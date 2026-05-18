@@ -13,10 +13,10 @@ jobs:
     name: Run pytest
     steps:
       - name: Check out source repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python environment
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.10"
 
@@ -36,10 +36,10 @@ jobs:
     name: Run flake8
     steps:
       - name: Check out source repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python environment
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.10"
 
@@ -49,9 +49,4 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run flake8
-        uses: py-actions/flake8@v2
-        with:
-          max-line-length: "120"
-          ignore: "E203"
-          exclude: .git,__pycache__,venv
-          plugins: "flake8-bugbear flake8-black"
+        run: flake8
