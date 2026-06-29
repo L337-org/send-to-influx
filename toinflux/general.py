@@ -70,7 +70,7 @@ def get_class(source):
     and add it to the classes dictionary.
 
     :param source: data source name
-    :type name: str
+    :type source: str
     :return: class object
     :rtype: DataHandler
     """

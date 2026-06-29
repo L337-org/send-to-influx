@@ -1,7 +1,8 @@
 """Unit tests for sendtoinflux (signal_handler, main, helper functions)."""
 
+import signal
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 import pytest
 import sendtoinflux
 
@@ -80,6 +81,19 @@ class TestMain:
                 sendtoinflux.main()
             mock_get_class.assert_called_once_with("zappi")
 
+    def test_main_registers_sigterm_handler(self, mock_main_deps):
+        """main registers signal_handler for both SIGINT and SIGTERM."""
+        with (
+            patch("sendtoinflux.signal.signal") as mock_signal,
+            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            registered = [c[0][0] for c in mock_signal.call_args_list]
+            assert signal.SIGINT in registered
+            assert signal.SIGTERM in registered
+
     def test_main_without_source_runs_configured_sources(self):
         """main without --source starts multi-source mode using settings sources list."""
         with (
@@ -129,7 +143,7 @@ class TestHelpers:
         handler = MagicMock()
         handler.get_data.return_value = {"x": 1}
         handler.source_settings = {"interval": 123}
-        args = SimpleNamespace(print=False)
+        args = SimpleNamespace(print=False, dump=False)
 
         interval = sendtoinflux.collect_source_data("hue", args, handler)
 
@@ -139,7 +153,7 @@ class TestHelpers:
 
     def test_run_multi_source_coerces_invalid_stagger_to_zero(self):
         """run_multi_source falls back to zero stagger when value is invalid."""
-        args = SimpleNamespace(print=False)
+        args = SimpleNamespace(print=False, dump=False)
         fake_thread = MagicMock()
         fake_thread.is_alive.return_value = True
 
@@ -153,3 +167,146 @@ class TestHelpers:
 
         mock_create_source_worker.assert_any_call("hue", 0, args)
         mock_create_source_worker.assert_any_call("zappi", 0, args)
+
+
+class TestRunSingleSourceRetry:
+    """Tests for retry/backoff behaviour in run_single_source."""
+
+    def _make_handler(self):
+        handler = MagicMock()
+        handler.source_settings = {"interval": 60}
+        return handler
+
+    def test_exception_is_caught_and_loop_continues(self):
+        """run_single_source catches Exception, resets handler, and retries."""
+        handler = self._make_handler()
+        handler.get_data.side_effect = [Exception("network error"), Exception("break")]
+
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False))
+
+        assert handler.get_data.call_count >= 1
+
+    def test_systemexit_is_caught_and_loop_continues(self):
+        """run_single_source catches SystemExit from get_data and retries."""
+        handler = self._make_handler()
+        handler.get_data.side_effect = [SystemExit(2), Exception("break")]
+
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False))
+
+        assert handler.get_data.call_count >= 1
+
+    def test_handler_is_recreated_after_failure(self):
+        """run_single_source calls get_class again after a failure resets the handler."""
+        handler = self._make_handler()
+        handler.get_data.side_effect = [Exception("fail"), Exception("break")]
+
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler) as mock_get_class,
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False))
+
+        # Called once before the loop, then again after the failure reset
+        assert mock_get_class.call_count == 2
+
+    def test_failure_count_increments_backoff(self):
+        """run_single_source passes increasing failure_count to get_backoff_delay."""
+        handler = self._make_handler()
+        handler.get_data.side_effect = Exception("always fails")
+        delays = []
+
+        original_backoff = sendtoinflux.get_backoff_delay
+
+        def capturing_backoff(failure_count, **kwargs):
+            delays.append(failure_count)
+            return original_backoff(failure_count, **kwargs)
+
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.get_backoff_delay", side_effect=capturing_backoff),
+            patch("sendtoinflux.time.sleep", side_effect=[None, None, SystemExit(0)]),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False))
+
+        assert len(delays) >= 2
+        assert delays == list(range(1, len(delays) + 1))
+
+
+class TestConfigureLogging:
+    """Tests for configure_logging."""
+
+    def _remove_handlers(self, root, added):
+        for h in added:
+            root.removeHandler(h)
+            h.close()
+
+    def test_adds_stdout_stream_handler(self):
+        """configure_logging adds a StreamHandler writing to stdout."""
+        import logging
+        import sys
+        from toinflux.general import configure_logging
+
+        root = logging.getLogger()
+        before = set(root.handlers)
+        try:
+            configure_logging()
+            added = [h for h in root.handlers if h not in before]
+            stream_handlers = [
+                h for h in added
+                if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+            ]
+            assert len(stream_handlers) == 1
+            assert stream_handlers[0].stream is sys.stdout
+        finally:
+            self._remove_handlers(root, [h for h in root.handlers if h not in before])
+
+    def test_adds_file_handler_when_logfile_provided(self):
+        """configure_logging adds a FileHandler when logfile is specified."""
+        import logging
+        import tempfile
+        import os
+        from toinflux.general import configure_logging
+
+        root = logging.getLogger()
+        before = set(root.handlers)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".log") as f:
+            logfile = f.name
+        try:
+            configure_logging(logfile=logfile)
+            added = [h for h in root.handlers if h not in before]
+            file_handlers = [h for h in added if isinstance(h, logging.FileHandler)]
+            assert len(file_handlers) == 1
+        finally:
+            self._remove_handlers(root, [h for h in root.handlers if h not in before])
+            os.unlink(logfile)
+
+    def test_no_file_handler_without_logfile(self):
+        """configure_logging does not add a FileHandler when logfile is None."""
+        import logging
+        from toinflux.general import configure_logging
+
+        root = logging.getLogger()
+        before = set(root.handlers)
+        try:
+            configure_logging()
+            added = [h for h in root.handlers if h not in before]
+            file_handlers = [h for h in added if isinstance(h, logging.FileHandler)]
+            assert len(file_handlers) == 0
+        finally:
+            self._remove_handlers(root, [h for h in root.handlers if h not in before])
