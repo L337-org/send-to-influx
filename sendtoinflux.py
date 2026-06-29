@@ -185,15 +185,39 @@ def run_single_source(source, args):
         print(json.dumps(data, indent=4))
         sys.exit(0)
 
+    failure_count = 0
     next_update = time.time()
     while True:
-        next_update += data_handler.source_settings["interval"]
-        data = data_handler.get_data()
+        try:
+            if data_handler is None:
+                data_handler = toinflux.get_class(source)
+            next_update += data_handler.source_settings["interval"]
+            data = data_handler.get_data()
 
-        if args.print:
-            print_source_data(source, data)
-        else:
-            data_handler.send_data()
+            if args.print:
+                print_source_data(source, data)
+            else:
+                data_handler.send_data()
+
+            failure_count = 0
+        except SystemExit as exc:
+            failure_count += 1
+            restart_delay = get_backoff_delay(failure_count)
+            print(
+                f"Source '{source}' exited with code {exc.code}. "
+                f"Restarting in {restart_delay} seconds (attempt {failure_count})."
+            )
+            data_handler = None
+            next_update = time.time() + restart_delay
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            failure_count += 1
+            restart_delay = get_backoff_delay(failure_count)
+            print(
+                f"Source '{source}' failed: {exc}. Restarting in {restart_delay} seconds "
+                f"(attempt {failure_count})."
+            )
+            data_handler = None
+            next_update = time.time() + restart_delay
 
         sleep_time = max(0, next_update - time.time())
         time.sleep(sleep_time)

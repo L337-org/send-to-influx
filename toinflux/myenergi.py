@@ -45,14 +45,14 @@ class MyEnergi(DataHandler):
         """
         Get the data for a specific day
 
-        :param year:
+        :param year: four-digit year, e.g. "2026"
         :type year: str
-        :param month:
+        :param month: zero-padded month, e.g. "06"
         :type month: str
-        :param day:
+        :param day: zero-padded day, e.g. "29"
         :type day: str
-        :param hour:
-        :type hour: str
+        :param hour: hour of the day (1–23); if falsy, results for the whole day are returned
+        :type hour: int
         :return:
         :rtype: dict
         """
@@ -68,7 +68,7 @@ class MyEnergi(DataHandler):
         # Tot up the data for the day/hour
         if response_data.get("U" + serial, False):
             for item in response_data["U" + serial]:
-                if hour and item.get("hr", -1) == int(hour):
+                if hour and item.get("hr", -1) == hour:
                     charge_amount = item.get("h1d", 0)
                     import_amount = item.get("imp", 0)
                     export_amount = item.get("exp", 0)
@@ -120,7 +120,7 @@ class Zappi(MyEnergi):
             now.strftime("%Y"),
             now.strftime("%m"),
             now.strftime("%d"),
-            now.strftime("%H").lstrip("0"),
+            now.hour,
         )
 
         # just extract the specific fields we want here
