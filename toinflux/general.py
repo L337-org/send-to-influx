@@ -8,11 +8,7 @@ __version__ = "1.0"
 # pylint: disable=import-outside-toplevel
 import os
 import sys
-import urllib3
 import yaml
-
-# disable SSL warnings for requests
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def flatten_dict(data, parent_key="", sep="_"):
