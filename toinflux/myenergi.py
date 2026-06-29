@@ -133,3 +133,65 @@ class Zappi(MyEnergi):
             zappi_data = myenergi_data["zappi"][0]
 
         return zappi_data | day_data
+
+
+class Eddi(MyEnergi):
+    """Child class of MyEnergi to get data from an Eddi hot water diverter"""
+
+    def get_data(self):
+        """
+        Get the data from the Eddi
+
+        :return: data
+        :rtype: dict
+        """
+        self.influx_header = "myenergi,device=eddi "
+        self.data = self.parse_eddi_data()
+        return self.data
+
+    def parse_eddi_data(self):
+        """
+        Parse the data from the MyEnergi API for the Eddi device
+
+        :return: data
+        :rtype: dict
+        """
+        myenergi_data = self.get_data_from_myenergi(self.settings["myenergi"]["eddi_url"])
+
+        if "fields" in self.settings["eddi"]:
+            return {
+                k: myenergi_data["eddi"][0][k] for k in self.settings["eddi"]["fields"] if k in myenergi_data["eddi"][0]
+            }
+        return myenergi_data["eddi"][0]
+
+
+class Harvi(MyEnergi):
+    """Child class of MyEnergi to get data from a Harvi CT clamp energy monitor"""
+
+    def get_data(self):
+        """
+        Get the data from the Harvi
+
+        :return: data
+        :rtype: dict
+        """
+        self.influx_header = "myenergi,device=harvi "
+        self.data = self.parse_harvi_data()
+        return self.data
+
+    def parse_harvi_data(self):
+        """
+        Parse the data from the MyEnergi API for the Harvi device
+
+        :return: data
+        :rtype: dict
+        """
+        myenergi_data = self.get_data_from_myenergi(self.settings["myenergi"]["harvi_url"])
+
+        if "fields" in self.settings["harvi"]:
+            return {
+                k: myenergi_data["harvi"][0][k]
+                for k in self.settings["harvi"]["fields"]
+                if k in myenergi_data["harvi"][0]
+            }
+        return myenergi_data["harvi"][0]

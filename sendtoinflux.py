@@ -75,7 +75,10 @@ def create_source_worker(source, source_start_delay, args):
                 restart_delay = get_backoff_delay(failure_count)
                 logging.warning(
                     "Source '%s' exited with code %s. Restarting in %s seconds (attempt %s).",
-                    source, exc.code, restart_delay, failure_count,
+                    source,
+                    exc.code,
+                    restart_delay,
+                    failure_count,
                 )
                 data_handler = None
                 next_update = time.time() + restart_delay
@@ -84,7 +87,10 @@ def create_source_worker(source, source_start_delay, args):
                 restart_delay = get_backoff_delay(failure_count)
                 logging.warning(
                     "Source '%s' failed: %s. Restarting in %s seconds (attempt %s).",
-                    source, exc, restart_delay, failure_count,
+                    source,
+                    exc,
+                    restart_delay,
+                    failure_count,
                 )
                 data_handler = None
                 next_update = time.time() + restart_delay
@@ -118,7 +124,7 @@ def main():
     # load settings once for defaults and configured source list
     settings = toinflux.load_settings()
     toinflux.configure_logging(settings.get("logfile"))
-    default_source = settings["default_source"]
+    default_source = settings.get("default_source", "hue")
 
     # parse the command line arguments
     arg_parse = argparse.ArgumentParser(description="Send Hue Data to InfluxDB")
@@ -203,7 +209,10 @@ def run_single_source(source, args):
             restart_delay = get_backoff_delay(failure_count)
             logging.warning(
                 "Source '%s' exited with code %s. Restarting in %s seconds (attempt %s).",
-                source, exc.code, restart_delay, failure_count,
+                source,
+                exc.code,
+                restart_delay,
+                failure_count,
             )
             data_handler = None
             next_update = time.time() + restart_delay
@@ -212,7 +221,10 @@ def run_single_source(source, args):
             restart_delay = get_backoff_delay(failure_count)
             logging.warning(
                 "Source '%s' failed: %s. Restarting in %s seconds (attempt %s).",
-                source, exc, restart_delay, failure_count,
+                source,
+                exc,
+                restart_delay,
+                failure_count,
             )
             data_handler = None
             next_update = time.time() + restart_delay

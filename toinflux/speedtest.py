@@ -14,15 +14,14 @@ from toinflux.general import flatten_dict
 
 
 class Speedtest(DataHandler):
-    """
-    Speedtest class to send data to InfluxDB
-
-    :return: data
-    :rtype: dict
-    """
+    """Speedtest class to send data to InfluxDB"""
 
     def get_data(self):
-        """Run and get the data from Speedtest"""
+        """Run and get the data from Speedtest
+
+        :return: data
+        :rtype: dict
+        """
         try:
             st = speedtest.Speedtest(timeout=self.settings["speedtest"].get("timeout", 120))
 

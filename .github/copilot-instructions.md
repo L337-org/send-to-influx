@@ -32,7 +32,9 @@ The project uses a plugin-like architecture where each data source is implemente
 
 #### Current Data Sources
 - **`toinflux/philipshue.py`**: Philips Hue Bridge integration
-- **`toinflux/myenergi.py`**: MyEnergi Zappi/Eddi/Harvi devices integration
+- **`toinflux/myenergi.py`**: MyEnergi Zappi/Eddi/Harvi devices integration (HTTP Digest auth)
+- **`toinflux/openmeteo.py`**: Open-Meteo weather data (no API key, lat/lon configuration)
+- **`toinflux/octopus.py`**: Octopus Energy electricity consumption and unit rates (API key auth)
 - **`toinflux/speedtest.py`**: Speedtest network performance integration
 
 ### Configuration (`settings.yaml`)
@@ -45,8 +47,10 @@ YAML-based configuration supporting multiple data sources:
 - **Logging**:
   - `logfile`: optional path to write logs to a file in addition to stdout
 - **Hue**: Bridge connection, sensor mappings, temperature units
-- **MyEnergi**: API endpoints, authentication, device serials
-- **Zappi**: Field selection, collection intervals
+- **MyEnergi**: API endpoints, authentication, device serials (shared across Zappi/Eddi/Harvi)
+- **Zappi/Eddi/Harvi**: Field selection, collection intervals, individual device serials
+- **OpenMeteo**: Latitude, longitude, field list (see open-meteo.com/en/docs)
+- **Octopus**: API key, MPAN, meter serial; optional product/tariff codes for unit rate collection
 - **Speedtest**: Field selection, collection intervals
 - **InfluxDB**: Connection details, database/bucket settings; supports v1 (user/password/db) and v2 (token/org/bucket)
 
@@ -119,10 +123,25 @@ except requests.exceptions.RequestException as e:
 - **Configuration**: Bridge host, username, sensor name mappings, temperature units
 
 ### MyEnergi (`toinflux/myenergi.py`)
-- **Devices**: Zappi (EV charger), Eddi (water heater), Harvi (energy monitor)
-- **Data Types**: Real-time status and historical day/hour data
-- **Authentication**: HTTP Digest authentication with serial/API key
-- **Configuration**: API endpoints, device serials, field selection
+- **Devices**:
+  - `Zappi` (EV charger): real-time status fields + daily energy totals (Charge/Import/Export/Genera)
+  - `Eddi` (hot water diverter): real-time status fields (frq, vol, div, sta, hno, che, tp1, tp2)
+  - `Harvi` (CT clamp monitor): CT clamp power readings (ectp1/ectp2/ectp3) and channel names
+- **Authentication**: HTTP Digest authentication with device serial/API key
+- **Configuration**: Shared `myenergi` block (API endpoints, apikey) + per-device block (serial, fields, interval)
+
+### Open-Meteo (`toinflux/openmeteo.py`)
+- **No API key required**; free, no rate limiting
+- **Configuration**: latitude, longitude, list of `current` weather variable names
+- **Recommended interval**: 900 s (15 min) or longer
+- **InfluxDB measurement**: `weather,source=open-meteo`
+
+### Octopus Energy (`toinflux/octopus.py`)
+- **Collects**: latest half-hourly electricity consumption; optionally current unit rate
+- **Authentication**: HTTP Basic auth with API key as username
+- **Configuration**: `api_key`, `mpan`, `meter_serial`; optional `product_code`+`tariff_code` for unit rate
+- **Note**: smart meter consumption data typically arrives with up to 24 hour delay
+- **InfluxDB measurement**: `octopus,source=octopus_energy`
 
 ## Dependencies
 

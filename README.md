@@ -6,7 +6,7 @@ https://github.com/GavinLucas/send-to-influx
 
 Script to take data from various APIs and post it to InfluxDB in order to view the data in Grafana.
 
-It currently supports Hue Bridges, MyEnergi Zappi car chargers and Speedtest network performance data sources.
+It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, Octopus Energy, and Speedtest network performance data sources.
 
 Hue Bridge
 ----------
@@ -23,14 +23,37 @@ of Smart Plugs and the brightness of lights, but could be modified to collect ot
 To create a username and password for the Hue Bridge, follow the instructions 
 here: https://developers.meethue.com/develop/get-started-2/
 
-MyEnergi Zappi
---------------
+MyEnergi Zappi / Eddi / Harvi
+-----------------------------
 
 Information on how to obtain your API key is available here:
 https://support.myenergi.com/hc/en-gb/articles/5069627351185-How-do-I-get-an-API-key
 
 Some information on the API fields is available here:
 https://github.com/twonk/MyEnergi-App-Api
+
+- **Zappi**: EV charger. Collects real-time status fields plus daily energy totals (Charge, Import, Export, Genera).
+- **Eddi**: Hot water diverter. Collects real-time status fields (frequency, voltage, diversion amount, temperatures, etc.).
+- **Harvi**: CT clamp energy monitor. Collects CT clamp power readings (ectp1/ectp2/ectp3) and channel names.
+
+Open-Meteo
+----------
+
+Free weather data with no API key required. Configure latitude/longitude and choose which fields to collect
+from the `current` weather variables (see https://open-meteo.com/en/docs for the full list).
+Recommended interval is 15 minutes (900 seconds) or longer.
+
+Octopus Energy
+--------------
+
+Collects half-hourly electricity consumption from your smart meter via the Octopus Energy API.
+Your API key is available from https://octopus.energy/dashboard/developer/.
+
+If you are on a time-of-use tariff (e.g. Agile Octopus), you can also configure `product_code` and
+`tariff_code` to collect the current unit rate alongside consumption.
+
+Note: smart meter readings are typically delayed by up to 24 hours, so consumption data always
+represents a recent-past reading rather than real-time usage.
 
 Speedtest
 ---------
@@ -135,13 +158,17 @@ influx.py - contains the top level parent class (DataHandler) which implements t
 
 philipshue.py - contains a single child class (Hue) with all the functionality required to get data when calling the common method - get_data()
 
-myenergi.py - contains an intermediate level child class (MyEnergi) with common functions for retrieving data from the myenergi APIs.   This class in turn has a child class (Zappi) for using those methods to retrieve data specific to a Zappi.  It implements the common method - get_data()
+myenergi.py - contains an intermediate level child class (MyEnergi) with common functions for retrieving data from the myenergi APIs.  This class has three child classes: Zappi (EV charger), Eddi (hot water diverter), and Harvi (CT clamp energy monitor), each of which implements get_data().
+
+openmeteo.py - contains a single child class (OpenMeteo) that fetches current weather observations from the Open-Meteo API (no API key required).
+
+octopus.py - contains a single child class (Octopus) that fetches half-hourly electricity consumption and optionally the current unit rate from the Octopus Energy API.
 
 speedtest.py - contains a single child class (Speedtest) with all the functionality required to get Speedtest data when calling the common method - get_data()
 
 Unit tests for all the functions and classes are located in the 'tests' directory.
 
-So to add a new device, if it's for an existing manufacturer, e.g. adding support for a MyEnergi Eddi you can add a new sub-class to an existing file, otherwise add a new file with a class which is a child of DataHandler and exposes a get_data() method.
+So to add a new device, if it's for an existing manufacturer, e.g. adding another MyEnergi device you can add a new sub-class to an existing file, otherwise add a new file with a class which is a child of DataHandler and exposes a get_data() method.
 
 Don't forget to add imports for any new data collector classes to get_class() in general.py and \_\_init__.py, update the README.md and also add any required settings to example_settings.yaml
 

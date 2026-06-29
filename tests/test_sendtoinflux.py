@@ -2,7 +2,7 @@
 
 import signal
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 import pytest
 import sendtoinflux
 
@@ -268,8 +268,7 @@ class TestConfigureLogging:
             configure_logging()
             added = [h for h in root.handlers if h not in before]
             stream_handlers = [
-                h for h in added
-                if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+                h for h in added if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
             ]
             assert len(stream_handlers) == 1
             assert stream_handlers[0].stream is sys.stdout

@@ -31,9 +31,13 @@ CI runs `pytest` and `flake8` in parallel on every push/PR (`.github/workflows/p
 ```
 DataHandler  (toinflux/influx.py)   — base; owns send_data() → InfluxDB HTTP POST
 ├── Hue      (toinflux/philipshue.py)
+├── OpenMeteo(toinflux/openmeteo.py)
+├── Octopus  (toinflux/octopus.py)
 ├── Speedtest(toinflux/speedtest.py)
 └── MyEnergi (toinflux/myenergi.py) — intermediate parent for MyEnergi API auth
-    └── Zappi(toinflux/myenergi.py)
+    ├── Zappi(toinflux/myenergi.py)
+    ├── Eddi (toinflux/myenergi.py)
+    └── Harvi(toinflux/myenergi.py)
 ```
 
 Each subclass implements `get_data()` which populates `self.data` (dict) and `self.influx_header` (InfluxDB measurement/tag string); `send_data()` in the base class takes it from there.
@@ -55,9 +59,10 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 ### Adding a new data source
 
 1. Create `toinflux/newsource.py` — class inheriting `DataHandler`, implement `get_data()`.
-2. Register it in `get_class()` in `toinflux/general.py`.
+2. Register it in `get_class()` in `toinflux/general.py` and add it to `toinflux/__init__.py`.
 3. Add a section to `example_settings.yaml`.
 4. Add tests in `tests/test_newsource.py`, reusing fixtures from `tests/conftest.py`.
+5. Update README.md, CLAUDE.md, and `.github/copilot-instructions.md`.
 
 ### Testing conventions
 

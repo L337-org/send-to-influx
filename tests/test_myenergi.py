@@ -1,8 +1,40 @@
-"""Unit tests for toinflux.myenergi (MyEnergi, Zappi)."""
+"""Unit tests for toinflux.myenergi (MyEnergi, Zappi, Eddi, Harvi)."""
 
 from unittest.mock import MagicMock, patch
 import pytest
-from toinflux.myenergi import MyEnergi, Zappi
+from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
+
+
+def _eddi_settings(base):
+    """Build minimal settings dict for Eddi tests."""
+    settings = {**base}
+    settings["myenergi"] = {
+        **base["myenergi"],
+        "eddi_url": "https://s18.myenergi.net/cgi-jstatus-E",
+    }
+    settings["eddi"] = {
+        "db": "eddi_db",
+        "interval": 300,
+        "serial": "67890",
+        "fields": ["frq", "div", "che"],
+    }
+    return settings
+
+
+def _harvi_settings(base):
+    """Build minimal settings dict for Harvi tests."""
+    settings = {**base}
+    settings["myenergi"] = {
+        **base["myenergi"],
+        "harvi_url": "https://s18.myenergi.net/cgi-jstatus-H",
+    }
+    settings["harvi"] = {
+        "db": "harvi_db",
+        "interval": 300,
+        "serial": "99999",
+        "fields": ["ectp1", "ectp2"],
+    }
+    return settings
 
 
 class TestMyEnergi:
@@ -74,7 +106,7 @@ class TestMyEnergi:
                 ],
             }
             with patch.object(handler, "get_data_from_myenergi", return_value=response_data):
-                result = handler.dayhour_results("2025", "01", "15", hour="2")
+                result = handler.dayhour_results("2025", "01", "15", hour=2)
                 assert result["Charge"] == round(7200 / 3600 / 1000, 4)
                 assert result["Import"] == round(5000 / 3600 / 1000, 4)
                 assert result["Export"] == round(100 / 3600 / 1000, 4)
@@ -141,3 +173,87 @@ class TestZappi:
                     assert result["frq"] == 50
                     assert result["vol"] == 240
                     assert result["custom"] == "yes"
+
+
+class TestEddi:
+    """Tests for Eddi class."""
+
+    def test_get_data_sets_influx_header_and_returns_parsed_data(self, sample_settings):
+        """get_data sets influx_header and returns parse_eddi_data result."""
+        settings = _eddi_settings(sample_settings)
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = settings
+            with patch.object(Eddi, "parse_eddi_data", return_value={"frq": 50, "div": 100}) as mock_parse:
+                eddi = Eddi(source="eddi")
+                result = eddi.get_data()
+                mock_parse.assert_called_once()
+                assert eddi.influx_header == "myenergi,device=eddi "
+                assert result == {"frq": 50, "div": 100}
+                assert eddi.data == result
+
+    def test_parse_eddi_data_filters_to_configured_fields(self, sample_settings):
+        """parse_eddi_data returns only configured fields that exist in API response."""
+        settings = _eddi_settings(sample_settings)
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = settings
+            eddi = Eddi(source="eddi")
+            myenergi_data = {"eddi": [{"frq": 50, "div": 100, "che": 0.5, "sta": 1, "other": "ignored"}]}
+            with patch.object(Eddi, "get_data_from_myenergi", return_value=myenergi_data):
+                result = eddi.parse_eddi_data()
+                assert result == {"frq": 50, "div": 100, "che": 0.5}
+                assert "sta" not in result
+                assert "other" not in result
+
+    def test_parse_eddi_data_uses_all_fields_when_no_fields_setting(self, sample_settings):
+        """parse_eddi_data returns full eddi[0] when eddi.fields not configured."""
+        settings = _eddi_settings(sample_settings)
+        settings["eddi"] = {k: v for k, v in settings["eddi"].items() if k != "fields"}
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = settings
+            eddi = Eddi(source="eddi")
+            myenergi_data = {"eddi": [{"frq": 50, "div": 100, "custom": "yes"}]}
+            with patch.object(Eddi, "get_data_from_myenergi", return_value=myenergi_data):
+                result = eddi.parse_eddi_data()
+                assert result == {"frq": 50, "div": 100, "custom": "yes"}
+
+
+class TestHarvi:
+    """Tests for Harvi class."""
+
+    def test_get_data_sets_influx_header_and_returns_parsed_data(self, sample_settings):
+        """get_data sets influx_header and returns parse_harvi_data result."""
+        settings = _harvi_settings(sample_settings)
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = settings
+            with patch.object(Harvi, "parse_harvi_data", return_value={"ectp1": 500, "ectp2": 0}) as mock_parse:
+                harvi = Harvi(source="harvi")
+                result = harvi.get_data()
+                mock_parse.assert_called_once()
+                assert harvi.influx_header == "myenergi,device=harvi "
+                assert result == {"ectp1": 500, "ectp2": 0}
+                assert harvi.data == result
+
+    def test_parse_harvi_data_filters_to_configured_fields(self, sample_settings):
+        """parse_harvi_data returns only configured fields that exist in API response."""
+        settings = _harvi_settings(sample_settings)
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = settings
+            harvi = Harvi(source="harvi")
+            myenergi_data = {"harvi": [{"ectp1": 500, "ectp2": 0, "ectp3": 200, "ectt1": "Grid"}]}
+            with patch.object(Harvi, "get_data_from_myenergi", return_value=myenergi_data):
+                result = harvi.parse_harvi_data()
+                assert result == {"ectp1": 500, "ectp2": 0}
+                assert "ectp3" not in result
+                assert "ectt1" not in result
+
+    def test_parse_harvi_data_uses_all_fields_when_no_fields_setting(self, sample_settings):
+        """parse_harvi_data returns full harvi[0] when harvi.fields not configured."""
+        settings = _harvi_settings(sample_settings)
+        settings["harvi"] = {k: v for k, v in settings["harvi"].items() if k != "fields"}
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = settings
+            harvi = Harvi(source="harvi")
+            myenergi_data = {"harvi": [{"ectp1": 500, "ectp2": 100, "ectt1": "Grid"}]}
+            with patch.object(Harvi, "get_data_from_myenergi", return_value=myenergi_data):
+                result = harvi.parse_harvi_data()
+                assert result == {"ectp1": 500, "ectp2": 100, "ectt1": "Grid"}

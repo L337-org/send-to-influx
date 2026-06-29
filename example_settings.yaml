@@ -5,6 +5,10 @@ sources:
   - "hue"
   - "zappi"
   - "speedtest"
+  # - "openmeteo"
+  # - "eddi"
+  # - "harvi"
+  # - "octopus"
 
 # Optional stagger delay (seconds) between source starts
 # This avoids collectors with equal intervals running at exactly the same time
@@ -92,6 +96,82 @@ speedtest:
     - "download"
     - "upload"
     - "ping"
+
+# Open-Meteo weather settings (no API key required)
+openmeteo:
+  # The database to use
+  db: "weather_db"
+  # Interval in seconds between data collection (15 minutes minimum recommended)
+  interval: 900
+  # Latitude and longitude for the weather location
+  latitude: 51.5
+  longitude: 2.6
+  # Timeout for requests to the Open-Meteo API
+  timeout: 10
+  # Fields to collect from the current weather response
+  # See https://open-meteo.com/en/docs for a full list of available variables
+  fields:
+    - "temperature_2m"
+    - "relative_humidity_2m"
+    - "precipitation"
+    - "cloud_cover"
+    - "wind_speed_10m"
+    - "direct_radiation"
+
+# Eddi settings (hot water diverter)
+eddi:
+  # The database to use
+  db: "myenergi_db"
+  # Interval in seconds between data collection
+  interval: 300
+  # The serial number of the Eddi device (used for API authentication)
+  serial: "your_eddi_serial"
+  # The fields to collect from the Eddi device
+  fields:
+    - "frq"
+    - "vol"
+    - "div"
+    - "sta"
+    - "hno"
+    - "che"
+    - "tp1"
+    - "tp2"
+
+# Harvi settings (CT clamp energy monitor)
+harvi:
+  # The database to use
+  db: "myenergi_db"
+  # Interval in seconds between data collection
+  interval: 300
+  # The serial number of the Harvi device (used for API authentication)
+  serial: "your_harvi_serial"
+  # The fields to collect from the Harvi device
+  fields:
+    - "ectp1"
+    - "ectp2"
+    - "ectp3"
+    - "ectt1"
+    - "ectt2"
+    - "ectt3"
+
+# Octopus Energy settings
+octopus:
+  # The database to use
+  db: "octopus_db"
+  # Interval in seconds between data collection (half-hourly data, 1800 minimum)
+  interval: 1800
+  # Your Octopus Energy API key (from https://octopus.energy/dashboard/developer/)
+  api_key: "your_octopus_api_key"
+  # Your electricity meter MPAN (13-digit number, found on your bill)
+  mpan: "your_mpan"
+  # Your electricity meter serial number (found on your bill or smart meter)
+  meter_serial: "your_meter_serial"
+  # Timeout for requests to the Octopus Energy API
+  timeout: 10
+  # Optional: product and tariff codes to also collect the current unit rate
+  # Useful for time-of-use tariffs such as Agile Octopus
+  # product_code: "AGILE-FLEX-22-11-25"
+  # tariff_code: "E-1R-AGILE-FLEX-22-11-25-C"
 
 # InfluxDB settings
 # For InfluxDB v1, use user/password and per-source db:

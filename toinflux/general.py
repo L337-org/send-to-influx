@@ -75,11 +75,23 @@ def get_class(source):
     :rtype: DataHandler
     """
     from toinflux.influx import DataHandler
-    from toinflux.myenergi import MyEnergi, Zappi
+    from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
+    from toinflux.octopus import Octopus
+    from toinflux.openmeteo import OpenMeteo
     from toinflux.philipshue import Hue
     from toinflux.speedtest import Speedtest
 
-    classes = {"DataHandler": DataHandler, "Hue": Hue, "MyEnergi": MyEnergi, "Zappi": Zappi, "Speedtest": Speedtest}
+    classes = {
+        "DataHandler": DataHandler,
+        "Eddi": Eddi,
+        "Harvi": Harvi,
+        "Hue": Hue,
+        "MyEnergi": MyEnergi,
+        "Octopus": Octopus,
+        "OpenMeteo": OpenMeteo,
+        "Speedtest": Speedtest,
+        "Zappi": Zappi,
+    }
 
     class_name = next((k for k in classes if k.lower() == source.lower()), source)
     source_name = source.lower()
@@ -91,16 +103,9 @@ def get_class(source):
     return my_class
 
 
-def validate_settings(settings):
-    """Validate required keys in a parsed settings dictionary, exit with code 1 if invalid.
-
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    """
+def _validate_influx_block(influx):
+    """Return a list of error strings for the influx configuration block."""
     errors = []
-
-    # Check influx block
-    influx = settings.get("influx", {})
     if not influx.get("url"):
         errors.append("influx.url is required")
     if "token" in influx:
@@ -108,21 +113,34 @@ def validate_settings(settings):
             errors.append("influx.org is required when using token authentication (v2)")
     elif not (influx.get("user") and influx.get("password")):
         errors.append("influx requires either token+org (v2) or user+password (v1)")
+    return errors
 
-    # Check each configured source has a settings section and required keys
+
+def _validate_source_block(source, settings):
+    """Return a list of error strings for a single source configuration section."""
+    if not source:
+        return []
+    if source not in settings:
+        return [f"no configuration section found for source '{source}'"]
+    errors = []
+    source_cfg = settings[source]
+    if "interval" not in source_cfg:
+        errors.append(f"{source}.interval is required")
+    if "db" not in source_cfg and "bucket" not in source_cfg:
+        errors.append(f"{source}.db (or {source}.bucket for InfluxDB v2) is required")
+    return errors
+
+
+def validate_settings(settings):
+    """Validate required keys in a parsed settings dictionary, exit with code 1 if invalid.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    """
+    errors = _validate_influx_block(settings.get("influx", {}))
     sources = settings.get("sources") or [settings.get("default_source")]
     for source in sources:
-        if not source:
-            continue
-        if source not in settings:
-            errors.append(f"no configuration section found for source '{source}'")
-            continue
-        source_cfg = settings[source]
-        if "interval" not in source_cfg:
-            errors.append(f"{source}.interval is required")
-        if "db" not in source_cfg and "bucket" not in source_cfg:
-            errors.append(f"{source}.db (or {source}.bucket for InfluxDB v2) is required")
-
+        errors.extend(_validate_source_block(source, settings))
     if errors:
         for error in errors:
             logging.critical("settings.yaml: %s", error)
@@ -159,8 +177,9 @@ def load_settings(settings_file="settings.yaml"):
         validate_settings(settings)
         return settings
     except FileNotFoundError:
-        logging.critical("%s not found. Make sure you copy example_settings.yaml to %s and edit it.",
-                         settings_path, settings_path)
+        logging.critical(
+            "%s not found. Make sure you copy example_settings.yaml to %s and edit it.", settings_path, settings_path
+        )
         sys.exit(1)
     except yaml.YAMLError as e:
         logging.critical("Error in %s - %s", settings_path, e)

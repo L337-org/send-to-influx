@@ -87,6 +87,7 @@ class TestLoadSettings:
     def test_no_fallback_when_yaml_exists(self, sample_settings):
         """load_settings uses .yaml and does not fall back when .yaml exists."""
         import copy
+
         yaml_settings = copy.deepcopy(sample_settings)
         yaml_settings["default_source"] = "from_yaml"
         with tempfile.TemporaryDirectory() as tmp:

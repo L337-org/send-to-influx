@@ -53,7 +53,7 @@ class DataHandler:
                 f'{influx_settings["url"]}/api/v2/write'
                 f'?org={influx_settings["org"]}'
                 f'&bucket={self.source_settings.get("bucket", self.source_settings.get("db"))}'
-                f'&precision=s'
+                f"&precision=s"
             )
             headers = {"Authorization": f'Token {influx_settings["token"]}'}
             kwargs = {"headers": headers}
