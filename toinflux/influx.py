@@ -41,9 +41,6 @@ class DataHandler:
             print("No data to send to InfluxDB")
             return
 
-        # minimalist activity indicator
-        print(" ^", end="\r")
-
         # format the data to send
         data_to_send = self.influx_header + ",".join([f"{key}={value}" for key, value in data.items()])
 
@@ -59,6 +56,3 @@ class DataHandler:
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             print(f"Error sending data to InfluxDB - {e}")
-
-        # minimalist activity indicator
-        print(" _", end="\r")
