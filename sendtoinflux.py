@@ -10,6 +10,7 @@ import sys
 import time
 import json
 import signal
+import logging
 import argparse
 import threading
 import toinflux
@@ -72,18 +73,18 @@ def create_source_worker(source, source_start_delay, args):
             except SystemExit as exc:
                 failure_count += 1
                 restart_delay = get_backoff_delay(failure_count)
-                print(
-                    f"Source '{source}' exited with code {exc.code}. "
-                    f"Restarting in {restart_delay} seconds (attempt {failure_count})."
+                logging.warning(
+                    "Source '%s' exited with code %s. Restarting in %s seconds (attempt %s).",
+                    source, exc.code, restart_delay, failure_count,
                 )
                 data_handler = None
                 next_update = time.time() + restart_delay
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 failure_count += 1
                 restart_delay = get_backoff_delay(failure_count)
-                print(
-                    f"Source '{source}' failed: {exc}. Restarting in {restart_delay} seconds "
-                    f"(attempt {failure_count})."
+                logging.warning(
+                    "Source '%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                    source, exc, restart_delay, failure_count,
                 )
                 data_handler = None
                 next_update = time.time() + restart_delay
@@ -102,7 +103,7 @@ def signal_handler(sig, _frame):
     """
     Signal handler to exit gracefully
     """
-    print(f"\nExiting on signal {sig}")
+    logging.info("Exiting on signal %s", sig)
     sys.exit(0)
 
 
@@ -116,6 +117,7 @@ def main():
 
     # load settings once for defaults and configured source list
     settings = toinflux.load_settings()
+    toinflux.configure_logging(settings.get("logfile"))
     default_source = settings["default_source"]
 
     # parse the command line arguments
@@ -158,7 +160,7 @@ def main():
         return
 
     if args.dump:
-        print("The --dump option requires --source when running in multi-source mode.")
+        logging.error("The --dump option requires --source when running in multi-source mode.")
         sys.exit(1)
 
     run_multi_source(sources, args, settings.get("stagger_seconds", DEFAULT_STAGGER_SECONDS))
@@ -199,18 +201,18 @@ def run_single_source(source, args):
         except SystemExit as exc:
             failure_count += 1
             restart_delay = get_backoff_delay(failure_count)
-            print(
-                f"Source '{source}' exited with code {exc.code}. "
-                f"Restarting in {restart_delay} seconds (attempt {failure_count})."
+            logging.warning(
+                "Source '%s' exited with code %s. Restarting in %s seconds (attempt %s).",
+                source, exc.code, restart_delay, failure_count,
             )
             data_handler = None
             next_update = time.time() + restart_delay
         except Exception as exc:  # pylint: disable=broad-exception-caught
             failure_count += 1
             restart_delay = get_backoff_delay(failure_count)
-            print(
-                f"Source '{source}' failed: {exc}. Restarting in {restart_delay} seconds "
-                f"(attempt {failure_count})."
+            logging.warning(
+                "Source '%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                source, exc, restart_delay, failure_count,
             )
             data_handler = None
             next_update = time.time() + restart_delay
@@ -234,10 +236,7 @@ def run_multi_source(sources, args, stagger_seconds):
     try:
         stagger_value = int(stagger_seconds)
     except (TypeError, ValueError):
-        print(
-            f"Invalid 'stagger_seconds' value '{stagger_seconds}' in configuration; defaulting to 0.",
-            file=sys.stderr,
-        )
+        logging.warning("Invalid 'stagger_seconds' value '%s' in configuration; defaulting to 0.", stagger_seconds)
         stagger_value = 0
 
     threads = []
@@ -251,7 +250,7 @@ def run_multi_source(sources, args, stagger_seconds):
 
     while True:
         if any(not thread.is_alive() for thread in threads):
-            print("One or more source workers stopped unexpectedly. Restarting worker thread.")
+            logging.warning("One or more source workers stopped unexpectedly. Restarting worker thread.")
             for idx, thread in enumerate(threads):
                 if not thread.is_alive():
                     threads[idx] = spawn_source_thread(workers[idx])

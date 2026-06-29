@@ -10,6 +10,9 @@ sources:
 # This avoids collectors with equal intervals running at exactly the same time
 stagger_seconds: 10
 
+# Optional log file path; if omitted, logs go to stdout only
+# logfile: "/var/log/send-to-influx.log"
+
 # The default source to use if no source is specified on the command line
 default_source: "hue"
 

@@ -6,6 +6,7 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 import sys
+import logging
 import requests
 from toinflux.general import load_settings
 
@@ -22,7 +23,7 @@ class DataHandler:
         if self.source and self.source in self.settings:
             self.source_settings = self.settings[self.source]
         else:
-            print(f"Source {self.source} not found in settings")
+            logging.error("Source %s not found in settings", self.source)
             sys.exit(1)
 
     def send_data(self, data=None):
@@ -38,7 +39,7 @@ class DataHandler:
             data = self.data
 
         if not data or not isinstance(data, dict):
-            print("No data to send to InfluxDB")
+            logging.warning("No data to send to InfluxDB")
             return
 
         # format the data to send
@@ -55,4 +56,4 @@ class DataHandler:
             )
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            print(f"Error sending data to InfluxDB - {e}")
+            logging.error("Error sending data to InfluxDB - %s", e)

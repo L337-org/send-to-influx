@@ -6,6 +6,7 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 import sys
+import logging
 from socket import gethostname
 import speedtest
 from toinflux.influx import DataHandler
@@ -34,10 +35,10 @@ class Speedtest(DataHandler):
             # get the results
             st_data = st.results.dict()
         except speedtest.SpeedtestException as e:
-            print(f"Error running Speedtest - {e}")
+            logging.error("Error running Speedtest - %s", e)
             sys.exit(2)
         if not isinstance(st_data, dict):
-            print("Error running Speedtest - invalid results")
+            logging.error("Error running Speedtest - invalid results")
             sys.exit(2)
 
         # flatten the speedtest payload so nested values can be filtered and sent

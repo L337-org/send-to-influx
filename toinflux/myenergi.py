@@ -6,6 +6,7 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 import sys
+import logging
 import datetime
 import requests
 from requests.auth import HTTPDigestAuth
@@ -33,10 +34,10 @@ class MyEnergi(DataHandler):
         if response.status_code == 200:
             pass  # "Login successful..")
         elif response.status_code == 401:
-            print("Login unsuccessful. Please check username, password or URL.")
+            logging.error("Login unsuccessful. Please check username, password or URL.")
             sys.exit(2)
         else:
-            print("Login unsuccessful. Return code: " + str(response.status_code))
+            logging.error("Login unsuccessful. Return code: %s", response.status_code)
             sys.exit(2)
 
         return response.json()

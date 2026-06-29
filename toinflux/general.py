@@ -6,9 +6,30 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 # pylint: disable=import-outside-toplevel
+import logging
 import os
 import sys
 import yaml
+
+
+def configure_logging(logfile=None):
+    """Configure root logger with stdout and an optional file handler.
+
+    :param logfile: path to log file; if None, logs to stdout only
+    :type logfile: str or None
+    """
+    fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(fmt)
+    root.addHandler(stdout_handler)
+
+    if logfile:
+        file_handler = logging.FileHandler(logfile)
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
 
 
 def flatten_dict(data, parent_key="", sep="_"):
@@ -65,7 +86,7 @@ def get_class(source):
     try:
         my_class = classes[class_name](source_name)
     except KeyError:
-        print(f"Source {class_name} not found")
+        logging.error("Source %s not found", class_name)
         sys.exit(1)
     return my_class
 
@@ -94,14 +115,14 @@ def load_settings(settings_file="settings.yaml"):
             settings = yaml.safe_load(f)
 
         if not isinstance(settings, dict) or not settings:
-            print(f"Invalid or empty configuration in {settings_path}. Please check {settings_path}.")
+            logging.critical("Invalid or empty configuration in %s. Please check %s.", settings_path, settings_path)
             sys.exit(1)
 
         return settings
     except FileNotFoundError:
-        print(f"{settings_path} not found.")
-        print(f"Make sure you copy example_settings.yaml to {settings_path} and edit it.")
+        logging.critical("%s not found. Make sure you copy example_settings.yaml to %s and edit it.",
+                         settings_path, settings_path)
         sys.exit(1)
     except yaml.YAMLError as e:
-        print(f"Error in {settings_path} - {e}")
+        logging.critical("Error in %s - %s", settings_path, e)
         sys.exit(1)
