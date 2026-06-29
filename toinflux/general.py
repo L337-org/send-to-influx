@@ -64,9 +64,7 @@ def get_class(source):
 
     classes = {"DataHandler": DataHandler, "Hue": Hue, "MyEnergi": MyEnergi, "Zappi": Zappi, "Speedtest": Speedtest}
 
-    # Use a Capitalised name for the class name
-    class_name = source.capitalize() if source.islower() else source
-    # Use a lower case name for the source to match the settings file entries
+    class_name = next((k for k in classes if k.lower() == source.lower()), source)
     source_name = source.lower()
     try:
         my_class = classes[class_name](source_name)
