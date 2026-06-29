@@ -24,7 +24,7 @@ CI runs `pytest` and `flake8` in parallel on every push/PR (`.github/workflows/p
 
 ## Architecture
 
-**send-to-influx** collects metrics from smart home / energy devices and writes them to InfluxDB using the [line protocol](https://docs.influxdata.com/influxdb/v1/write_protocols/line_protocol_tutorial/).
+**send-to-influx** collects metrics from smart home / energy devices and writes them to InfluxDB using the [line protocol](https://docs.influxdata.com/influxdb/v1/write_protocols/line_protocol_tutorial/). Both InfluxDB v1 (user/password) and v2 (token/org/bucket) are supported.
 
 ### Class hierarchy
 
@@ -40,15 +40,17 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 
 ### Entry point (`sendtoinflux.py`)
 
-- **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source.
-- **Multi-source mode** (no `--source`): reads `sources` list from `settings.yaml`, spawns one daemon thread per source with a configurable startup stagger (`stagger_seconds`, default 10). Dead threads are detected and restarted with exponential backoff (base 5 s, max 300 s).
+- **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source. Failures are retried with exponential backoff (base 5 s, max 300 s).
+- **Multi-source mode** (no `--source`): reads `sources` list from `settings.yaml`, spawns one daemon thread per source with a configurable startup stagger (`stagger_seconds`, default 10). Dead threads are detected and restarted with the same exponential backoff.
 - `--dump`: one-time raw JSON to stdout, then exit (single source only).
 - `--print`: parsed data to stdout instead of InfluxDB.
+- Handles SIGINT and SIGTERM for graceful shutdown.
 
 ### Factory / settings
 
-- `toinflux/general.py`: `load_settings(file)` (exits with code 1 on missing/invalid YAML), `get_class(source)` (case-insensitive factory → correct DataHandler subclass), `flatten_dict()` (used by Speedtest to flatten nested JSON).
-- Config file: `settings.yaml` (copy from `example_settings.yaml`). Required at runtime; not committed.
+- `toinflux/general.py`: `load_settings(file)` (exits with code 1 on missing/invalid YAML), `get_class(source)` (case-insensitive factory → correct DataHandler subclass), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None)` (sets up timestamped stdout logging, plus optional file handler).
+- `configure_logging()` is called in `main()` after settings are loaded. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`.
+- Config file: `settings.yaml` (copy from `example_settings.yaml`). Required at runtime; not committed. Optional `logfile` key adds a file log destination.
 
 ### Adding a new data source
 

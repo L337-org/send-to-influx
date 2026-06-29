@@ -74,6 +74,49 @@ class TestDataHandler:
                 assert "influx.example.com" in url
                 assert call_kw["auth"] == ("influx_user", "influx_password")
 
+    def test_send_data_v2_uses_token_auth_and_bucket_url(self, sample_settings):
+        """send_data uses v2 API endpoint and token header when token is in influx settings."""
+        sample_settings["influx"] = {
+            "url": "https://influx.example.com:8086",
+            "token": "my-token",
+            "org": "my-org",
+            "timeout": 5,
+        }
+        sample_settings["hue"]["bucket"] = "hue_bucket"
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch("toinflux.influx.requests.post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data()
+                url = mock_post.call_args[0][0]
+                call_kw = mock_post.call_args[1]
+                assert "/api/v2/write" in url
+                assert "org=my-org" in url
+                assert "bucket=hue_bucket" in url
+                assert call_kw["headers"] == {"Authorization": "Token my-token"}
+                assert "auth" not in call_kw
+
+    def test_send_data_v2_falls_back_to_db_when_no_bucket(self, sample_settings):
+        """send_data uses db value as bucket when bucket is not set in source settings."""
+        sample_settings["influx"] = {
+            "url": "https://influx.example.com:8086",
+            "token": "my-token",
+            "org": "my-org",
+        }
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch("toinflux.influx.requests.post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data()
+                url = mock_post.call_args[0][0]
+                assert "bucket=hue_db" in url
+
     def test_send_data_handles_request_exception(self, sample_settings):
         """send_data does not raise when requests.post raises."""
 

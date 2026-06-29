@@ -46,14 +46,22 @@ class DataHandler:
         data_to_send = self.influx_header + ",".join([f"{key}={value}" for key, value in data.items()])
 
         # send to InfluxDB
-        url = f'{self.settings["influx"]["url"]}/write?db={self.source_settings["db"]}&precision=s'
-        try:
-            response = requests.post(
-                url,
-                auth=(self.settings["influx"]["user"], self.settings["influx"]["password"]),
-                data=data_to_send,
-                timeout=self.settings["influx"].get("timeout", 5),
+        influx_settings = self.settings["influx"]
+        timeout = influx_settings.get("timeout", 5)
+        if "token" in influx_settings:
+            url = (
+                f'{influx_settings["url"]}/api/v2/write'
+                f'?org={influx_settings["org"]}'
+                f'&bucket={self.source_settings.get("bucket", self.source_settings.get("db"))}'
+                f'&precision=s'
             )
+            headers = {"Authorization": f'Token {influx_settings["token"]}'}
+            kwargs = {"headers": headers}
+        else:
+            url = f'{influx_settings["url"]}/write?db={self.source_settings["db"]}&precision=s'
+            kwargs = {"auth": (influx_settings["user"], influx_settings["password"])}
+        try:
+            response = requests.post(url, data=data_to_send, timeout=timeout, **kwargs)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logging.error("Error sending data to InfluxDB - %s", e)

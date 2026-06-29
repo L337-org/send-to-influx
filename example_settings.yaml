@@ -94,12 +94,16 @@ speedtest:
     - "ping"
 
 # InfluxDB settings
+# For InfluxDB v1, use user/password and per-source db:
 influx:
-  # The URL of the InfluxDB server
   url: "https://influx.example.com:8086"
-  # The username for the InfluxDB server
   user: "your_influx_user"
-  # The password for the InfluxDB server
   password: "your_influx_password"
-  # Timeout for requests to the InfluxDB server
   timeout: 5
+
+# For InfluxDB v2, use token/org instead and per-source bucket: instead of db:
+# influx:
+#   url: "https://influx.example.com:8086"
+#   token: "your_influx_token"
+#   org: "your_org"
+#   timeout: 5

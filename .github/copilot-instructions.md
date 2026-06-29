@@ -18,14 +18,16 @@ send-to-influx is a Python application that collects data from various smart hom
   - per-source interval-based timing system to avoid drift
   - multi-source startup stagger via optional `stagger_seconds` setting (default `10`)
 - **Resilience**:
-  - in multi-source mode, source failures do not stop the process
-  - failed sources are restarted independently with exponential backoff (base `5s`, max `300s`)
+  - source failures do not stop the process in either single-source or multi-source mode
+  - failed sources are restarted with exponential backoff (base `5s`, max `300s`)
+  - in multi-source mode, only the failed source is retried; others keep running
+- **Signals**: handles both SIGINT (Ctrl-C) and SIGTERM (systemd/container stop) for graceful shutdown
 
 ### Modular Data Sources (`toinflux/` package)
 The project uses a plugin-like architecture where each data source is implemented as a separate module:
 
 #### Base Classes
-- **`toinflux/general.py`**: `load_settings()` (loads YAML configuration and returns a dictionary), `get_class()` (factory function to instantiate data source classes dynamically)
+- **`toinflux/general.py`**: `load_settings()` (loads YAML configuration and returns a dictionary), `get_class()` (case-insensitive factory function to instantiate data source classes dynamically), `configure_logging(logfile=None)` (sets up timestamped stdout logging with optional file handler)
 - **`toinflux/influx.py`**: `DataHandler` (base class for all data sources)
 
 #### Current Data Sources
@@ -40,11 +42,13 @@ YAML-based configuration supporting multiple data sources:
   - `stagger_seconds`: optional start delay between sources (default `10`)
 - **Defaults**:
   - `default_source`: used when no `sources` list is configured and `--source` is omitted
+- **Logging**:
+  - `logfile`: optional path to write logs to a file in addition to stdout
 - **Hue**: Bridge connection, sensor mappings, temperature units
 - **MyEnergi**: API endpoints, authentication, device serials
 - **Zappi**: Field selection, collection intervals
 - **Speedtest**: Field selection, collection intervals
-- **InfluxDB**: Connection details, database settings
+- **InfluxDB**: Connection details, database/bucket settings; supports v1 (user/password/db) and v2 (token/org/bucket)
 
 ## Code Style & Standards
 
@@ -60,7 +64,7 @@ YAML-based configuration supporting multiple data sources:
   - `0`: Normal exit
   - `1`: Configuration errors (missing/invalid settings.yaml)
   - `2`: Connection errors (API endpoints, InfluxDB)
-- **Error Messages**: Descriptive messages printed to stderr
+- **Error Messages**: Logged via Python's `logging` module with timestamps and log level (WARNING, ERROR, CRITICAL)
 - **Network Handling**: Proper timeout handling and connection failure management
 - **Validation**: Configuration validation before processing
 
@@ -94,11 +98,13 @@ newsource:
 
 ### Error Handling Patterns
 ```python
+import logging
+
 try:
     response = requests.get(url, timeout=timeout)
     response.raise_for_status()
 except requests.exceptions.RequestException as e:
-    print(f"Error connecting to API - {e}")
+    logging.error("Error connecting to API - %s", e)
     sys.exit(2)
 ```
 
@@ -122,7 +128,7 @@ except requests.exceptions.RequestException as e:
 
 ### Core Dependencies
 - `requests`: HTTP requests for APIs and InfluxDB
-- `urllib3`: HTTP client library used in `toinflux/general.py` to disable `InsecureRequestWarning` globally
+- `urllib3`: HTTP client library; `InsecureRequestWarning` is suppressed only for the Hue bridge request (which uses a self-signed cert) in `toinflux/philipshue.py`
 - `pyyaml`: YAML configuration file parsing
 - `speedtest-cli`: Speedtest library for collecting network perf data
 
@@ -209,12 +215,22 @@ speedtest:
 ```
 
 ### InfluxDB Configuration
+
+InfluxDB v1 (user/password, per-source `db`):
 ```yaml
 influx:
   url: "https://influx.example.com:8086"
-  db: "smart_home_db"
   user: "your_influx_user"
   password: "your_influx_password"
+  timeout: 5
+```
+
+InfluxDB v2 (token/org, per-source `bucket`; falls back to `db` if `bucket` is absent):
+```yaml
+influx:
+  url: "https://influx.example.com:8086"
+  token: "your_token"
+  org: "your_org"
   timeout: 5
 ```
 

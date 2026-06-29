@@ -37,6 +37,25 @@ Speedtest
 
 This uses the speedtest-cli python library and will run download and upload tests and store the results.
 
+InfluxDB
+--------
+
+Both InfluxDB v1 and v2 are supported.
+
+For v1, configure `user` and `password` in the `influx` settings block and use `db` per source:
+
+    influx:
+      url: "http://influx.example.com:8086"
+      user: "your_user"
+      password: "your_password"
+
+For v2, use `token` and `org` instead and optionally use `bucket` per source (falls back to `db` if `bucket` is not set):
+
+    influx:
+      url: "http://influx.example.com:8086"
+      token: "your_token"
+      org: "your_org"
+
 Speedtest-cli is installed as a requirement of this project so no additional download is required.
 
 Information about speedtest-cli is available on their project page:
@@ -51,11 +70,19 @@ Running the script
 - Install runtime requirements with `pip install -r requirements.txt`
 - Leave the script running in a screen session and sit back and watch the data roll in.
 
+Log output goes to stdout with timestamps and log level, e.g.:
+
+    2026-06-29 14:23:01 WARNING  Source 'hue' failed: connection timeout. Restarting in 5 seconds (attempt 1).
+
+To also write logs to a file, add an optional `logfile` key to `settings.yaml`:
+
+    logfile: "/var/log/send-to-influx.log"
+
 By default, `sendtoinflux.py` starts one worker per source listed in the `sources` setting. Each source runs in its own loop using its own `interval`.
 
 Worker start times are slightly staggered to avoid all collectors firing at exactly the same moment when intervals are equal.
 
-In multi-source mode, if a source fails, only that source is retried. Failed sources are automatically restarted with exponential backoff to avoid tight failure loops, while other sources keep running.
+If a source fails — whether running in single-source or multi-source mode — it is automatically restarted with exponential backoff (base 5 s, max 300 s) to avoid tight failure loops. In multi-source mode, only the failed source is retried; other sources keep running.
 
 There are a few options that can be passed to the script and a couple of these can help you to debug and also to help you understand your data:
 
