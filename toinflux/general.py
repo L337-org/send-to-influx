@@ -91,6 +91,44 @@ def get_class(source):
     return my_class
 
 
+def validate_settings(settings):
+    """Validate required keys in a parsed settings dictionary, exit with code 1 if invalid.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    """
+    errors = []
+
+    # Check influx block
+    influx = settings.get("influx", {})
+    if not influx.get("url"):
+        errors.append("influx.url is required")
+    if "token" in influx:
+        if not influx.get("org"):
+            errors.append("influx.org is required when using token authentication (v2)")
+    elif not (influx.get("user") and influx.get("password")):
+        errors.append("influx requires either token+org (v2) or user+password (v1)")
+
+    # Check each configured source has a settings section and required keys
+    sources = settings.get("sources") or [settings.get("default_source")]
+    for source in sources:
+        if not source:
+            continue
+        if source not in settings:
+            errors.append(f"no configuration section found for source '{source}'")
+            continue
+        source_cfg = settings[source]
+        if "interval" not in source_cfg:
+            errors.append(f"{source}.interval is required")
+        if "db" not in source_cfg and "bucket" not in source_cfg:
+            errors.append(f"{source}.db (or {source}.bucket for InfluxDB v2) is required")
+
+    if errors:
+        for error in errors:
+            logging.critical("settings.yaml: %s", error)
+        sys.exit(1)
+
+
 def load_settings(settings_file="settings.yaml"):
     """Load settings from a YAML file and return as a dictionary.
 
@@ -118,6 +156,7 @@ def load_settings(settings_file="settings.yaml"):
             logging.critical("Invalid or empty configuration in %s. Please check %s.", settings_path, settings_path)
             sys.exit(1)
 
+        validate_settings(settings)
         return settings
     except FileNotFoundError:
         logging.critical("%s not found. Make sure you copy example_settings.yaml to %s and edit it.",

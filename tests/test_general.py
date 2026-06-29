@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 import pytest
 import yaml
-from toinflux.general import flatten_dict, load_settings, get_class
+from toinflux.general import flatten_dict, load_settings, get_class, validate_settings
 
 
 class TestLoadSettings:
@@ -86,16 +86,76 @@ class TestLoadSettings:
 
     def test_no_fallback_when_yaml_exists(self, sample_settings):
         """load_settings uses .yaml and does not fall back when .yaml exists."""
-        different = {"key": "from_yaml"}
+        import copy
+        yaml_settings = copy.deepcopy(sample_settings)
+        yaml_settings["default_source"] = "from_yaml"
         with tempfile.TemporaryDirectory() as tmp:
             yml_path = os.path.join(tmp, "settings.yml")
             yaml_path = os.path.join(tmp, "settings.yaml")
             with open(yml_path, "w", encoding="utf8") as f:
                 yaml.dump(sample_settings, f)
             with open(yaml_path, "w", encoding="utf8") as f:
-                yaml.dump(different, f)
+                yaml.dump(yaml_settings, f)
             result = load_settings(settings_file=yaml_path)
-            assert result == different
+            assert result["default_source"] == "from_yaml"
+
+
+class TestValidateSettings:
+    """Tests for validate_settings function."""
+
+    def test_valid_v1_settings_passes(self, sample_settings):
+        """validate_settings does not exit for valid v1 settings."""
+        validate_settings(sample_settings)
+
+    def test_valid_v2_settings_passes(self, sample_settings):
+        """validate_settings does not exit for valid v2 settings."""
+        sample_settings["influx"] = {"url": "http://influx.example.com:8086", "token": "tok", "org": "myorg"}
+        sample_settings["hue"]["bucket"] = "hue_bucket"
+        del sample_settings["hue"]["db"]
+        validate_settings(sample_settings)
+
+    def test_missing_influx_url_exits(self, sample_settings):
+        """validate_settings exits when influx.url is missing."""
+        del sample_settings["influx"]["url"]
+        with pytest.raises(SystemExit):
+            validate_settings(sample_settings)
+
+    def test_missing_influx_credentials_exits(self, sample_settings):
+        """validate_settings exits when neither v1 nor v2 credentials are present."""
+        del sample_settings["influx"]["user"]
+        del sample_settings["influx"]["password"]
+        with pytest.raises(SystemExit):
+            validate_settings(sample_settings)
+
+    def test_v2_token_without_org_exits(self, sample_settings):
+        """validate_settings exits when token is present but org is missing."""
+        sample_settings["influx"]["token"] = "mytoken"
+        with pytest.raises(SystemExit):
+            validate_settings(sample_settings)
+
+    def test_missing_source_section_exits(self, sample_settings):
+        """validate_settings exits when a configured source has no settings section."""
+        sample_settings["sources"] = ["hue", "nosuchsource"]
+        with pytest.raises(SystemExit):
+            validate_settings(sample_settings)
+
+    def test_missing_interval_exits(self, sample_settings):
+        """validate_settings exits when a source is missing interval."""
+        del sample_settings["hue"]["interval"]
+        with pytest.raises(SystemExit):
+            validate_settings(sample_settings)
+
+    def test_missing_db_and_bucket_exits(self, sample_settings):
+        """validate_settings exits when a source has neither db nor bucket."""
+        del sample_settings["hue"]["db"]
+        with pytest.raises(SystemExit):
+            validate_settings(sample_settings)
+
+    def test_bucket_accepted_in_place_of_db(self, sample_settings):
+        """validate_settings accepts bucket as an alternative to db."""
+        del sample_settings["hue"]["db"]
+        sample_settings["hue"]["bucket"] = "hue_bucket"
+        validate_settings(sample_settings)
 
 
 class TestGetClass:
