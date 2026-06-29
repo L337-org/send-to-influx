@@ -20,17 +20,17 @@ class MyEnergi(DataHandler):
         """
         Get the data from the myenergi API
 
-        :param url:
-        :type url:
-        :return:
-        :rtype:
+        :param url: full API endpoint URL
+        :type url: str
+        :return: parsed JSON response
+        :rtype: dict
         """
         # Get the data for the given serial from the MyEnergi API
         serial = self.source_settings["serial"]
         auth = HTTPDigestAuth(serial, self.settings["myenergi"]["apikey"])
         response = requests.get(url, auth=auth, timeout=self.settings["myenergi"].get("timeout", 5))
         if response.status_code == 200:
-            pass  # "Login successful..")
+            pass
         elif response.status_code == 401:
             logging.error("Login unsuccessful. Please check username, password or URL.")
             sys.exit(2)
@@ -52,7 +52,7 @@ class MyEnergi(DataHandler):
         :type day: str
         :param hour: hour of the day (1–23); if falsy, results for the whole day are returned
         :type hour: int
-        :return:
+        :return: Charge, Import, Export and Genera values in kWh
         :rtype: dict
         """
         # Get the Day/Hour data from the MyEnergi API
