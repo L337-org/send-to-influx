@@ -74,6 +74,7 @@ def get_class(source):
     :return: class object
     :rtype: DataHandler
     """
+    from toinflux.carbonintensity import CarbonIntensity
     from toinflux.influx import DataHandler
     from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
     from toinflux.octopus import Octopus
@@ -82,6 +83,7 @@ def get_class(source):
     from toinflux.speedtest import Speedtest
 
     classes = {
+        "CarbonIntensity": CarbonIntensity,
         "DataHandler": DataHandler,
         "Eddi": Eddi,
         "Harvi": Harvi,

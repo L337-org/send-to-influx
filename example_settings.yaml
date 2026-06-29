@@ -6,6 +6,7 @@ sources:
   - "zappi"
   - "speedtest"
   # - "openmeteo"
+  # - "carbonintensity"
   # - "eddi"
   # - "harvi"
   # - "octopus"
@@ -117,6 +118,18 @@ openmeteo:
     - "cloud_cover"
     - "wind_speed_10m"
     - "direct_radiation"
+
+# National Grid Carbon Intensity settings (no API key required)
+carbonintensity:
+  # The database to use
+  db: "grid_db"
+  # Interval in seconds between data collection (half-hourly data, 1800 minimum)
+  interval: 1800
+  # Timeout for requests to the Carbon Intensity API
+  timeout: 10
+  # Set to true to also collect the national generation fuel mix percentages
+  # (gas, nuclear, wind, solar, coal, hydro, biomass, imports, other)
+  include_generation: true
 
 # Eddi settings (hot water diverter)
 eddi:

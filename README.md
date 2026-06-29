@@ -6,7 +6,7 @@ https://github.com/GavinLucas/send-to-influx
 
 Script to take data from various APIs and post it to InfluxDB in order to view the data in Grafana.
 
-It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, Octopus Energy, and Speedtest network performance data sources.
+It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid Carbon Intensity, Octopus Energy, and Speedtest network performance data sources.
 
 Hue Bridge
 ----------
@@ -35,6 +35,16 @@ https://github.com/twonk/MyEnergi-App-Api
 - **Zappi**: EV charger. Collects real-time status fields plus daily energy totals (Charge, Import, Export, Genera).
 - **Eddi**: Hot water diverter. Collects real-time status fields (frequency, voltage, diversion amount, temperatures, etc.).
 - **Harvi**: CT clamp energy monitor. Collects CT clamp power readings (ectp1/ectp2/ectp3) and channel names.
+
+National Grid Carbon Intensity
+------------------------------
+
+Real-time national grid carbon intensity (gCO2/kWh) and generation fuel mix (wind, solar, gas, nuclear, etc.)
+from the National Grid ESO Carbon Intensity API. No API key required. Data updates every 30 minutes.
+
+API documentation: https://carbon-intensity.github.io/api-definitions/
+
+Set `include_generation: true` in settings to also collect the fuel mix percentages.
 
 Open-Meteo
 ----------
@@ -157,6 +167,8 @@ general.py - contains the function that returns an instance of the correct child
 influx.py - contains the top level parent class (DataHandler) which implements the common method for uploading to influx - send_data()
 
 philipshue.py - contains a single child class (Hue) with all the functionality required to get data when calling the common method - get_data()
+
+carbonintensity.py - contains a single child class (CarbonIntensity) that fetches national grid carbon intensity and optionally the generation fuel mix from the National Grid ESO API.
 
 myenergi.py - contains an intermediate level child class (MyEnergi) with common functions for retrieving data from the myenergi APIs.  This class has three child classes: Zappi (EV charger), Eddi (hot water diverter), and Harvi (CT clamp energy monitor), each of which implements get_data().
 

@@ -33,6 +33,7 @@ The project uses a plugin-like architecture where each data source is implemente
 #### Current Data Sources
 - **`toinflux/philipshue.py`**: Philips Hue Bridge integration
 - **`toinflux/myenergi.py`**: MyEnergi Zappi/Eddi/Harvi devices integration (HTTP Digest auth)
+- **`toinflux/carbonintensity.py`**: National Grid carbon intensity and generation fuel mix (no API key)
 - **`toinflux/openmeteo.py`**: Open-Meteo weather data (no API key, lat/lon configuration)
 - **`toinflux/octopus.py`**: Octopus Energy electricity consumption and unit rates (API key auth)
 - **`toinflux/speedtest.py`**: Speedtest network performance integration
@@ -49,6 +50,7 @@ YAML-based configuration supporting multiple data sources:
 - **Hue**: Bridge connection, sensor mappings, temperature units
 - **MyEnergi**: API endpoints, authentication, device serials (shared across Zappi/Eddi/Harvi)
 - **Zappi/Eddi/Harvi**: Field selection, collection intervals, individual device serials
+- **CarbonIntensity**: `include_generation` flag; no credentials required
 - **OpenMeteo**: Latitude, longitude, field list (see open-meteo.com/en/docs)
 - **Octopus**: API key, MPAN, meter serial; optional product/tariff codes for unit rate collection
 - **Speedtest**: Field selection, collection intervals
@@ -129,6 +131,13 @@ except requests.exceptions.RequestException as e:
   - `Harvi` (CT clamp monitor): CT clamp power readings (ectp1/ectp2/ectp3) and channel names
 - **Authentication**: HTTP Digest authentication with device serial/API key
 - **Configuration**: Shared `myenergi` block (API endpoints, apikey) + per-device block (serial, fields, interval)
+
+### National Grid Carbon Intensity (`toinflux/carbonintensity.py`)
+- **No API key required**; data updates every 30 minutes
+- **Collects**: `intensity_actual` and `intensity_forecast` (gCO2/kWh)
+- **Optional**: generation fuel mix (`gen_gas`, `gen_wind`, `gen_solar`, etc.) via `include_generation: true`
+- **InfluxDB measurement**: `carbonintensity,source=national_grid`
+- API docs: https://carbon-intensity.github.io/api-definitions/
 
 ### Open-Meteo (`toinflux/openmeteo.py`)
 - **No API key required**; free, no rate limiting

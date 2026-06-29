@@ -5,6 +5,7 @@ __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT License"
 __version__ = "1.0"
 
+from .carbonintensity import CarbonIntensity
 from .general import load_settings, get_class, configure_logging
 from .influx import DataHandler
 from .myenergi import MyEnergi, Zappi, Eddi, Harvi

@@ -29,15 +29,16 @@ CI runs `pytest` and `flake8` in parallel on every push/PR (`.github/workflows/p
 ### Class hierarchy
 
 ```
-DataHandler  (toinflux/influx.py)   — base; owns send_data() → InfluxDB HTTP POST
-├── Hue      (toinflux/philipshue.py)
-├── OpenMeteo(toinflux/openmeteo.py)
-├── Octopus  (toinflux/octopus.py)
-├── Speedtest(toinflux/speedtest.py)
-└── MyEnergi (toinflux/myenergi.py) — intermediate parent for MyEnergi API auth
-    ├── Zappi(toinflux/myenergi.py)
-    ├── Eddi (toinflux/myenergi.py)
-    └── Harvi(toinflux/myenergi.py)
+DataHandler      (toinflux/influx.py)          — base; owns send_data() → InfluxDB HTTP POST
+├── CarbonIntensity(toinflux/carbonintensity.py)
+├── Hue            (toinflux/philipshue.py)
+├── OpenMeteo      (toinflux/openmeteo.py)
+├── Octopus        (toinflux/octopus.py)
+├── Speedtest      (toinflux/speedtest.py)
+└── MyEnergi       (toinflux/myenergi.py)     — intermediate parent for MyEnergi API auth
+    ├── Zappi      (toinflux/myenergi.py)
+    ├── Eddi       (toinflux/myenergi.py)
+    └── Harvi      (toinflux/myenergi.py)
 ```
 
 Each subclass implements `get_data()` which populates `self.data` (dict) and `self.influx_header` (InfluxDB measurement/tag string); `send_data()` in the base class takes it from there.
