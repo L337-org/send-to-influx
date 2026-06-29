@@ -98,15 +98,10 @@ def spawn_source_thread(worker):
     return source_thread
 
 
-def signal_handler(sig, frame):
+def signal_handler(sig, _frame):
     """
     Signal handler to exit gracefully
     """
-    # avoid unused variable warning
-    if frame:
-        pass
-
-    # print a message and exit
     print(f"\nExiting on signal {sig}")
     sys.exit(0)
 
@@ -115,8 +110,9 @@ def main():
     """
     The main function
     """
-    # register the signal handler for ctrl-c
+    # register the signal handler for ctrl-c and termination
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     # load settings once for defaults and configured source list
     settings = toinflux.load_settings()
