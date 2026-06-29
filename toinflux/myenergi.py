@@ -22,8 +22,6 @@ class MyEnergi(DataHandler):
 
         :param url:
         :type url:
-        :param serial:
-        :type serial: str
         :return:
         :rtype:
         """
