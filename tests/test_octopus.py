@@ -48,9 +48,9 @@ class TestOctopus:
                 assert handler.data == result
 
     def test_get_data_includes_gas_consumption_when_gas_meter_configured(self, sample_settings):
-        """get_data adds gas_consumption when gas_mpan and gas_meter_serial are set."""
+        """get_data adds gas_consumption when gas_mprn and gas_meter_serial are set."""
         settings = _octopus_settings(sample_settings)
-        settings["octopus"]["gas_mpan"] = "9876543210987"
+        settings["octopus"]["gas_mprn"] = "9876543210987"
         settings["octopus"]["gas_meter_serial"] = "G4F1234567"
         elec_response = {"results": [{"consumption": 0.123}]}
         gas_response = {"results": [{"consumption": 1.5}]}
@@ -67,7 +67,7 @@ class TestOctopus:
                 assert "gas-meter-points/9876543210987/meters/G4F1234567/consumption/" in gas_url
 
     def test_get_data_skips_gas_consumption_when_not_configured(self, sample_settings):
-        """get_data omits gas_consumption when gas_mpan/gas_meter_serial are absent."""
+        """get_data omits gas_consumption when gas_mprn/gas_meter_serial are absent."""
         settings = _octopus_settings(sample_settings)
         consumption_response = {"results": [{"consumption": 0.123}]}
         with patch("toinflux.influx.load_settings") as mock_load_settings:
@@ -81,7 +81,7 @@ class TestOctopus:
     def test_get_data_handles_empty_gas_consumption_results(self, sample_settings):
         """get_data omits gas_consumption when the API returns no results for the gas meter."""
         settings = _octopus_settings(sample_settings)
-        settings["octopus"]["gas_mpan"] = "9876543210987"
+        settings["octopus"]["gas_mprn"] = "9876543210987"
         settings["octopus"]["gas_meter_serial"] = "G4F1234567"
         elec_response = {"results": [{"consumption": 0.123}]}
         with patch("toinflux.influx.load_settings") as mock_load_settings:

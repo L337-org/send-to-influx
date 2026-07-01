@@ -59,7 +59,7 @@ Octopus Energy
 Collects half-hourly electricity consumption from your smart meter via the Octopus Energy API.
 Your API key is available from https://octopus.energy/dashboard/developer/.
 
-If you also configure `gas_mpan` and `gas_meter_serial`, gas consumption is collected too, as
+If you also configure `gas_mprn` and `gas_meter_serial`, gas consumption is collected too, as
 `gas_consumption`. Its unit depends on your meter type (kWh for SMETS1 Secure meters, m3 for
 SMETS2 meters) and is sent unconverted, so check which applies to you before using the value.
 

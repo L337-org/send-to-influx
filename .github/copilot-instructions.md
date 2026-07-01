@@ -52,7 +52,7 @@ YAML-based configuration supporting multiple data sources:
 - **Zappi/Eddi/Harvi**: Field selection, collection intervals, individual device serials
 - **CarbonIntensity**: `include_generation` flag; no credentials required
 - **OpenMeteo**: Latitude, longitude, field list (see open-meteo.com/en/docs)
-- **Octopus**: API key, MPAN, meter serial; optional `gas_mpan`+`gas_meter_serial` for gas consumption, and optional product/tariff codes for unit rate collection
+- **Octopus**: API key, MPAN, meter serial; optional `gas_mprn`+`gas_meter_serial` for gas consumption, and optional product/tariff codes for unit rate collection
 - **Speedtest**: Field selection, collection intervals
 - **InfluxDB**: Connection details, database/bucket settings; supports v1 (user/password/db) and v2 (token/org/bucket)
 
@@ -148,7 +148,7 @@ except requests.exceptions.RequestException as e:
 ### Octopus Energy (`toinflux/octopus.py`)
 - **Collects**: latest half-hourly electricity consumption; optionally gas consumption and current unit rate
 - **Authentication**: HTTP Basic auth with API key as username
-- **Configuration**: `api_key`, `mpan`, `meter_serial`; optional `gas_mpan`+`gas_meter_serial` for gas; optional `product_code`+`tariff_code` for unit rate
+- **Configuration**: `api_key`, `mpan`, `meter_serial`; optional `gas_mprn`+`gas_meter_serial` for gas; optional `product_code`+`tariff_code` for unit rate
 - **Note**: smart meter consumption data typically arrives with up to 24 hour delay
 - **Note**: gas consumption unit depends on meter type (kWh for SMETS1 Secure, m3 for SMETS2) and is sent unconverted as `gas_consumption`
 - **InfluxDB measurement**: `octopus,source=octopus_energy`

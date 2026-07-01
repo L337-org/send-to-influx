@@ -44,7 +44,7 @@ class Octopus(DataHandler):
 
         Consumption is returned as the most recent half-hourly reading (smart meter data
         typically arrives with a delay of up to 24 hours). Gas consumption is only collected
-        if ``gas_mpan`` and ``gas_meter_serial`` are configured in settings; its unit depends
+        if ``gas_mprn`` and ``gas_meter_serial`` are configured in settings; its unit depends
         on the meter type (kWh for SMETS1 Secure meters, m3 for SMETS2 meters), so it is sent
         unconverted as ``gas_consumption``. If ``product_code`` and ``tariff_code`` are
         configured in settings, the current electricity unit rate for that tariff is also collected.
@@ -65,11 +65,11 @@ class Octopus(DataHandler):
             self.data["consumption_kwh"] = result["results"][0]["consumption"]
 
         # Get most recent gas consumption reading, if a gas meter is configured
-        gas_mpan = self.source_settings.get("gas_mpan")
+        gas_mprn = self.source_settings.get("gas_mprn")
         gas_meter_serial = self.source_settings.get("gas_meter_serial")
-        if gas_mpan and gas_meter_serial:
+        if gas_mprn and gas_meter_serial:
             result = self._get(
-                f"gas-meter-points/{gas_mpan}/meters/{gas_meter_serial}/consumption/" "?page_size=1&order_by=-period"
+                f"gas-meter-points/{gas_mprn}/meters/{gas_meter_serial}/consumption/" "?page_size=1&order_by=-period"
             )
             if result.get("results"):
                 self.data["gas_consumption"] = result["results"][0]["consumption"]
