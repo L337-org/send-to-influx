@@ -262,6 +262,9 @@ influx:
   timeout: 5
 ```
 
+Optional `insecure: true` in the `influx` block skips TLS certificate verification for `https` URLs
+(needed for self-signed/internal certs); it defaults to `false` (verification enabled).
+
 ## Data Format
 - **InfluxDB Line Protocol**: `measurement,tag=value field=value timestamp`
 - **Timestamp Precision**: Seconds

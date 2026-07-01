@@ -3,12 +3,12 @@
 # The sources to be kicked off by the wrapper script
 sources:
   - "hue"
-  - "zappi"
   - "speedtest"
-  # - "openmeteo"
-  # - "carbonintensity"
-  # - "eddi"
+  - "openmeteo"
+  - "carbonintensity"
+  # - "zappi"
   # - "harvi"
+  # - "eddi"
   # - "octopus"
 
 # Optional stagger delay (seconds) between source starts
@@ -20,6 +20,24 @@ stagger_seconds: 10
 
 # The default source to use if no source is specified on the command line
 default_source: "hue"
+
+# InfluxDB settings
+# For InfluxDB v1, use user/password and per-source db:
+influx:
+  url: "https://influx.example.com:8086"
+  user: "your_influx_user"
+  password: "your_influx_password"
+  timeout: 5
+  # Uncomment the line below to skip TLS certificate verification (e.g. self-signed/internal certs)
+  # insecure: true
+
+# For InfluxDB v2, use token/org instead and per-source bucket: instead of db:
+# influx:
+#   url: "https://influx.example.com:8086"
+#   token: "your_influx_token"
+#   org: "your_org"
+#   timeout: 5
+#   insecure: false
 
 # Hue bridge settings
 hue:
@@ -44,6 +62,54 @@ hue:
     "Hue ambient light sensor 2": "Room2_Light_Sensor"
     "Hue temperature sensor 1": "Room1_Temperature_Sensor"
     "Hue temperature sensor 2": "Room2_Temperature_Sensor"
+
+# Speedtest settings
+speedtest:
+  # The database to use
+  db: "speedtest_db"
+  # Interval in seconds between data collection
+  interval: 21600
+  # Timeout for the speedtest scan
+  timeout: 5
+  # The fields to collect from the Speedtest results
+  
+  fields:
+    - "download"
+    - "upload"
+    - "ping"
+
+# Open-Meteo weather settings (no API key required)
+openmeteo:
+  # The database to use
+  db: "weather_db"
+  # Interval in seconds between data collection (15 minutes minimum recommended)
+  interval: 900
+  # Latitude and longitude for the weather location
+  latitude: 51.5
+  longitude: -2.6
+  # Timeout for requests to the Open-Meteo API
+  timeout: 10
+  # Fields to collect from the current weather response
+  # See https://open-meteo.com/en/docs for a full list of available variables
+  fields:
+    - "temperature_2m"
+    - "relative_humidity_2m"
+    - "precipitation"
+    - "cloud_cover"
+    - "wind_speed_10m"
+    - "direct_radiation"
+
+# National Grid Carbon Intensity settings (no API key required)
+carbonintensity:
+  # The database to use
+  db: "grid_db"
+  # Interval in seconds between data collection (half-hourly data, 1800 minimum)
+  interval: 1800
+  # Timeout for requests to the Carbon Intensity API
+  timeout: 10
+  # Set to true to also collect the national generation fuel mix percentages
+  # (gas, nuclear, wind, solar, coal, hydro, biomass, imports, other)
+  include_generation: true
 
 # General Myenergi settings
 myenergi:
@@ -83,53 +149,22 @@ zappi:
     - "newAppAvailable"
     - "newBootloaderAvailable"
 
-# Speedtest settings
-speedtest:
+# Harvi settings (CT clamp energy monitor)
+harvi:
   # The database to use
-  db: "speedtest_db"
+  db: "myenergi_db"
   # Interval in seconds between data collection
-  interval: 21600
-  # Timeout for the speedtest scan
-  timeout: 5
-  # The fields to collect from the Speedtest results
-  
+  interval: 300
+  # The serial number of the Harvi device (used for API authentication)
+  serial: "your_harvi_serial"
+  # The fields to collect from the Harvi device
   fields:
-    - "download"
-    - "upload"
-    - "ping"
-
-# Open-Meteo weather settings (no API key required)
-openmeteo:
-  # The database to use
-  db: "weather_db"
-  # Interval in seconds between data collection (15 minutes minimum recommended)
-  interval: 900
-  # Latitude and longitude for the weather location
-  latitude: 51.5
-  longitude: 2.6
-  # Timeout for requests to the Open-Meteo API
-  timeout: 10
-  # Fields to collect from the current weather response
-  # See https://open-meteo.com/en/docs for a full list of available variables
-  fields:
-    - "temperature_2m"
-    - "relative_humidity_2m"
-    - "precipitation"
-    - "cloud_cover"
-    - "wind_speed_10m"
-    - "direct_radiation"
-
-# National Grid Carbon Intensity settings (no API key required)
-carbonintensity:
-  # The database to use
-  db: "grid_db"
-  # Interval in seconds between data collection (half-hourly data, 1800 minimum)
-  interval: 1800
-  # Timeout for requests to the Carbon Intensity API
-  timeout: 10
-  # Set to true to also collect the national generation fuel mix percentages
-  # (gas, nuclear, wind, solar, coal, hydro, biomass, imports, other)
-  include_generation: true
+    - "ectp1"
+    - "ectp2"
+    - "ectp3"
+    - "ectt1"
+    - "ectt2"
+    - "ectt3"
 
 # Eddi settings (hot water diverter)
 eddi:
@@ -150,23 +185,6 @@ eddi:
     - "tp1"
     - "tp2"
 
-# Harvi settings (CT clamp energy monitor)
-harvi:
-  # The database to use
-  db: "myenergi_db"
-  # Interval in seconds between data collection
-  interval: 300
-  # The serial number of the Harvi device (used for API authentication)
-  serial: "your_harvi_serial"
-  # The fields to collect from the Harvi device
-  fields:
-    - "ectp1"
-    - "ectp2"
-    - "ectp3"
-    - "ectt1"
-    - "ectt2"
-    - "ectt3"
-
 # Octopus Energy settings
 octopus:
   # The database to use
@@ -185,18 +203,3 @@ octopus:
   # Useful for time-of-use tariffs such as Agile Octopus
   # product_code: "AGILE-FLEX-22-11-25"
   # tariff_code: "E-1R-AGILE-FLEX-22-11-25-C"
-
-# InfluxDB settings
-# For InfluxDB v1, use user/password and per-source db:
-influx:
-  url: "https://influx.example.com:8086"
-  user: "your_influx_user"
-  password: "your_influx_password"
-  timeout: 5
-
-# For InfluxDB v2, use token/org instead and per-source bucket: instead of db:
-# influx:
-#   url: "https://influx.example.com:8086"
-#   token: "your_influx_token"
-#   org: "your_org"
-#   timeout: 5

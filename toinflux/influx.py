@@ -7,6 +7,8 @@ __version__ = "1.0"
 
 import sys
 import logging
+import warnings
+import urllib3
 import requests
 from toinflux.general import load_settings
 
@@ -60,8 +62,15 @@ class DataHandler:
         else:
             url = f'{influx_settings["url"]}/write?db={self.source_settings["db"]}&precision=s'
             kwargs = {"auth": (influx_settings["user"], influx_settings["password"])}
+
+        insecure = influx_settings.get("insecure", False)
+        kwargs["verify"] = not insecure
+
         try:
-            response = requests.post(url, data=data_to_send, timeout=timeout, **kwargs)
+            with warnings.catch_warnings():
+                if insecure:
+                    warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+                response = requests.post(url, data=data_to_send, timeout=timeout, **kwargs)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logging.error("Error sending data to InfluxDB - %s", e)

@@ -117,6 +117,31 @@ class TestDataHandler:
                 url = mock_post.call_args[0][0]
                 assert "bucket=hue_db" in url
 
+    def test_send_data_verifies_tls_by_default(self, sample_settings):
+        """send_data passes verify=True to requests.post when insecure is not set."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch("toinflux.influx.requests.post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data()
+                assert mock_post.call_args[1]["verify"] is True
+
+    def test_send_data_skips_tls_verification_when_insecure(self, sample_settings):
+        """send_data passes verify=False to requests.post when influx.insecure is true."""
+        sample_settings["influx"]["insecure"] = True
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch("toinflux.influx.requests.post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data()
+                assert mock_post.call_args[1]["verify"] is False
+
     def test_send_data_handles_request_exception(self, sample_settings):
         """send_data does not raise when requests.post raises."""
 

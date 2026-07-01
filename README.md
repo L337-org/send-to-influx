@@ -33,10 +33,10 @@ Some information on the API fields is available here:
 https://github.com/twonk/MyEnergi-App-Api
 
 - **Zappi**: EV charger. Collects real-time status fields plus daily energy totals (Charge, Import, Export, Genera).
-- **Eddi**: Hot water diverter. Collects real-time status fields (frequency, voltage, diversion amount, temperatures, etc.).
 - **Harvi**: CT clamp energy monitor. Collects CT clamp power readings (ectp1/ectp2/ectp3) and channel names.
+- **Eddi**: Hot water diverter. Collects real-time status fields (frequency, voltage, diversion amount, temperatures, etc.).
 
-National Grid Carbon Intensity
+UK National Grid Carbon Intensity
 ------------------------------
 
 Real-time national grid carbon intensity (gCO2/kWh) and generation fuel mix (wind, solar, gas, nuclear, etc.)
@@ -88,6 +88,15 @@ For v2, use `token` and `org` instead and optionally use `bucket` per source (fa
       url: "http://influx.example.com:8086"
       token: "your_token"
       org: "your_org"
+
+If your InfluxDB URL uses `https` with a self-signed or internally-issued certificate, TLS certificate
+verification will fail by default. Set `insecure: true` in the `influx` settings block to skip verification:
+
+    influx:
+      url: "https://influx.example.com:8086"
+      user: "your_user"
+      password: "your_password"
+      insecure: true
 
 Speedtest-cli is installed as a requirement of this project so no additional download is required.
 
