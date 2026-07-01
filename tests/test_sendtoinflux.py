@@ -113,6 +113,45 @@ class TestMain:
             assert call_args[0] == ["hue", "zappi", "speedtest"]
             assert call_args[2] == 3
 
+    def test_main_logs_sources_on_multi_source_startup(self, caplog):
+        """main logs the configured sources list when starting in multi-source mode."""
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
+            patch("sendtoinflux.run_multi_source"),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+            caplog.at_level("INFO"),
+        ):
+            mock_load_settings.return_value = {
+                "default_source": "hue",
+                "sources": ["hue", "zappi", "speedtest"],
+                "stagger_seconds": 3,
+            }
+            sendtoinflux.main()
+            assert any("hue, zappi, speedtest" in record.message for record in caplog.records)
+
+    def test_main_logs_source_on_single_source_startup(self, mock_main_deps, caplog):
+        """main logs the source name when started with -s/--source."""
+        with (
+            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "-s", "zappi"]),
+            caplog.at_level("INFO"),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            assert any("source=zappi" in record.message for record in caplog.records)
+
+    def test_main_logs_default_source_on_startup(self, mock_main_deps, caplog):
+        """main logs the default_source when no --source or settings sources list is given."""
+        with (
+            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+            caplog.at_level("INFO"),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            assert any("source=hue, from default_source" in record.message for record in caplog.records)
+
     def test_main_multi_source_dump_requires_source(self):
         """main in multi-source mode exits when --dump is used without --source."""
         with (

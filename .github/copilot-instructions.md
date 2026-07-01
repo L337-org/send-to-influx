@@ -22,6 +22,7 @@ send-to-influx is a Python application that collects data from various smart hom
   - failed sources are restarted with exponential backoff (base `5s`, max `300s`)
   - in multi-source mode, only the failed source is retried; others keep running
 - **Signals**: handles both SIGINT (Ctrl-C) and SIGTERM (systemd/container stop) for graceful shutdown
+- **Startup logging**: logs an INFO line with the version and the source(s) that will run, so process (re)starts are visible in the logs
 
 ### Modular Data Sources (`toinflux/` package)
 The project uses a plugin-like architecture where each data source is implemented as a separate module:
