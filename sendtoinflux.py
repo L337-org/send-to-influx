@@ -157,11 +157,13 @@ def main():
     args = arg_parse.parse_args()
 
     if args.source:
+        logging.info("Starting send-to-influx v%s (source=%s)", __version__, args.source)
         run_single_source(args.source, args)
         return
 
     sources = settings.get("sources")
     if not isinstance(sources, list) or not sources:
+        logging.info("Starting send-to-influx v%s (source=%s, from default_source)", __version__, default_source)
         run_single_source(default_source, args)
         return
 
@@ -169,6 +171,7 @@ def main():
         logging.error("The --dump option requires --source when running in multi-source mode.")
         sys.exit(1)
 
+    logging.info("Starting send-to-influx v%s (sources=%s)", __version__, ", ".join(map(str, sources)))
     run_multi_source(sources, args, settings.get("stagger_seconds", DEFAULT_STAGGER_SECONDS))
 
 

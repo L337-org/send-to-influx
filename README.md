@@ -120,6 +120,10 @@ Log output goes to stdout with timestamps and log level, e.g.:
 
     2026-06-29 14:23:01 WARNING  Source 'hue' failed: connection timeout. Restarting in 5 seconds (attempt 1).
 
+On startup, an INFO line logs the version and which source(s) will run, so restarts are visible in the logs:
+
+    2026-06-29 14:23:00 INFO     Starting send-to-influx v1.0 (sources=hue, zappi, speedtest)
+
 To also write logs to a file, add an optional `logfile` key to `settings.yaml`:
 
     logfile: "/var/log/send-to-influx.log"

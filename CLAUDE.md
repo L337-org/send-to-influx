@@ -50,6 +50,7 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 - `--dump`: one-time raw JSON to stdout, then exit (single source only).
 - `--print`: parsed data to stdout instead of InfluxDB.
 - Handles SIGINT and SIGTERM for graceful shutdown.
+- On startup, logs an INFO line with the version and the source(s) that will run, so process (re)starts are visible in the logs.
 
 ### Factory / settings
 
