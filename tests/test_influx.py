@@ -41,7 +41,8 @@ class TestDataHandler:
                 h.send_data()
                 body = mock_post.call_args[1]["data"]
                 assert "temp=21.5" in body
-                assert "light=100i" in body
+                assert "light=100" in body
+                assert "light=100i" not in body
                 assert body.startswith("hue,host=test ")
 
     def test_send_data_uses_provided_data(self, sample_settings):
@@ -191,7 +192,8 @@ class TestDataHandler:
                 body = mock_post.call_args[1]["data"]
                 assert 'name="a \\"quoted\\" val"' in body
                 assert "active=true" in body
-                assert "count=3i" in body
+                assert "count=3" in body
+                assert "count=3i" not in body
                 assert "ratio=1.5" in body
 
 
@@ -204,8 +206,9 @@ class TestFormatFieldValue:
     def test_bool_false(self):
         assert _format_field_value(False) == "false"
 
-    def test_int_gets_i_suffix(self):
-        assert _format_field_value(42) == "42i"
+    def test_int_is_unquoted_and_unsuffixed(self):
+        """Ints are written as bare numbers (not i-suffixed) to match existing float-typed fields."""
+        assert _format_field_value(42) == "42"
 
     def test_float_is_unquoted_and_unsuffixed(self):
         assert _format_field_value(3.14) == "3.14"

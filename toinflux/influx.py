@@ -17,9 +17,12 @@ def _format_field_value(value):
     """
     Format a value as an InfluxDB line protocol field value.
 
-    Booleans become ``true``/``false``, ints get an ``i`` suffix so InfluxDB
-    doesn't store them as floats, and strings are quoted with internal
-    backslashes/quotes escaped. Everything else (e.g. floats) is left as-is.
+    Booleans become ``true``/``false`` and strings are quoted with internal
+    backslashes/quotes escaped. Numbers (including ints) are left as bare,
+    unsuffixed values so they're always written as InfluxDB's float field
+    type - deliberately not using the ``i`` integer suffix, since a field's
+    type is fixed by its first write and existing databases already have
+    these fields established as float.
 
     :param value: field value to format
     :return: line protocol representation of the value
@@ -27,8 +30,6 @@ def _format_field_value(value):
     """
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, int):
-        return f"{value}i"
     if isinstance(value, str):
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
