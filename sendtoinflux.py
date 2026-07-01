@@ -171,7 +171,7 @@ def main():
         logging.error("The --dump option requires --source when running in multi-source mode.")
         sys.exit(1)
 
-    logging.info("Starting send-to-influx v%s (sources=%s)", __version__, ", ".join(sources))
+    logging.info("Starting send-to-influx v%s (sources=%s)", __version__, ", ".join(map(str, sources)))
     run_multi_source(sources, args, settings.get("stagger_seconds", DEFAULT_STAGGER_SECONDS))
 
 
