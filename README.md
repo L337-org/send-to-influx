@@ -8,17 +8,13 @@ Script to take data from various APIs and post it to InfluxDB in order to view t
 
 It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid Carbon Intensity, Octopus Energy, and Speedtest network performance data sources.
 
+For a full field-by-field reference of what each source collects and the units it's reported in, see [UNITS.md](UNITS.md).
+
 Hue Bridge
 ----------
 
 It will collect occupancy, temperature and light readings from Hue Motion Sensors, on/off state 
 of Smart Plugs and the brightness of lights, but could be modified to collect other data from the bridge.
-
-- Temperature data uses the units specified in the settings file
-- Light level is in lux
-- Occupancy (movement) is output as boolean 0 or 1 (1 for movement detected)
-- Smart Plugs state is also output as boolean 0 or 1 (1 for on)
-- Brightness of dimmable lights is output as a percentage
 
 To create a username and password for the Hue Bridge, follow the instructions 
 here: https://developers.meethue.com/develop/get-started-2/
@@ -60,8 +56,7 @@ Collects half-hourly electricity consumption from your smart meter via the Octop
 Your API key is available from https://octopus.energy/dashboard/developer/.
 
 If you also configure `gas_mprn` and `gas_meter_serial`, gas consumption is collected too, as
-`gas_consumption`. Its unit depends on your meter type (kWh for SMETS1 Secure meters, m3 for
-SMETS2 meters) and is sent unconverted, so check which applies to you before using the value.
+`gas_consumption` (see [UNITS.md](UNITS.md) for its unit, which depends on your meter type).
 
 If you are on a time-of-use tariff (e.g. Agile Octopus), you can also configure `product_code` and
 `tariff_code` to collect the current electricity unit rate alongside consumption.
