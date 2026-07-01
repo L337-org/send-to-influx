@@ -6,13 +6,39 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 # pylint: disable=import-outside-toplevel
+import logging
 import os
 import sys
-import urllib3
 import yaml
 
-# disable SSL warnings for requests
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def configure_logging(logfile=None):
+    """Configure root logger with stdout and an optional file handler.
+
+    :param logfile: path to log file; if None, logs to stdout only
+    :type logfile: str or None
+    """
+    fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    # Remove any handlers added by a previous call to this function, so repeated
+    # calls (e.g. in tests, or if main() is invoked more than once) don't duplicate log lines.
+    for handler in list(root.handlers):
+        if getattr(handler, "_send_to_influx_handler", False):
+            root.removeHandler(handler)
+            handler.close()
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(fmt)
+    stdout_handler._send_to_influx_handler = True
+    root.addHandler(stdout_handler)
+
+    if logfile:
+        file_handler = logging.FileHandler(logfile)
+        file_handler.setFormatter(fmt)
+        file_handler._send_to_influx_handler = True
+        root.addHandler(file_handler)
 
 
 def flatten_dict(data, parent_key="", sep="_"):
@@ -53,27 +79,83 @@ def get_class(source):
     and add it to the classes dictionary.
 
     :param source: data source name
-    :type name: str
+    :type source: str
     :return: class object
     :rtype: DataHandler
     """
+    from toinflux.carbonintensity import CarbonIntensity
     from toinflux.influx import DataHandler
-    from toinflux.myenergi import MyEnergi, Zappi
+    from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
+    from toinflux.octopus import Octopus
+    from toinflux.openmeteo import OpenMeteo
     from toinflux.philipshue import Hue
     from toinflux.speedtest import Speedtest
 
-    classes = {"DataHandler": DataHandler, "Hue": Hue, "MyEnergi": MyEnergi, "Zappi": Zappi, "Speedtest": Speedtest}
+    classes = {
+        "CarbonIntensity": CarbonIntensity,
+        "DataHandler": DataHandler,
+        "Eddi": Eddi,
+        "Harvi": Harvi,
+        "Hue": Hue,
+        "MyEnergi": MyEnergi,
+        "Octopus": Octopus,
+        "OpenMeteo": OpenMeteo,
+        "Speedtest": Speedtest,
+        "Zappi": Zappi,
+    }
 
-    # Use a Capitalised name for the class name
-    class_name = source.capitalize() if source.islower() else source
-    # Use a lower case name for the source to match the settings file entries
+    class_name = next((k for k in classes if k.lower() == source.lower()), source)
     source_name = source.lower()
     try:
         my_class = classes[class_name](source_name)
     except KeyError:
-        print(f"Source {class_name} not found")
+        logging.error("Source %s not found", class_name)
         sys.exit(1)
     return my_class
+
+
+def _validate_influx_block(influx):
+    """Return a list of error strings for the influx configuration block."""
+    errors = []
+    if not influx.get("url"):
+        errors.append("influx.url is required")
+    if influx.get("token"):
+        if not influx.get("org"):
+            errors.append("influx.org is required when using token authentication (v2)")
+    elif not (influx.get("user") and influx.get("password")):
+        errors.append("influx requires either token+org (v2) or user+password (v1)")
+    return errors
+
+
+def _validate_source_block(source, settings):
+    """Return a list of error strings for a single source configuration section."""
+    if not source:
+        return []
+    if source not in settings:
+        return [f"no configuration section found for source '{source}'"]
+    errors = []
+    source_cfg = settings[source]
+    if "interval" not in source_cfg:
+        errors.append(f"{source}.interval is required")
+    if "db" not in source_cfg and "bucket" not in source_cfg:
+        errors.append(f"{source}.db (or {source}.bucket for InfluxDB v2) is required")
+    return errors
+
+
+def validate_settings(settings):
+    """Validate required keys in a parsed settings dictionary, exit with code 1 if invalid.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    """
+    errors = _validate_influx_block(settings.get("influx", {}))
+    sources = settings.get("sources") or [settings.get("default_source")]
+    for source in sources:
+        errors.extend(_validate_source_block(source, settings))
+    if errors:
+        for error in errors:
+            logging.critical("settings.yaml: %s", error)
+        sys.exit(1)
 
 
 def load_settings(settings_file="settings.yaml"):
@@ -100,14 +182,16 @@ def load_settings(settings_file="settings.yaml"):
             settings = yaml.safe_load(f)
 
         if not isinstance(settings, dict) or not settings:
-            print(f"Invalid or empty configuration in {settings_path}. Please check {settings_path}.")
+            logging.critical("Invalid or empty configuration in %s. Please check %s.", settings_path, settings_path)
             sys.exit(1)
 
+        validate_settings(settings)
         return settings
     except FileNotFoundError:
-        print(f"{settings_path} not found.")
-        print(f"Make sure you copy example_settings.yaml to {settings_path} and edit it.")
+        logging.critical(
+            "%s not found. Make sure you copy example_settings.yaml to %s and edit it.", settings_path, settings_path
+        )
         sys.exit(1)
     except yaml.YAMLError as e:
-        print(f"Error in {settings_path} - {e}")
+        logging.critical("Error in %s - %s", settings_path, e)
         sys.exit(1)

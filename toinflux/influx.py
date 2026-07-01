@@ -6,8 +6,33 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 import sys
+import logging
+import warnings
+import urllib3
 import requests
 from toinflux.general import load_settings
+
+
+def _format_field_value(value):
+    """
+    Format a value as an InfluxDB line protocol field value.
+
+    Booleans become ``true``/``false``, ints get an ``i`` suffix so InfluxDB
+    doesn't store them as floats, and strings are quoted with internal
+    backslashes/quotes escaped. Everything else (e.g. floats) is left as-is.
+
+    :param value: field value to format
+    :return: line protocol representation of the value
+    :rtype: str
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return f"{value}i"
+    if isinstance(value, str):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return str(value)
 
 
 class DataHandler:
@@ -22,7 +47,7 @@ class DataHandler:
         if self.source and self.source in self.settings:
             self.source_settings = self.settings[self.source]
         else:
-            print(f"Source {self.source} not found in settings")
+            logging.error("Source %s not found in settings", self.source)
             sys.exit(1)
 
     def send_data(self, data=None):
@@ -38,27 +63,38 @@ class DataHandler:
             data = self.data
 
         if not data or not isinstance(data, dict):
-            print("No data to send to InfluxDB")
+            logging.warning("No data to send to InfluxDB")
             return
 
-        # minimalist activity indicator
-        print(" ^", end="\r")
-
         # format the data to send
-        data_to_send = self.influx_header + ",".join([f"{key}={value}" for key, value in data.items()])
+        data_to_send = self.influx_header + ",".join(
+            f"{key}={_format_field_value(value)}" for key, value in data.items()
+        )
 
         # send to InfluxDB
-        url = f'{self.settings["influx"]["url"]}/write?db={self.source_settings["db"]}&precision=s'
-        try:
-            response = requests.post(
-                url,
-                auth=(self.settings["influx"]["user"], self.settings["influx"]["password"]),
-                data=data_to_send,
-                timeout=self.settings["influx"].get("timeout", 5),
+        influx_settings = self.settings["influx"]
+        timeout = influx_settings.get("timeout", 5)
+        if influx_settings.get("token"):
+            url = (
+                f'{influx_settings["url"]}/api/v2/write'
+                f'?org={influx_settings["org"]}'
+                f'&bucket={self.source_settings.get("bucket", self.source_settings.get("db"))}'
+                f"&precision=s"
             )
+            headers = {"Authorization": f'Token {influx_settings["token"]}'}
+            kwargs = {"headers": headers}
+        else:
+            url = f'{influx_settings["url"]}/write?db={self.source_settings["db"]}&precision=s'
+            kwargs = {"auth": (influx_settings["user"], influx_settings["password"])}
+
+        insecure = influx_settings.get("insecure", False)
+        kwargs["verify"] = not insecure
+
+        try:
+            with warnings.catch_warnings():
+                if insecure:
+                    warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+                response = requests.post(url, data=data_to_send, timeout=timeout, **kwargs)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            print(f"Error sending data to InfluxDB - {e}")
-
-        # minimalist activity indicator
-        print(" _", end="\r")
+            logging.error("Error sending data to InfluxDB - %s", e)

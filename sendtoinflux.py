@@ -10,6 +10,7 @@ import sys
 import time
 import json
 import signal
+import logging
 import argparse
 import threading
 import toinflux
@@ -72,18 +73,24 @@ def create_source_worker(source, source_start_delay, args):
             except SystemExit as exc:
                 failure_count += 1
                 restart_delay = get_backoff_delay(failure_count)
-                print(
-                    f"Source '{source}' exited with code {exc.code}. "
-                    f"Restarting in {restart_delay} seconds (attempt {failure_count})."
+                logging.warning(
+                    "Source '%s' exited with code %s. Restarting in %s seconds (attempt %s).",
+                    source,
+                    exc.code,
+                    restart_delay,
+                    failure_count,
                 )
                 data_handler = None
                 next_update = time.time() + restart_delay
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 failure_count += 1
                 restart_delay = get_backoff_delay(failure_count)
-                print(
-                    f"Source '{source}' failed: {exc}. Restarting in {restart_delay} seconds "
-                    f"(attempt {failure_count})."
+                logging.warning(
+                    "Source '%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                    source,
+                    exc,
+                    restart_delay,
+                    failure_count,
                 )
                 data_handler = None
                 next_update = time.time() + restart_delay
@@ -98,16 +105,11 @@ def spawn_source_thread(worker):
     return source_thread
 
 
-def signal_handler(sig, frame):
+def signal_handler(sig, _frame):
     """
     Signal handler to exit gracefully
     """
-    # avoid unused variable warning
-    if frame:
-        pass
-
-    # print a message and exit
-    print(f"\nExiting on signal {sig}")
+    logging.info("Exiting on signal %s", sig)
     sys.exit(0)
 
 
@@ -115,12 +117,14 @@ def main():
     """
     The main function
     """
-    # register the signal handler for ctrl-c
+    # register the signal handler for ctrl-c and termination
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     # load settings once for defaults and configured source list
     settings = toinflux.load_settings()
-    default_source = settings["default_source"]
+    toinflux.configure_logging(settings.get("logfile"))
+    default_source = settings.get("default_source", "hue")
 
     # parse the command line arguments
     arg_parse = argparse.ArgumentParser(description="Send Hue Data to InfluxDB")
@@ -162,7 +166,7 @@ def main():
         return
 
     if args.dump:
-        print("The --dump option requires --source when running in multi-source mode.")
+        logging.error("The --dump option requires --source when running in multi-source mode.")
         sys.exit(1)
 
     run_multi_source(sources, args, settings.get("stagger_seconds", DEFAULT_STAGGER_SECONDS))
@@ -185,15 +189,45 @@ def run_single_source(source, args):
         print(json.dumps(data, indent=4))
         sys.exit(0)
 
+    failure_count = 0
     next_update = time.time()
     while True:
-        next_update += data_handler.source_settings["interval"]
-        data = data_handler.get_data()
+        try:
+            if data_handler is None:
+                data_handler = toinflux.get_class(source)
+            next_update += data_handler.source_settings["interval"]
+            data = data_handler.get_data()
 
-        if args.print:
-            print_source_data(source, data)
-        else:
-            data_handler.send_data()
+            if args.print:
+                print_source_data(source, data)
+            else:
+                data_handler.send_data()
+
+            failure_count = 0
+        except SystemExit as exc:
+            failure_count += 1
+            restart_delay = get_backoff_delay(failure_count)
+            logging.warning(
+                "Source '%s' exited with code %s. Restarting in %s seconds (attempt %s).",
+                source,
+                exc.code,
+                restart_delay,
+                failure_count,
+            )
+            data_handler = None
+            next_update = time.time() + restart_delay
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            failure_count += 1
+            restart_delay = get_backoff_delay(failure_count)
+            logging.warning(
+                "Source '%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                source,
+                exc,
+                restart_delay,
+                failure_count,
+            )
+            data_handler = None
+            next_update = time.time() + restart_delay
 
         sleep_time = max(0, next_update - time.time())
         time.sleep(sleep_time)
@@ -214,10 +248,7 @@ def run_multi_source(sources, args, stagger_seconds):
     try:
         stagger_value = int(stagger_seconds)
     except (TypeError, ValueError):
-        print(
-            f"Invalid 'stagger_seconds' value '{stagger_seconds}' in configuration; defaulting to 0.",
-            file=sys.stderr,
-        )
+        logging.warning("Invalid 'stagger_seconds' value '%s' in configuration; defaulting to 0.", stagger_seconds)
         stagger_value = 0
 
     threads = []
@@ -231,7 +262,7 @@ def run_multi_source(sources, args, stagger_seconds):
 
     while True:
         if any(not thread.is_alive() for thread in threads):
-            print("One or more source workers stopped unexpectedly. Restarting worker thread.")
+            logging.warning("One or more source workers stopped unexpectedly. Restarting worker thread.")
             for idx, thread in enumerate(threads):
                 if not thread.is_alive():
                     threads[idx] = spawn_source_thread(workers[idx])

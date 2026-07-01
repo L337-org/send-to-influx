@@ -18,19 +18,24 @@ send-to-influx is a Python application that collects data from various smart hom
   - per-source interval-based timing system to avoid drift
   - multi-source startup stagger via optional `stagger_seconds` setting (default `10`)
 - **Resilience**:
-  - in multi-source mode, source failures do not stop the process
-  - failed sources are restarted independently with exponential backoff (base `5s`, max `300s`)
+  - source failures do not stop the process in either single-source or multi-source mode
+  - failed sources are restarted with exponential backoff (base `5s`, max `300s`)
+  - in multi-source mode, only the failed source is retried; others keep running
+- **Signals**: handles both SIGINT (Ctrl-C) and SIGTERM (systemd/container stop) for graceful shutdown
 
 ### Modular Data Sources (`toinflux/` package)
 The project uses a plugin-like architecture where each data source is implemented as a separate module:
 
 #### Base Classes
-- **`toinflux/general.py`**: `load_settings()` (loads YAML configuration and returns a dictionary), `get_class()` (factory function to instantiate data source classes dynamically)
+- **`toinflux/general.py`**: `load_settings()` (loads YAML configuration and returns a dictionary), `get_class()` (case-insensitive factory function to instantiate data source classes dynamically), `configure_logging(logfile=None)` (sets up timestamped stdout logging with optional file handler)
 - **`toinflux/influx.py`**: `DataHandler` (base class for all data sources)
 
 #### Current Data Sources
 - **`toinflux/philipshue.py`**: Philips Hue Bridge integration
-- **`toinflux/myenergi.py`**: MyEnergi Zappi/Eddi/Harvi devices integration
+- **`toinflux/myenergi.py`**: MyEnergi Zappi/Eddi/Harvi devices integration (HTTP Digest auth)
+- **`toinflux/carbonintensity.py`**: National Grid carbon intensity and generation fuel mix (no API key)
+- **`toinflux/openmeteo.py`**: Open-Meteo weather data (no API key, lat/lon configuration)
+- **`toinflux/octopus.py`**: Octopus Energy electricity consumption and unit rates (API key auth)
 - **`toinflux/speedtest.py`**: Speedtest network performance integration
 
 ### Configuration (`settings.yaml`)
@@ -40,11 +45,16 @@ YAML-based configuration supporting multiple data sources:
   - `stagger_seconds`: optional start delay between sources (default `10`)
 - **Defaults**:
   - `default_source`: used when no `sources` list is configured and `--source` is omitted
+- **Logging**:
+  - `logfile`: optional path to write logs to a file in addition to stdout
 - **Hue**: Bridge connection, sensor mappings, temperature units
-- **MyEnergi**: API endpoints, authentication, device serials
-- **Zappi**: Field selection, collection intervals
+- **MyEnergi**: API endpoints, authentication, device serials (shared across Zappi/Eddi/Harvi)
+- **Zappi/Eddi/Harvi**: Field selection, collection intervals, individual device serials
+- **CarbonIntensity**: `include_generation` flag; no credentials required
+- **OpenMeteo**: Latitude, longitude, field list (see open-meteo.com/en/docs)
+- **Octopus**: API key, MPAN, meter serial; optional product/tariff codes for unit rate collection
 - **Speedtest**: Field selection, collection intervals
-- **InfluxDB**: Connection details, database settings
+- **InfluxDB**: Connection details, database/bucket settings; supports v1 (user/password/db) and v2 (token/org/bucket)
 
 ## Code Style & Standards
 
@@ -60,7 +70,7 @@ YAML-based configuration supporting multiple data sources:
   - `0`: Normal exit
   - `1`: Configuration errors (missing/invalid settings.yaml)
   - `2`: Connection errors (API endpoints, InfluxDB)
-- **Error Messages**: Descriptive messages printed to stderr
+- **Error Messages**: Logged via Python's `logging` module with timestamps and log level (WARNING, ERROR, CRITICAL)
 - **Network Handling**: Proper timeout handling and connection failure management
 - **Validation**: Configuration validation before processing
 
@@ -94,11 +104,13 @@ newsource:
 
 ### Error Handling Patterns
 ```python
+import logging
+
 try:
     response = requests.get(url, timeout=timeout)
     response.raise_for_status()
 except requests.exceptions.RequestException as e:
-    print(f"Error connecting to API - {e}")
+    logging.error("Error connecting to API - %s", e)
     sys.exit(2)
 ```
 
@@ -113,16 +125,38 @@ except requests.exceptions.RequestException as e:
 - **Configuration**: Bridge host, username, sensor name mappings, temperature units
 
 ### MyEnergi (`toinflux/myenergi.py`)
-- **Devices**: Zappi (EV charger), Eddi (water heater), Harvi (energy monitor)
-- **Data Types**: Real-time status and historical day/hour data
-- **Authentication**: HTTP Digest authentication with serial/API key
-- **Configuration**: API endpoints, device serials, field selection
+- **Devices**:
+  - `Zappi` (EV charger): real-time status fields + daily energy totals (Charge/Import/Export/Genera)
+  - `Eddi` (hot water diverter): real-time status fields (frq, vol, div, sta, hno, che, tp1, tp2)
+  - `Harvi` (CT clamp monitor): CT clamp power readings (ectp1/ectp2/ectp3) and channel names
+- **Authentication**: HTTP Digest authentication with device serial/API key
+- **Configuration**: Shared `myenergi` block (API endpoints, apikey) + per-device block (serial, fields, interval)
+
+### National Grid Carbon Intensity (`toinflux/carbonintensity.py`)
+- **No API key required**; data updates every 30 minutes
+- **Collects**: `intensity_actual` and `intensity_forecast` (gCO2/kWh)
+- **Optional**: generation fuel mix (`gen_gas`, `gen_wind`, `gen_solar`, etc.) via `include_generation: true`
+- **InfluxDB measurement**: `carbonintensity,source=national_grid`
+- API docs: https://carbon-intensity.github.io/api-definitions/
+
+### Open-Meteo (`toinflux/openmeteo.py`)
+- **No API key required**; free, no rate limiting
+- **Configuration**: latitude, longitude, list of `current` weather variable names
+- **Recommended interval**: 900 s (15 min) or longer
+- **InfluxDB measurement**: `weather,source=open-meteo`
+
+### Octopus Energy (`toinflux/octopus.py`)
+- **Collects**: latest half-hourly electricity consumption; optionally current unit rate
+- **Authentication**: HTTP Basic auth with API key as username
+- **Configuration**: `api_key`, `mpan`, `meter_serial`; optional `product_code`+`tariff_code` for unit rate
+- **Note**: smart meter consumption data typically arrives with up to 24 hour delay
+- **InfluxDB measurement**: `octopus,source=octopus_energy`
 
 ## Dependencies
 
 ### Core Dependencies
 - `requests`: HTTP requests for APIs and InfluxDB
-- `urllib3`: HTTP client library used in `toinflux/general.py` to disable `InsecureRequestWarning` globally
+- `urllib3`: HTTP client library; `InsecureRequestWarning` is suppressed only for the Hue bridge request (which uses a self-signed cert) in `toinflux/philipshue.py`
 - `pyyaml`: YAML configuration file parsing
 - `speedtest-cli`: Speedtest library for collecting network perf data
 
@@ -209,14 +243,27 @@ speedtest:
 ```
 
 ### InfluxDB Configuration
+
+InfluxDB v1 (user/password, per-source `db`):
 ```yaml
 influx:
   url: "https://influx.example.com:8086"
-  db: "smart_home_db"
   user: "your_influx_user"
   password: "your_influx_password"
   timeout: 5
 ```
+
+InfluxDB v2 (token/org, per-source `bucket`; falls back to `db` if `bucket` is absent):
+```yaml
+influx:
+  url: "https://influx.example.com:8086"
+  token: "your_token"
+  org: "your_org"
+  timeout: 5
+```
+
+Optional `insecure: true` in the `influx` block skips TLS certificate verification for `https` URLs
+(needed for self-signed/internal certs); it defaults to `false` (verification enabled).
 
 ## Data Format
 - **InfluxDB Line Protocol**: `measurement,tag=value field=value timestamp`

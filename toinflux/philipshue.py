@@ -6,6 +6,9 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 import sys
+import logging
+import warnings
+import urllib3
 import requests
 from toinflux.influx import DataHandler
 
@@ -32,17 +35,19 @@ class Hue(DataHandler):
         :rtype: dict
         """
         try:
-            response = requests.get(
-                f"https://{self.settings['hue']['host']}/api/{self.settings['hue']['user']}",
-                timeout=self.settings["hue"].get("timeout", 5),
-                verify=False,
-            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+                response = requests.get(
+                    f"https://{self.settings['hue']['host']}/api/{self.settings['hue']['user']}",
+                    timeout=self.settings["hue"].get("timeout", 5),
+                    verify=False,
+                )
             hue_data = response.json()
         except requests.exceptions.RequestException as e:
-            print(f"Error connecting to Hue Bridge - {e}")
+            logging.error("Error connecting to Hue Bridge - %s", e)
             sys.exit(2)
         if isinstance(hue_data, list) and "error" in hue_data[0]:
-            print(f"Error connecting to Hue Bridge - {hue_data[0]['error']['description']}")
+            logging.error("Error connecting to Hue Bridge - %s", hue_data[0]["error"]["description"])
             sys.exit(2)
         return hue_data
 
