@@ -40,12 +40,14 @@ class Octopus(DataHandler):
 
     def get_data(self):
         """
-        Get the latest electricity consumption and optionally current unit rate from Octopus Energy.
+        Get the latest electricity/gas consumption and optionally current unit rate from Octopus Energy.
 
         Consumption is returned as the most recent half-hourly reading (smart meter data
-        typically arrives with a delay of up to 24 hours).  If ``product_code`` and
-        ``tariff_code`` are configured in settings, the current unit rate for that tariff
-        is also collected.
+        typically arrives with a delay of up to 24 hours). Gas consumption is only collected
+        if ``gas_mpan`` and ``gas_meter_serial`` are configured in settings; its unit depends
+        on the meter type (kWh for SMETS1 Secure meters, m3 for SMETS2 meters), so it is sent
+        unconverted as ``gas_consumption``. If ``product_code`` and ``tariff_code`` are
+        configured in settings, the current electricity unit rate for that tariff is also collected.
 
         :return: data
         :rtype: dict
@@ -61,6 +63,16 @@ class Octopus(DataHandler):
         )
         if result.get("results"):
             self.data["consumption_kwh"] = result["results"][0]["consumption"]
+
+        # Get most recent gas consumption reading, if a gas meter is configured
+        gas_mpan = self.source_settings.get("gas_mpan")
+        gas_meter_serial = self.source_settings.get("gas_meter_serial")
+        if gas_mpan and gas_meter_serial:
+            result = self._get(
+                f"gas-meter-points/{gas_mpan}/meters/{gas_meter_serial}/consumption/" "?page_size=1&order_by=-period"
+            )
+            if result.get("results"):
+                self.data["gas_consumption"] = result["results"][0]["consumption"]
 
         # Get current unit rate if tariff is configured (useful for time-of-use tariffs)
         product_code = self.source_settings.get("product_code")
