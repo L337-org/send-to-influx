@@ -19,21 +19,21 @@ unless explicitly noted below.
 | Field | Unit | Notes |
 |---|---|---|
 | `frq` | Hz | Supply frequency |
-| `vol` | V ×10 | Supply voltage, as returned by the API (divide by 10 for volts) |
+| `vol` | raw MyEnergi API value | Supply voltage, passed through unconverted; some MyEnergi docs describe this field as deciVolts (divide by 10 for volts), but this project does not rescale it - verify against your device's actual voltage |
 | `gen` | W | Generated (solar) power |
 | `grd` | W | Power from/to the grid |
 | `che` | kWh | Energy transferred so far this session |
 | `sta` | numeric status code | Not a physical unit |
 | `wifiLink`, `ethernetLink` | N/A | Diagnostic/status fields, not documented as physical units |
 | `newAppAvailable`, `newBootloaderAvailable` | boolean (0/1) | Update-available flags |
-| `Charge`, `Import`, `Export`, `Genera` | kWh | Daily totals from the day/hour endpoint, always collected regardless of `fields` |
+| `Charge`, `Import`, `Export`, `Genera` | kWh | Daily totals computed by this project from the day/hour endpoint's raw values (divided by 3,600,000 and rounded to 4 dp); always collected regardless of `fields` |
 
 ## MyEnergi Eddi (`eddi`)
 
 | Field | Unit | Notes |
 |---|---|---|
 | `frq` | Hz | Supply frequency |
-| `vol` | V ×10 | Supply voltage, as returned by the API (divide by 10 for volts) |
+| `vol` | raw MyEnergi API value | Supply voltage, passed through unconverted; some MyEnergi docs describe this field as deciVolts (divide by 10 for volts), but this project does not rescale it - verify against your device's actual voltage |
 | `div` | W | Diversion (heating) power |
 | `sta` | numeric status code | Not a physical unit |
 | `hno` | 1 or 2 | Currently active heater number |
