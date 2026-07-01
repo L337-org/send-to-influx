@@ -59,8 +59,12 @@ Octopus Energy
 Collects half-hourly electricity consumption from your smart meter via the Octopus Energy API.
 Your API key is available from https://octopus.energy/dashboard/developer/.
 
+If you also configure `gas_mprn` and `gas_meter_serial`, gas consumption is collected too, as
+`gas_consumption`. Its unit depends on your meter type (kWh for SMETS1 Secure meters, m3 for
+SMETS2 meters) and is sent unconverted, so check which applies to you before using the value.
+
 If you are on a time-of-use tariff (e.g. Agile Octopus), you can also configure `product_code` and
-`tariff_code` to collect the current unit rate alongside consumption.
+`tariff_code` to collect the current electricity unit rate alongside consumption.
 
 Note: smart meter readings are typically delayed by up to 24 hours, so consumption data always
 represents a recent-past reading rather than real-time usage.

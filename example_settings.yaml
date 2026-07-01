@@ -197,6 +197,10 @@ octopus:
   mpan: "your_mpan"
   # Your electricity meter serial number (found on your bill or smart meter)
   meter_serial: "your_meter_serial"
+  # Your gas meter MPRN (gas meter point reference number, found on your bill)
+  gas_mprn: "your_gas_mprn"
+  # Your gas meter serial number (found on your bill or smart meter)
+  gas_meter_serial: "your_gas_meter_serial"
   # Timeout for requests to the Octopus Energy API
   timeout: 10
   # Optional: product and tariff codes to also collect the current unit rate
