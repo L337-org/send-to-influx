@@ -50,7 +50,7 @@ class MyEnergi(DataHandler):
         :type month: str
         :param day: zero-padded day, e.g. "29"
         :type day: str
-        :param hour: hour of the day (1–23); if falsy, results for the whole day are returned
+        :param hour: hour of the day (0-23); if None, results for the whole day are returned
         :type hour: int
         :return: Charge, Import, Export and Genera values in kWh
         :rtype: dict
@@ -67,7 +67,7 @@ class MyEnergi(DataHandler):
         # Tot up the data for the day/hour
         if response_data.get("U" + serial, False):
             for item in response_data["U" + serial]:
-                if hour and item.get("hr", -1) == hour:
+                if hour is not None and item.get("hr", -1) == hour:
                     charge_amount = item.get("h1d", 0)
                     import_amount = item.get("imp", 0)
                     export_amount = item.get("exp", 0)

@@ -112,6 +112,23 @@ class TestMyEnergi:
                 assert result["Export"] == round(100 / 3600 / 1000, 4)
                 assert result["Genera"] == round(200 / 3600 / 1000, 4)
 
+    def test_dayhour_results_hour_zero_returns_single_hour_not_whole_day(self, sample_settings):
+        """dayhour_results treats hour=0 (midnight) as a specific hour, not 'whole day'."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            handler = MyEnergi(source="zappi")
+            serial = handler.source_settings["serial"]
+            response_data = {
+                f"U{serial}": [
+                    {"hr": 0, "h1d": 3600, "imp": 1000, "exp": 0, "gep": 0},
+                    {"hr": 1, "h1d": 3600, "imp": 2000, "exp": 0, "gep": 0},
+                ],
+            }
+            with patch.object(handler, "get_data_from_myenergi", return_value=response_data):
+                result = handler.dayhour_results("2025", "01", "15", hour=0)
+                assert result["Charge"] == round(3600 / 3600 / 1000, 4)
+                assert result["Import"] == round(1000 / 3600 / 1000, 4)
+
     def test_dayhour_results_empty_when_no_serial_key(self, sample_settings):
         """dayhour_results returns zeroed data when response has no U+serial key."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:

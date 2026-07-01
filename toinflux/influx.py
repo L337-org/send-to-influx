@@ -13,6 +13,28 @@ import requests
 from toinflux.general import load_settings
 
 
+def _format_field_value(value):
+    """
+    Format a value as an InfluxDB line protocol field value.
+
+    Booleans become ``true``/``false``, ints get an ``i`` suffix so InfluxDB
+    doesn't store them as floats, and strings are quoted with internal
+    backslashes/quotes escaped. Everything else (e.g. floats) is left as-is.
+
+    :param value: field value to format
+    :return: line protocol representation of the value
+    :rtype: str
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return f"{value}i"
+    if isinstance(value, str):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return str(value)
+
+
 class DataHandler:
     """Class to send data to InfluxDB"""
 
@@ -45,12 +67,14 @@ class DataHandler:
             return
 
         # format the data to send
-        data_to_send = self.influx_header + ",".join([f"{key}={value}" for key, value in data.items()])
+        data_to_send = self.influx_header + ",".join(
+            f"{key}={_format_field_value(value)}" for key, value in data.items()
+        )
 
         # send to InfluxDB
         influx_settings = self.settings["influx"]
         timeout = influx_settings.get("timeout", 5)
-        if "token" in influx_settings:
+        if influx_settings.get("token"):
             url = (
                 f'{influx_settings["url"]}/api/v2/write'
                 f'?org={influx_settings["org"]}'

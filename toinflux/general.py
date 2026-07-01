@@ -22,13 +22,22 @@ def configure_logging(logfile=None):
     root = logging.getLogger()
     root.setLevel(logging.INFO)
 
+    # Remove any handlers added by a previous call to this function, so repeated
+    # calls (e.g. in tests, or if main() is invoked more than once) don't duplicate log lines.
+    for handler in list(root.handlers):
+        if getattr(handler, "_send_to_influx_handler", False):
+            root.removeHandler(handler)
+            handler.close()
+
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setFormatter(fmt)
+    stdout_handler._send_to_influx_handler = True
     root.addHandler(stdout_handler)
 
     if logfile:
         file_handler = logging.FileHandler(logfile)
         file_handler.setFormatter(fmt)
+        file_handler._send_to_influx_handler = True
         root.addHandler(file_handler)
 
 
@@ -110,7 +119,7 @@ def _validate_influx_block(influx):
     errors = []
     if not influx.get("url"):
         errors.append("influx.url is required")
-    if "token" in influx:
+    if influx.get("token"):
         if not influx.get("org"):
             errors.append("influx.org is required when using token authentication (v2)")
     elif not (influx.get("user") and influx.get("password")):

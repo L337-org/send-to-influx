@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 import requests
 import pytest
-from toinflux.influx import DataHandler
+from toinflux.influx import DataHandler, _format_field_value
 
 
 class TestDataHandler:
@@ -41,7 +41,7 @@ class TestDataHandler:
                 h.send_data()
                 body = mock_post.call_args[1]["data"]
                 assert "temp=21.5" in body
-                assert "light=100" in body
+                assert "light=100i" in body
                 assert body.startswith("hue,host=test ")
 
     def test_send_data_uses_provided_data(self, sample_settings):
@@ -99,6 +99,29 @@ class TestDataHandler:
                 assert call_kw["headers"] == {"Authorization": "Token my-token"}
                 assert "auth" not in call_kw
 
+    def test_send_data_falls_back_to_v1_when_token_is_empty(self, sample_settings):
+        """send_data uses v1 user/password auth when token is present but empty."""
+        sample_settings["influx"] = {
+            "url": "https://influx.example.com:8086",
+            "token": "",
+            "user": "influx_user",
+            "password": "influx_password",
+            "timeout": 5,
+        }
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch("toinflux.influx.requests.post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data()
+                url = mock_post.call_args[0][0]
+                call_kw = mock_post.call_args[1]
+                assert "/api/v2/write" not in url
+                assert call_kw["auth"] == ("influx_user", "influx_password")
+                assert "headers" not in call_kw
+
     def test_send_data_v2_falls_back_to_db_when_no_bucket(self, sample_settings):
         """send_data uses db value as bucket when bucket is not set in source settings."""
         sample_settings["influx"] = {
@@ -154,3 +177,41 @@ class TestDataHandler:
                 mock_post.side_effect = requests.exceptions.RequestException("network error")
                 # should not raise
                 h.send_data()
+
+    def test_send_data_formats_mixed_field_types_as_line_protocol(self, sample_settings):
+        """send_data formats strings/bools/ints/floats per InfluxDB line protocol rules."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"name": 'a "quoted" val', "active": True, "count": 3, "ratio": 1.5}
+            with patch("toinflux.influx.requests.post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data()
+                body = mock_post.call_args[1]["data"]
+                assert 'name="a \\"quoted\\" val"' in body
+                assert "active=true" in body
+                assert "count=3i" in body
+                assert "ratio=1.5" in body
+
+
+class TestFormatFieldValue:
+    """Tests for the _format_field_value line protocol helper."""
+
+    def test_bool_true(self):
+        assert _format_field_value(True) == "true"
+
+    def test_bool_false(self):
+        assert _format_field_value(False) == "false"
+
+    def test_int_gets_i_suffix(self):
+        assert _format_field_value(42) == "42i"
+
+    def test_float_is_unquoted_and_unsuffixed(self):
+        assert _format_field_value(3.14) == "3.14"
+
+    def test_string_is_quoted(self):
+        assert _format_field_value("Charging") == '"Charging"'
+
+    def test_string_escapes_quotes_and_backslashes(self):
+        assert _format_field_value('say "hi"\\bye') == '"say \\"hi\\"\\\\bye"'

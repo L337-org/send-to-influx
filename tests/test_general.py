@@ -152,6 +152,11 @@ class TestValidateSettings:
         with pytest.raises(SystemExit):
             validate_settings(sample_settings)
 
+    def test_empty_token_falls_back_to_v1_validation(self, sample_settings):
+        """validate_settings treats an empty token as absent and validates v1 user/password instead."""
+        sample_settings["influx"]["token"] = ""
+        validate_settings(sample_settings)
+
     def test_bucket_accepted_in_place_of_db(self, sample_settings):
         """validate_settings accepts bucket as an alternative to db."""
         del sample_settings["hue"]["db"]

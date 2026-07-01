@@ -309,3 +309,22 @@ class TestConfigureLogging:
             assert len(file_handlers) == 0
         finally:
             self._remove_handlers(root, [h for h in root.handlers if h not in before])
+
+    def test_repeated_calls_do_not_duplicate_handlers(self):
+        """configure_logging replaces its own handlers rather than accumulating them."""
+        import logging
+        from toinflux.general import configure_logging
+
+        root = logging.getLogger()
+        before = set(root.handlers)
+        try:
+            configure_logging()
+            configure_logging()
+            configure_logging()
+            added = [h for h in root.handlers if h not in before]
+            stream_handlers = [
+                h for h in added if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+            ]
+            assert len(stream_handlers) == 1
+        finally:
+            self._remove_handlers(root, [h for h in root.handlers if h not in before])
