@@ -53,8 +53,12 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 - `--dump`: one-time raw JSON to stdout, then exit (single source only).
 - `--print`: parsed data to stdout instead of InfluxDB.
 - `--settings <path>`: use a settings file at a path other than `settings.yaml` in the project root (e.g. `/etc/send-to-influx/settings.yaml` for a packaged install). Threaded through `toinflux.get_class()`/`load_settings()`.
+- `--version`: print `__version__` and exit; parsed before settings are loaded, so it works without a `settings.yaml` present.
+- `--check-config`: load and validate the settings file (via `load_settings()`), print `Configuration OK`, exit 0. Exits 1 with details if invalid (same validation as a normal run).
+- `-v`/`--verbose`: force `DEBUG`-level logging, overriding the `loglevel` settings.yaml key.
 - Handles SIGINT and SIGTERM for graceful shutdown.
 - On startup, logs an INFO line with the version and the source(s) that will run, so process (re)starts are visible in the logs.
+- CLI arguments are parsed *before* `load_settings()` is called, so `--version`/`--help` don't require a config file to exist.
 
 ### Exceptions (`toinflux/exceptions.py`)
 
@@ -63,9 +67,9 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 
 ### Factory / settings
 
-- `toinflux/general.py`: `load_settings(settings_file=None)` (raises `ConfigError` on missing/invalid YAML; `settings_file` defaults to `settings.yaml` in the project root when omitted), `get_class(source, settings_file=None)` (case-insensitive factory → correct DataHandler subclass; raises `ConfigError` for an unknown source; threads `settings_file` through to the handler's `load_settings()` call), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None)` (sets up timestamped stdout logging, plus optional file handler).
-- `configure_logging()` is called in `main()` after settings are loaded. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`.
-- Config file: `settings.yaml` (copy from `example_settings.yaml`), or a custom path via `--settings`. Required at runtime; not committed. Optional `logfile` key adds a file log destination. `INFLUX_TOKEN`/`INFLUX_PASSWORD` environment variables override the matching `influx` settings block values, for keeping secrets out of the file on disk.
+- `toinflux/general.py`: `load_settings(settings_file=None)` (raises `ConfigError` on missing/invalid YAML; `settings_file` defaults to `settings.yaml` in the project root when omitted), `get_class(source, settings_file=None)` (case-insensitive factory → correct DataHandler subclass; raises `ConfigError` for an unknown source, including `DataHandler` itself — it's the abstract base, not a selectable source; threads `settings_file` through to the handler's `load_settings()` call), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped stdout logging, plus an optional `RotatingFileHandler`).
+- `configure_logging()` is called in `main()` after settings are loaded and `--check-config` has short-circuited. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`. Effective log level is `-v`/`--verbose` (forces `DEBUG`) > `loglevel` settings.yaml key > `INFO` default.
+- Config file: `settings.yaml` (copy from `example_settings.yaml`), or a custom path via `--settings`. Required at runtime; not committed. Optional `logfile` key adds a rotating file log destination (`log_max_bytes`/`log_backup_count` settings keys control rotation, defaulting to 10 MiB / 3 backups). `INFLUX_TOKEN`/`INFLUX_PASSWORD` environment variables override the matching `influx` settings block values, for keeping secrets out of the file on disk.
 
 ### Adding a new data source
 

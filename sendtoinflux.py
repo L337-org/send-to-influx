@@ -127,28 +127,33 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # peek at --settings before the real parser is built, since its help text
-    # embeds the configured default_source (which requires settings to be loaded)
-    pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--settings", dest="settings", type=str, default=None)
-    pre_args, _ = pre_parser.parse_known_args()
-
-    # load settings once for defaults and configured source list
-    try:
-        settings = toinflux.load_settings(pre_args.settings)
-    except ConfigError:
-        sys.exit(1)
-    toinflux.configure_logging(settings.get("logfile"))
-    default_source = settings.get("default_source", "hue")
-
-    # parse the command line arguments
+    # parse the command line arguments first so --version/--help/--check-config work without a
+    # settings.yaml present
     arg_parse = argparse.ArgumentParser(description="Send Hue Data to InfluxDB")
+    arg_parse.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
     arg_parse.add_argument(
         "--settings",
         dest="settings",
         type=str,
-        default=pre_args.settings,
+        default=None,
         help="path to the settings file (default: settings.yaml in the project root)",
+    )
+    arg_parse.add_argument(
+        "--check-config",
+        required=False,
+        action="store_true",
+        help="validate settings.yaml and exit (0 if valid, 1 if invalid)",
+    )
+    arg_parse.add_argument(
+        "-v",
+        "--verbose",
+        required=False,
+        action="store_true",
+        help="enable DEBUG-level logging (overrides the 'loglevel' settings.yaml key)",
     )
     arg_parse.add_argument(
         "-d",
@@ -173,10 +178,31 @@ def main():
         help=(
             "the source of the data to send to InfluxDB (hue, zappi, etc.). "
             "If this parameter is omitted, all sources in the settings file 'sources' list are started. "
-            f"If no sources are specified in the settings file, the default source is used: {default_source}"
+            "If no sources are specified in the settings file, the 'default_source' settings key is used."
         ),
     )
     args = arg_parse.parse_args()
+
+    # load settings once for defaults and configured source list
+    try:
+        settings = toinflux.load_settings(args.settings)
+    except ConfigError as exc:
+        if args.check_config:
+            print(f"Configuration error: {exc}")
+        sys.exit(1)
+
+    if args.check_config:
+        print("Configuration OK")
+        sys.exit(0)
+
+    loglevel = "DEBUG" if args.verbose else settings.get("loglevel", "INFO")
+    toinflux.configure_logging(
+        settings.get("logfile"),
+        loglevel=loglevel,
+        log_max_bytes=settings.get("log_max_bytes", toinflux.DEFAULT_LOG_MAX_BYTES),
+        log_backup_count=settings.get("log_backup_count", toinflux.DEFAULT_LOG_BACKUP_COUNT),
+    )
+    default_source = settings.get("default_source", "hue")
 
     if args.source:
         logging.info("Starting send-to-influx v%s (source=%s)", __version__, args.source)

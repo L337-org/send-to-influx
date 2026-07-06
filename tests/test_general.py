@@ -275,6 +275,11 @@ class TestGetClass:
                 get_class("hue", settings_file="/etc/send-to-influx/settings.yaml")
                 mock_hue.assert_called_once_with("hue", settings_file="/etc/send-to-influx/settings.yaml")
 
+    def test_get_class_datahandler_is_not_selectable(self):
+        """get_class('DataHandler') raises ConfigError - it's the abstract base, not a real source."""
+        with pytest.raises(ConfigError):
+            get_class("DataHandler")
+
 
 class TestFlattenDict:
     """Tests for flatten_dict function."""

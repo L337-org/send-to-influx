@@ -167,6 +167,74 @@ class TestMain:
                 sendtoinflux.main()
             assert any("source=hue, from default_source" in record.message for record in caplog.records)
 
+    def test_main_version_flag_prints_version_and_exits_zero(self, capsys):
+        """main with --version prints the version string and exits 0, without needing settings."""
+        with patch("sendtoinflux.sys.argv", ["sendtoinflux", "--version"]):
+            with pytest.raises(SystemExit) as exc_info:
+                sendtoinflux.main()
+            assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert sendtoinflux.__version__ in captured.out
+
+    def test_main_check_config_prints_ok_and_exits_zero(self):
+        """main with --check-config validates settings, prints a success message, and exits 0."""
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
+            patch("sendtoinflux.print") as mock_print,
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(0)) as mock_exit,
+        ):
+            mock_load_settings.return_value = {"default_source": "hue"}
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            mock_exit.assert_called_once_with(0)
+            mock_print.assert_called_once_with("Configuration OK")
+
+    def test_main_verbose_flag_forces_debug_loglevel(self, mock_main_deps):
+        """main with -v/--verbose overrides the configured loglevel with DEBUG."""
+        with (
+            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "-v"]),
+            patch("sendtoinflux.toinflux.configure_logging") as mock_configure_logging,
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            assert mock_configure_logging.call_args.kwargs["loglevel"] == "DEBUG"
+
+    def test_main_uses_settings_loglevel_when_not_verbose(self, mock_main_deps):
+        """main uses the 'loglevel' settings.yaml key when -v is not passed."""
+        with (
+            patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
+            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+            patch("sendtoinflux.toinflux.configure_logging") as mock_configure_logging,
+        ):
+            mock_load_settings.return_value = {"default_source": "hue", "loglevel": "WARNING"}
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            assert mock_configure_logging.call_args.kwargs["loglevel"] == "WARNING"
+
+    def test_main_passes_log_rotation_settings_through(self, mock_main_deps):
+        """main forwards log_max_bytes/log_backup_count settings keys to configure_logging."""
+        with (
+            patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
+            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+            patch("sendtoinflux.toinflux.configure_logging") as mock_configure_logging,
+        ):
+            mock_load_settings.return_value = {
+                "default_source": "hue",
+                "logfile": "/tmp/send-to-influx-test.log",
+                "log_max_bytes": 123,
+                "log_backup_count": 7,
+            }
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            kwargs = mock_configure_logging.call_args.kwargs
+            assert kwargs["log_max_bytes"] == 123
+            assert kwargs["log_backup_count"] == 7
+
     def test_main_multi_source_dump_requires_source(self):
         """main in multi-source mode exits when --dump is used without --source."""
         with (
@@ -430,3 +498,56 @@ class TestConfigureLogging:
             assert len(stream_handlers) == 1
         finally:
             self._remove_handlers(root, [h for h in root.handlers if h not in before])
+
+    def test_sets_specified_loglevel(self):
+        """configure_logging sets the root logger to the requested level."""
+        import logging
+        from toinflux.general import configure_logging
+
+        root = logging.getLogger()
+        before = set(root.handlers)
+        previous_level = root.level
+        try:
+            configure_logging(loglevel="DEBUG")
+            assert root.level == logging.DEBUG
+        finally:
+            self._remove_handlers(root, [h for h in root.handlers if h not in before])
+            root.setLevel(previous_level)
+
+    def test_invalid_loglevel_defaults_to_info(self):
+        """configure_logging falls back to INFO when given an unrecognised level name."""
+        import logging
+        from toinflux.general import configure_logging
+
+        root = logging.getLogger()
+        before = set(root.handlers)
+        previous_level = root.level
+        try:
+            configure_logging(loglevel="NOT_A_LEVEL")
+            assert root.level == logging.INFO
+        finally:
+            self._remove_handlers(root, [h for h in root.handlers if h not in before])
+            root.setLevel(previous_level)
+
+    def test_file_handler_is_rotating_with_custom_params(self):
+        """configure_logging uses a RotatingFileHandler honouring maxBytes/backupCount."""
+        import logging
+        import tempfile
+        import os
+        from logging.handlers import RotatingFileHandler
+        from toinflux.general import configure_logging
+
+        root = logging.getLogger()
+        before = set(root.handlers)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".log") as f:
+            logfile = f.name
+        try:
+            configure_logging(logfile=logfile, log_max_bytes=1234, log_backup_count=7)
+            added = [h for h in root.handlers if h not in before]
+            file_handlers = [h for h in added if isinstance(h, RotatingFileHandler)]
+            assert len(file_handlers) == 1
+            assert file_handlers[0].maxBytes == 1234
+            assert file_handlers[0].backupCount == 7
+        finally:
+            self._remove_handlers(root, [h for h in root.handlers if h not in before])
+            os.unlink(logfile)

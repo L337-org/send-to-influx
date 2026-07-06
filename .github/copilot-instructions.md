@@ -13,6 +13,9 @@ send-to-influx is a Python application that collects data from various smart hom
 - **CLI Modes**: 
   - `--dump`: One-time data export (JSON format)
   - `--print`: Continuous monitoring with JSON output to console
+  - `--version`: print version and exit (parsed before settings are loaded, so no `settings.yaml` is required)
+  - `--check-config`: validate `settings.yaml`, print `Configuration OK`, exit 0 (or 1 with details if invalid)
+  - `-v`/`--verbose`: force `DEBUG`-level logging, overriding the `loglevel` settings.yaml key
   - Normal mode: Continuous data collection and transmission to InfluxDB
   - `--settings <path>`: use a settings file at a path other than `settings.yaml` in the project root
 - **Timing**:
@@ -28,7 +31,7 @@ send-to-influx is a Python application that collects data from various smart hom
 The project uses a plugin-like architecture where each data source is implemented as a separate module:
 
 #### Base Classes
-- **`toinflux/general.py`**: `load_settings(settings_file=None)` (loads YAML configuration and returns a dictionary; raises `ConfigError` on missing/invalid YAML; defaults to `settings.yaml` in the project root, overridable via the `--settings` CLI flag; `INFLUX_TOKEN`/`INFLUX_PASSWORD` env vars override the matching `influx` settings values), `get_class(source, settings_file=None)` (case-insensitive factory function to instantiate data source classes dynamically; raises `ConfigError` for an unknown source), `configure_logging(logfile=None)` (sets up timestamped stdout logging with optional file handler)
+- **`toinflux/general.py`**: `load_settings(settings_file=None)` (loads YAML configuration and returns a dictionary; raises `ConfigError` on missing/invalid YAML; defaults to `settings.yaml` in the project root, overridable via the `--settings` CLI flag; `INFLUX_TOKEN`/`INFLUX_PASSWORD` env vars override the matching `influx` settings values), `get_class(source, settings_file=None)` (case-insensitive factory function to instantiate data source classes dynamically; raises `ConfigError` for an unknown source, including `DataHandler` itself, since it's the abstract base, not a selectable source), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped stdout logging with an optional rotating file handler)
 - **`toinflux/influx.py`**: `DataHandler` (base class for all data sources)
 - **`toinflux/exceptions.py`**: `ConfigError` (fatal, not retried) and `SourceConnectionError` (transient, retried with backoff)
 
@@ -48,7 +51,9 @@ YAML-based configuration supporting multiple data sources:
 - **Defaults**:
   - `default_source`: used when no `sources` list is configured and `--source` is omitted
 - **Logging**:
-  - `logfile`: optional path to write logs to a file in addition to stdout
+  - `logfile`: optional path to write logs to a file in addition to stdout (rotated automatically)
+  - `log_max_bytes`/`log_backup_count`: optional rotation size (default 10 MiB) and backup count (default 3) for `logfile`
+  - `loglevel`: optional log level name (default `INFO`); overridden by the `-v`/`--verbose` CLI flag
 - **Hue**: Bridge connection, sensor mappings, temperature units
 - **MyEnergi**: API endpoints, authentication, device serials (shared across Zappi/Eddi/Harvi)
 - **Zappi/Eddi/Harvi**: Field selection, collection intervals, individual device serials
@@ -186,6 +191,12 @@ python sendtoinflux.py --source zappi --dump
 
 # Continuous monitoring (console output)
 python sendtoinflux.py --source hue --print
+
+# Validate settings.yaml without starting any collectors
+python sendtoinflux.py --check-config
+
+# Print the installed version
+python sendtoinflux.py --version
 
 # Available sources: hue, zappi, speedtest (and any other implemented sources)
 # Multi-source mode uses the settings.yaml `sources` list.

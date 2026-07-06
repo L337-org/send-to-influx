@@ -126,9 +126,17 @@ On startup, an INFO line logs the version and which source(s) will run, so resta
 
     2026-06-29 14:23:00 INFO     Starting send-to-influx v1.0 (sources=hue, zappi, speedtest)
 
-To also write logs to a file, add an optional `logfile` key to `settings.yaml`:
+To also write logs to a file, add an optional `logfile` key to `settings.yaml`. The file is rotated automatically
+once it reaches `log_max_bytes` (default 10 MiB), keeping `log_backup_count` old copies (default 3):
 
     logfile: "/var/log/send-to-influx.log"
+    # log_max_bytes: 10485760
+    # log_backup_count: 3
+
+The log level defaults to `INFO`. Set an optional `loglevel` key in `settings.yaml` (e.g. `DEBUG`, `WARNING`), or
+pass `-v`/`--verbose` on the command line to force `DEBUG` regardless of what's configured:
+
+    loglevel: "INFO"
 
 By default the script looks for `settings.yaml` in the project root. To use a settings file at a
 different location (e.g. `/etc/send-to-influx/settings.yaml` for a packaged install), pass
@@ -153,6 +161,9 @@ and it will output all the data returned as json. When `sources` is configured i
 used together with `--source` so the script knows which source to dump.
 - To print the data rather than send it to InfluxDB, run `sendtoinflux.py --source hue --print` and it will output the
 parsed data structure as json.
+- To check `settings.yaml` is valid without starting any collectors, run `sendtoinflux.py --check-config`. It prints
+`Configuration OK` and exits 0, or exits 1 with details of what's wrong.
+- To print the installed version, run `sendtoinflux.py --version`.
 
 Configuration options for multi-source mode:
 - `sources`: list of source names to run in parallel when `--source` is not provided
@@ -201,17 +212,20 @@ stdout above.
 Usage
 -----
 >$ ./.venv/bin/python ./sendtoinflux.py --help  
->usage: sendtoinflux.py [-h] [--settings SETTINGS] [-d] [-p] [-s SOURCE]
+>usage: sendtoinflux.py [-h] [--version] [--settings SETTINGS] [--check-config] [-v] [-d] [-p] [-s SOURCE]
 >
 >Send Hue Data to InfluxDB
 >
 >options:  
 > &emsp; -h, --help            show this help message and exit  
+> &emsp; --version             show program's version number and exit  
 > &emsp; --settings SETTINGS   path to the settings file (default: settings.yaml in the project root)  
+> &emsp; --check-config        validate settings.yaml and exit (0 if valid, 1 if invalid)  
+> &emsp; -v, --verbose         enable DEBUG-level logging (overrides the 'loglevel' settings.yaml key)  
 > &emsp; -d, --dump            dump the data to the console one time and exit. This requires a source to be specified  
-> &emsp; -p, --print           print the data rather than sending it to InfluxDB  
+> &emsp; -p, --print           print the raw data rather than sending it to InfluxDB  
 > &emsp; -s, --source SOURCE   the source of the data to send to InfluxDB (hue, zappi, etc.). If this parameter is omitted, all sources in the settings file
-> &emsp;                       'sources' list are started. If no sources are specified in the settings file, the default source is used: hue
+> &emsp;                       'sources' list are started. If no sources are specified in the settings file, the 'default_source' settings key is used.
 
 Running the unit tests
 ----------------------
