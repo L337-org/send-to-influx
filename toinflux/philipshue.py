@@ -34,13 +34,17 @@ class Hue(DataHandler):
         :return: hue_data
         :rtype: dict
         """
+        # Hue bridges are commonly reached over a self-signed local cert, so verification is
+        # skipped by default; set hue.insecure: false in settings.yaml if yours has a valid cert.
+        insecure = self.settings["hue"].get("insecure", True)
         try:
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+                if insecure:
+                    warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
                 response = requests.get(
                     f"https://{self.settings['hue']['host']}/api/{self.settings['hue']['user']}",
                     timeout=self.settings["hue"].get("timeout", 5),
-                    verify=False,
+                    verify=not insecure,
                 )
             hue_data = response.json()
         except requests.exceptions.RequestException as e:

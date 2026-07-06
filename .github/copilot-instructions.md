@@ -268,6 +268,10 @@ influx:
 Optional `insecure: true` in the `influx` block skips TLS certificate verification for `https` URLs
 (needed for self-signed/internal certs); it defaults to `false` (verification enabled).
 
+The `hue` block has its own `insecure` option with the opposite default (`true`), since Hue
+bridges are commonly reached over a self-signed local certificate; set `insecure: false` there
+if yours has a valid cert.
+
 ## Data Format
 - **InfluxDB Line Protocol**: `measurement,tag=value field=value timestamp`
 - **Timestamp Precision**: Seconds
