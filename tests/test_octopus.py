@@ -47,6 +47,40 @@ class TestOctopus:
                 assert handler.influx_header == "octopus,source=octopus_energy "
                 assert handler.data == result
 
+    def test_get_data_sets_timestamp_from_interval_start(self, sample_settings):
+        """get_data sets self.timestamp from the reading's interval_start, not the current time."""
+        settings = _octopus_settings(sample_settings)
+        consumption_response = {"results": [{"consumption": 0.123, "interval_start": "2026-07-06T10:00:00+01:00"}]}
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = settings
+            handler = Octopus(source="octopus")
+            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([consumption_response])):
+                handler.get_data()
+                # 2026-07-06T10:00:00+01:00 == 2026-07-06T09:00:00Z
+                assert handler.timestamp == 1783328400
+
+    def test_get_data_leaves_timestamp_none_without_interval_start(self, sample_settings):
+        """get_data leaves self.timestamp as None when the API omits interval_start (send_data then defaults to now)."""
+        settings = _octopus_settings(sample_settings)
+        consumption_response = {"results": [{"consumption": 0.123}]}
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = settings
+            handler = Octopus(source="octopus")
+            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([consumption_response])):
+                handler.get_data()
+                assert handler.timestamp is None
+
+    def test_get_data_resets_timestamp_when_no_consumption_results(self, sample_settings):
+        """get_data resets self.timestamp to None on a cycle with no consumption results."""
+        settings = _octopus_settings(sample_settings)
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = settings
+            handler = Octopus(source="octopus")
+            handler.timestamp = 1234567890
+            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([{"results": []}])):
+                handler.get_data()
+                assert handler.timestamp is None
+
     def test_get_data_includes_gas_consumption_when_gas_meter_configured(self, sample_settings):
         """get_data adds gas_consumption when gas_mprn and gas_meter_serial are set."""
         settings = _octopus_settings(sample_settings)

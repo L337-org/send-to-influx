@@ -269,9 +269,9 @@ Optional `insecure: true` in the `influx` block skips TLS certificate verificati
 
 ## Data Format
 - **InfluxDB Line Protocol**: `measurement,tag=value field=value timestamp`
-- **Timestamp Precision**: Seconds
+- **Timestamp Precision**: Seconds. `send_data()` uses `self.timestamp` if `get_data()` set it (e.g. Octopus uses the reading's own `interval_start`), otherwise the time `send_data()` is called
 - **Data Types**: Numeric values (integers, floats) for time-series data
-- **Field Names**: Sanitized device names (spaces replaced with underscores)
+- **Field Names**: Sanitized device names (spaces replaced with underscores); field keys are also escaped per line protocol rules (commas, `=`, spaces)
 
 ## Performance Considerations
 - **Timeouts**: Appropriate timeouts for all network operations (default: 5 seconds)

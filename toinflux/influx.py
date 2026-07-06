@@ -6,6 +6,7 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 import sys
+import time
 import logging
 import warnings
 import urllib3
@@ -36,6 +37,22 @@ def _format_field_value(value):
     return str(value)
 
 
+def _escape_key_or_tag_value(value):
+    """
+    Escape a value for use as an InfluxDB line protocol key or tag value.
+
+    Per the line protocol spec, commas, equals signs and spaces must be
+    backslash-escaped in measurement/tag/field keys and tag values (field
+    *values* follow different quoting rules, handled by _format_field_value).
+
+    :param value: key or tag value to escape
+    :return: escaped line protocol representation
+    :rtype: str
+    """
+    value = str(value)
+    return value.replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
+
+
 class DataHandler:
     """Class to send data to InfluxDB"""
 
@@ -44,6 +61,7 @@ class DataHandler:
         self.source = source
         self.influx_header = None
         self.data = None
+        self.timestamp = None
 
         if self.source and self.source in self.settings:
             self.source_settings = self.settings[self.source]
@@ -51,13 +69,19 @@ class DataHandler:
             logging.error("Source %s not found in settings", self.source)
             sys.exit(1)
 
-    def send_data(self, data=None):
+    def send_data(self, data=None, timestamp=None):
         """
         Sends data to influxDB
 
         :param data: data to send to InfluxDB
         :type data: dict
+        :param timestamp: unix epoch seconds to write the point at (matching the
+            ``precision=s`` write parameter below). Defaults to ``self.timestamp``
+            (set by some handlers' ``get_data()`` to the time of collection, e.g.
+            a reading's own interval start) and falls back to the current time.
+        :type timestamp: int or None
         :return: None
+        :raises InfluxWriteError: if the write to InfluxDB fails
         """
         # if the data is not provided, use the data from the class
         if data is None:
@@ -67,9 +91,14 @@ class DataHandler:
             logging.warning("No data to send to InfluxDB")
             return
 
+        if timestamp is None:
+            timestamp = self.timestamp if self.timestamp is not None else int(time.time())
+
         # format the data to send
-        data_to_send = self.influx_header + ",".join(
-            f"{key}={_format_field_value(value)}" for key, value in data.items()
+        data_to_send = (
+            self.influx_header
+            + ",".join(f"{_escape_key_or_tag_value(key)}={_format_field_value(value)}" for key, value in data.items())
+            + f" {timestamp}"
         )
 
         # send to InfluxDB
