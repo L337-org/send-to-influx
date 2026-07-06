@@ -40,6 +40,25 @@ class MyEnergi(DataHandler):
 
         return response.json()
 
+    def _parse_device_data(self, device_key, url_key):
+        """
+        Fetch data for a MyEnergi device and filter it to configured fields if set.
+
+        :param device_key: settings/response key for the device, e.g. "eddi", "harvi", "zappi"
+        :type device_key: str
+        :param url_key: settings key (under "myenergi") for the device's API URL, e.g. "eddi_url"
+        :type url_key: str
+        :return: device data, filtered to the configured "fields" list if present
+        :rtype: dict
+        """
+        myenergi_data = self.get_data_from_myenergi(self.settings["myenergi"][url_key])
+        device_data = myenergi_data[device_key][0]
+
+        device_settings = self.settings[device_key]
+        if "fields" in device_settings:
+            return {k: device_data[k] for k in device_settings["fields"] if k in device_data}
+        return device_data
+
     def dayhour_results(self, year, month, day, hour=None):
         """
         Get the data for a specific day
@@ -111,26 +130,18 @@ class Zappi(MyEnergi):
         :rtype: dict
         """
         # Get the data for the Zappi from the MyEnergi API
-        myenergi_data = self.get_data_from_myenergi(self.settings["myenergi"]["zappi_url"])
+        zappi_data = self._parse_device_data("zappi", "zappi_url")
 
-        # Get the day/hour data for the Zappi
-        now = datetime.datetime.now()
+        # Get the day/hour data for the Zappi. The MyEnergi day/hour API is keyed by UTC,
+        # so the day/hour must be computed in UTC too - using local time would pick the
+        # wrong hour (or the wrong day, around midnight) whenever local time isn't UTC.
+        now = datetime.datetime.now(datetime.timezone.utc)
         day_data = self.dayhour_results(
             now.strftime("%Y"),
             now.strftime("%m"),
             now.strftime("%d"),
             now.hour,
         )
-
-        # just extract the specific fields we want here
-        if "fields" in self.settings["zappi"]:
-            zappi_data = dict(
-                (k, myenergi_data["zappi"][0][k])
-                for k in self.settings["zappi"]["fields"]
-                if k in myenergi_data["zappi"][0]
-            )
-        else:
-            zappi_data = myenergi_data["zappi"][0]
 
         return zappi_data | day_data
 
@@ -156,13 +167,7 @@ class Eddi(MyEnergi):
         :return: data
         :rtype: dict
         """
-        myenergi_data = self.get_data_from_myenergi(self.settings["myenergi"]["eddi_url"])
-
-        if "fields" in self.settings["eddi"]:
-            return {
-                k: myenergi_data["eddi"][0][k] for k in self.settings["eddi"]["fields"] if k in myenergi_data["eddi"][0]
-            }
-        return myenergi_data["eddi"][0]
+        return self._parse_device_data("eddi", "eddi_url")
 
 
 class Harvi(MyEnergi):
@@ -186,12 +191,4 @@ class Harvi(MyEnergi):
         :return: data
         :rtype: dict
         """
-        myenergi_data = self.get_data_from_myenergi(self.settings["myenergi"]["harvi_url"])
-
-        if "fields" in self.settings["harvi"]:
-            return {
-                k: myenergi_data["harvi"][0][k]
-                for k in self.settings["harvi"]["fields"]
-                if k in myenergi_data["harvi"][0]
-            }
-        return myenergi_data["harvi"][0]
+        return self._parse_device_data("harvi", "harvi_url")
