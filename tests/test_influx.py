@@ -259,8 +259,9 @@ class TestDataHandler:
             h.influx_header = "hue "
             h.data = {"x": 1}
             assert h.timestamp is None
-            with patch.object(h.session, "post") as mock_post, patch(
-                "toinflux.influx.time.time", return_value=1234567890.5
+            with (
+                patch.object(h.session, "post") as mock_post,
+                patch("toinflux.influx.time.time", return_value=1234567890.5),
             ):
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data()
