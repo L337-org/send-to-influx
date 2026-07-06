@@ -6,7 +6,14 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 from .carbonintensity import CarbonIntensity
-from .general import load_settings, get_class, configure_logging
+from .general import (
+    load_settings,
+    get_class,
+    configure_logging,
+    validate_settings,
+    DEFAULT_LOG_MAX_BYTES,
+    DEFAULT_LOG_BACKUP_COUNT,
+)
 from .influx import DataHandler
 from .myenergi import MyEnergi, Zappi, Eddi, Harvi
 from .octopus import Octopus

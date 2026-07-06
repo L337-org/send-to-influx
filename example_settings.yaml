@@ -15,13 +15,23 @@ sources:
 # This avoids collectors with equal intervals running at exactly the same time
 stagger_seconds: 10
 
-# Optional log file path; if omitted, logs go to stdout only
+# Optional log file path; if omitted, logs go to stdout only.
+# The file is rotated automatically once it reaches log_max_bytes.
 # logfile: "/var/log/send-to-influx.log"
+# log_max_bytes: 10485760
+# log_backup_count: 3
+
+# Optional log level (DEBUG/INFO/WARNING/ERROR/CRITICAL); defaults to INFO.
+# Overridden by the -v/--verbose command line flag.
+# loglevel: "INFO"
 
 # The default source to use if no source is specified on the command line
 default_source: "hue"
 
 # InfluxDB settings
+# `user`/`password` (v1) or `token` (v2) below may instead be supplied via the
+# INFLUX_PASSWORD / INFLUX_TOKEN environment variables, which take precedence
+# over the values here if set - useful for keeping secrets out of this file.
 # For InfluxDB v1, use user/password and per-source db:
 influx:
   url: "https://influx.example.com:8086"
@@ -54,6 +64,9 @@ hue:
   interval: 300
   # Temperature unit (C/F/K)
   temperature_units: "C"
+  # Skip TLS certificate verification. Defaults to true since Hue bridges are commonly
+  # reached over a self-signed local certificate. Set to false if yours has a valid cert.
+  insecure: true
   # Optional name mappings for custom naming
   # If not specified, the name in the Hue settings is used
   # Any spaces will be replaced with underscores

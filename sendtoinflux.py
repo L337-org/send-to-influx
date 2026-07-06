@@ -4,7 +4,6 @@
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT License"
-__version__ = "2.1"
 
 import sys
 import time
@@ -13,7 +12,16 @@ import signal
 import logging
 import argparse
 import threading
+from importlib.metadata import version, PackageNotFoundError
 import toinflux
+from toinflux.exceptions import ConfigError, SourceConnectionError
+
+try:
+    __version__ = version("send-to-influx")
+except PackageNotFoundError:
+    # Running from a source checkout without the package installed (e.g. `python sendtoinflux.py`
+    # in a dev venv) - pyproject.toml's [project] version is the single source of truth otherwise.
+    __version__ = "0.0.0-dev"
 
 DEFAULT_STAGGER_SECONDS = 10
 BACKOFF_BASE_SECONDS = 5
@@ -54,8 +62,60 @@ def collect_source_data(source, args, data_handler):
     return data_handler.source_settings["interval"]
 
 
-def create_source_worker(source, source_start_delay, args):
-    """Create a worker function for continuous source collection with retries."""
+def send_heartbeat(data_handler, source, ok, consecutive_failures):
+    """
+    Write a ``collector_status`` point via the source's own DataHandler, so a dead
+    collector shows up as ``ok=0`` in Grafana instead of a silent gap.
+
+    Reuses send_data() by temporarily swapping in a heartbeat measurement header -
+    it doesn't care what measurement/fields it's sending. Passes an explicit
+    ``timestamp`` of "now": some handlers (e.g. Octopus) set ``self.timestamp`` to
+    something other than the current time for their own writes, which send_data()
+    would otherwise fall back to, making the heartbeat reflect a stale time rather
+    than when the collector was actually last checked. A heartbeat write failure
+    is logged and swallowed rather than counted as a source failure.
+
+    :param data_handler: the source's DataHandler instance, or None if it hasn't
+        been constructed yet (e.g. a config error) - in which case there's no
+        handler to send a heartbeat through, so this is a no-op
+    :type data_handler: DataHandler or None
+    :param source: source name, used as the ``source`` tag
+    :type source: str
+    :param ok: whether the most recent collection cycle succeeded
+    :type ok: bool
+    :param consecutive_failures: current failure streak for this source
+    :type consecutive_failures: int
+    :return: None
+    """
+    if data_handler is None:
+        return
+    original_header = data_handler.influx_header
+    data_handler.influx_header = f"collector_status,source={source} "
+    try:
+        data_handler.send_data(
+            data={"ok": 1 if ok else 0, "consecutive_failures": consecutive_failures},
+            timestamp=int(time.time()),
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logging.warning("Failed to write heartbeat for source '%s': %s", source, exc)
+    finally:
+        data_handler.influx_header = original_header
+
+
+def maybe_send_heartbeat(args, data_handler, source, ok, consecutive_failures):
+    """Send a heartbeat unless running in --print mode, which never touches InfluxDB."""
+    if not args.print:
+        send_heartbeat(data_handler, source, ok=ok, consecutive_failures=consecutive_failures)
+
+
+def create_source_worker(source, source_start_delay, args, stopped_sources):
+    """Create a worker function for continuous source collection with retries.
+
+    :param stopped_sources: shared set that the worker adds ``source`` to when it
+        gives up permanently (a ConfigError), so the multi-source supervisor loop
+        knows not to restart it
+    :type stopped_sources: set
+    """
 
     def source_worker():
         failure_count = 0
@@ -64,24 +124,18 @@ def create_source_worker(source, source_start_delay, args):
         while True:
             try:
                 if data_handler is None:
-                    data_handler = toinflux.get_class(source)
+                    data_handler = toinflux.get_class(source, args.settings)
                 sleep_time = max(0, next_update - time.time())
                 time.sleep(sleep_time)
                 interval = collect_source_data(source, args, data_handler)
                 next_update += interval
                 failure_count = 0
-            except SystemExit as exc:
-                failure_count += 1
-                restart_delay = get_backoff_delay(failure_count)
-                logging.warning(
-                    "Source '%s' exited with code %s. Restarting in %s seconds (attempt %s).",
-                    source,
-                    exc.code,
-                    restart_delay,
-                    failure_count,
-                )
-                data_handler = None
-                next_update = time.time() + restart_delay
+                maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
+            except ConfigError as exc:
+                logging.critical("Source '%s' has a configuration problem and will not be retried: %s", source, exc)
+                maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
+                stopped_sources.add(source)
+                return
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 failure_count += 1
                 restart_delay = get_backoff_delay(failure_count)
@@ -92,6 +146,7 @@ def create_source_worker(source, source_start_delay, args):
                     restart_delay,
                     failure_count,
                 )
+                maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count)
                 data_handler = None
                 next_update = time.time() + restart_delay
 
@@ -121,13 +176,34 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # load settings once for defaults and configured source list
-    settings = toinflux.load_settings()
-    toinflux.configure_logging(settings.get("logfile"))
-    default_source = settings.get("default_source", "hue")
-
-    # parse the command line arguments
+    # parse the command line arguments first so --version/--help/--check-config work without a
+    # settings.yaml present
     arg_parse = argparse.ArgumentParser(description="Send Hue Data to InfluxDB")
+    arg_parse.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    arg_parse.add_argument(
+        "--settings",
+        dest="settings",
+        type=str,
+        default=None,
+        help="path to the settings file (default: settings.yaml in the project root)",
+    )
+    arg_parse.add_argument(
+        "--check-config",
+        required=False,
+        action="store_true",
+        help="validate settings.yaml and exit (0 if valid, 1 if invalid)",
+    )
+    arg_parse.add_argument(
+        "-v",
+        "--verbose",
+        required=False,
+        action="store_true",
+        help="enable DEBUG-level logging (overrides the 'loglevel' settings.yaml key)",
+    )
     arg_parse.add_argument(
         "-d",
         "--dump",
@@ -151,10 +227,40 @@ def main():
         help=(
             "the source of the data to send to InfluxDB (hue, zappi, etc.). "
             "If this parameter is omitted, all sources in the settings file 'sources' list are started. "
-            f"If no sources are specified in the settings file, the default source is used: {default_source}"
+            "If no sources are specified in the settings file, the 'default_source' settings key is used."
         ),
     )
     args = arg_parse.parse_args()
+
+    # load settings once for defaults and configured source list
+    try:
+        settings = toinflux.load_settings(args.settings)
+    except ConfigError as exc:
+        if args.check_config:
+            print(f"Configuration error: {exc}")
+        sys.exit(1)
+
+    if args.check_config:
+        # load_settings() already validated the configured sources/default_source above;
+        # also validate args.source specifically, since a user checking config for a
+        # particular --source shouldn't get a false "OK" if that source isn't part of
+        # the sources/default_source list load_settings() already checked.
+        try:
+            toinflux.validate_settings(settings, source=args.source, settings_path=args.settings or "settings.yaml")
+        except ConfigError as exc:
+            print(f"Configuration error: {exc}")
+            sys.exit(1)
+        print("Configuration OK")
+        sys.exit(0)
+
+    loglevel = "DEBUG" if args.verbose else settings.get("loglevel", "INFO")
+    toinflux.configure_logging(
+        settings.get("logfile"),
+        loglevel=loglevel,
+        log_max_bytes=settings.get("log_max_bytes", toinflux.DEFAULT_LOG_MAX_BYTES),
+        log_backup_count=settings.get("log_backup_count", toinflux.DEFAULT_LOG_BACKUP_COUNT),
+    )
+    default_source = settings.get("default_source", "hue")
 
     if args.source:
         logging.info("Starting send-to-influx v%s (source=%s)", __version__, args.source)
@@ -184,11 +290,22 @@ def run_single_source(source, args):
     :param args: parsed CLI arguments
     :type args: argparse.Namespace
     """
-    data_handler = toinflux.get_class(source)
+    data_handler = None
 
     # dump the data if required and exit
     if args.dump:
-        data = data_handler.get_data()
+        try:
+            data_handler = toinflux.get_class(source, args.settings)
+            data = data_handler.get_data()
+        except ConfigError as exc:
+            logging.critical("Source '%s' has a configuration problem: %s", source, exc)
+            sys.exit(1)
+        except SourceConnectionError as exc:
+            # --dump is a one-shot manual/debugging run, so there's no worker loop to
+            # retry it with backoff - report the failure and exit distinctly from a
+            # config problem, rather than an unhandled traceback.
+            logging.error("Source '%s' failed: %s", source, exc)
+            sys.exit(2)
         print(json.dumps(data, indent=4))
         sys.exit(0)
 
@@ -197,28 +314,16 @@ def run_single_source(source, args):
     while True:
         try:
             if data_handler is None:
-                data_handler = toinflux.get_class(source)
-            next_update += data_handler.source_settings["interval"]
-            data = data_handler.get_data()
-
-            if args.print:
-                print_source_data(source, data)
-            else:
-                data_handler.send_data()
+                data_handler = toinflux.get_class(source, args.settings)
+            interval = collect_source_data(source, args, data_handler)
+            next_update += interval
 
             failure_count = 0
-        except SystemExit as exc:
-            failure_count += 1
-            restart_delay = get_backoff_delay(failure_count)
-            logging.warning(
-                "Source '%s' exited with code %s. Restarting in %s seconds (attempt %s).",
-                source,
-                exc.code,
-                restart_delay,
-                failure_count,
-            )
-            data_handler = None
-            next_update = time.time() + restart_delay
+            maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
+        except ConfigError as exc:
+            logging.critical("Source '%s' has a configuration problem and will not be retried: %s", source, exc)
+            maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
+            sys.exit(1)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             failure_count += 1
             restart_delay = get_backoff_delay(failure_count)
@@ -229,6 +334,7 @@ def run_single_source(source, args):
                 restart_delay,
                 failure_count,
             )
+            maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count)
             data_handler = None
             next_update = time.time() + restart_delay
 
@@ -256,19 +362,19 @@ def run_multi_source(sources, args, stagger_seconds):
 
     threads = []
     workers = []
+    stopped_sources = set()
     stagger_step = max(0, stagger_value)
     for index, source in enumerate(sources):
         start_delay = stagger_step * index
-        worker = create_source_worker(source, start_delay, args)
+        worker = create_source_worker(source, start_delay, args, stopped_sources)
         workers.append(worker)
         threads.append(spawn_source_thread(worker))
 
     while True:
-        if any(not thread.is_alive() for thread in threads):
-            logging.warning("One or more source workers stopped unexpectedly. Restarting worker thread.")
-            for idx, thread in enumerate(threads):
-                if not thread.is_alive():
-                    threads[idx] = spawn_source_thread(workers[idx])
+        for idx, thread in enumerate(threads):
+            if not thread.is_alive() and sources[idx] not in stopped_sources:
+                logging.warning("Source '%s' worker stopped unexpectedly. Restarting worker thread.", sources[idx])
+                threads[idx] = spawn_source_thread(workers[idx])
         time.sleep(1)
 
 

@@ -1,0 +1,16 @@
+#!/bin/sh
+# postrm for send-to-influx.deb
+set -e
+
+if [ "$1" = "purge" ]; then
+    rm -rf /etc/send-to-influx
+    if getent passwd send-to-influx >/dev/null 2>&1; then
+        deluser --system send-to-influx || true
+    fi
+fi
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
+
+exit 0

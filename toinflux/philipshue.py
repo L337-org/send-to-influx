@@ -5,12 +5,12 @@ __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT License"
 __version__ = "1.0"
 
-import sys
 import logging
 import warnings
 import urllib3
 import requests
 from toinflux.influx import DataHandler
+from toinflux.exceptions import SourceConnectionError
 
 
 class Hue(DataHandler):
@@ -34,21 +34,26 @@ class Hue(DataHandler):
         :return: hue_data
         :rtype: dict
         """
+        # Hue bridges are commonly reached over a self-signed local cert, so verification is
+        # skipped by default; set hue.insecure: false in settings.yaml if yours has a valid cert.
+        insecure = self.settings["hue"].get("insecure", True)
         try:
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
-                response = requests.get(
+                if insecure:
+                    warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+                response = self.session.get(
                     f"https://{self.settings['hue']['host']}/api/{self.settings['hue']['user']}",
                     timeout=self.settings["hue"].get("timeout", 5),
-                    verify=False,
+                    verify=not insecure,
                 )
             hue_data = response.json()
         except requests.exceptions.RequestException as e:
             logging.error("Error connecting to Hue Bridge - %s", e)
-            sys.exit(2)
+            raise SourceConnectionError(str(e)) from e
         if isinstance(hue_data, list) and "error" in hue_data[0]:
-            logging.error("Error connecting to Hue Bridge - %s", hue_data[0]["error"]["description"])
-            sys.exit(2)
+            description = hue_data[0]["error"]["description"]
+            logging.error("Error connecting to Hue Bridge - %s", description)
+            raise SourceConnectionError(description)
         return hue_data
 
     def hue_device_name_to_name(self, device_name):

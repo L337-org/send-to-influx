@@ -1,8 +1,11 @@
 """Unit tests for toinflux.myenergi (MyEnergi, Zappi, Eddi, Harvi)."""
 
+import datetime
 from unittest.mock import MagicMock, patch
 import pytest
+import requests
 from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
+from toinflux.exceptions import SourceConnectionError
 
 
 def _eddi_settings(base):
@@ -48,30 +51,52 @@ class TestMyEnergi:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {"key": "value"}
-            with patch("toinflux.myenergi.requests.get", return_value=mock_resp):
+            with patch.object(handler.session, "get", return_value=mock_resp):
                 result = handler.get_data_from_myenergi("https://example.com/api")
                 assert result == {"key": "value"}
 
-    def test_get_data_from_myenergi_exits_on_401(self, sample_settings):
-        """get_data_from_myenergi exits on 401."""
+    def test_get_data_from_myenergi_raises_on_401(self, sample_settings):
+        """get_data_from_myenergi raises SourceConnectionError on 401."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             handler = MyEnergi(source="zappi")
             mock_resp = MagicMock()
             mock_resp.status_code = 401
-            with patch("toinflux.myenergi.requests.get", return_value=mock_resp):
-                with pytest.raises(SystemExit):
+            with patch.object(handler.session, "get", return_value=mock_resp):
+                with pytest.raises(SourceConnectionError):
                     handler.get_data_from_myenergi("https://example.com")
 
-    def test_get_data_from_myenergi_exits_on_other_error_code(self, sample_settings):
-        """get_data_from_myenergi exits on non-200, non-401 status."""
+    def test_get_data_from_myenergi_raises_on_other_error_code(self, sample_settings):
+        """get_data_from_myenergi raises SourceConnectionError on non-200, non-401 status."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             handler = MyEnergi(source="zappi")
             mock_resp = MagicMock()
             mock_resp.status_code = 500
-            with patch("toinflux.myenergi.requests.get", return_value=mock_resp):
-                with pytest.raises(SystemExit):
+            with patch.object(handler.session, "get", return_value=mock_resp):
+                with pytest.raises(SourceConnectionError):
+                    handler.get_data_from_myenergi("https://example.com")
+
+    def test_get_data_from_myenergi_raises_on_request_exception(self, sample_settings):
+        """get_data_from_myenergi raises SourceConnectionError when the request itself fails."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            handler = MyEnergi(source="zappi")
+            with patch.object(handler.session, "get") as mock_get:
+                mock_get.side_effect = requests.exceptions.RequestException("connection failed")
+                with pytest.raises(SourceConnectionError):
+                    handler.get_data_from_myenergi("https://example.com")
+
+    def test_get_data_from_myenergi_raises_on_invalid_json(self, sample_settings):
+        """get_data_from_myenergi raises SourceConnectionError when the response body isn't valid JSON."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            handler = MyEnergi(source="zappi")
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.side_effect = requests.exceptions.JSONDecodeError("bad json", "", 0)
+            with patch.object(handler.session, "get", return_value=mock_resp):
+                with pytest.raises(SourceConnectionError):
                     handler.get_data_from_myenergi("https://example.com")
 
     def test_dayhour_results_aggregates_day(self, sample_settings):
@@ -190,6 +215,28 @@ class TestZappi:
                     assert result["frq"] == 50
                     assert result["vol"] == 240
                     assert result["custom"] == "yes"
+
+    def test_parse_zappi_data_uses_utc_for_dayhour_lookup(self, sample_settings):
+        """parse_zappi_data computes the day/hour lookup in UTC, not local time.
+
+        23:30 UTC on 2025-06-30 is 00:30 on 2025-07-01 in a UTC+1 (e.g. BST) local
+        timezone - a different day and hour. Using local time here would look up the
+        wrong day/hour bucket from the MyEnergi API, which is UTC-keyed.
+        """
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            zappi = Zappi(source="zappi")
+            myenergi_data = {"zappi": [{"frq": 50}]}
+            fixed_utc_now = datetime.datetime(2025, 6, 30, 23, 30, tzinfo=datetime.timezone.utc)
+            day_data = {"Charge": 0, "Import": 0, "Export": 0, "Genera": 0}
+            with patch.object(Zappi, "get_data_from_myenergi", return_value=myenergi_data):
+                with patch("toinflux.myenergi.datetime") as mock_datetime_module:
+                    mock_datetime_module.datetime.now.return_value = fixed_utc_now
+                    mock_datetime_module.timezone.utc = datetime.timezone.utc
+                    with patch.object(Zappi, "dayhour_results", return_value=day_data) as mock_dayhour:
+                        zappi.parse_zappi_data()
+                        mock_datetime_module.datetime.now.assert_called_once_with(datetime.timezone.utc)
+                        mock_dayhour.assert_called_once_with("2025", "06", "30", 23)
 
 
 class TestEddi:

@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 from toinflux.carbonintensity import CarbonIntensity
+from toinflux.exceptions import SourceConnectionError
 
 
 def _ci_settings(base, include_generation=False):
@@ -54,7 +55,7 @@ class TestCarbonIntensity:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = CarbonIntensity(source="carbonintensity")
-            with patch("toinflux.carbonintensity.requests.get", side_effect=_mock_get([_INTENSITY_RESPONSE])):
+            with patch.object(handler.session, "get", side_effect=_mock_get([_INTENSITY_RESPONSE])):
                 result = handler.get_data()
                 assert result["intensity_actual"] == 143
                 assert result["intensity_forecast"] == 150
@@ -67,8 +68,9 @@ class TestCarbonIntensity:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = CarbonIntensity(source="carbonintensity")
-            with patch(
-                "toinflux.carbonintensity.requests.get",
+            with patch.object(
+                handler.session,
+                "get",
                 side_effect=_mock_get([_INTENSITY_RESPONSE, _GENERATION_RESPONSE]),
             ):
                 result = handler.get_data()
@@ -83,7 +85,7 @@ class TestCarbonIntensity:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = CarbonIntensity(source="carbonintensity")
-            with patch("toinflux.carbonintensity.requests.get", side_effect=_mock_get([_INTENSITY_RESPONSE])):
+            with patch.object(handler.session, "get", side_effect=_mock_get([_INTENSITY_RESPONSE])):
                 result = handler.get_data()
                 assert not any(k.startswith("gen_") for k in result)
 
@@ -94,24 +96,24 @@ class TestCarbonIntensity:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = CarbonIntensity(source="carbonintensity")
-            with patch("toinflux.carbonintensity.requests.get", side_effect=_mock_get([response])):
+            with patch.object(handler.session, "get", side_effect=_mock_get([response])):
                 result = handler.get_data()
                 assert "intensity_actual" not in result
                 assert result["intensity_forecast"] == 200
 
-    def test_get_data_exits_on_request_exception(self, sample_settings):
-        """get_data exits with code 2 when the HTTP request fails."""
+    def test_get_data_raises_source_connection_error_on_request_exception(self, sample_settings):
+        """get_data raises SourceConnectionError when the HTTP request fails."""
         settings = _ci_settings(sample_settings)
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = CarbonIntensity(source="carbonintensity")
-            with patch(
-                "toinflux.carbonintensity.requests.get",
+            with patch.object(
+                handler.session,
+                "get",
                 side_effect=requests.exceptions.ConnectionError("timeout"),
             ):
-                with pytest.raises(SystemExit) as exc_info:
+                with pytest.raises(SourceConnectionError):
                     handler.get_data()
-                assert exc_info.value.code == 2
 
     def test_get_data_sends_accept_json_header(self, sample_settings):
         """get_data includes Accept: application/json header in all requests."""
@@ -119,9 +121,7 @@ class TestCarbonIntensity:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = CarbonIntensity(source="carbonintensity")
-            with patch(
-                "toinflux.carbonintensity.requests.get", side_effect=_mock_get([_INTENSITY_RESPONSE])
-            ) as mock_get:
+            with patch.object(handler.session, "get", side_effect=_mock_get([_INTENSITY_RESPONSE])) as mock_get:
                 handler.get_data()
                 headers_used = mock_get.call_args[1]["headers"]
                 assert headers_used.get("Accept") == "application/json"

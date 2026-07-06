@@ -46,3 +46,4 @@ Thumbs.db
 /settings.json
 /settings.yaml
 /settings.yml
+*.deb

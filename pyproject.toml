@@ -1,3 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "send-to-influx"
+version = "2.1"
+description = "Collects data from smart home / energy monitoring devices and sends it to InfluxDB"
+readme = "README.md"
+license = { file = "LICENSE.md" }
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/GavinLucas/send-to-influx"
+
+[project.scripts]
+send-to-influx = "sendtoinflux:main"
+
+[tool.setuptools]
+py-modules = ["sendtoinflux"]
+
+[tool.setuptools.packages.find]
+include = ["toinflux*"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
 [tool.black]
 line-length = 120
 
@@ -7,3 +35,8 @@ addopts = "--capture=sys"
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
+
+[tool.mypy]
+ignore_missing_imports = true
+check_untyped_defs = false
+disallow_untyped_defs = false

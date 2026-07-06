@@ -13,23 +13,28 @@ send-to-influx is a Python application that collects data from various smart hom
 - **CLI Modes**: 
   - `--dump`: One-time data export (JSON format)
   - `--print`: Continuous monitoring with JSON output to console
+  - `--version`: print version and exit (parsed before settings are loaded, so no `settings.yaml` is required)
+  - `--check-config`: validate `settings.yaml`, print `Configuration OK`, exit 0 (or 1 with details if invalid)
+  - `-v`/`--verbose`: force `DEBUG`-level logging, overriding the `loglevel` settings.yaml key
   - Normal mode: Continuous data collection and transmission to InfluxDB
+  - `--settings <path>`: use a settings file at a path other than `settings.yaml` in the project root
 - **Timing**:
   - per-source interval-based timing system to avoid drift
   - multi-source startup stagger via optional `stagger_seconds` setting (default `10`)
 - **Resilience**:
-  - source failures do not stop the process in either single-source or multi-source mode
-  - failed sources are restarted with exponential backoff (base `5s`, max `300s`)
-  - in multi-source mode, only the failed source is retried; others keep running
+  - transient failures (`SourceConnectionError`) are retried with exponential backoff (base `5s`, max `300s`) in either single-source or multi-source mode; in multi-source mode, only the failed source is retried, others keep running
+  - configuration problems (`ConfigError`) are not retried: single-source mode exits immediately with code `1`; in multi-source mode that source's worker stops permanently (logged as critical) while other sources keep running
 - **Signals**: handles both SIGINT (Ctrl-C) and SIGTERM (systemd/container stop) for graceful shutdown
 - **Startup logging**: logs an INFO line with the version and the source(s) that will run, so process (re)starts are visible in the logs
+- **Heartbeat**: after every collection cycle, writes a `collector_status,source=<name>` point (fields `ok`, `consecutive_failures`) to InfluxDB via the source's own DataHandler, so a dead collector is visible as `ok=0` rather than a silent gap; skipped in `--print` mode
 
 ### Modular Data Sources (`toinflux/` package)
 The project uses a plugin-like architecture where each data source is implemented as a separate module:
 
 #### Base Classes
-- **`toinflux/general.py`**: `load_settings()` (loads YAML configuration and returns a dictionary), `get_class()` (case-insensitive factory function to instantiate data source classes dynamically), `configure_logging(logfile=None)` (sets up timestamped stdout logging with optional file handler)
+- **`toinflux/general.py`**: `load_settings(settings_file=None)` (loads YAML configuration and returns a dictionary; raises `ConfigError` on missing/invalid YAML; defaults to `settings.yaml` in the project root, overridable via the `--settings` CLI flag; `INFLUX_TOKEN`/`INFLUX_PASSWORD` env vars override the matching `influx` settings values), `get_class(source, settings_file=None)` (case-insensitive factory function to instantiate data source classes dynamically; raises `ConfigError` for an unknown source, including `DataHandler` itself, since it's the abstract base, not a selectable source), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped stdout logging with an optional rotating file handler)
 - **`toinflux/influx.py`**: `DataHandler` (base class for all data sources)
+- **`toinflux/exceptions.py`**: `ConfigError` (fatal, not retried) and `SourceConnectionError` (transient, retried with backoff)
 
 #### Current Data Sources
 - **`toinflux/philipshue.py`**: Philips Hue Bridge integration
@@ -47,7 +52,9 @@ YAML-based configuration supporting multiple data sources:
 - **Defaults**:
   - `default_source`: used when no `sources` list is configured and `--source` is omitted
 - **Logging**:
-  - `logfile`: optional path to write logs to a file in addition to stdout
+  - `logfile`: optional path to write logs to a file in addition to stdout (rotated automatically)
+  - `log_max_bytes`/`log_backup_count`: optional rotation size (default 10 MiB) and backup count (default 3) for `logfile`
+  - `loglevel`: optional log level name (default `INFO`); overridden by the `-v`/`--verbose` CLI flag
 - **Hue**: Bridge connection, sensor mappings, temperature units
 - **MyEnergi**: API endpoints, authentication, device serials (shared across Zappi/Eddi/Harvi)
 - **Zappi/Eddi/Harvi**: Field selection, collection intervals, individual device serials
@@ -70,7 +77,7 @@ YAML-based configuration supporting multiple data sources:
 - **Exit Codes**:
   - `0`: Normal exit
   - `1`: Configuration errors (missing/invalid settings.yaml)
-  - `2`: Connection errors (API endpoints, InfluxDB)
+  - `2`: Connection errors (API endpoints, InfluxDB) - only in `--dump` mode; continuous mode always retries connection errors with backoff instead of exiting
 - **Error Messages**: Logged via Python's `logging` module with timestamps and log level (WARNING, ERROR, CRITICAL)
 - **Network Handling**: Proper timeout handling and connection failure management
 - **Validation**: Configuration validation before processing
@@ -106,13 +113,14 @@ newsource:
 ### Error Handling Patterns
 ```python
 import logging
+from toinflux.exceptions import SourceConnectionError
 
 try:
     response = requests.get(url, timeout=timeout)
     response.raise_for_status()
 except requests.exceptions.RequestException as e:
     logging.error("Error connecting to API - %s", e)
-    sys.exit(2)
+    raise SourceConnectionError(str(e)) from e
 ```
 
 ## Current Data Sources
@@ -185,9 +193,24 @@ python sendtoinflux.py --source zappi --dump
 # Continuous monitoring (console output)
 python sendtoinflux.py --source hue --print
 
+# Validate settings.yaml without starting any collectors
+python sendtoinflux.py --check-config
+
+# Print the installed version
+python sendtoinflux.py --version
+
 # Available sources: hue, zappi, speedtest (and any other implemented sources)
 # Multi-source mode uses the settings.yaml `sources` list.
+
+# Use a settings file at a non-default location (e.g. a packaged install)
+python sendtoinflux.py --settings /etc/send-to-influx/settings.yaml
 ```
+
+## Packaging & Deployment
+
+- `pyproject.toml` is the single source of truth for the package version (`[project].version`) and dependencies (dynamically sourced from `requirements.txt`). `sendtoinflux.py`'s `__version__` is read back from installed package metadata via `importlib.metadata`, falling back to `"0.0.0-dev"` when running from an uninstalled source checkout.
+- `packaging/build-deb.sh` builds a `.deb` bundling the app and its dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service`) to run it as a service — see the README's "Running as a systemd service" section.
+- `INFLUX_TOKEN`/`INFLUX_PASSWORD` environment variables override the matching `influx` settings values, so a systemd deployment can keep secrets out of `settings.yaml` (e.g. via the service's `EnvironmentFile`).
 
 ## Configuration Examples
 
@@ -267,11 +290,15 @@ influx:
 Optional `insecure: true` in the `influx` block skips TLS certificate verification for `https` URLs
 (needed for self-signed/internal certs); it defaults to `false` (verification enabled).
 
+The `hue` block has its own `insecure` option with the opposite default (`true`), since Hue
+bridges are commonly reached over a self-signed local certificate; set `insecure: false` there
+if yours has a valid cert.
+
 ## Data Format
 - **InfluxDB Line Protocol**: `measurement,tag=value field=value timestamp`
-- **Timestamp Precision**: Seconds
+- **Timestamp Precision**: Seconds. `send_data()` uses `self.timestamp` if `get_data()` set it (e.g. Octopus uses the reading's own `interval_start`), otherwise the time `send_data()` is called
 - **Data Types**: Numeric values (integers, floats) for time-series data
-- **Field Names**: Sanitized device names (spaces replaced with underscores)
+- **Field Names**: Sanitized device names (spaces replaced with underscores); field keys are also escaped per line protocol rules (commas, `=`, spaces)
 
 ## Performance Considerations
 - **Timeouts**: Appropriate timeouts for all network operations (default: 5 seconds)
@@ -312,7 +339,7 @@ Optional `insecure: true` in the `influx` block skips TLS certificate verificati
 - **Framework**: pytest. Tests live under `tests/`.
 - **Coverage**: Write unit tests for new and modified code. Tests should cover public functions and classes; use mocks for `load_settings`, file I/O, and HTTP so tests run without real config or network.
 - **Virtual environment requirement**: Always run Python tooling from the repo-local virtual environment (`.venv`). Do not rely on globally installed `python`, `pip`, or `pytest`.
-- **Running tests**: Install dev dependencies (`.venv/bin/pip install -r requirements-dev.txt`) then run `.venv/bin/pytest -v` (or `.venv/bin/python -m pytest -v`). CI runs this on every push and pull request.
+- **Running tests**: Install dev dependencies (`.venv/bin/pip install -r requirements-dev.txt`) then run `.venv/bin/pytest -v` (or `.venv/bin/python -m pytest -v`). CI runs this (matrixed across Python 3.10-3.14, with coverage), plus `flake8` and `mypy`, on every push to `main` and every pull request. Dependabot keeps pip and GitHub Actions dependencies up to date weekly.
 - **Adding tests**: When adding a new data source or changing behaviour, add or update tests in the appropriate `tests/test_*.py` module. Reuse fixtures from `tests/conftest.py` (e.g. `sample_settings`) where applicable.
 
 ## Development Workflow

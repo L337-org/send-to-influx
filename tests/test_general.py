@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 from toinflux.general import flatten_dict, load_settings, get_class, validate_settings
+from toinflux.exceptions import ConfigError
 
 
 class TestLoadSettings:
@@ -34,31 +35,31 @@ class TestLoadSettings:
         finally:
             Path(path).unlink(missing_ok=True)
 
-    def test_file_not_found_exits(self):
-        """load_settings exits with 1 when file is missing."""
+    def test_file_not_found_raises_config_error(self):
+        """load_settings raises ConfigError when file is missing."""
         with tempfile.TemporaryDirectory() as tmp:
             missing = os.path.join(tmp, "missing.yml")
-            with pytest.raises(SystemExit):
+            with pytest.raises(ConfigError):
                 load_settings(settings_file=missing)
 
-    def test_invalid_yaml_exits(self):
-        """load_settings exits with 1 on YAML error."""
+    def test_invalid_yaml_raises_config_error(self):
+        """load_settings raises ConfigError on YAML error."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
             f.write("invalid: yaml: [[[")
             path = f.name
         try:
-            with pytest.raises(SystemExit):
+            with pytest.raises(ConfigError):
                 load_settings(settings_file=path)
         finally:
             Path(path).unlink(missing_ok=True)
 
-    def test_empty_yaml_exits(self):
-        """load_settings exits with 1 on empty YAML file."""
+    def test_empty_yaml_raises_config_error(self):
+        """load_settings raises ConfigError on empty YAML file."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
             f.write("")
             path = f.name
         try:
-            with pytest.raises(SystemExit):
+            with pytest.raises(ConfigError):
                 load_settings(settings_file=path)
         finally:
             Path(path).unlink(missing_ok=True)
@@ -100,6 +101,69 @@ class TestLoadSettings:
             result = load_settings(settings_file=yaml_path)
             assert result["default_source"] == "from_yaml"
 
+    def test_validation_error_log_uses_the_actual_resolved_path(self, sample_settings, caplog):
+        """load_settings labels validation error logs with the real resolved path, not 'settings.yaml'."""
+        del sample_settings["influx"]["url"]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(sample_settings, f)
+            path = f.name
+        try:
+            with caplog.at_level("CRITICAL"):
+                with pytest.raises(ConfigError):
+                    load_settings(settings_file=path)
+            assert any(f"{path}: influx.url is required" in r.message for r in caplog.records)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_defaults_to_settings_yaml_when_omitted(self):
+        """load_settings() with no argument resolves to settings.yaml in the project root."""
+        with patch("toinflux.general.open", side_effect=FileNotFoundError):
+            with pytest.raises(ConfigError):
+                load_settings()
+
+    def test_env_influx_token_overrides_yaml(self, sample_settings):
+        """INFLUX_TOKEN environment variable overrides influx.token from the YAML file."""
+        sample_settings["influx"] = {
+            "url": "https://influx.example.com:8086",
+            "token": "yaml-token",
+            "org": "my-org",
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(sample_settings, f)
+            path = f.name
+        try:
+            with patch.dict(os.environ, {"INFLUX_TOKEN": "env-token"}):
+                result = load_settings(settings_file=path)
+            assert result["influx"]["token"] == "env-token"
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_env_influx_password_overrides_yaml(self, sample_settings):
+        """INFLUX_PASSWORD environment variable overrides influx.password from the YAML file."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(sample_settings, f)
+            path = f.name
+        try:
+            with patch.dict(os.environ, {"INFLUX_PASSWORD": "env-password"}):
+                result = load_settings(settings_file=path)
+            assert result["influx"]["password"] == "env-password"
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_no_env_override_when_unset(self, sample_settings):
+        """load_settings leaves influx.token/password untouched when the env vars aren't set."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(sample_settings, f)
+            path = f.name
+        try:
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("INFLUX_TOKEN", None)
+                os.environ.pop("INFLUX_PASSWORD", None)
+                result = load_settings(settings_file=path)
+            assert result["influx"]["password"] == sample_settings["influx"]["password"]
+        finally:
+            Path(path).unlink(missing_ok=True)
+
 
 class TestValidateSettings:
     """Tests for validate_settings function."""
@@ -115,41 +179,41 @@ class TestValidateSettings:
         del sample_settings["hue"]["db"]
         validate_settings(sample_settings)
 
-    def test_missing_influx_url_exits(self, sample_settings):
-        """validate_settings exits when influx.url is missing."""
+    def test_missing_influx_url_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when influx.url is missing."""
         del sample_settings["influx"]["url"]
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
-    def test_missing_influx_credentials_exits(self, sample_settings):
-        """validate_settings exits when neither v1 nor v2 credentials are present."""
+    def test_missing_influx_credentials_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when neither v1 nor v2 credentials are present."""
         del sample_settings["influx"]["user"]
         del sample_settings["influx"]["password"]
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
-    def test_v2_token_without_org_exits(self, sample_settings):
-        """validate_settings exits when token is present but org is missing."""
+    def test_v2_token_without_org_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when token is present but org is missing."""
         sample_settings["influx"]["token"] = "mytoken"
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
-    def test_missing_source_section_exits(self, sample_settings):
-        """validate_settings exits when a configured source has no settings section."""
+    def test_missing_source_section_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when a configured source has no settings section."""
         sample_settings["sources"] = ["hue", "nosuchsource"]
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
-    def test_missing_interval_exits(self, sample_settings):
-        """validate_settings exits when a source is missing interval."""
+    def test_missing_interval_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when a source is missing interval."""
         del sample_settings["hue"]["interval"]
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
-    def test_missing_db_and_bucket_exits(self, sample_settings):
-        """validate_settings exits when a source has neither db nor bucket."""
+    def test_missing_db_and_bucket_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when a source has neither db nor bucket."""
         del sample_settings["hue"]["db"]
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
     def test_empty_token_falls_back_to_v1_validation(self, sample_settings):
@@ -157,11 +221,55 @@ class TestValidateSettings:
         sample_settings["influx"]["token"] = ""
         validate_settings(sample_settings)
 
-    def test_bucket_accepted_in_place_of_db(self, sample_settings):
-        """validate_settings accepts bucket as an alternative to db."""
+    def test_bucket_accepted_in_place_of_db_for_v2(self, sample_settings):
+        """validate_settings accepts bucket as an alternative to db, for v2 (token) auth."""
+        sample_settings["influx"] = {"url": "http://influx.example.com:8086", "token": "tok", "org": "myorg"}
         del sample_settings["hue"]["db"]
         sample_settings["hue"]["bucket"] = "hue_bucket"
         validate_settings(sample_settings)
+
+    def test_bucket_without_db_raises_config_error_for_v1(self, sample_settings):
+        """validate_settings rejects bucket-only source config under v1 (user/password) auth.
+
+        v1's send_data() reads source_settings["db"] directly with no bucket fallback
+        (unlike v2, which falls back from bucket to db) - a source configured with only
+        bucket under v1 auth would otherwise pass validation and then KeyError at runtime.
+        """
+        del sample_settings["hue"]["db"]
+        sample_settings["hue"]["bucket"] = "hue_bucket"
+        with pytest.raises(ConfigError):
+            validate_settings(sample_settings)
+
+    def test_explicit_source_validated_even_if_not_in_sources_list(self, sample_settings):
+        """validate_settings(source=...) also validates a source outside sources/default_source.
+
+        Without the source= kwarg, a broken block for a source that isn't part of
+        sources/default_source is never checked - passing it explicitly (as --check-config
+        --source <x> now does) is what surfaces it.
+        """
+        sample_settings["octopus"] = {"db": "octopus_db"}  # missing interval; not in sources/default_source
+        validate_settings(sample_settings)  # passes: octopus isn't checked without source=
+        with pytest.raises(ConfigError):
+            validate_settings(sample_settings, source="octopus")
+
+    def test_explicit_source_not_double_reported_if_already_in_sources_list(self, sample_settings):
+        """validate_settings(source=...) doesn't duplicate a source already covered by sources/default_source."""
+        # default_source is "hue" per sample_settings; passing it explicitly shouldn't
+        # cause it to be validated (and thus reported) twice.
+        validate_settings(sample_settings, source="hue")
+
+    def test_error_log_uses_given_settings_path_not_hardcoded_settings_yaml(self, sample_settings, caplog):
+        """validate_settings labels log messages with settings_path, not a hard-coded 'settings.yaml'.
+
+        Settings can come from a location other than settings.yaml (--settings, or the .yml
+        fallback), so the log output shouldn't claim it's always settings.yaml.
+        """
+        del sample_settings["influx"]["url"]
+        with caplog.at_level("CRITICAL"):
+            with pytest.raises(ConfigError):
+                validate_settings(sample_settings, settings_path="/etc/send-to-influx/settings.yaml")
+        assert any("/etc/send-to-influx/settings.yaml: influx.url is required" in r.message for r in caplog.records)
+        assert not any("settings.yaml: influx.url is required" == r.message for r in caplog.records)
 
 
 class TestGetClass:
@@ -173,7 +281,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 result = get_class("hue")
-                mock_hue.assert_called_once_with("hue")
+                mock_hue.assert_called_once_with("hue", settings_file=None)
                 assert result is mock_hue.return_value
 
     def test_get_class_returns_hue_for_uppercase(self, sample_settings):
@@ -182,7 +290,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 result = get_class("Hue")
-                mock_hue.assert_called_once_with("hue")
+                mock_hue.assert_called_once_with("hue", settings_file=None)
                 assert result is mock_hue.return_value
 
     def test_get_class_returns_zappi_for_lowercase(self, sample_settings):
@@ -191,7 +299,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.myenergi.Zappi") as mock_zappi:
                 result = get_class("zappi")
-                mock_zappi.assert_called_once_with("zappi")
+                mock_zappi.assert_called_once_with("zappi", settings_file=None)
                 assert result is mock_zappi.return_value
 
     def test_get_class_returns_speedtest_for_lowercase(self, sample_settings):
@@ -200,7 +308,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.speedtest.Speedtest") as mock_speedtest:
                 result = get_class("speedtest")
-                mock_speedtest.assert_called_once_with("speedtest")
+                mock_speedtest.assert_called_once_with("speedtest", settings_file=None)
                 assert result is mock_speedtest.return_value
 
     def test_get_class_returns_speedtest_for_uppercase(self, sample_settings):
@@ -209,13 +317,26 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.speedtest.Speedtest") as mock_speedtest:
                 result = get_class("Speedtest")
-                mock_speedtest.assert_called_once_with("speedtest")
+                mock_speedtest.assert_called_once_with("speedtest", settings_file=None)
                 assert result is mock_speedtest.return_value
 
-    def test_get_class_unknown_source_exits(self):
-        """get_class with unknown source exits with 1."""
-        with pytest.raises(SystemExit):
+    def test_get_class_unknown_source_raises_config_error(self):
+        """get_class with unknown source raises ConfigError."""
+        with pytest.raises(ConfigError):
             get_class("nosuchsource")
+
+    def test_get_class_threads_settings_file_through(self, sample_settings):
+        """get_class passes an explicit settings_file through to the handler constructor."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            with patch("toinflux.philipshue.Hue") as mock_hue:
+                get_class("hue", settings_file="/etc/send-to-influx/settings.yaml")
+                mock_hue.assert_called_once_with("hue", settings_file="/etc/send-to-influx/settings.yaml")
+
+    def test_get_class_datahandler_is_not_selectable(self):
+        """get_class('DataHandler') raises ConfigError - it's the abstract base, not a real source."""
+        with pytest.raises(ConfigError):
+            get_class("DataHandler")
 
 
 class TestFlattenDict:
