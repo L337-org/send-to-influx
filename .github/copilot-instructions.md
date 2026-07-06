@@ -327,7 +327,7 @@ if yours has a valid cert.
 - **Framework**: pytest. Tests live under `tests/`.
 - **Coverage**: Write unit tests for new and modified code. Tests should cover public functions and classes; use mocks for `load_settings`, file I/O, and HTTP so tests run without real config or network.
 - **Virtual environment requirement**: Always run Python tooling from the repo-local virtual environment (`.venv`). Do not rely on globally installed `python`, `pip`, or `pytest`.
-- **Running tests**: Install dev dependencies (`.venv/bin/pip install -r requirements-dev.txt`) then run `.venv/bin/pytest -v` (or `.venv/bin/python -m pytest -v`). CI runs this on every push and pull request.
+- **Running tests**: Install dev dependencies (`.venv/bin/pip install -r requirements-dev.txt`) then run `.venv/bin/pytest -v` (or `.venv/bin/python -m pytest -v`). CI runs this (matrixed across Python 3.10-3.14, with coverage), plus `flake8` and `mypy`, on every push to `main` and every pull request. Dependabot keeps pip and GitHub Actions dependencies up to date weekly.
 - **Adding tests**: When adding a new data source or changing behaviour, add or update tests in the appropriate `tests/test_*.py` module. Reuse fixtures from `tests/conftest.py` (e.g. `sample_settings`) where applicable.
 
 ## Development Workflow

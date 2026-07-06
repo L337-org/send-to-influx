@@ -18,9 +18,12 @@ python -m venv .venv
 # Lint / format
 .venv/bin/flake8                     # max line length 120, complexity 10
 .venv/bin/black .                    # auto-format
+.venv/bin/mypy toinflux sendtoinflux.py   # static type check (permissive, see pyproject.toml)
 ```
 
-CI runs `pytest` and `flake8` in parallel on every push/PR (`.github/workflows/premerge.yaml`, Python 3.10).
+CI runs `pytest` (with coverage, matrixed across Python 3.10-3.14), `flake8`, and `mypy` in parallel on
+every push to `main` and every PR (`.github/workflows/premerge.yaml`). Dependency and GitHub Actions
+updates are managed by Dependabot (`.github/dependabot.yml`), weekly.
 
 ## Architecture
 
