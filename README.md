@@ -129,6 +129,8 @@ Worker start times are slightly staggered to avoid all collectors firing at exac
 
 If a source fails — whether running in single-source or multi-source mode — it is automatically restarted with exponential backoff (base 5 s, max 300 s) to avoid tight failure loops. In multi-source mode, only the failed source is retried; other sources keep running.
 
+After every collection cycle (success or failure), a `collector_status,source=<name>` heartbeat point is written to InfluxDB alongside the source's own data, with fields `ok` (`1`/`0`) and `consecutive_failures`. A dead collector would otherwise only show up as a silent gap in Grafana; this gives you a positive signal to alert on (e.g. `ok == 0` or a stale `collector_status` point). Heartbeats are not written in `--print` mode, since that mode never sends anything to InfluxDB.
+
 There are a few options that can be passed to the script and a couple of these can help you to debug and also to help you understand your data:
 
 - To run only one data source, use the 'source' option, e.g. `sendtoinflux.py --source zappi`.

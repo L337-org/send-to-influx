@@ -208,6 +208,70 @@ class TestHelpers:
         mock_create_source_worker.assert_any_call("zappi", 0, args)
 
 
+class TestSendHeartbeat:
+    """Tests for send_heartbeat."""
+
+    def test_no_op_when_handler_is_none(self):
+        """send_heartbeat does nothing when no handler has been constructed yet."""
+        sendtoinflux.send_heartbeat(None, "hue", ok=True, consecutive_failures=0)
+
+    def test_sends_ok_status_and_restores_header(self):
+        """send_heartbeat writes ok=1 and restores the handler's original influx_header."""
+        handler = MagicMock()
+        handler.influx_header = "hue,host=test "
+        sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
+        handler.send_data.assert_called_once_with(data={"ok": 1, "consecutive_failures": 0})
+        assert handler.influx_header == "hue,host=test "
+
+    def test_sends_failure_status_with_count(self):
+        """send_heartbeat writes ok=0 with the current consecutive failure count."""
+        handler = MagicMock()
+        handler.influx_header = "hue "
+        sendtoinflux.send_heartbeat(handler, "hue", ok=False, consecutive_failures=3)
+        handler.send_data.assert_called_once_with(data={"ok": 0, "consecutive_failures": 3})
+
+    def test_uses_collector_status_measurement_while_sending(self):
+        """send_heartbeat temporarily swaps in the collector_status header for the write."""
+        handler = MagicMock()
+        handler.influx_header = "hue "
+        captured = {}
+        handler.send_data.side_effect = lambda data=None: captured.update(header=handler.influx_header)
+
+        sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
+
+        assert captured["header"] == "collector_status,source=hue "
+
+    def test_swallows_send_failures(self):
+        """A heartbeat write failure is logged and swallowed, not raised."""
+        handler = MagicMock()
+        handler.influx_header = "hue "
+        handler.send_data.side_effect = Exception("network error")
+
+        sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)  # should not raise
+
+        assert handler.influx_header == "hue "
+
+
+class TestMaybeSendHeartbeat:
+    """Tests for maybe_send_heartbeat."""
+
+    def test_sends_when_not_in_print_mode(self):
+        """maybe_send_heartbeat delegates to send_heartbeat when not in --print mode."""
+        handler = MagicMock()
+        args = SimpleNamespace(print=False, dump=False)
+        with patch("sendtoinflux.send_heartbeat") as mock_heartbeat:
+            sendtoinflux.maybe_send_heartbeat(args, handler, "hue", ok=True, consecutive_failures=0)
+        mock_heartbeat.assert_called_once_with(handler, "hue", ok=True, consecutive_failures=0)
+
+    def test_skips_in_print_mode(self):
+        """maybe_send_heartbeat does not touch InfluxDB in --print mode."""
+        handler = MagicMock()
+        args = SimpleNamespace(print=True, dump=False)
+        with patch("sendtoinflux.send_heartbeat") as mock_heartbeat:
+            sendtoinflux.maybe_send_heartbeat(args, handler, "hue", ok=True, consecutive_failures=0)
+        mock_heartbeat.assert_not_called()
+
+
 class TestRunSingleSourceRetry:
     """Tests for retry/backoff behaviour in run_single_source."""
 
@@ -285,6 +349,116 @@ class TestRunSingleSourceRetry:
 
         assert len(delays) >= 2
         assert delays == list(range(1, len(delays) + 1))
+
+    def test_sends_heartbeat_on_success(self):
+        """run_single_source sends an ok=1 heartbeat after a successful cycle."""
+        handler = self._make_handler()
+        handler.get_data.side_effect = [{"x": 1}, Exception("break")]
+
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
+            patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False))
+
+        mock_heartbeat.assert_any_call(handler, "hue", ok=True, consecutive_failures=0)
+
+    def test_sends_heartbeat_on_failure_with_failure_count(self):
+        """run_single_source sends an ok=0 heartbeat with the failure count after a failed cycle."""
+        handler = self._make_handler()
+        handler.get_data.side_effect = [Exception("network error"), Exception("break")]
+
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
+            patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False))
+
+        mock_heartbeat.assert_any_call(handler, "hue", ok=False, consecutive_failures=1)
+
+    def test_skips_heartbeat_in_print_mode(self):
+        """run_single_source does not write heartbeats in --print mode."""
+        handler = self._make_handler()
+        handler.get_data.side_effect = [{"x": 1}, Exception("break")]
+
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
+            patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.run_single_source("hue", SimpleNamespace(print=True, dump=False))
+
+        mock_heartbeat.assert_not_called()
+
+
+class TestCreateSourceWorkerHeartbeat:
+    """Tests for heartbeat wiring in the multi-source worker."""
+
+    def test_worker_sends_heartbeat_on_success(self):
+        """The multi-source worker sends an ok=1 heartbeat after a successful cycle."""
+        handler = MagicMock()
+        handler.source_settings = {"interval": 60}
+        handler.get_data.return_value = {"x": 1}
+        args = SimpleNamespace(print=False, dump=False)
+
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, KeyboardInterrupt()]),
+            patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
+        ):
+            worker = sendtoinflux.create_source_worker("hue", 0, args)
+            with pytest.raises(KeyboardInterrupt):
+                worker()
+
+        mock_heartbeat.assert_called_once_with(handler, "hue", ok=True, consecutive_failures=0)
+
+    def test_worker_sends_heartbeat_on_failure(self):
+        """The multi-source worker sends an ok=0 heartbeat with the failure count on error."""
+        handler = MagicMock()
+        handler.source_settings = {"interval": 60}
+        handler.get_data.side_effect = Exception("network error")
+        args = SimpleNamespace(print=False, dump=False)
+
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, KeyboardInterrupt()]),
+            patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
+        ):
+            worker = sendtoinflux.create_source_worker("hue", 0, args)
+            with pytest.raises(KeyboardInterrupt):
+                worker()
+
+        mock_heartbeat.assert_any_call(handler, "hue", ok=False, consecutive_failures=1)
+
+    def test_worker_skips_heartbeat_in_print_mode(self):
+        """The multi-source worker does not write heartbeats in --print mode."""
+        handler = MagicMock()
+        handler.source_settings = {"interval": 60}
+        handler.get_data.return_value = {"x": 1}
+        args = SimpleNamespace(print=True, dump=False)
+
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, KeyboardInterrupt()]),
+            patch("sendtoinflux.print_source_data"),
+            patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
+        ):
+            worker = sendtoinflux.create_source_worker("hue", 0, args)
+            with pytest.raises(KeyboardInterrupt):
+                worker()
+
+        mock_heartbeat.assert_not_called()
 
 
 class TestConfigureLogging:
