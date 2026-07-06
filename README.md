@@ -245,35 +245,15 @@ The project uses pytest for unit tests. To run the tests:
 
 No real configuration or network access is required; tests use mocks for settings and HTTP. The same test suite runs in CI on every push and pull request.
 
-Project Structure and How to Contribute
----------------------------------------
+Contributing
+------------
 
-Most of the functionality is located in the 'toinflux' package.  This contains several modules each concerned with a different device type.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the project layout, code
+conventions, the checklist for adding a new data source, and local development setup.
 
-Pretty much all of the code is in a hierarchy of parent and child classes:
-
-general.py - contains the function that returns an instance of the correct child class
-
-influx.py - contains the top level parent class (DataHandler) which implements the common method for uploading to influx - send_data()
-
-philipshue.py - contains a single child class (Hue) with all the functionality required to get data when calling the common method - get_data()
-
-carbonintensity.py - contains a single child class (CarbonIntensity) that fetches national grid carbon intensity and optionally the generation fuel mix from the National Grid ESO API.
-
-myenergi.py - contains an intermediate level child class (MyEnergi) with common functions for retrieving data from the myenergi APIs.  This class has three child classes: Zappi (EV charger), Eddi (hot water diverter), and Harvi (CT clamp energy monitor), each of which implements get_data().
-
-openmeteo.py - contains a single child class (OpenMeteo) that fetches current weather observations from the Open-Meteo API (no API key required).
-
-octopus.py - contains a single child class (Octopus) that fetches half-hourly electricity consumption and optionally the current unit rate from the Octopus Energy API.
-
-speedtest.py - contains a single child class (Speedtest) with all the functionality required to get Speedtest data when calling the common method - get_data()
-
-Unit tests for all the functions and classes are located in the 'tests' directory.
-
-So to add a new device, if it's for an existing manufacturer, e.g. adding another MyEnergi device you can add a new sub-class to an existing file, otherwise add a new file with a class which is a child of DataHandler and exposes a get_data() method.
-
-Don't forget to add imports for any new data collector classes to get_class() in general.py and \_\_init__.py, update the README.md and also add any required settings to example_settings.yaml
-
-Also make sure you add unit tests for any functions or classes that you add.  Check that the existing tests still pass and check your linting before pushing changes to avoid CI failures.
-
-Enjoy!
+Privacy and Security
+---------------------
+`send-to-influx` sends no telemetry and has no author-operated backend - see
+[PRIVACY.md](PRIVACY.md) for what data it does handle (yours, sent only to the InfluxDB and
+device/API endpoints you configure) and [SECURITY.md](SECURITY.md) for reporting a vulnerability
+and operational security notes (credential storage, TLS verification defaults).
