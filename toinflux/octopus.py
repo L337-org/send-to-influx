@@ -38,6 +38,19 @@ class Octopus(DataHandler):
             raise SourceConnectionError(str(e)) from e
         return response.json()
 
+    @staticmethod
+    def _parse_interval_start(interval_start):
+        """Convert an Octopus API ISO-8601 ``interval_start`` string to unix epoch seconds.
+
+        :param interval_start: ISO-8601 timestamp, e.g. "2026-07-06T10:00:00+01:00", or None
+        :type interval_start: str or None
+        :return: unix epoch seconds, or None if interval_start was not provided
+        :rtype: int or None
+        """
+        if not interval_start:
+            return None
+        return int(datetime.fromisoformat(interval_start.replace("Z", "+00:00")).timestamp())
+
     def get_data(self):
         """
         Get the latest electricity/gas consumption and optionally current unit rate from Octopus Energy.
@@ -54,6 +67,7 @@ class Octopus(DataHandler):
         """
         self.influx_header = "octopus,source=octopus_energy "
         self.data = {}
+        self.timestamp = None
 
         # Get most recent electricity consumption reading
         mpan = self.source_settings["mpan"]
@@ -62,7 +76,13 @@ class Octopus(DataHandler):
             f"electricity-meter-points/{mpan}/meters/{serial}/consumption/" "?page_size=1&order_by=-period"
         )
         if result.get("results"):
-            self.data["consumption_kwh"] = result["results"][0]["consumption"]
+            reading = result["results"][0]
+            self.data["consumption_kwh"] = reading["consumption"]
+            # Write the point at the reading's own interval start rather than "now" - readings
+            # arrive up to 24h late, and Octopus keeps re-serving the same latest reading for
+            # ~30 min before the next one lands, so a fixed timestamp makes repeat writes of the
+            # same reading idempotent (overwrite) instead of creating duplicate points.
+            self.timestamp = self._parse_interval_start(reading.get("interval_start"))
 
         # Get most recent gas consumption reading, if a gas meter is configured
         gas_mprn = self.source_settings.get("gas_mprn")

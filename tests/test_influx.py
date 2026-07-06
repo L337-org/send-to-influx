@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 import requests
 import pytest
-from toinflux.influx import DataHandler, InfluxWriteError, _format_field_value
+from toinflux.influx import DataHandler, InfluxWriteError, _escape_key_or_tag_value, _format_field_value
 from toinflux.exceptions import ConfigError
 
 
@@ -210,6 +210,62 @@ class TestDataHandler:
                 assert "count=3i" not in body
                 assert "ratio=1.5" in body
 
+    def test_send_data_appends_explicit_timestamp(self, sample_settings):
+        """send_data appends an explicitly-passed timestamp to the line protocol body."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch("toinflux.influx.requests.post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data(timestamp=1700000000)
+                body = mock_post.call_args[1]["data"]
+                assert body == "hue x=1 1700000000"
+
+    def test_send_data_uses_instance_timestamp_when_not_passed(self, sample_settings):
+        """send_data falls back to self.timestamp (set by get_data()) when no timestamp arg is given."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            h.timestamp = 1600000000
+            with patch("toinflux.influx.requests.post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data()
+                body = mock_post.call_args[1]["data"]
+                assert body == "hue x=1 1600000000"
+
+    def test_send_data_defaults_timestamp_to_now(self, sample_settings):
+        """send_data defaults to the current time when neither timestamp arg nor self.timestamp is set."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            assert h.timestamp is None
+            with patch("toinflux.influx.requests.post") as mock_post, patch(
+                "toinflux.influx.time.time", return_value=1234567890.5
+            ):
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data()
+                body = mock_post.call_args[1]["data"]
+                assert body == "hue x=1 1234567890"
+
+    def test_send_data_escapes_field_keys(self, sample_settings):
+        """send_data escapes commas, equals signs and spaces in field keys."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"Living Room, Main=Sensor": 1}
+            with patch("toinflux.influx.requests.post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data(timestamp=1700000000)
+                body = mock_post.call_args[1]["data"]
+                assert r"Living\ Room\,\ Main\=Sensor=1" in body
+
 
 class TestFormatFieldValue:
     """Tests for the _format_field_value line protocol helper."""
@@ -232,3 +288,22 @@ class TestFormatFieldValue:
 
     def test_string_escapes_quotes_and_backslashes(self):
         assert _format_field_value('say "hi"\\bye') == '"say \\"hi\\"\\\\bye"'
+
+
+class TestEscapeKeyOrTagValue:
+    """Tests for the _escape_key_or_tag_value line protocol helper."""
+
+    def test_escapes_comma(self):
+        assert _escape_key_or_tag_value("a,b") == "a\\,b"
+
+    def test_escapes_equals(self):
+        assert _escape_key_or_tag_value("a=b") == "a\\=b"
+
+    def test_escapes_space(self):
+        assert _escape_key_or_tag_value("a b") == "a\\ b"
+
+    def test_escapes_backslash(self):
+        assert _escape_key_or_tag_value("a\\b") == "a\\\\b"
+
+    def test_leaves_clean_value_untouched(self):
+        assert _escape_key_or_tag_value("clean_key") == "clean_key"
