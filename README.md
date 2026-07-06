@@ -19,6 +19,10 @@ of Smart Plugs and the brightness of lights, but could be modified to collect ot
 To create a username and password for the Hue Bridge, follow the instructions 
 here: https://developers.meethue.com/develop/get-started-2/
 
+Hue bridges are commonly reached over `https` with a self-signed local certificate, so TLS
+verification is skipped by default (`insecure: true`). If your bridge has a valid certificate,
+set `insecure: false` in the `hue` settings block to enable verification.
+
 MyEnergi Zappi / Eddi / Harvi
 -----------------------------
 

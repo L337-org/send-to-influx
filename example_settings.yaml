@@ -54,6 +54,9 @@ hue:
   interval: 300
   # Temperature unit (C/F/K)
   temperature_units: "C"
+  # Skip TLS certificate verification. Defaults to true since Hue bridges are commonly
+  # reached over a self-signed local certificate. Set to false if yours has a valid cert.
+  insecure: true
   # Optional name mappings for custom naming
   # If not specified, the name in the Hue settings is used
   # Any spaces will be replaced with underscores
