@@ -28,6 +28,7 @@ If applicable, add screenshots to help explain your problem.
 
 **Versions (please complete the following information as appropriate):**
  - O/S: [e.g. Debian 12.8]
+ - Install method: [e.g. source checkout / pip / .deb package + systemd]
  - Python: [e.g. 3.11.2]
  - Hue Bridge: [e.g. BSB002| 1.67.1967054020]
  - Zappi: [e.g. v3562S5.736]
