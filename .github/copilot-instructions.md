@@ -26,6 +26,7 @@ send-to-influx is a Python application that collects data from various smart hom
   - configuration problems (`ConfigError`) are not retried: single-source mode exits immediately with code `1`; in multi-source mode that source's worker stops permanently (logged as critical) while other sources keep running
 - **Signals**: handles both SIGINT (Ctrl-C) and SIGTERM (systemd/container stop) for graceful shutdown
 - **Startup logging**: logs an INFO line with the version and the source(s) that will run, so process (re)starts are visible in the logs
+- **Heartbeat**: after every collection cycle, writes a `collector_status,source=<name>` point (fields `ok`, `consecutive_failures`) to InfluxDB via the source's own DataHandler, so a dead collector is visible as `ok=0` rather than a silent gap; skipped in `--print` mode
 
 ### Modular Data Sources (`toinflux/` package)
 The project uses a plugin-like architecture where each data source is implemented as a separate module:

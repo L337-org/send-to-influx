@@ -59,6 +59,7 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 - Handles SIGINT and SIGTERM for graceful shutdown.
 - On startup, logs an INFO line with the version and the source(s) that will run, so process (re)starts are visible in the logs.
 - CLI arguments are parsed *before* `load_settings()` is called, so `--version`/`--help` don't require a config file to exist.
+- After every collection cycle, `maybe_send_heartbeat()` writes a `collector_status,source=<name>` point (fields `ok`, `consecutive_failures`) via `send_heartbeat()`, which reuses the source's own `DataHandler.send_data()` with a swapped-in header. Skipped in `--print` mode.
 
 ### Exceptions (`toinflux/exceptions.py`)
 

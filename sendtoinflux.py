@@ -62,6 +62,45 @@ def collect_source_data(source, args, data_handler):
     return data_handler.source_settings["interval"]
 
 
+def send_heartbeat(data_handler, source, ok, consecutive_failures):
+    """
+    Write a ``collector_status`` point via the source's own DataHandler, so a dead
+    collector shows up as ``ok=0`` in Grafana instead of a silent gap.
+
+    Reuses send_data() by temporarily swapping in a heartbeat measurement header -
+    it doesn't care what measurement/fields it's sending. A heartbeat write failure
+    is logged and swallowed rather than counted as a source failure.
+
+    :param data_handler: the source's DataHandler instance, or None if it hasn't
+        been constructed yet (e.g. a config error) - in which case there's no
+        handler to send a heartbeat through, so this is a no-op
+    :type data_handler: DataHandler or None
+    :param source: source name, used as the ``source`` tag
+    :type source: str
+    :param ok: whether the most recent collection cycle succeeded
+    :type ok: bool
+    :param consecutive_failures: current failure streak for this source
+    :type consecutive_failures: int
+    :return: None
+    """
+    if data_handler is None:
+        return
+    original_header = data_handler.influx_header
+    data_handler.influx_header = f"collector_status,source={source} "
+    try:
+        data_handler.send_data(data={"ok": 1 if ok else 0, "consecutive_failures": consecutive_failures})
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logging.warning("Failed to write heartbeat for source '%s': %s", source, exc)
+    finally:
+        data_handler.influx_header = original_header
+
+
+def maybe_send_heartbeat(args, data_handler, source, ok, consecutive_failures):
+    """Send a heartbeat unless running in --print mode, which never touches InfluxDB."""
+    if not args.print:
+        send_heartbeat(data_handler, source, ok=ok, consecutive_failures=consecutive_failures)
+
+
 def create_source_worker(source, source_start_delay, args, stopped_sources):
     """Create a worker function for continuous source collection with retries.
 
@@ -84,8 +123,10 @@ def create_source_worker(source, source_start_delay, args, stopped_sources):
                 interval = collect_source_data(source, args, data_handler)
                 next_update += interval
                 failure_count = 0
+                maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
             except ConfigError as exc:
                 logging.critical("Source '%s' has a configuration problem and will not be retried: %s", source, exc)
+                maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
                 stopped_sources.add(source)
                 return
             except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -98,6 +139,7 @@ def create_source_worker(source, source_start_delay, args, stopped_sources):
                     restart_delay,
                     failure_count,
                 )
+                maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count)
                 data_handler = None
                 next_update = time.time() + restart_delay
 
@@ -260,8 +302,10 @@ def run_single_source(source, args):
                 data_handler.send_data()
 
             failure_count = 0
+            maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
         except ConfigError as exc:
             logging.critical("Source '%s' has a configuration problem and will not be retried: %s", source, exc)
+            maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
             sys.exit(1)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             failure_count += 1
@@ -273,6 +317,7 @@ def run_single_source(source, args):
                 restart_delay,
                 failure_count,
             )
+            maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count)
             data_handler = None
             next_update = time.time() + restart_delay
 
