@@ -63,14 +63,27 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" send-to-influx_*.deb --title "$GITHUB_REF_NAME" --generate-notes
 
+  check-apt-secret:
+    # `secrets` isn't a recognized named-value in a job-level `if:` (only within step
+    # run/env/with), so whether to run apt-repo has to be computed in a step here and
+    # passed to it via a job output instead of referencing secrets.* directly below.
+    runs-on: [ubuntu-latest]
+    name: Check whether the APT signing key is configured
+    outputs:
+      has_secret: ${{ steps.check.outputs.has_secret }}
+    steps:
+      - name: Check APT_GPG_PRIVATE_KEY secret
+        id: check
+        run: echo "has_secret=${{ secrets.APT_GPG_PRIVATE_KEY != '' }}" >> "$GITHUB_OUTPUT"
+
   apt-repo:
     # Publishes the .deb to a flat APT repo on the gh-pages branch, served via GitHub Pages.
     # Requires a one-time setup: generate a GPG key, add its private key (base64-encoded,
     # armored) as the APT_GPG_PRIVATE_KEY secret, and publish the public key for users to
     # import - see the README's "Running as a systemd service" / APT repo section. Skipped
     # until that secret exists, so tagging a release doesn't require the APT repo to be set up.
-    needs: build-and-release
-    if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
+    needs: [build-and-release, check-apt-secret]
+    if: needs.check-apt-secret.outputs.has_secret == 'true'
     runs-on: [ubuntu-latest]
     name: Publish APT repo to GitHub Pages
     env:
