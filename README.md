@@ -161,8 +161,21 @@ Configuration options for multi-source mode:
 
 Running as a systemd service
 -----------------------------
-Instead of a screen session, you can build a `.deb` package that installs send-to-influx as a
-systemd-managed service:
+Instead of a screen session, you can install send-to-influx as a systemd-managed service via a
+`.deb` package, either built yourself or from the project's APT repo.
+
+### Installing from the APT repo
+
+    curl -fsSL https://gavinlucas.github.io/send-to-influx/send-to-influx.gpg | sudo tee /usr/share/keyrings/send-to-influx.gpg >/dev/null
+    echo "deb [signed-by=/usr/share/keyrings/send-to-influx.gpg] https://gavinlucas.github.io/send-to-influx/ ./" | sudo tee /etc/apt/sources.list.d/send-to-influx.list
+    sudo apt update
+    sudo apt install send-to-influx
+
+The repo only keeps the last few releases' `.deb` files (older versions remain available on the
+[Releases page](https://github.com/GavinLucas/send-to-influx/releases)), and is published by the
+`apt-repo` job in `.github/workflows/release.yaml` on every tagged release.
+
+### Building it yourself
 
     packaging/build-deb.sh
     sudo dpkg -i send-to-influx_*.deb
@@ -170,7 +183,10 @@ systemd-managed service:
 This must be built on the target architecture (it bundles the app and its Python dependencies
 into a venv under `/opt/send-to-influx`, rather than pure source, so it's not architecture-agnostic).
 
-The package installs (but does not start) the service, since it needs configuration first:
+### After installing
+
+Either way, the package installs (but does not start) the service, since it needs configuration
+first:
 
 - Edit `/etc/send-to-influx/settings.yaml` (copied from `example_settings.yaml` on install; dpkg
   preserves your edits across upgrades).

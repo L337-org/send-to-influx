@@ -1,0 +1,121 @@
+name: 'Release'
+permissions:
+  contents: write
+
+# Triggers
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+
+  build-and-release:
+    runs-on: [ubuntu-latest]
+    name: Build .deb and create GitHub release
+    outputs:
+      deb_name: ${{ steps.build.outputs.deb_name }}
+    steps:
+      - name: Check out source repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python environment
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: pytest -v
+
+      - name: Run flake8
+        run: flake8
+
+      - name: Verify tag matches pyproject.toml version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match pyproject.toml version ${pkg_version}"
+            exit 1
+          fi
+
+      - name: Build .deb package
+        id: build
+        run: |
+          packaging/build-deb.sh
+          deb_name="$(basename send-to-influx_*.deb)"
+          echo "deb_name=${deb_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: send-to-influx-deb
+          path: send-to-influx_*.deb
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" send-to-influx_*.deb --title "$GITHUB_REF_NAME" --generate-notes
+
+  apt-repo:
+    # Publishes the .deb to a flat APT repo on the gh-pages branch, served via GitHub Pages.
+    # Requires a one-time setup: generate a GPG key, add its private key (base64-encoded,
+    # armored) as the APT_GPG_PRIVATE_KEY secret, and publish the public key for users to
+    # import - see the README's "Running as a systemd service" / APT repo section. Skipped
+    # until that secret exists, so tagging a release doesn't require the APT repo to be set up.
+    needs: build-and-release
+    if: ${{ secrets.APT_GPG_PRIVATE_KEY != '' }}
+    runs-on: [ubuntu-latest]
+    name: Publish APT repo to GitHub Pages
+    env:
+      KEEP_LAST_N: 5
+    steps:
+      - name: Download .deb artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: send-to-influx-deb
+          path: new-deb
+
+      - name: Check out gh-pages branch
+        uses: actions/checkout@v6
+        with:
+          ref: gh-pages
+          path: gh-pages
+          fetch-depth: 0
+
+      - name: Install apt repo tooling
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev gnupg
+
+      - name: Import GPG signing key
+        run: echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+
+      - name: Update repo contents
+        working-directory: gh-pages
+        run: |
+          cp ../new-deb/*.deb .
+
+          # Keep only the most recent N .deb files; full history stays in GitHub Releases.
+          ls -t *.deb | tail -n +$((KEEP_LAST_N + 1)) | xargs -r rm --
+
+          dpkg-scanpackages . /dev/null > Packages
+          gzip -9c Packages > Packages.gz
+
+          apt-ftparchive release . > Release
+          gpg --batch --yes --armor --detach-sign -o Release.gpg Release
+          gpg --batch --yes --armor --clear-sign -o InRelease Release
+          gpg --batch --yes --armor --export > send-to-influx.gpg
+
+      - name: Commit and push
+        working-directory: gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Publish ${GITHUB_REF_NAME} to APT repo" || echo "Nothing to commit"
+          git push origin gh-pages
