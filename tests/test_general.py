@@ -101,6 +101,55 @@ class TestLoadSettings:
             result = load_settings(settings_file=yaml_path)
             assert result["default_source"] == "from_yaml"
 
+    def test_defaults_to_settings_yaml_when_omitted(self):
+        """load_settings() with no argument resolves to settings.yaml in the project root."""
+        with patch("toinflux.general.open", side_effect=FileNotFoundError):
+            with pytest.raises(SystemExit):
+                load_settings()
+
+    def test_env_influx_token_overrides_yaml(self, sample_settings):
+        """INFLUX_TOKEN environment variable overrides influx.token from the YAML file."""
+        sample_settings["influx"] = {
+            "url": "https://influx.example.com:8086",
+            "token": "yaml-token",
+            "org": "my-org",
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(sample_settings, f)
+            path = f.name
+        try:
+            with patch.dict(os.environ, {"INFLUX_TOKEN": "env-token"}):
+                result = load_settings(settings_file=path)
+            assert result["influx"]["token"] == "env-token"
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_env_influx_password_overrides_yaml(self, sample_settings):
+        """INFLUX_PASSWORD environment variable overrides influx.password from the YAML file."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(sample_settings, f)
+            path = f.name
+        try:
+            with patch.dict(os.environ, {"INFLUX_PASSWORD": "env-password"}):
+                result = load_settings(settings_file=path)
+            assert result["influx"]["password"] == "env-password"
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_no_env_override_when_unset(self, sample_settings):
+        """load_settings leaves influx.token/password untouched when the env vars aren't set."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(sample_settings, f)
+            path = f.name
+        try:
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("INFLUX_TOKEN", None)
+                os.environ.pop("INFLUX_PASSWORD", None)
+                result = load_settings(settings_file=path)
+            assert result["influx"]["password"] == sample_settings["influx"]["password"]
+        finally:
+            Path(path).unlink(missing_ok=True)
+
 
 class TestValidateSettings:
     """Tests for validate_settings function."""
@@ -174,7 +223,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 result = get_class("hue")
-                mock_hue.assert_called_once_with("hue")
+                mock_hue.assert_called_once_with("hue", settings_file=None)
                 assert result is mock_hue.return_value
 
     def test_get_class_returns_hue_for_uppercase(self, sample_settings):
@@ -183,7 +232,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 result = get_class("Hue")
-                mock_hue.assert_called_once_with("hue")
+                mock_hue.assert_called_once_with("hue", settings_file=None)
                 assert result is mock_hue.return_value
 
     def test_get_class_returns_zappi_for_lowercase(self, sample_settings):
@@ -192,7 +241,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.myenergi.Zappi") as mock_zappi:
                 result = get_class("zappi")
-                mock_zappi.assert_called_once_with("zappi")
+                mock_zappi.assert_called_once_with("zappi", settings_file=None)
                 assert result is mock_zappi.return_value
 
     def test_get_class_returns_speedtest_for_lowercase(self, sample_settings):
@@ -201,7 +250,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.speedtest.Speedtest") as mock_speedtest:
                 result = get_class("speedtest")
-                mock_speedtest.assert_called_once_with("speedtest")
+                mock_speedtest.assert_called_once_with("speedtest", settings_file=None)
                 assert result is mock_speedtest.return_value
 
     def test_get_class_returns_speedtest_for_uppercase(self, sample_settings):
@@ -210,13 +259,21 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.speedtest.Speedtest") as mock_speedtest:
                 result = get_class("Speedtest")
-                mock_speedtest.assert_called_once_with("speedtest")
+                mock_speedtest.assert_called_once_with("speedtest", settings_file=None)
                 assert result is mock_speedtest.return_value
 
     def test_get_class_unknown_source_raises_config_error(self):
         """get_class with unknown source raises ConfigError."""
         with pytest.raises(ConfigError):
             get_class("nosuchsource")
+
+    def test_get_class_threads_settings_file_through(self, sample_settings):
+        """get_class passes an explicit settings_file through to the handler constructor."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            with patch("toinflux.philipshue.Hue") as mock_hue:
+                get_class("hue", settings_file="/etc/send-to-influx/settings.yaml")
+                mock_hue.assert_called_once_with("hue", settings_file="/etc/send-to-influx/settings.yaml")
 
 
 class TestFlattenDict:

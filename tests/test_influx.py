@@ -30,6 +30,20 @@ class TestDataHandler:
             with pytest.raises(ConfigError):
                 DataHandler(source="unknown_source")
 
+    def test_init_passes_settings_file_through_to_load_settings(self, sample_settings):
+        """DataHandler __init__ forwards an explicit settings_file to load_settings()."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            DataHandler(source="hue", settings_file="/etc/send-to-influx/settings.yaml")
+            mock_load_settings.assert_called_once_with("/etc/send-to-influx/settings.yaml")
+
+    def test_init_defaults_settings_file_to_none(self, sample_settings):
+        """DataHandler __init__ calls load_settings(None) when settings_file is omitted."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            DataHandler(source="hue")
+            mock_load_settings.assert_called_once_with(None)
+
     def test_send_data_uses_instance_data_when_data_is_none(self, sample_settings):
         """send_data uses self.data when data argument is None."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:

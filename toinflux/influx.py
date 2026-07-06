@@ -60,8 +60,8 @@ def _escape_key_or_tag_value(value):
 class DataHandler:
     """Class to send data to InfluxDB"""
 
-    def __init__(self, source=None):
-        self.settings = load_settings()
+    def __init__(self, source=None, settings_file=None):
+        self.settings = load_settings(settings_file)
         self.source = source
         self.influx_header = None
         self.data = None

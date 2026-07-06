@@ -127,6 +127,15 @@ To also write logs to a file, add an optional `logfile` key to `settings.yaml`:
 
     logfile: "/var/log/send-to-influx.log"
 
+By default the script looks for `settings.yaml` in the project root. To use a settings file at a
+different location (e.g. `/etc/send-to-influx/settings.yaml` for a packaged install), pass
+`--settings <path>`:
+
+    sendtoinflux.py --settings /etc/send-to-influx/settings.yaml
+
+`INFLUX_TOKEN` and `INFLUX_PASSWORD` environment variables, if set, override the corresponding
+values in the `influx` settings block, so secrets need not be stored in the settings file itself.
+
 By default, `sendtoinflux.py` starts one worker per source listed in the `sources` setting. Each source runs in its own loop using its own `interval`.
 
 Worker start times are slightly staggered to avoid all collectors firing at exactly the same moment when intervals are equal.
@@ -150,12 +159,13 @@ Configuration options for multi-source mode:
 Usage
 -----
 >$ ./.venv/bin/python ./sendtoinflux.py --help  
->usage: sendtoinflux.py [-h] [-d] [-p] [-s SOURCE]
+>usage: sendtoinflux.py [-h] [--settings SETTINGS] [-d] [-p] [-s SOURCE]
 >
 >Send Hue Data to InfluxDB
 >
 >options:  
 > &emsp; -h, --help            show this help message and exit  
+> &emsp; --settings SETTINGS   path to the settings file (default: settings.yaml in the project root)  
 > &emsp; -d, --dump            dump the data to the console one time and exit. This requires a source to be specified  
 > &emsp; -p, --print           print the data rather than sending it to InfluxDB  
 > &emsp; -s, --source SOURCE   the source of the data to send to InfluxDB (hue, zappi, etc.). If this parameter is omitted, all sources in the settings file
