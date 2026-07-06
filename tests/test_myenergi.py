@@ -1,5 +1,6 @@
 """Unit tests for toinflux.myenergi (MyEnergi, Zappi, Eddi, Harvi)."""
 
+import datetime
 from unittest.mock import MagicMock, patch
 import pytest
 from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
@@ -190,6 +191,28 @@ class TestZappi:
                     assert result["frq"] == 50
                     assert result["vol"] == 240
                     assert result["custom"] == "yes"
+
+    def test_parse_zappi_data_uses_utc_for_dayhour_lookup(self, sample_settings):
+        """parse_zappi_data computes the day/hour lookup in UTC, not local time.
+
+        23:30 UTC on 2025-06-30 is 00:30 on 2025-07-01 in a UTC+1 (e.g. BST) local
+        timezone - a different day and hour. Using local time here would look up the
+        wrong day/hour bucket from the MyEnergi API, which is UTC-keyed.
+        """
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            zappi = Zappi(source="zappi")
+            myenergi_data = {"zappi": [{"frq": 50}]}
+            fixed_utc_now = datetime.datetime(2025, 6, 30, 23, 30, tzinfo=datetime.timezone.utc)
+            day_data = {"Charge": 0, "Import": 0, "Export": 0, "Genera": 0}
+            with patch.object(Zappi, "get_data_from_myenergi", return_value=myenergi_data):
+                with patch("toinflux.myenergi.datetime") as mock_datetime_module:
+                    mock_datetime_module.datetime.now.return_value = fixed_utc_now
+                    mock_datetime_module.timezone.utc = datetime.timezone.utc
+                    with patch.object(Zappi, "dayhour_results", return_value=day_data) as mock_dayhour:
+                        zappi.parse_zappi_data()
+                        mock_datetime_module.datetime.now.assert_called_once_with(datetime.timezone.utc)
+                        mock_dayhour.assert_called_once_with("2025", "06", "30", 23)
 
 
 class TestEddi:
