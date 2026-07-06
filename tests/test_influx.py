@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 import requests
 import pytest
-from toinflux.influx import DataHandler, _format_field_value
+from toinflux.influx import DataHandler, InfluxWriteError, _format_field_value
 
 
 class TestDataHandler:
@@ -166,8 +166,8 @@ class TestDataHandler:
                 h.send_data()
                 assert mock_post.call_args[1]["verify"] is False
 
-    def test_send_data_handles_request_exception(self, sample_settings):
-        """send_data does not raise when requests.post raises."""
+    def test_send_data_raises_influx_write_error_on_request_exception(self, sample_settings):
+        """send_data raises InfluxWriteError when requests.post raises, so callers can retry/backoff."""
 
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
@@ -176,8 +176,21 @@ class TestDataHandler:
             h.data = {"x": 1}
             with patch("toinflux.influx.requests.post") as mock_post:
                 mock_post.side_effect = requests.exceptions.RequestException("network error")
-                # should not raise
-                h.send_data()
+                with pytest.raises(InfluxWriteError):
+                    h.send_data()
+
+    def test_send_data_raises_influx_write_error_on_bad_status(self, sample_settings):
+        """send_data raises InfluxWriteError when InfluxDB returns an error status."""
+
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch("toinflux.influx.requests.post") as mock_post:
+                mock_post.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError("500 Server Error")
+                with pytest.raises(InfluxWriteError):
+                    h.send_data()
 
     def test_send_data_formats_mixed_field_types_as_line_protocol(self, sample_settings):
         """send_data formats strings/bools/ints/floats per InfluxDB line protocol rules."""

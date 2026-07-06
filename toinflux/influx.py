@@ -13,6 +13,10 @@ import requests
 from toinflux.general import load_settings
 
 
+class InfluxWriteError(Exception):
+    """Raised when a write to InfluxDB fails."""
+
+
 def _format_field_value(value):
     """
     Format a value as an InfluxDB line protocol field value.
@@ -58,6 +62,7 @@ class DataHandler:
         :param data: data to send to InfluxDB
         :type data: dict
         :return: None
+        :raises InfluxWriteError: if the write to InfluxDB fails
         """
         # if the data is not provided, use the data from the class
         if data is None:
@@ -99,3 +104,4 @@ class DataHandler:
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logging.error("Error sending data to InfluxDB - %s", e)
+            raise InfluxWriteError(str(e)) from e
