@@ -27,7 +27,7 @@ class CarbonIntensity(DataHandler):
         """
         url = f"{CARBON_INTENSITY_BASE_URL}/{path}"
         try:
-            response = requests.get(
+            response = self.session.get(
                 url,
                 headers=ACCEPT_JSON,
                 timeout=self.source_settings.get("timeout", 10),

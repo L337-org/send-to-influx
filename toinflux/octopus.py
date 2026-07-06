@@ -27,7 +27,7 @@ class Octopus(DataHandler):
         """
         url = f"{OCTOPUS_BASE_URL}/{path}"
         try:
-            response = requests.get(
+            response = self.session.get(
                 url,
                 auth=(self.source_settings["api_key"], ""),
                 timeout=self.source_settings.get("timeout", 10),
