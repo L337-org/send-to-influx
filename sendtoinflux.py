@@ -68,7 +68,11 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
     collector shows up as ``ok=0`` in Grafana instead of a silent gap.
 
     Reuses send_data() by temporarily swapping in a heartbeat measurement header -
-    it doesn't care what measurement/fields it's sending. A heartbeat write failure
+    it doesn't care what measurement/fields it's sending. Passes an explicit
+    ``timestamp`` of "now": some handlers (e.g. Octopus) set ``self.timestamp`` to
+    something other than the current time for their own writes, which send_data()
+    would otherwise fall back to, making the heartbeat reflect a stale time rather
+    than when the collector was actually last checked. A heartbeat write failure
     is logged and swallowed rather than counted as a source failure.
 
     :param data_handler: the source's DataHandler instance, or None if it hasn't
@@ -88,7 +92,10 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
     original_header = data_handler.influx_header
     data_handler.influx_header = f"collector_status,source={source} "
     try:
-        data_handler.send_data(data={"ok": 1 if ok else 0, "consecutive_failures": consecutive_failures})
+        data_handler.send_data(
+            data={"ok": 1 if ok else 0, "consecutive_failures": consecutive_failures},
+            timestamp=int(time.time()),
+        )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logging.warning("Failed to write heartbeat for source '%s': %s", source, exc)
     finally:
@@ -234,6 +241,15 @@ def main():
         sys.exit(1)
 
     if args.check_config:
+        # load_settings() already validated the configured sources/default_source above;
+        # also validate args.source specifically, since a user checking config for a
+        # particular --source shouldn't get a false "OK" if that source isn't part of
+        # the sources/default_source list load_settings() already checked.
+        try:
+            toinflux.validate_settings(settings, source=args.source)
+        except ConfigError as exc:
+            print(f"Configuration error: {exc}")
+            sys.exit(1)
         print("Configuration OK")
         sys.exit(0)
 
@@ -293,13 +309,8 @@ def run_single_source(source, args):
         try:
             if data_handler is None:
                 data_handler = toinflux.get_class(source, args.settings)
-            next_update += data_handler.source_settings["interval"]
-            data = data_handler.get_data()
-
-            if args.print:
-                print_source_data(source, data)
-            else:
-                data_handler.send_data()
+            interval = collect_source_data(source, args, data_handler)
+            next_update += interval
 
             failure_count = 0
             maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)

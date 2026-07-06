@@ -144,8 +144,15 @@ def _validate_influx_block(influx):
     return errors
 
 
-def _validate_source_block(source, settings):
-    """Return a list of error strings for a single source configuration section."""
+def _validate_source_block(source, settings, is_v2):
+    """Return a list of error strings for a single source configuration section.
+
+    :param is_v2: whether the influx block is configured for v2 (token) auth - v2's
+        send_data() accepts either db or bucket (falling back from bucket to db), but
+        v1's send_data() reads source_settings["db"] directly with no fallback, so a
+        v1 config needs db specifically, not just "db or bucket"
+    :type is_v2: bool
+    """
     if not source:
         return []
     if source not in settings:
@@ -154,22 +161,34 @@ def _validate_source_block(source, settings):
     source_cfg = settings[source]
     if "interval" not in source_cfg:
         errors.append(f"{source}.interval is required")
-    if "db" not in source_cfg and "bucket" not in source_cfg:
-        errors.append(f"{source}.db (or {source}.bucket for InfluxDB v2) is required")
+    if is_v2:
+        if "db" not in source_cfg and "bucket" not in source_cfg:
+            errors.append(f"{source}.db (or {source}.bucket for InfluxDB v2) is required")
+    elif "db" not in source_cfg:
+        errors.append(f"{source}.db is required when using InfluxDB v1 (user/password) authentication")
     return errors
 
 
-def validate_settings(settings):
+def validate_settings(settings, source=None):
     """Validate required keys in a parsed settings dictionary.
 
     :param settings: parsed settings dictionary
     :type settings: dict
+    :param source: an additional specific source to validate (e.g. the --source CLI
+        argument), even if it isn't in the configured sources/default_source - without
+        this, --check-config --source <x> could report success while <x>'s own block
+        is broken, if <x> isn't part of the normal sources list
+    :type source: str or None
     :raises ConfigError: if any required settings are missing or invalid
     """
-    errors = _validate_influx_block(settings.get("influx", {}))
+    influx = settings.get("influx", {})
+    errors = _validate_influx_block(influx)
+    is_v2 = bool(influx.get("token"))
     sources = settings.get("sources") or [settings.get("default_source")]
-    for source in sources:
-        errors.extend(_validate_source_block(source, settings))
+    if source and source not in sources:
+        sources = [*sources, source]
+    for src in sources:
+        errors.extend(_validate_source_block(src, settings, is_v2))
     if errors:
         for error in errors:
             logging.critical("settings.yaml: %s", error)

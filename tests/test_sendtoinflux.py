@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import sendtoinflux
 from toinflux.exceptions import ConfigError
+from toinflux.influx import DataHandler
 
 
 class TestSignalHandler:
@@ -181,6 +182,7 @@ class TestMain:
         with (
             patch("sendtoinflux.signal.signal"),
             patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
+            patch("sendtoinflux.toinflux.validate_settings") as mock_validate_settings,
             patch("sendtoinflux.print") as mock_print,
             patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
             patch("sendtoinflux.sys.exit", side_effect=SystemExit(0)) as mock_exit,
@@ -189,7 +191,42 @@ class TestMain:
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
             mock_exit.assert_called_once_with(0)
+            mock_validate_settings.assert_called_once_with({"default_source": "hue"}, source=None)
             mock_print.assert_called_once_with("Configuration OK")
+
+    def test_main_check_config_validates_explicit_source_argument(self, tmp_path):
+        """--check-config also validates the source named by --source, even if it isn't in sources/default_source.
+
+        Uses a real settings file and the real validate_settings() (not mocked), since
+        that's exactly the code path a fully-mocked test can't catch a gap in.
+        """
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("""
+default_source: hue
+influx:
+  url: "http://influx.example.com:8086"
+  user: "u"
+  password: "p"
+hue:
+  db: hue_db
+  interval: 300
+octopus:
+  db: octopus_db
+""")
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.print") as mock_print,
+            patch(
+                "sendtoinflux.sys.argv",
+                ["sendtoinflux", "--check-config", "--source", "octopus", "--settings", str(settings_path)],
+            ),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(1)) as mock_exit,
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            mock_exit.assert_called_once_with(1)
+            call_arg = mock_print.call_args[0][0]
+            assert "octopus.interval is required" in call_arg
 
     def test_main_check_config_prints_error_and_exits_one_when_invalid(self):
         """main with --check-config prints the error and exits 1 when settings are invalid."""
@@ -364,27 +401,52 @@ class TestSendHeartbeat:
         """send_heartbeat writes ok=1 and restores the handler's original influx_header."""
         handler = MagicMock()
         handler.influx_header = "hue,host=test "
-        sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
-        handler.send_data.assert_called_once_with(data={"ok": 1, "consecutive_failures": 0})
+        with patch("sendtoinflux.time.time", return_value=1700000000.0):
+            sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
+        handler.send_data.assert_called_once_with(data={"ok": 1, "consecutive_failures": 0}, timestamp=1700000000)
         assert handler.influx_header == "hue,host=test "
 
     def test_sends_failure_status_with_count(self):
         """send_heartbeat writes ok=0 with the current consecutive failure count."""
         handler = MagicMock()
         handler.influx_header = "hue "
-        sendtoinflux.send_heartbeat(handler, "hue", ok=False, consecutive_failures=3)
-        handler.send_data.assert_called_once_with(data={"ok": 0, "consecutive_failures": 3})
+        with patch("sendtoinflux.time.time", return_value=1700000000.0):
+            sendtoinflux.send_heartbeat(handler, "hue", ok=False, consecutive_failures=3)
+        handler.send_data.assert_called_once_with(data={"ok": 0, "consecutive_failures": 3}, timestamp=1700000000)
 
     def test_uses_collector_status_measurement_while_sending(self):
         """send_heartbeat temporarily swaps in the collector_status header for the write."""
         handler = MagicMock()
         handler.influx_header = "hue "
         captured = {}
-        handler.send_data.side_effect = lambda data=None: captured.update(header=handler.influx_header)
+        handler.send_data.side_effect = lambda data=None, timestamp=None: captured.update(header=handler.influx_header)
 
         sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
 
         assert captured["header"] == "collector_status,source=hue "
+
+    def test_uses_current_time_not_a_stale_self_timestamp(self, sample_settings):
+        """send_heartbeat writes with the current time, not a stale self.timestamp set by an earlier get_data() cycle.
+
+        Uses a real DataHandler (not a bare mock) so the actual send_data() timestamp
+        fallback logic in influx.py runs, since that's exactly the interaction a fully
+        mocked handler can't catch.
+        """
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            handler = DataHandler(source="hue")
+            handler.influx_header = "hue "
+            # Simulate a handler whose last get_data() cycle set a stale timestamp
+            # (e.g. Octopus using a delayed reading's interval_start).
+            handler.timestamp = 1000000000
+            with (
+                patch.object(handler.session, "post") as mock_post,
+                patch("sendtoinflux.time.time", return_value=2000000000.0),
+            ):
+                mock_post.return_value.raise_for_status = MagicMock()
+                sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
+                body = mock_post.call_args[1]["data"]
+                assert body.endswith(" 2000000000")
 
     def test_swallows_send_failures(self):
         """A heartbeat write failure is logged and swallowed, not raised."""

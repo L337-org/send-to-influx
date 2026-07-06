@@ -54,7 +54,7 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 - `--print`: parsed data to stdout instead of InfluxDB.
 - `--settings <path>`: use a settings file at a path other than `settings.yaml` in the project root (e.g. `/etc/send-to-influx/settings.yaml` for a packaged install). Threaded through `toinflux.get_class()`/`load_settings()`.
 - `--version`: print `__version__` and exit; parsed before settings are loaded, so it works without a `settings.yaml` present.
-- `--check-config`: load and validate the settings file (via `load_settings()`), print `Configuration OK`, exit 0. Exits 1 with details if invalid (same validation as a normal run).
+- `--check-config`: load and validate the settings file (via `load_settings()`), print `Configuration OK`, exit 0. Exits 1 with details if invalid (same validation as a normal run). If `--source` is also given, that source's block is validated too even if it isn't in `sources`/`default_source` (`validate_settings(settings, source=...)`), so checking config for a one-off `--source` can't report a false "OK".
 - `-v`/`--verbose`: force `DEBUG`-level logging, overriding the `loglevel` settings.yaml key.
 - Handles SIGINT and SIGTERM for graceful shutdown.
 - On startup, logs an INFO line with the version and the source(s) that will run, so process (re)starts are visible in the logs.

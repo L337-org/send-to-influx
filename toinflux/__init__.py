@@ -10,6 +10,7 @@ from .general import (
     load_settings,
     get_class,
     configure_logging,
+    validate_settings,
     DEFAULT_LOG_MAX_BYTES,
     DEFAULT_LOG_BACKUP_COUNT,
 )

@@ -207,11 +207,42 @@ class TestValidateSettings:
         sample_settings["influx"]["token"] = ""
         validate_settings(sample_settings)
 
-    def test_bucket_accepted_in_place_of_db(self, sample_settings):
-        """validate_settings accepts bucket as an alternative to db."""
+    def test_bucket_accepted_in_place_of_db_for_v2(self, sample_settings):
+        """validate_settings accepts bucket as an alternative to db, for v2 (token) auth."""
+        sample_settings["influx"] = {"url": "http://influx.example.com:8086", "token": "tok", "org": "myorg"}
         del sample_settings["hue"]["db"]
         sample_settings["hue"]["bucket"] = "hue_bucket"
         validate_settings(sample_settings)
+
+    def test_bucket_without_db_raises_config_error_for_v1(self, sample_settings):
+        """validate_settings rejects bucket-only source config under v1 (user/password) auth.
+
+        v1's send_data() reads source_settings["db"] directly with no bucket fallback
+        (unlike v2, which falls back from bucket to db) - a source configured with only
+        bucket under v1 auth would otherwise pass validation and then KeyError at runtime.
+        """
+        del sample_settings["hue"]["db"]
+        sample_settings["hue"]["bucket"] = "hue_bucket"
+        with pytest.raises(ConfigError):
+            validate_settings(sample_settings)
+
+    def test_explicit_source_validated_even_if_not_in_sources_list(self, sample_settings):
+        """validate_settings(source=...) also validates a source outside sources/default_source.
+
+        Without the source= kwarg, a broken block for a source that isn't part of
+        sources/default_source is never checked - passing it explicitly (as --check-config
+        --source <x> now does) is what surfaces it.
+        """
+        sample_settings["octopus"] = {"db": "octopus_db"}  # missing interval; not in sources/default_source
+        validate_settings(sample_settings)  # passes: octopus isn't checked without source=
+        with pytest.raises(ConfigError):
+            validate_settings(sample_settings, source="octopus")
+
+    def test_explicit_source_not_double_reported_if_already_in_sources_list(self, sample_settings):
+        """validate_settings(source=...) doesn't duplicate a source already covered by sources/default_source."""
+        # default_source is "hue" per sample_settings; passing it explicitly shouldn't
+        # cause it to be validated (and thus reported) twice.
+        validate_settings(sample_settings, source="hue")
 
 
 class TestGetClass:
