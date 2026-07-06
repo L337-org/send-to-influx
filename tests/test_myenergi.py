@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 import pytest
 from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
+from toinflux.exceptions import SourceConnectionError
 
 
 def _eddi_settings(base):
@@ -52,26 +53,26 @@ class TestMyEnergi:
                 result = handler.get_data_from_myenergi("https://example.com/api")
                 assert result == {"key": "value"}
 
-    def test_get_data_from_myenergi_exits_on_401(self, sample_settings):
-        """get_data_from_myenergi exits on 401."""
+    def test_get_data_from_myenergi_raises_on_401(self, sample_settings):
+        """get_data_from_myenergi raises SourceConnectionError on 401."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             handler = MyEnergi(source="zappi")
             mock_resp = MagicMock()
             mock_resp.status_code = 401
             with patch("toinflux.myenergi.requests.get", return_value=mock_resp):
-                with pytest.raises(SystemExit):
+                with pytest.raises(SourceConnectionError):
                     handler.get_data_from_myenergi("https://example.com")
 
-    def test_get_data_from_myenergi_exits_on_other_error_code(self, sample_settings):
-        """get_data_from_myenergi exits on non-200, non-401 status."""
+    def test_get_data_from_myenergi_raises_on_other_error_code(self, sample_settings):
+        """get_data_from_myenergi raises SourceConnectionError on non-200, non-401 status."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             handler = MyEnergi(source="zappi")
             mock_resp = MagicMock()
             mock_resp.status_code = 500
             with patch("toinflux.myenergi.requests.get", return_value=mock_resp):
-                with pytest.raises(SystemExit):
+                with pytest.raises(SourceConnectionError):
                     handler.get_data_from_myenergi("https://example.com")
 
     def test_dayhour_results_aggregates_day(self, sample_settings):

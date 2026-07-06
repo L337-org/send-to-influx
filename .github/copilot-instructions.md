@@ -18,9 +18,8 @@ send-to-influx is a Python application that collects data from various smart hom
   - per-source interval-based timing system to avoid drift
   - multi-source startup stagger via optional `stagger_seconds` setting (default `10`)
 - **Resilience**:
-  - source failures do not stop the process in either single-source or multi-source mode
-  - failed sources are restarted with exponential backoff (base `5s`, max `300s`)
-  - in multi-source mode, only the failed source is retried; others keep running
+  - transient failures (`SourceConnectionError`) are retried with exponential backoff (base `5s`, max `300s`) in either single-source or multi-source mode; in multi-source mode, only the failed source is retried, others keep running
+  - configuration problems (`ConfigError`) are not retried: single-source mode exits immediately with code `1`; in multi-source mode that source's worker stops permanently (logged as critical) while other sources keep running
 - **Signals**: handles both SIGINT (Ctrl-C) and SIGTERM (systemd/container stop) for graceful shutdown
 - **Startup logging**: logs an INFO line with the version and the source(s) that will run, so process (re)starts are visible in the logs
 
@@ -28,8 +27,9 @@ send-to-influx is a Python application that collects data from various smart hom
 The project uses a plugin-like architecture where each data source is implemented as a separate module:
 
 #### Base Classes
-- **`toinflux/general.py`**: `load_settings()` (loads YAML configuration and returns a dictionary), `get_class()` (case-insensitive factory function to instantiate data source classes dynamically), `configure_logging(logfile=None)` (sets up timestamped stdout logging with optional file handler)
+- **`toinflux/general.py`**: `load_settings()` (loads YAML configuration and returns a dictionary; raises `ConfigError` on missing/invalid YAML), `get_class()` (case-insensitive factory function to instantiate data source classes dynamically; raises `ConfigError` for an unknown source), `configure_logging(logfile=None)` (sets up timestamped stdout logging with optional file handler)
 - **`toinflux/influx.py`**: `DataHandler` (base class for all data sources)
+- **`toinflux/exceptions.py`**: `ConfigError` (fatal, not retried) and `SourceConnectionError` (transient, retried with backoff)
 
 #### Current Data Sources
 - **`toinflux/philipshue.py`**: Philips Hue Bridge integration
@@ -106,13 +106,14 @@ newsource:
 ### Error Handling Patterns
 ```python
 import logging
+from toinflux.exceptions import SourceConnectionError
 
 try:
     response = requests.get(url, timeout=timeout)
     response.raise_for_status()
 except requests.exceptions.RequestException as e:
     logging.error("Error connecting to API - %s", e)
-    sys.exit(2)
+    raise SourceConnectionError(str(e)) from e
 ```
 
 ## Current Data Sources

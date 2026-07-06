@@ -5,10 +5,10 @@ __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT License"
 __version__ = "1.0"
 
-import sys
 import logging
 import requests
 from toinflux.influx import DataHandler
+from toinflux.exceptions import SourceConnectionError
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -41,7 +41,7 @@ class OpenMeteo(DataHandler):
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logging.error("Error connecting to Open-Meteo - %s", e)
-            sys.exit(2)
+            raise SourceConnectionError(str(e)) from e
 
         current = response.json().get("current", {})
         self.data = {k: current[k] for k in fields if k in current}

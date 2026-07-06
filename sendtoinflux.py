@@ -14,6 +14,7 @@ import logging
 import argparse
 import threading
 import toinflux
+from toinflux.exceptions import ConfigError
 
 DEFAULT_STAGGER_SECONDS = 10
 BACKOFF_BASE_SECONDS = 5
@@ -54,8 +55,14 @@ def collect_source_data(source, args, data_handler):
     return data_handler.source_settings["interval"]
 
 
-def create_source_worker(source, source_start_delay, args):
-    """Create a worker function for continuous source collection with retries."""
+def create_source_worker(source, source_start_delay, args, stopped_sources):
+    """Create a worker function for continuous source collection with retries.
+
+    :param stopped_sources: shared set that the worker adds ``source`` to when it
+        gives up permanently (a ConfigError), so the multi-source supervisor loop
+        knows not to restart it
+    :type stopped_sources: set
+    """
 
     def source_worker():
         failure_count = 0
@@ -70,18 +77,10 @@ def create_source_worker(source, source_start_delay, args):
                 interval = collect_source_data(source, args, data_handler)
                 next_update += interval
                 failure_count = 0
-            except SystemExit as exc:
-                failure_count += 1
-                restart_delay = get_backoff_delay(failure_count)
-                logging.warning(
-                    "Source '%s' exited with code %s. Restarting in %s seconds (attempt %s).",
-                    source,
-                    exc.code,
-                    restart_delay,
-                    failure_count,
-                )
-                data_handler = None
-                next_update = time.time() + restart_delay
+            except ConfigError as exc:
+                logging.critical("Source '%s' has a configuration problem and will not be retried: %s", source, exc)
+                stopped_sources.add(source)
+                return
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 failure_count += 1
                 restart_delay = get_backoff_delay(failure_count)
@@ -122,7 +121,10 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     # load settings once for defaults and configured source list
-    settings = toinflux.load_settings()
+    try:
+        settings = toinflux.load_settings()
+    except ConfigError:
+        sys.exit(1)
     toinflux.configure_logging(settings.get("logfile"))
     default_source = settings.get("default_source", "hue")
 
@@ -184,11 +186,16 @@ def run_single_source(source, args):
     :param args: parsed CLI arguments
     :type args: argparse.Namespace
     """
-    data_handler = toinflux.get_class(source)
+    data_handler = None
 
     # dump the data if required and exit
     if args.dump:
-        data = data_handler.get_data()
+        try:
+            data_handler = toinflux.get_class(source)
+            data = data_handler.get_data()
+        except ConfigError as exc:
+            logging.critical("Source '%s' has a configuration problem: %s", source, exc)
+            sys.exit(1)
         print(json.dumps(data, indent=4))
         sys.exit(0)
 
@@ -207,18 +214,9 @@ def run_single_source(source, args):
                 data_handler.send_data()
 
             failure_count = 0
-        except SystemExit as exc:
-            failure_count += 1
-            restart_delay = get_backoff_delay(failure_count)
-            logging.warning(
-                "Source '%s' exited with code %s. Restarting in %s seconds (attempt %s).",
-                source,
-                exc.code,
-                restart_delay,
-                failure_count,
-            )
-            data_handler = None
-            next_update = time.time() + restart_delay
+        except ConfigError as exc:
+            logging.critical("Source '%s' has a configuration problem and will not be retried: %s", source, exc)
+            sys.exit(1)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             failure_count += 1
             restart_delay = get_backoff_delay(failure_count)
@@ -256,19 +254,19 @@ def run_multi_source(sources, args, stagger_seconds):
 
     threads = []
     workers = []
+    stopped_sources = set()
     stagger_step = max(0, stagger_value)
     for index, source in enumerate(sources):
         start_delay = stagger_step * index
-        worker = create_source_worker(source, start_delay, args)
+        worker = create_source_worker(source, start_delay, args, stopped_sources)
         workers.append(worker)
         threads.append(spawn_source_thread(worker))
 
     while True:
-        if any(not thread.is_alive() for thread in threads):
-            logging.warning("One or more source workers stopped unexpectedly. Restarting worker thread.")
-            for idx, thread in enumerate(threads):
-                if not thread.is_alive():
-                    threads[idx] = spawn_source_thread(workers[idx])
+        for idx, thread in enumerate(threads):
+            if not thread.is_alive() and sources[idx] not in stopped_sources:
+                logging.warning("Source '%s' worker stopped unexpectedly. Restarting worker thread.", sources[idx])
+                threads[idx] = spawn_source_thread(workers[idx])
         time.sleep(1)
 
 

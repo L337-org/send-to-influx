@@ -4,18 +4,19 @@ from socket import gethostname
 from unittest.mock import MagicMock, patch
 import pytest
 from toinflux.speedtest import Speedtest
+from toinflux.exceptions import ConfigError
 
 
 class TestSpeedtest:
     """Tests for Speedtest class."""
 
-    def test_init_exits_when_speedtest_source_missing_in_settings(self, sample_settings):
-        """Speedtest init exits when speedtest source is not in settings."""
+    def test_init_raises_config_error_when_speedtest_source_missing_in_settings(self, sample_settings):
+        """Speedtest init raises ConfigError when speedtest source is not in settings."""
         settings = {k: v for k, v in sample_settings.items() if k != "speedtest"}
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             with patch("toinflux.speedtest.speedtest.Speedtest"):
-                with pytest.raises(SystemExit):
+                with pytest.raises(ConfigError):
                     Speedtest(source="speedtest")
 
     def test_get_data_runs_speedtest_and_returns_all_fields_without_filter(self, sample_settings):

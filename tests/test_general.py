@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 from toinflux.general import flatten_dict, load_settings, get_class, validate_settings
+from toinflux.exceptions import ConfigError
 
 
 class TestLoadSettings:
@@ -34,31 +35,31 @@ class TestLoadSettings:
         finally:
             Path(path).unlink(missing_ok=True)
 
-    def test_file_not_found_exits(self):
-        """load_settings exits with 1 when file is missing."""
+    def test_file_not_found_raises_config_error(self):
+        """load_settings raises ConfigError when file is missing."""
         with tempfile.TemporaryDirectory() as tmp:
             missing = os.path.join(tmp, "missing.yml")
-            with pytest.raises(SystemExit):
+            with pytest.raises(ConfigError):
                 load_settings(settings_file=missing)
 
-    def test_invalid_yaml_exits(self):
-        """load_settings exits with 1 on YAML error."""
+    def test_invalid_yaml_raises_config_error(self):
+        """load_settings raises ConfigError on YAML error."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
             f.write("invalid: yaml: [[[")
             path = f.name
         try:
-            with pytest.raises(SystemExit):
+            with pytest.raises(ConfigError):
                 load_settings(settings_file=path)
         finally:
             Path(path).unlink(missing_ok=True)
 
-    def test_empty_yaml_exits(self):
-        """load_settings exits with 1 on empty YAML file."""
+    def test_empty_yaml_raises_config_error(self):
+        """load_settings raises ConfigError on empty YAML file."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
             f.write("")
             path = f.name
         try:
-            with pytest.raises(SystemExit):
+            with pytest.raises(ConfigError):
                 load_settings(settings_file=path)
         finally:
             Path(path).unlink(missing_ok=True)
@@ -115,41 +116,41 @@ class TestValidateSettings:
         del sample_settings["hue"]["db"]
         validate_settings(sample_settings)
 
-    def test_missing_influx_url_exits(self, sample_settings):
-        """validate_settings exits when influx.url is missing."""
+    def test_missing_influx_url_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when influx.url is missing."""
         del sample_settings["influx"]["url"]
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
-    def test_missing_influx_credentials_exits(self, sample_settings):
-        """validate_settings exits when neither v1 nor v2 credentials are present."""
+    def test_missing_influx_credentials_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when neither v1 nor v2 credentials are present."""
         del sample_settings["influx"]["user"]
         del sample_settings["influx"]["password"]
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
-    def test_v2_token_without_org_exits(self, sample_settings):
-        """validate_settings exits when token is present but org is missing."""
+    def test_v2_token_without_org_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when token is present but org is missing."""
         sample_settings["influx"]["token"] = "mytoken"
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
-    def test_missing_source_section_exits(self, sample_settings):
-        """validate_settings exits when a configured source has no settings section."""
+    def test_missing_source_section_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when a configured source has no settings section."""
         sample_settings["sources"] = ["hue", "nosuchsource"]
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
-    def test_missing_interval_exits(self, sample_settings):
-        """validate_settings exits when a source is missing interval."""
+    def test_missing_interval_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when a source is missing interval."""
         del sample_settings["hue"]["interval"]
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
-    def test_missing_db_and_bucket_exits(self, sample_settings):
-        """validate_settings exits when a source has neither db nor bucket."""
+    def test_missing_db_and_bucket_raises_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when a source has neither db nor bucket."""
         del sample_settings["hue"]["db"]
-        with pytest.raises(SystemExit):
+        with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
     def test_empty_token_falls_back_to_v1_validation(self, sample_settings):
@@ -212,9 +213,9 @@ class TestGetClass:
                 mock_speedtest.assert_called_once_with("speedtest")
                 assert result is mock_speedtest.return_value
 
-    def test_get_class_unknown_source_exits(self):
-        """get_class with unknown source exits with 1."""
-        with pytest.raises(SystemExit):
+    def test_get_class_unknown_source_raises_config_error(self):
+        """get_class with unknown source raises ConfigError."""
+        with pytest.raises(ConfigError):
             get_class("nosuchsource")
 
 

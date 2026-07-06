@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import yaml
+from toinflux.exceptions import ConfigError
 
 
 def configure_logging(logfile=None):
@@ -109,8 +110,7 @@ def get_class(source):
     try:
         my_class = classes[class_name](source_name)
     except KeyError:
-        logging.error("Source %s not found", class_name)
-        sys.exit(1)
+        raise ConfigError(f"Source {class_name} not found") from None
     return my_class
 
 
@@ -143,10 +143,11 @@ def _validate_source_block(source, settings):
 
 
 def validate_settings(settings):
-    """Validate required keys in a parsed settings dictionary, exit with code 1 if invalid.
+    """Validate required keys in a parsed settings dictionary.
 
     :param settings: parsed settings dictionary
     :type settings: dict
+    :raises ConfigError: if any required settings are missing or invalid
     """
     errors = _validate_influx_block(settings.get("influx", {}))
     sources = settings.get("sources") or [settings.get("default_source")]
@@ -155,7 +156,7 @@ def validate_settings(settings):
     if errors:
         for error in errors:
             logging.critical("settings.yaml: %s", error)
-        sys.exit(1)
+        raise ConfigError("; ".join(errors))
 
 
 def load_settings(settings_file="settings.yaml"):
@@ -183,7 +184,7 @@ def load_settings(settings_file="settings.yaml"):
 
         if not isinstance(settings, dict) or not settings:
             logging.critical("Invalid or empty configuration in %s. Please check %s.", settings_path, settings_path)
-            sys.exit(1)
+            raise ConfigError(f"Invalid or empty configuration in {settings_path}")
 
         validate_settings(settings)
         return settings
@@ -191,7 +192,7 @@ def load_settings(settings_file="settings.yaml"):
         logging.critical(
             "%s not found. Make sure you copy example_settings.yaml to %s and edit it.", settings_path, settings_path
         )
-        sys.exit(1)
+        raise ConfigError(f"{settings_path} not found") from None
     except yaml.YAMLError as e:
         logging.critical("Error in %s - %s", settings_path, e)
-        sys.exit(1)
+        raise ConfigError(f"Error in {settings_path} - {e}") from e

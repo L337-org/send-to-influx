@@ -5,10 +5,10 @@ __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT License"
 __version__ = "1.0"
 
-import sys
 import logging
 import requests
 from toinflux.influx import DataHandler
+from toinflux.exceptions import SourceConnectionError
 
 CARBON_INTENSITY_BASE_URL = "https://api.carbonintensity.org.uk"
 ACCEPT_JSON = {"Accept": "application/json"}
@@ -35,7 +35,7 @@ class CarbonIntensity(DataHandler):
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logging.error("Error connecting to Carbon Intensity API - %s", e)
-            sys.exit(2)
+            raise SourceConnectionError(str(e)) from e
         return response.json()
 
     def get_data(self):

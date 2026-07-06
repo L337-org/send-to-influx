@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import requests
 import pytest
 from toinflux.influx import DataHandler, _format_field_value
+from toinflux.exceptions import ConfigError
 
 
 class TestDataHandler:
@@ -22,11 +23,11 @@ class TestDataHandler:
             assert h.influx_header is None
             assert h.data is None
 
-    def test_init_source_not_in_settings_exits(self, sample_settings):
-        """DataHandler __init__ exits when source not in settings."""
+    def test_init_source_not_in_settings_raises_config_error(self, sample_settings):
+        """DataHandler __init__ raises ConfigError when source not in settings."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
-            with pytest.raises(SystemExit):
+            with pytest.raises(ConfigError):
                 DataHandler(source="unknown_source")
 
     def test_send_data_uses_instance_data_when_data_is_none(self, sample_settings):

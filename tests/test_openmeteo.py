@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 from toinflux.openmeteo import OpenMeteo
+from toinflux.exceptions import SourceConnectionError
 
 
 def _openmeteo_settings(base):
@@ -78,8 +79,8 @@ class TestOpenMeteo:
                 assert params["current"] == "temperature_2m,relative_humidity_2m"
                 assert params["timezone"] == "auto"
 
-    def test_get_data_exits_on_request_exception(self, sample_settings):
-        """get_data exits with code 2 when the HTTP request fails."""
+    def test_get_data_raises_source_connection_error_on_request_exception(self, sample_settings):
+        """get_data raises SourceConnectionError when the HTTP request fails."""
         settings = _openmeteo_settings(sample_settings)
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
@@ -88,6 +89,5 @@ class TestOpenMeteo:
                 "toinflux.openmeteo.requests.get",
                 side_effect=requests.exceptions.ConnectionError("timeout"),
             ):
-                with pytest.raises(SystemExit) as exc_info:
+                with pytest.raises(SourceConnectionError):
                     handler.get_data()
-                assert exc_info.value.code == 2

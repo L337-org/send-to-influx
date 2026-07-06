@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 from toinflux.octopus import Octopus
+from toinflux.exceptions import SourceConnectionError
 
 
 def _octopus_settings(base):
@@ -127,8 +128,8 @@ class TestOctopus:
                 result = handler.get_data()
                 assert result == {}
 
-    def test_get_data_exits_on_request_exception(self, sample_settings):
-        """get_data exits with code 2 when the HTTP request fails."""
+    def test_get_data_raises_source_connection_error_on_request_exception(self, sample_settings):
+        """get_data raises SourceConnectionError when the HTTP request fails."""
         settings = _octopus_settings(sample_settings)
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
@@ -137,9 +138,8 @@ class TestOctopus:
                 "toinflux.octopus.requests.get",
                 side_effect=requests.exceptions.ConnectionError("refused"),
             ):
-                with pytest.raises(SystemExit) as exc_info:
+                with pytest.raises(SourceConnectionError):
                     handler.get_data()
-                assert exc_info.value.code == 2
 
     def test_get_data_uses_api_key_for_auth(self, sample_settings):
         """get_data authenticates with api_key as basic auth username."""

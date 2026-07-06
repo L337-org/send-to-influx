@@ -5,12 +5,12 @@ __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT License"
 __version__ = "1.0"
 
-import sys
 import logging
 import datetime
 import requests
 from requests.auth import HTTPDigestAuth
 from toinflux.influx import DataHandler
+from toinflux.exceptions import SourceConnectionError
 
 
 class MyEnergi(DataHandler):
@@ -33,10 +33,10 @@ class MyEnergi(DataHandler):
             pass
         elif response.status_code == 401:
             logging.error("Login unsuccessful. Please check username, password or URL.")
-            sys.exit(2)
+            raise SourceConnectionError("Login unsuccessful. Please check username, password or URL.")
         else:
             logging.error("Login unsuccessful. Return code: %s", response.status_code)
-            sys.exit(2)
+            raise SourceConnectionError(f"Login unsuccessful. Return code: {response.status_code}")
 
         return response.json()
 

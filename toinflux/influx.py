@@ -5,12 +5,12 @@ __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT License"
 __version__ = "1.0"
 
-import sys
 import logging
 import warnings
 import urllib3
 import requests
 from toinflux.general import load_settings
+from toinflux.exceptions import ConfigError
 
 
 def _format_field_value(value):
@@ -48,8 +48,7 @@ class DataHandler:
         if self.source and self.source in self.settings:
             self.source_settings = self.settings[self.source]
         else:
-            logging.error("Source %s not found in settings", self.source)
-            sys.exit(1)
+            raise ConfigError(f"Source {self.source} not found in settings")
 
     def send_data(self, data=None):
         """

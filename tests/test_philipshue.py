@@ -5,6 +5,7 @@ import pytest
 import requests
 
 from toinflux.philipshue import Hue
+from toinflux.exceptions import SourceConnectionError
 
 
 class TestHue:
@@ -33,25 +34,25 @@ class TestHue:
                 result = hue.get_data_from_hue_bridge()
                 assert result == {"sensors": {}, "lights": {}}
 
-    def test_get_data_from_hue_bridge_exits_on_request_exception(self, sample_settings):
-        """get_data_from_hue_bridge exits on requests exception."""
+    def test_get_data_from_hue_bridge_raises_on_request_exception(self, sample_settings):
+        """get_data_from_hue_bridge raises SourceConnectionError on requests exception."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             hue = Hue(source="hue")
             with patch("toinflux.philipshue.requests.get") as mock_get:
                 mock_get.side_effect = requests.exceptions.RequestException("connection failed")
-                with pytest.raises(SystemExit):
+                with pytest.raises(SourceConnectionError):
                     hue.get_data_from_hue_bridge()
 
-    def test_get_data_from_hue_bridge_exits_on_api_error_list(self, sample_settings):
-        """get_data_from_hue_bridge exits when API returns error list."""
+    def test_get_data_from_hue_bridge_raises_on_api_error_list(self, sample_settings):
+        """get_data_from_hue_bridge raises SourceConnectionError when API returns error list."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             hue = Hue(source="hue")
             mock_response = MagicMock()
             mock_response.json.return_value = [{"error": {"description": "unauthorized"}}]
             with patch("toinflux.philipshue.requests.get", return_value=mock_response):
-                with pytest.raises(SystemExit):
+                with pytest.raises(SourceConnectionError):
                     hue.get_data_from_hue_bridge()
 
     def test_hue_device_name_to_name_uses_mapping_when_present(self, sample_settings):

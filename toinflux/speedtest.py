@@ -5,12 +5,12 @@ __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT License"
 __version__ = "1.0"
 
-import sys
 import logging
 from socket import gethostname
 import speedtest
 from toinflux.influx import DataHandler
 from toinflux.general import flatten_dict
+from toinflux.exceptions import SourceConnectionError
 
 
 class Speedtest(DataHandler):
@@ -35,10 +35,10 @@ class Speedtest(DataHandler):
             st_data = st.results.dict()
         except speedtest.SpeedtestException as e:
             logging.error("Error running Speedtest - %s", e)
-            sys.exit(2)
+            raise SourceConnectionError(str(e)) from e
         if not isinstance(st_data, dict):
             logging.error("Error running Speedtest - invalid results")
-            sys.exit(2)
+            raise SourceConnectionError("invalid results")
 
         # flatten the speedtest payload so nested values can be filtered and sent
         flattened_data = flatten_dict(st_data)
