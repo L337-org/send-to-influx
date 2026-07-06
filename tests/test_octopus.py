@@ -55,7 +55,7 @@ class TestOctopus:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
-            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([consumption_response])):
+            with patch.object(handler.session, "get", side_effect=_mock_get([consumption_response])):
                 handler.get_data()
                 # 2026-07-06T10:00:00+01:00 == 2026-07-06T09:00:00Z
                 assert handler.timestamp == 1783328400
@@ -67,7 +67,7 @@ class TestOctopus:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
-            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([consumption_response])):
+            with patch.object(handler.session, "get", side_effect=_mock_get([consumption_response])):
                 handler.get_data()
                 assert handler.timestamp is None
 
@@ -78,7 +78,7 @@ class TestOctopus:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
             handler.timestamp = 1234567890
-            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([{"results": []}])):
+            with patch.object(handler.session, "get", side_effect=_mock_get([{"results": []}])):
                 handler.get_data()
                 assert handler.timestamp is None
 

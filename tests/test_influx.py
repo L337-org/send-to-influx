@@ -188,7 +188,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue "
             h.data = {"x": 1}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status.side_effect = requests.exceptions.HTTPError("500 Server Error")
                 with pytest.raises(InfluxWriteError):
                     h.send_data()
@@ -217,7 +217,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue "
             h.data = {"x": 1}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data(timestamp=1700000000)
                 body = mock_post.call_args[1]["data"]
@@ -231,7 +231,7 @@ class TestDataHandler:
             h.influx_header = "hue "
             h.data = {"x": 1}
             h.timestamp = 1600000000
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data()
                 body = mock_post.call_args[1]["data"]
@@ -245,7 +245,7 @@ class TestDataHandler:
             h.influx_header = "hue "
             h.data = {"x": 1}
             assert h.timestamp is None
-            with patch("toinflux.influx.requests.post") as mock_post, patch(
+            with patch.object(h.session, "post") as mock_post, patch(
                 "toinflux.influx.time.time", return_value=1234567890.5
             ):
                 mock_post.return_value.raise_for_status = MagicMock()
@@ -260,7 +260,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue "
             h.data = {"Living Room, Main=Sensor": 1}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data(timestamp=1700000000)
                 body = mock_post.call_args[1]["data"]
