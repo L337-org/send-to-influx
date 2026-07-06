@@ -27,8 +27,9 @@ being deliberate about are credential storage and TLS verification:
   valid certificate. Don't set `insecure: true` for InfluxDB unless you understand the exposure
   (typically only reasonable for a same-host or same-LAN instance).
 - **Packaged (`.deb`/systemd) deployments** run as a dedicated unprivileged system user with
-  `NoNewPrivileges=true` and `ProtectSystem=strict`, limited to writing under
-  `/etc/send-to-influx` - see `packaging/send-to-influx.service`.
+  `NoNewPrivileges=true` and `ProtectSystem=strict` (mounts the filesystem read-only except for
+  paths explicitly listed). `/etc/send-to-influx` is the only path granted read-write access via
+  `ReadWritePaths=` - see `packaging/send-to-influx.service`.
 
 If you find a gap in any of the above (e.g. a credential that ends up somewhere it shouldn't,
 such as logs), please report it via the private flow above rather than a public issue.
