@@ -3,6 +3,8 @@
 ## Project Overview
 send-to-influx is a Python application that collects data from various smart home and energy monitoring devices and sends them to InfluxDB for time-series monitoring and visualization. The project is designed with a modular architecture that makes it easy to add new data sources.
 
+Contributor-facing project structure and conventions live in [CONTRIBUTING.md](../CONTRIBUTING.md); see also [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md), [SECURITY.md](../SECURITY.md), and [PRIVACY.md](../PRIVACY.md).
+
 ## Architecture
 
 ### Main Application (`sendtoinflux.py`)
@@ -166,7 +168,7 @@ except requests.exceptions.RequestException as e:
 
 ### Core Dependencies
 - `requests`: HTTP requests for APIs and InfluxDB
-- `urllib3`: HTTP client library; `InsecureRequestWarning` is suppressed only for the Hue bridge request (which uses a self-signed cert) in `toinflux/philipshue.py`
+- `urllib3`: HTTP client library; `InsecureRequestWarning` is suppressed only when the relevant `insecure` setting is true - for the Hue bridge request (`toinflux/philipshue.py`, defaults to insecure) and for InfluxDB writes (`toinflux/influx.py`, defaults to secure)
 - `pyyaml`: YAML configuration file parsing
 - `speedtest-cli`: Speedtest library for collecting network perf data
 
@@ -175,7 +177,8 @@ except requests.exceptions.RequestException as e:
 - `flake8`: Linting with bugbear and black plugins
 - `flake8-bugbear`: Additional linting rules
 - `flake8-black`: Black integration for flake8
-- `pytest`: Unit test framework
+- `pytest` / `pytest-cov`: Unit test framework and coverage reporting
+- `mypy` / `types-PyYAML` / `types-requests`: Static type checking (permissive config, see `pyproject.toml`'s `[tool.mypy]`)
 
 Install runtime requirements with `.venv/bin/pip install -r requirements.txt`, or development requirements (which include runtime) with `.venv/bin/pip install -r requirements-dev.txt`.
 

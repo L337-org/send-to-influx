@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Contributor-facing project structure and conventions live in [CONTRIBUTING.md](CONTRIBUTING.md) (this
+file is the deeper architecture reference); see also [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md),
+[SECURITY.md](SECURITY.md), and [PRIVACY.md](PRIVACY.md).
+
 ## Commands
 
 All Python tooling must use the repo-local virtual environment (`.venv`), not system Python.
