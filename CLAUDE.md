@@ -45,16 +45,21 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 
 ### Entry point (`sendtoinflux.py`)
 
-- **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source. Failures are retried with exponential backoff (base 5 s, max 300 s).
-- **Multi-source mode** (no `--source`): reads `sources` list from `settings.yaml`, spawns one daemon thread per source with a configurable startup stagger (`stagger_seconds`, default 10). Dead threads are detected and restarted with the same exponential backoff.
+- **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source. Connection failures (`SourceConnectionError`) are retried with exponential backoff (base 5 s, max 300 s); a `ConfigError` is not retried — it exits the process immediately with code 1.
+- **Multi-source mode** (no `--source`): reads `sources` list from `settings.yaml`, spawns one daemon thread per source with a configurable startup stagger (`stagger_seconds`, default 10). Dead threads are detected and restarted with the same exponential backoff — unless the source's worker stopped because of a `ConfigError`, in which case it is logged and left stopped (other sources keep running).
 - `--dump`: one-time raw JSON to stdout, then exit (single source only).
 - `--print`: parsed data to stdout instead of InfluxDB.
 - Handles SIGINT and SIGTERM for graceful shutdown.
 - On startup, logs an INFO line with the version and the source(s) that will run, so process (re)starts are visible in the logs.
 
+### Exceptions (`toinflux/exceptions.py`)
+
+- `ConfigError`: a fatal, non-retryable problem (missing/invalid settings, unknown source name). Raised by `toinflux/general.py` (`load_settings()`, `get_class()`) and `DataHandler.__init__()`.
+- `SourceConnectionError`: a transient problem talking to a source's API (network error, bad auth, bad response). Raised from each handler's `get_data()`/API-call code and retried with backoff by the worker loop.
+
 ### Factory / settings
 
-- `toinflux/general.py`: `load_settings(file)` (exits with code 1 on missing/invalid YAML), `get_class(source)` (case-insensitive factory → correct DataHandler subclass), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None)` (sets up timestamped stdout logging, plus optional file handler).
+- `toinflux/general.py`: `load_settings(file)` (raises `ConfigError` on missing/invalid YAML), `get_class(source)` (case-insensitive factory → correct DataHandler subclass; raises `ConfigError` for an unknown source), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None)` (sets up timestamped stdout logging, plus optional file handler).
 - `configure_logging()` is called in `main()` after settings are loaded. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`.
 - Config file: `settings.yaml` (copy from `example_settings.yaml`). Required at runtime; not committed. Optional `logfile` key adds a file log destination.
 

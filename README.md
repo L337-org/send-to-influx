@@ -127,7 +127,7 @@ By default, `sendtoinflux.py` starts one worker per source listed in the `source
 
 Worker start times are slightly staggered to avoid all collectors firing at exactly the same moment when intervals are equal.
 
-If a source fails — whether running in single-source or multi-source mode — it is automatically restarted with exponential backoff (base 5 s, max 300 s) to avoid tight failure loops. In multi-source mode, only the failed source is retried; other sources keep running.
+If a source hits a transient failure (e.g. a network error talking to its API or to InfluxDB) — whether running in single-source or multi-source mode — it is automatically restarted with exponential backoff (base 5 s, max 300 s) to avoid tight failure loops. In multi-source mode, only the failed source is retried; other sources keep running. A configuration problem (e.g. a source missing its settings section) is not retried: in single-source mode the process exits with code 1; in multi-source mode that source's worker stops permanently and a critical line is logged, while other sources keep running.
 
 There are a few options that can be passed to the script and a couple of these can help you to debug and also to help you understand your data:
 

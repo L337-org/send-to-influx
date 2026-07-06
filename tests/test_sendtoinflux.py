@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 import pytest
 import sendtoinflux
+from toinflux.exceptions import ConfigError
 
 
 class TestSignalHandler:
@@ -204,8 +205,56 @@ class TestHelpers:
             with pytest.raises(SystemExit):
                 sendtoinflux.run_multi_source(["hue", "zappi"], args, "not-an-int")
 
-        mock_create_source_worker.assert_any_call("hue", 0, args)
-        mock_create_source_worker.assert_any_call("zappi", 0, args)
+        mock_create_source_worker.assert_any_call("hue", 0, args, set())
+        mock_create_source_worker.assert_any_call("zappi", 0, args, set())
+
+    def test_create_source_worker_stops_permanently_on_config_error(self):
+        """create_source_worker adds the source to stopped_sources and returns (no retry) on ConfigError."""
+        handler = MagicMock()
+        handler.get_data.side_effect = ConfigError("bad config")
+        args = SimpleNamespace(print=False, dump=False)
+        stopped_sources = set()
+
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep"),
+        ):
+            worker = sendtoinflux.create_source_worker("hue", 0, args, stopped_sources)
+            worker()  # should return normally, not raise or loop forever
+
+        assert stopped_sources == {"hue"}
+        handler.get_data.assert_called_once()
+
+    def test_run_multi_source_does_not_restart_stopped_source(self):
+        """run_multi_source does not restart a thread whose source gave up with a ConfigError."""
+        args = SimpleNamespace(print=False, dump=False)
+
+        def make_dead_thread():
+            thread = MagicMock()
+            thread.is_alive.return_value = False
+            return thread
+
+        with (
+            patch("sendtoinflux.create_source_worker") as mock_create_source_worker,
+            patch("sendtoinflux.spawn_source_thread", side_effect=lambda worker: make_dead_thread()) as mock_spawn,
+            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+        ):
+            # simulate "zappi" having already stopped permanently by the time the
+            # supervisor loop runs its first check
+            def fake_create_source_worker(source, delay, worker_args, stopped_sources):
+                if source == "zappi":
+                    stopped_sources.add("zappi")
+                return MagicMock()
+
+            mock_create_source_worker.side_effect = fake_create_source_worker
+
+            with pytest.raises(SystemExit):
+                sendtoinflux.run_multi_source(["hue", "zappi"], args, 0)
+
+        # both threads report dead (2 initial spawns), but only "hue" (not in
+        # stopped_sources) should have triggered a respawn attempt (3rd spawn)
+        assert mock_spawn.call_count == 3
 
 
 class TestRunSingleSourceRetry:
@@ -231,20 +280,20 @@ class TestRunSingleSourceRetry:
 
         assert handler.get_data.call_count >= 1
 
-    def test_systemexit_is_caught_and_loop_continues(self):
-        """run_single_source catches SystemExit from get_data and retries."""
+    def test_config_error_exits_immediately_without_retry(self):
+        """run_single_source exits with code 1 on ConfigError instead of retrying."""
         handler = self._make_handler()
-        handler.get_data.side_effect = [SystemExit(2), Exception("break")]
+        handler.get_data.side_effect = ConfigError("bad config")
 
         with (
             patch("sendtoinflux.toinflux.get_class", return_value=handler),
             patch("sendtoinflux.time.time", return_value=1000.0),
-            patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
         ):
-            with pytest.raises(SystemExit):
+            with pytest.raises(SystemExit) as exc_info:
                 sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False))
 
-        assert handler.get_data.call_count >= 1
+        assert exc_info.value.code == 1
+        handler.get_data.assert_called_once()
 
     def test_handler_is_recreated_after_failure(self):
         """run_single_source calls get_class again after a failure resets the handler."""
