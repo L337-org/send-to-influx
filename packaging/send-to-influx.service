@@ -1,0 +1,22 @@
+[Unit]
+Description=send-to-influx - collect smart home/energy metrics and write to InfluxDB
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=send-to-influx
+Group=send-to-influx
+WorkingDirectory=/opt/send-to-influx
+EnvironmentFile=-/etc/send-to-influx/environment
+ExecStart=/opt/send-to-influx/venv/bin/send-to-influx --settings /etc/send-to-influx/settings.yaml
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/send-to-influx
+
+[Install]
+WantedBy=multi-user.target

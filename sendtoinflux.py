@@ -4,7 +4,6 @@
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT License"
-__version__ = "2.1"
 
 import sys
 import time
@@ -13,8 +12,16 @@ import signal
 import logging
 import argparse
 import threading
+from importlib.metadata import version, PackageNotFoundError
 import toinflux
 from toinflux.exceptions import ConfigError
+
+try:
+    __version__ = version("send-to-influx")
+except PackageNotFoundError:
+    # Running from a source checkout without the package installed (e.g. `python sendtoinflux.py`
+    # in a dev venv) - pyproject.toml's [project] version is the single source of truth otherwise.
+    __version__ = "0.0.0-dev"
 
 DEFAULT_STAGGER_SECONDS = 10
 BACKOFF_BASE_SECONDS = 5

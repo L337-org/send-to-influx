@@ -1,4 +1,5 @@
 -r requirements.txt
+-e .
 black~=26.3.1
 flake8~=7.3.0
 flake8-bugbear~=25.11.29
