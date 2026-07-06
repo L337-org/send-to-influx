@@ -246,7 +246,7 @@ def main():
         # particular --source shouldn't get a false "OK" if that source isn't part of
         # the sources/default_source list load_settings() already checked.
         try:
-            toinflux.validate_settings(settings, source=args.source)
+            toinflux.validate_settings(settings, source=args.source, settings_path=args.settings or "settings.yaml")
         except ConfigError as exc:
             print(f"Configuration error: {exc}")
             sys.exit(1)

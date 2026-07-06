@@ -15,7 +15,12 @@ class ConfigError(Exception):
 
 
 class SourceConnectionError(Exception):
-    """A data source or InfluxDB API call failed (network, auth, bad response).
+    """A data source's API call failed (network, auth, bad response).
 
-    These are treated as transient and retried with backoff by the worker loop.
+    Raised by each handler's get_data()/API-call code - not by InfluxDB writes, which raise
+    the separate InfluxWriteError (toinflux.influx) instead. Both are plain Exception
+    subclasses, so both are caught by the worker loop's generic exception handling and
+    treated as transient and retried with backoff; they're kept as distinct types so a
+    source's own API failures and its InfluxDB write failures aren't conflated should any
+    caller ever need to react to them differently.
     """

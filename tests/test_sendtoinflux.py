@@ -202,7 +202,9 @@ class TestMain:
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
             mock_exit.assert_called_once_with(0)
-            mock_validate_settings.assert_called_once_with({"default_source": "hue"}, source=None)
+            mock_validate_settings.assert_called_once_with(
+                {"default_source": "hue"}, source=None, settings_path="settings.yaml"
+            )
             mock_print.assert_called_once_with("Configuration OK")
 
     def test_main_check_config_validates_explicit_source_argument(self, tmp_path):

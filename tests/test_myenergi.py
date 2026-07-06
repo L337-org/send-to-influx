@@ -3,6 +3,7 @@
 import datetime
 from unittest.mock import MagicMock, patch
 import pytest
+import requests
 from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
 from toinflux.exceptions import SourceConnectionError
 
@@ -72,6 +73,28 @@ class TestMyEnergi:
             handler = MyEnergi(source="zappi")
             mock_resp = MagicMock()
             mock_resp.status_code = 500
+            with patch.object(handler.session, "get", return_value=mock_resp):
+                with pytest.raises(SourceConnectionError):
+                    handler.get_data_from_myenergi("https://example.com")
+
+    def test_get_data_from_myenergi_raises_on_request_exception(self, sample_settings):
+        """get_data_from_myenergi raises SourceConnectionError when the request itself fails."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            handler = MyEnergi(source="zappi")
+            with patch.object(handler.session, "get") as mock_get:
+                mock_get.side_effect = requests.exceptions.RequestException("connection failed")
+                with pytest.raises(SourceConnectionError):
+                    handler.get_data_from_myenergi("https://example.com")
+
+    def test_get_data_from_myenergi_raises_on_invalid_json(self, sample_settings):
+        """get_data_from_myenergi raises SourceConnectionError when the response body isn't valid JSON."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            handler = MyEnergi(source="zappi")
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.side_effect = requests.exceptions.JSONDecodeError("bad json", "", 0)
             with patch.object(handler.session, "get", return_value=mock_resp):
                 with pytest.raises(SourceConnectionError):
                     handler.get_data_from_myenergi("https://example.com")

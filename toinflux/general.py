@@ -169,7 +169,7 @@ def _validate_source_block(source, settings, is_v2):
     return errors
 
 
-def validate_settings(settings, source=None):
+def validate_settings(settings, source=None, settings_path="settings.yaml"):
     """Validate required keys in a parsed settings dictionary.
 
     :param settings: parsed settings dictionary
@@ -179,6 +179,10 @@ def validate_settings(settings, source=None):
         this, --check-config --source <x> could report success while <x>'s own block
         is broken, if <x> isn't part of the normal sources list
     :type source: str or None
+    :param settings_path: path to the settings file, used only to label log messages -
+        settings can come from a location other than settings.yaml (--settings, or the
+        .yml fallback), so this shouldn't be hard-coded in the log output
+    :type settings_path: str
     :raises ConfigError: if any required settings are missing or invalid
     """
     influx = settings.get("influx", {})
@@ -191,7 +195,7 @@ def validate_settings(settings, source=None):
         errors.extend(_validate_source_block(src, settings, is_v2))
     if errors:
         for error in errors:
-            logging.critical("settings.yaml: %s", error)
+            logging.critical("%s: %s", settings_path, error)
         raise ConfigError("; ".join(errors))
 
 
@@ -249,7 +253,7 @@ def load_settings(settings_file=None):
             raise ConfigError(f"Invalid or empty configuration in {settings_path}")
 
         _apply_env_overrides(settings)
-        validate_settings(settings)
+        validate_settings(settings, settings_path=settings_path)
         return settings
     except FileNotFoundError:
         logging.critical(

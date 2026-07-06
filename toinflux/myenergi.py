@@ -7,6 +7,7 @@ __version__ = "1.0"
 
 import logging
 import datetime
+import requests
 from requests.auth import HTTPDigestAuth
 from toinflux.influx import DataHandler
 from toinflux.exceptions import SourceConnectionError
@@ -27,7 +28,12 @@ class MyEnergi(DataHandler):
         # Get the data for the given serial from the MyEnergi API
         serial = self.source_settings["serial"]
         auth = HTTPDigestAuth(serial, self.settings["myenergi"]["apikey"])
-        response = self.session.get(url, auth=auth, timeout=self.settings["myenergi"].get("timeout", 5))
+        try:
+            response = self.session.get(url, auth=auth, timeout=self.settings["myenergi"].get("timeout", 5))
+        except requests.exceptions.RequestException as e:
+            logging.error("Error connecting to MyEnergi API - %s", e)
+            raise SourceConnectionError(str(e)) from e
+
         if response.status_code == 200:
             pass
         elif response.status_code == 401:
@@ -37,7 +43,11 @@ class MyEnergi(DataHandler):
             logging.error("Login unsuccessful. Return code: %s", response.status_code)
             raise SourceConnectionError(f"Login unsuccessful. Return code: {response.status_code}")
 
-        return response.json()
+        try:
+            return response.json()
+        except requests.exceptions.JSONDecodeError as e:
+            logging.error("Error parsing MyEnergi API response - %s", e)
+            raise SourceConnectionError(str(e)) from e
 
     def _parse_device_data(self, device_key, url_key):
         """

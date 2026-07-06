@@ -101,6 +101,20 @@ class TestLoadSettings:
             result = load_settings(settings_file=yaml_path)
             assert result["default_source"] == "from_yaml"
 
+    def test_validation_error_log_uses_the_actual_resolved_path(self, sample_settings, caplog):
+        """load_settings labels validation error logs with the real resolved path, not 'settings.yaml'."""
+        del sample_settings["influx"]["url"]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(sample_settings, f)
+            path = f.name
+        try:
+            with caplog.at_level("CRITICAL"):
+                with pytest.raises(ConfigError):
+                    load_settings(settings_file=path)
+            assert any(f"{path}: influx.url is required" in r.message for r in caplog.records)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
     def test_defaults_to_settings_yaml_when_omitted(self):
         """load_settings() with no argument resolves to settings.yaml in the project root."""
         with patch("toinflux.general.open", side_effect=FileNotFoundError):
@@ -243,6 +257,19 @@ class TestValidateSettings:
         # default_source is "hue" per sample_settings; passing it explicitly shouldn't
         # cause it to be validated (and thus reported) twice.
         validate_settings(sample_settings, source="hue")
+
+    def test_error_log_uses_given_settings_path_not_hardcoded_settings_yaml(self, sample_settings, caplog):
+        """validate_settings labels log messages with settings_path, not a hard-coded 'settings.yaml'.
+
+        Settings can come from a location other than settings.yaml (--settings, or the .yml
+        fallback), so the log output shouldn't claim it's always settings.yaml.
+        """
+        del sample_settings["influx"]["url"]
+        with caplog.at_level("CRITICAL"):
+            with pytest.raises(ConfigError):
+                validate_settings(sample_settings, settings_path="/etc/send-to-influx/settings.yaml")
+        assert any("/etc/send-to-influx/settings.yaml: influx.url is required" in r.message for r in caplog.records)
+        assert not any("settings.yaml: influx.url is required" == r.message for r in caplog.records)
 
 
 class TestGetClass:
