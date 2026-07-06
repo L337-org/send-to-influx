@@ -14,6 +14,7 @@ send-to-influx is a Python application that collects data from various smart hom
   - `--dump`: One-time data export (JSON format)
   - `--print`: Continuous monitoring with JSON output to console
   - Normal mode: Continuous data collection and transmission to InfluxDB
+  - `--settings <path>`: use a settings file at a path other than `settings.yaml` in the project root
 - **Timing**:
   - per-source interval-based timing system to avoid drift
   - multi-source startup stagger via optional `stagger_seconds` setting (default `10`)
@@ -28,7 +29,7 @@ send-to-influx is a Python application that collects data from various smart hom
 The project uses a plugin-like architecture where each data source is implemented as a separate module:
 
 #### Base Classes
-- **`toinflux/general.py`**: `load_settings()` (loads YAML configuration and returns a dictionary), `get_class()` (case-insensitive factory function to instantiate data source classes dynamically), `configure_logging(logfile=None)` (sets up timestamped stdout logging with optional file handler)
+- **`toinflux/general.py`**: `load_settings(settings_file=None)` (loads YAML configuration and returns a dictionary; defaults to `settings.yaml` in the project root, overridable via the `--settings` CLI flag; `INFLUX_TOKEN`/`INFLUX_PASSWORD` env vars override the matching `influx` settings values), `get_class(source, settings_file=None)` (case-insensitive factory function to instantiate data source classes dynamically), `configure_logging(logfile=None)` (sets up timestamped stdout logging with optional file handler)
 - **`toinflux/influx.py`**: `DataHandler` (base class for all data sources)
 
 #### Current Data Sources

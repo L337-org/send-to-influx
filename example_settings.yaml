@@ -22,6 +22,9 @@ stagger_seconds: 10
 default_source: "hue"
 
 # InfluxDB settings
+# `user`/`password` (v1) or `token` (v2) below may instead be supplied via the
+# INFLUX_PASSWORD / INFLUX_TOKEN environment variables, which take precedence
+# over the values here if set - useful for keeping secrets out of this file.
 # For InfluxDB v1, use user/password and per-source db:
 influx:
   url: "https://influx.example.com:8086"

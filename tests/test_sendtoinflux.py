@@ -79,7 +79,21 @@ class TestMain:
         ):
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
-            mock_get_class.assert_called_once_with("zappi")
+            mock_get_class.assert_called_once_with("zappi", None)
+
+    def test_main_uses_settings_arg(self, mock_main_deps):
+        """main with --settings passes the path through to load_settings and get_class."""
+        _, mock_get_class = mock_main_deps
+        with (
+            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+            patch(
+                "sendtoinflux.sys.argv",
+                ["sendtoinflux", "-s", "zappi", "--settings", "/etc/send-to-influx/settings.yaml"],
+            ),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            mock_get_class.assert_called_once_with("zappi", "/etc/send-to-influx/settings.yaml")
 
     def test_main_registers_sigterm_handler(self, mock_main_deps):
         """main registers signal_handler for both SIGINT and SIGTERM."""
@@ -182,7 +196,7 @@ class TestHelpers:
         handler = MagicMock()
         handler.get_data.return_value = {"x": 1}
         handler.source_settings = {"interval": 123}
-        args = SimpleNamespace(print=False, dump=False)
+        args = SimpleNamespace(print=False, dump=False, settings=None)
 
         interval = sendtoinflux.collect_source_data("hue", args, handler)
 
@@ -192,7 +206,7 @@ class TestHelpers:
 
     def test_run_multi_source_coerces_invalid_stagger_to_zero(self):
         """run_multi_source falls back to zero stagger when value is invalid."""
-        args = SimpleNamespace(print=False, dump=False)
+        args = SimpleNamespace(print=False, dump=False, settings=None)
         fake_thread = MagicMock()
         fake_thread.is_alive.return_value = True
 
@@ -227,7 +241,7 @@ class TestRunSingleSourceRetry:
             patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False))
+                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False, settings=None))
 
         assert handler.get_data.call_count >= 1
 
@@ -242,7 +256,7 @@ class TestRunSingleSourceRetry:
             patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False))
+                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False, settings=None))
 
         assert handler.get_data.call_count >= 1
 
@@ -257,7 +271,7 @@ class TestRunSingleSourceRetry:
             patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False))
+                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False, settings=None))
 
         # Called once before the loop, then again after the failure reset
         assert mock_get_class.call_count == 2
@@ -281,7 +295,7 @@ class TestRunSingleSourceRetry:
             patch("sendtoinflux.time.sleep", side_effect=[None, None, SystemExit(0)]),
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False))
+                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False, settings=None))
 
         assert len(delays) >= 2
         assert delays == list(range(1, len(delays) + 1))

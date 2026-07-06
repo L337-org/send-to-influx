@@ -64,7 +64,7 @@ def create_source_worker(source, source_start_delay, args):
         while True:
             try:
                 if data_handler is None:
-                    data_handler = toinflux.get_class(source)
+                    data_handler = toinflux.get_class(source, args.settings)
                 sleep_time = max(0, next_update - time.time())
                 time.sleep(sleep_time)
                 interval = collect_source_data(source, args, data_handler)
@@ -121,13 +121,26 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # peek at --settings before the real parser is built, since its help text
+    # embeds the configured default_source (which requires settings to be loaded)
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--settings", dest="settings", type=str, default=None)
+    pre_args, _ = pre_parser.parse_known_args()
+
     # load settings once for defaults and configured source list
-    settings = toinflux.load_settings()
+    settings = toinflux.load_settings(pre_args.settings)
     toinflux.configure_logging(settings.get("logfile"))
     default_source = settings.get("default_source", "hue")
 
     # parse the command line arguments
     arg_parse = argparse.ArgumentParser(description="Send Hue Data to InfluxDB")
+    arg_parse.add_argument(
+        "--settings",
+        dest="settings",
+        type=str,
+        default=pre_args.settings,
+        help="path to the settings file (default: settings.yaml in the project root)",
+    )
     arg_parse.add_argument(
         "-d",
         "--dump",
@@ -184,7 +197,7 @@ def run_single_source(source, args):
     :param args: parsed CLI arguments
     :type args: argparse.Namespace
     """
-    data_handler = toinflux.get_class(source)
+    data_handler = toinflux.get_class(source, args.settings)
 
     # dump the data if required and exit
     if args.dump:
@@ -197,7 +210,7 @@ def run_single_source(source, args):
     while True:
         try:
             if data_handler is None:
-                data_handler = toinflux.get_class(source)
+                data_handler = toinflux.get_class(source, args.settings)
             next_update += data_handler.source_settings["interval"]
             data = data_handler.get_data()
 

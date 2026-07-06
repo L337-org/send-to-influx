@@ -68,7 +68,7 @@ def flatten_dict(data, parent_key="", sep="_"):
     return flattened
 
 
-def get_class(source):
+def get_class(source, settings_file=None):
     """
     Create and return a class object for the given data source name
 
@@ -80,6 +80,8 @@ def get_class(source):
 
     :param source: data source name
     :type source: str
+    :param settings_file: path to the settings file (default: settings.yaml in the project root)
+    :type settings_file: str or None
     :return: class object
     :rtype: DataHandler
     """
@@ -107,7 +109,7 @@ def get_class(source):
     class_name = next((k for k in classes if k.lower() == source.lower()), source)
     source_name = source.lower()
     try:
-        my_class = classes[class_name](source_name)
+        my_class = classes[class_name](source_name, settings_file=settings_file)
     except KeyError:
         logging.error("Source %s not found", class_name)
         sys.exit(1)
@@ -158,17 +160,43 @@ def validate_settings(settings):
         sys.exit(1)
 
 
-def load_settings(settings_file="settings.yaml"):
+def _apply_env_overrides(settings):
+    """Override secret-bearing influx settings from the environment, if set.
+
+    Lets a packaged/systemd deployment keep tokens and passwords out of the
+    settings file on disk (e.g. in an EnvironmentFile), instead of requiring
+    them in plain YAML.
+
+    :param settings: parsed settings dictionary, modified in place
+    :type settings: dict
+    """
+    influx = settings.get("influx")
+    if not isinstance(influx, dict):
+        return
+    if os.environ.get("INFLUX_TOKEN"):
+        influx["token"] = os.environ["INFLUX_TOKEN"]
+    if os.environ.get("INFLUX_PASSWORD"):
+        influx["password"] = os.environ["INFLUX_PASSWORD"]
+
+
+def load_settings(settings_file=None):
     """Load settings from a YAML file and return as a dictionary.
 
     When the resolved path does not exist and ends with ``.yaml``, the function
     falls back to the ``.yml`` equivalent for backwards compatibility.
 
-    :param settings_file: path to the settings file (absolute, or relative to the project root)
-    :type settings_file: str
+    ``INFLUX_TOKEN`` and ``INFLUX_PASSWORD`` environment variables, if set,
+    override the corresponding values in the ``influx`` settings block, so
+    secrets need not be stored in the settings file itself.
+
+    :param settings_file: path to the settings file (absolute, or relative to the project
+        root); defaults to ``settings.yaml`` in the project root when omitted
+    :type settings_file: str or None
     :return: parsed settings dictionary
     :rtype: dict
     """
+    if not settings_file:
+        settings_file = "settings.yaml"
     base_dir = os.path.abspath(os.path.dirname(__file__) + "/..")
     settings_path = os.path.join(base_dir, settings_file)
 
@@ -185,6 +213,7 @@ def load_settings(settings_file="settings.yaml"):
             logging.critical("Invalid or empty configuration in %s. Please check %s.", settings_path, settings_path)
             sys.exit(1)
 
+        _apply_env_overrides(settings)
         validate_settings(settings)
         return settings
     except FileNotFoundError:
