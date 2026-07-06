@@ -79,3 +79,9 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 | 0 | Normal exit |
 | 1 | Configuration error (missing/invalid `settings.yaml`) |
 | 2 | Connection error (API or InfluxDB) |
+
+### Packaging (`packaging/`)
+
+- `pyproject.toml` is the single source of truth for the package version (`[project].version`) and runtime dependencies (dynamically read from `requirements.txt`). Bump the version there, not in `sendtoinflux.py`.
+- `sendtoinflux.py`'s `__version__` is read from installed package metadata (`importlib.metadata.version("send-to-influx")`), falling back to `"0.0.0-dev"` when run from a source checkout without the package installed. `requirements-dev.txt` includes `-e .` so dev/test environments have it installed and see the real version.
+- `packaging/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service`) and maintainer scripts (`postinst`/`prerm`/`postrm`). Must be built on the target architecture. See the README's "Running as a systemd service" section.

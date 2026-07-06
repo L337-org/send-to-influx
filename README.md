@@ -111,6 +111,9 @@ Running the script
 - Install runtime requirements with `pip install -r requirements.txt`
 - Leave the script running in a screen session and sit back and watch the data roll in.
 
+Alternatively, see [Running as a systemd service](#running-as-a-systemd-service) below for a
+`.deb` package that installs and supervises it properly instead.
+
 Log output goes to stdout with timestamps and log level, e.g.:
 
     2026-06-29 14:23:01 WARNING  Source 'hue' failed: connection timeout. Restarting in 5 seconds (attempt 1).
@@ -151,6 +154,29 @@ Configuration options for multi-source mode:
 - `sources`: list of source names to run in parallel when `--source` is not provided
 - `stagger_seconds` (optional): delay between source starts (default `10`)
 - failed source retries: exponential backoff with a 5 second base and 300 second maximum
+
+Running as a systemd service
+-----------------------------
+Instead of a screen session, you can build a `.deb` package that installs send-to-influx as a
+systemd-managed service:
+
+    packaging/build-deb.sh
+    sudo dpkg -i send-to-influx_*.deb
+
+This must be built on the target architecture (it bundles the app and its Python dependencies
+into a venv under `/opt/send-to-influx`, rather than pure source, so it's not architecture-agnostic).
+
+The package installs (but does not start) the service, since it needs configuration first:
+
+- Edit `/etc/send-to-influx/settings.yaml` (copied from `example_settings.yaml` on install; dpkg
+  preserves your edits across upgrades).
+- Optionally put `INFLUX_TOKEN`/`INFLUX_PASSWORD` in `/etc/send-to-influx/environment`
+  (`KEY=VALUE`, one per line) instead of in the settings file - see the `--settings`/env var
+  override notes above.
+- Then enable and start it: `systemctl enable --now send-to-influx`
+
+Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as
+stdout above.
 
 Usage
 -----

@@ -188,7 +188,16 @@ python sendtoinflux.py --source hue --print
 
 # Available sources: hue, zappi, speedtest (and any other implemented sources)
 # Multi-source mode uses the settings.yaml `sources` list.
+
+# Use a settings file at a non-default location (e.g. a packaged install)
+python sendtoinflux.py --settings /etc/send-to-influx/settings.yaml
 ```
+
+## Packaging & Deployment
+
+- `pyproject.toml` is the single source of truth for the package version (`[project].version`) and dependencies (dynamically sourced from `requirements.txt`). `sendtoinflux.py`'s `__version__` is read back from installed package metadata via `importlib.metadata`, falling back to `"0.0.0-dev"` when running from an uninstalled source checkout.
+- `packaging/build-deb.sh` builds a `.deb` bundling the app and its dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service`) to run it as a service — see the README's "Running as a systemd service" section.
+- `INFLUX_TOKEN`/`INFLUX_PASSWORD` environment variables override the matching `influx` settings values, so a systemd deployment can keep secrets out of `settings.yaml` (e.g. via the service's `EnvironmentFile`).
 
 ## Configuration Examples
 
