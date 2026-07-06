@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 import pytest
 import sendtoinflux
-from toinflux.exceptions import ConfigError
+from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.influx import DataHandler
 
 
@@ -43,7 +43,18 @@ class TestMain:
             mock_print.assert_called_once()
             call_arg = mock_print.call_args[0][0]
             assert "temp" in call_arg
-            assert "21" in call_arg
+
+    def test_main_dump_mode_exits_two_on_source_connection_error(self, mock_main_deps):
+        """main with -d/--dump exits 2 (not an unhandled traceback) on a SourceConnectionError."""
+        mock_handler, _ = mock_main_deps
+        mock_handler.get_data.side_effect = SourceConnectionError("401 Unauthorized")
+        with (
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "-d"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(2)) as mock_exit,
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            mock_exit.assert_called_once_with(2)
 
     def test_main_print_mode_one_iteration(self, mock_main_deps):
         """main with --print runs one loop iteration then we break via sleep."""

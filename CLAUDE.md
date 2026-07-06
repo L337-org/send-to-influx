@@ -90,8 +90,8 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 | Code | Meaning |
 |------|---------|
 | 0 | Normal exit |
-| 1 | Configuration error (missing/invalid `settings.yaml`) |
-| 2 | Connection error (API or InfluxDB) |
+| 1 | Configuration error (`ConfigError`: missing/invalid settings, unknown source) |
+| 2 | Connection error (`SourceConnectionError`) in `--dump` mode only - there's no worker loop to retry a one-shot dump with backoff. In continuous mode (single- or multi-source), connection errors are always retried with backoff instead of exiting. |
 
 ### Packaging (`packaging/`)
 

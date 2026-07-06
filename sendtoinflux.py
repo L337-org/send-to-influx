@@ -14,7 +14,7 @@ import argparse
 import threading
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
-from toinflux.exceptions import ConfigError
+from toinflux.exceptions import ConfigError, SourceConnectionError
 
 try:
     __version__ = version("send-to-influx")
@@ -300,6 +300,12 @@ def run_single_source(source, args):
         except ConfigError as exc:
             logging.critical("Source '%s' has a configuration problem: %s", source, exc)
             sys.exit(1)
+        except SourceConnectionError as exc:
+            # --dump is a one-shot manual/debugging run, so there's no worker loop to
+            # retry it with backoff - report the failure and exit distinctly from a
+            # config problem, rather than an unhandled traceback.
+            logging.error("Source '%s' failed: %s", source, exc)
+            sys.exit(2)
         print(json.dumps(data, indent=4))
         sys.exit(0)
 

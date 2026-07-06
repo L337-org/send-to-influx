@@ -133,6 +133,12 @@ once it reaches `log_max_bytes` (default 10 MiB), keeping `log_backup_count` old
     # log_max_bytes: 10485760
     # log_backup_count: 3
 
+If you're running the [systemd service](#running-as-a-systemd-service), logs already go to the
+journal, so `logfile` is rarely needed there - and the packaged service's `ProtectSystem=strict`
+sandboxing means `/var/log/...` isn't writable by it. If you do want a file as well under systemd,
+point `logfile` at a path under `/etc/send-to-influx/` (the one directory the service can write to),
+or add your own path to `ReadWritePaths=` in `packaging/send-to-influx.service` and rebuild.
+
 The log level defaults to `INFO`. Set an optional `loglevel` key in `settings.yaml` (e.g. `DEBUG`, `WARNING`), or
 pass `-v`/`--verbose` on the command line to force `DEBUG` regardless of what's configured:
 

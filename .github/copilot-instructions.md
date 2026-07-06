@@ -77,7 +77,7 @@ YAML-based configuration supporting multiple data sources:
 - **Exit Codes**:
   - `0`: Normal exit
   - `1`: Configuration errors (missing/invalid settings.yaml)
-  - `2`: Connection errors (API endpoints, InfluxDB)
+  - `2`: Connection errors (API endpoints, InfluxDB) - only in `--dump` mode; continuous mode always retries connection errors with backoff instead of exiting
 - **Error Messages**: Logged via Python's `logging` module with timestamps and log level (WARNING, ERROR, CRITICAL)
 - **Network Handling**: Proper timeout handling and connection failure management
 - **Validation**: Configuration validation before processing
