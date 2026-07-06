@@ -104,7 +104,7 @@ class TestLoadSettings:
     def test_defaults_to_settings_yaml_when_omitted(self):
         """load_settings() with no argument resolves to settings.yaml in the project root."""
         with patch("toinflux.general.open", side_effect=FileNotFoundError):
-            with pytest.raises(SystemExit):
+            with pytest.raises(ConfigError):
                 load_settings()
 
     def test_env_influx_token_overrides_yaml(self, sample_settings):
