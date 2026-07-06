@@ -9,18 +9,35 @@ __version__ = "1.0"
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 import yaml
 
+DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 3
 
-def configure_logging(logfile=None):
-    """Configure root logger with stdout and an optional file handler.
+
+def configure_logging(
+    logfile=None, loglevel="INFO", log_max_bytes=DEFAULT_LOG_MAX_BYTES, log_backup_count=DEFAULT_LOG_BACKUP_COUNT
+):
+    """Configure root logger with stdout and an optional rotating file handler.
 
     :param logfile: path to log file; if None, logs to stdout only
     :type logfile: str or None
+    :param loglevel: logging level name (e.g. "INFO", "DEBUG"); falls back to INFO if invalid
+    :type loglevel: str
+    :param log_max_bytes: max size in bytes before the log file is rotated
+    :type log_max_bytes: int
+    :param log_backup_count: number of rotated log files to keep
+    :type log_backup_count: int
     """
     fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+
+    resolved_level = getattr(logging, str(loglevel).upper(), None)
+    if not isinstance(resolved_level, int):
+        logging.warning("Invalid loglevel '%s'; defaulting to INFO", loglevel)
+        resolved_level = logging.INFO
+    root.setLevel(resolved_level)
 
     # Remove any handlers added by a previous call to this function, so repeated
     # calls (e.g. in tests, or if main() is invoked more than once) don't duplicate log lines.
@@ -35,7 +52,7 @@ def configure_logging(logfile=None):
     root.addHandler(stdout_handler)
 
     if logfile:
-        file_handler = logging.FileHandler(logfile)
+        file_handler = RotatingFileHandler(logfile, maxBytes=log_max_bytes, backupCount=log_backup_count)
         file_handler.setFormatter(fmt)
         file_handler._send_to_influx_handler = True
         root.addHandler(file_handler)
@@ -84,7 +101,6 @@ def get_class(source):
     :rtype: DataHandler
     """
     from toinflux.carbonintensity import CarbonIntensity
-    from toinflux.influx import DataHandler
     from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
     from toinflux.octopus import Octopus
     from toinflux.openmeteo import OpenMeteo
@@ -93,7 +109,6 @@ def get_class(source):
 
     classes = {
         "CarbonIntensity": CarbonIntensity,
-        "DataHandler": DataHandler,
         "Eddi": Eddi,
         "Harvi": Harvi,
         "Hue": Hue,

@@ -217,6 +217,11 @@ class TestGetClass:
         with pytest.raises(SystemExit):
             get_class("nosuchsource")
 
+    def test_get_class_datahandler_is_not_selectable(self):
+        """get_class('DataHandler') exits with 1 - it's the abstract base, not a real source."""
+        with pytest.raises(SystemExit):
+            get_class("DataHandler")
+
 
 class TestFlattenDict:
     """Tests for flatten_dict function."""

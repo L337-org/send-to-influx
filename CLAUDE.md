@@ -49,14 +49,18 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 - **Multi-source mode** (no `--source`): reads `sources` list from `settings.yaml`, spawns one daemon thread per source with a configurable startup stagger (`stagger_seconds`, default 10). Dead threads are detected and restarted with the same exponential backoff.
 - `--dump`: one-time raw JSON to stdout, then exit (single source only).
 - `--print`: parsed data to stdout instead of InfluxDB.
+- `--version`: print `__version__` and exit; parsed before settings are loaded, so it works without a `settings.yaml` present.
+- `--check-config`: load and validate `settings.yaml` (via `load_settings()`), print `Configuration OK`, exit 0. Exits 1 with details if invalid (same validation as a normal run).
+- `-v`/`--verbose`: force `DEBUG`-level logging, overriding the `loglevel` settings.yaml key.
 - Handles SIGINT and SIGTERM for graceful shutdown.
 - On startup, logs an INFO line with the version and the source(s) that will run, so process (re)starts are visible in the logs.
+- CLI arguments are parsed *before* `load_settings()` is called, so `--version`/`--help` don't require a config file to exist.
 
 ### Factory / settings
 
-- `toinflux/general.py`: `load_settings(file)` (exits with code 1 on missing/invalid YAML), `get_class(source)` (case-insensitive factory → correct DataHandler subclass), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None)` (sets up timestamped stdout logging, plus optional file handler).
-- `configure_logging()` is called in `main()` after settings are loaded. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`.
-- Config file: `settings.yaml` (copy from `example_settings.yaml`). Required at runtime; not committed. Optional `logfile` key adds a file log destination.
+- `toinflux/general.py`: `load_settings(file)` (exits with code 1 on missing/invalid YAML), `get_class(source)` (case-insensitive factory → correct DataHandler subclass; `DataHandler` itself is excluded — it's the abstract base, not a selectable source), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped stdout logging, plus an optional `RotatingFileHandler`).
+- `configure_logging()` is called in `main()` after settings are loaded and `--check-config` has short-circuited. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`. Effective log level is `-v`/`--verbose` (forces `DEBUG`) > `loglevel` settings.yaml key > `INFO` default.
+- Config file: `settings.yaml` (copy from `example_settings.yaml`). Required at runtime; not committed. Optional `logfile` key adds a rotating file log destination (`log_max_bytes`/`log_backup_count` settings keys control rotation, defaulting to 10 MiB / 3 backups).
 
 ### Adding a new data source
 
