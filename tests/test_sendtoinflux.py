@@ -191,6 +191,20 @@ class TestMain:
             mock_exit.assert_called_once_with(0)
             mock_print.assert_called_once_with("Configuration OK")
 
+    def test_main_check_config_prints_error_and_exits_one_when_invalid(self):
+        """main with --check-config prints the error and exits 1 when settings are invalid."""
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings", side_effect=ConfigError("influx.url is required")),
+            patch("sendtoinflux.print") as mock_print,
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(1)) as mock_exit,
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            mock_exit.assert_called_once_with(1)
+            mock_print.assert_called_once_with("Configuration error: influx.url is required")
+
     def test_main_verbose_flag_forces_debug_loglevel(self, mock_main_deps):
         """main with -v/--verbose overrides the configured loglevel with DEBUG."""
         with (
