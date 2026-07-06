@@ -17,7 +17,7 @@ jobs:
       deb_name: ${{ steps.build.outputs.deb_name }}
     steps:
       - name: Check out source repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Python environment
         uses: actions/setup-python@v6
@@ -52,7 +52,7 @@ jobs:
           echo "deb_name=${deb_name}" >> "$GITHUB_OUTPUT"
 
       - name: Upload .deb artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: send-to-influx-deb
           path: send-to-influx_*.deb
@@ -83,7 +83,7 @@ jobs:
           path: new-deb
 
       - name: Check out gh-pages branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: gh-pages
           path: gh-pages
