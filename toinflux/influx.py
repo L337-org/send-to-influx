@@ -66,6 +66,7 @@ class DataHandler:
         self.influx_header = None
         self.data = None
         self.timestamp = None
+        self.session = requests.Session()
 
         if self.source and self.source in self.settings:
             self.source_settings = self.settings[self.source]
@@ -127,7 +128,7 @@ class DataHandler:
             with warnings.catch_warnings():
                 if insecure:
                     warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
-                response = requests.post(url, data=data_to_send, timeout=timeout, **kwargs)
+                response = self.session.post(url, data=data_to_send, timeout=timeout, **kwargs)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logging.error("Error sending data to InfluxDB - %s", e)

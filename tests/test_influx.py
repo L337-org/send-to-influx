@@ -37,7 +37,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue,host=test "
             h.data = {"temp": 21.5, "light": 100}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data()
                 body = mock_post.call_args[1]["data"]
@@ -53,7 +53,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue,host=test "
             h.data = {"old": 1}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data(data={"a": 1, "b": 2})
                 body = mock_post.call_args[1]["data"]
@@ -68,7 +68,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue "
             h.data = {"x": 1}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data()
                 url = mock_post.call_args[0][0]
@@ -90,7 +90,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue "
             h.data = {"x": 1}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data()
                 url = mock_post.call_args[0][0]
@@ -115,7 +115,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue "
             h.data = {"x": 1}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data()
                 url = mock_post.call_args[0][0]
@@ -136,7 +136,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue "
             h.data = {"x": 1}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data()
                 url = mock_post.call_args[0][0]
@@ -149,7 +149,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue "
             h.data = {"x": 1}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data()
                 assert mock_post.call_args[1]["verify"] is True
@@ -162,7 +162,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue "
             h.data = {"x": 1}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data()
                 assert mock_post.call_args[1]["verify"] is False
@@ -175,7 +175,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue "
             h.data = {"x": 1}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.side_effect = requests.exceptions.RequestException("network error")
                 with pytest.raises(InfluxWriteError):
                     h.send_data()
@@ -200,7 +200,7 @@ class TestDataHandler:
             h = DataHandler(source="hue")
             h.influx_header = "hue "
             h.data = {"name": 'a "quoted" val', "active": True, "count": 3, "ratio": 1.5}
-            with patch("toinflux.influx.requests.post") as mock_post:
+            with patch.object(h.session, "post") as mock_post:
                 mock_post.return_value.raise_for_status = MagicMock()
                 h.send_data()
                 body = mock_post.call_args[1]["data"]

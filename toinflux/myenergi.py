@@ -7,7 +7,6 @@ __version__ = "1.0"
 
 import logging
 import datetime
-import requests
 from requests.auth import HTTPDigestAuth
 from toinflux.influx import DataHandler
 from toinflux.exceptions import SourceConnectionError
@@ -28,7 +27,7 @@ class MyEnergi(DataHandler):
         # Get the data for the given serial from the MyEnergi API
         serial = self.source_settings["serial"]
         auth = HTTPDigestAuth(serial, self.settings["myenergi"]["apikey"])
-        response = requests.get(url, auth=auth, timeout=self.settings["myenergi"].get("timeout", 5))
+        response = self.session.get(url, auth=auth, timeout=self.settings["myenergi"].get("timeout", 5))
         if response.status_code == 200:
             pass
         elif response.status_code == 401:

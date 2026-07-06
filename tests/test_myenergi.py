@@ -50,7 +50,7 @@ class TestMyEnergi:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
             mock_resp.json.return_value = {"key": "value"}
-            with patch("toinflux.myenergi.requests.get", return_value=mock_resp):
+            with patch.object(handler.session, "get", return_value=mock_resp):
                 result = handler.get_data_from_myenergi("https://example.com/api")
                 assert result == {"key": "value"}
 
@@ -61,7 +61,7 @@ class TestMyEnergi:
             handler = MyEnergi(source="zappi")
             mock_resp = MagicMock()
             mock_resp.status_code = 401
-            with patch("toinflux.myenergi.requests.get", return_value=mock_resp):
+            with patch.object(handler.session, "get", return_value=mock_resp):
                 with pytest.raises(SourceConnectionError):
                     handler.get_data_from_myenergi("https://example.com")
 
@@ -72,7 +72,7 @@ class TestMyEnergi:
             handler = MyEnergi(source="zappi")
             mock_resp = MagicMock()
             mock_resp.status_code = 500
-            with patch("toinflux.myenergi.requests.get", return_value=mock_resp):
+            with patch.object(handler.session, "get", return_value=mock_resp):
                 with pytest.raises(SourceConnectionError):
                     handler.get_data_from_myenergi("https://example.com")
 

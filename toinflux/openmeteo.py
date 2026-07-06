@@ -33,7 +33,7 @@ class OpenMeteo(DataHandler):
             "timezone": "auto",
         }
         try:
-            response = requests.get(
+            response = self.session.get(
                 OPEN_METEO_URL,
                 params=params,
                 timeout=self.source_settings.get("timeout", 10),

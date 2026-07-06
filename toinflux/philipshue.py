@@ -41,7 +41,7 @@ class Hue(DataHandler):
             with warnings.catch_warnings():
                 if insecure:
                     warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
-                response = requests.get(
+                response = self.session.get(
                     f"https://{self.settings['hue']['host']}/api/{self.settings['hue']['user']}",
                     timeout=self.settings["hue"].get("timeout", 5),
                     verify=not insecure,

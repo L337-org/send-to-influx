@@ -30,7 +30,7 @@ class TestHue:
             hue = Hue(source="hue")
             mock_response = MagicMock()
             mock_response.json.return_value = {"sensors": {}, "lights": {}}
-            with patch("toinflux.philipshue.requests.get", return_value=mock_response):
+            with patch.object(hue.session, "get", return_value=mock_response):
                 result = hue.get_data_from_hue_bridge()
                 assert result == {"sensors": {}, "lights": {}}
 
@@ -39,7 +39,7 @@ class TestHue:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             hue = Hue(source="hue")
-            with patch("toinflux.philipshue.requests.get") as mock_get:
+            with patch.object(hue.session, "get") as mock_get:
                 mock_get.side_effect = requests.exceptions.RequestException("connection failed")
                 with pytest.raises(SourceConnectionError):
                     hue.get_data_from_hue_bridge()
@@ -51,7 +51,7 @@ class TestHue:
             hue = Hue(source="hue")
             mock_response = MagicMock()
             mock_response.json.return_value = {"sensors": {}, "lights": {}}
-            with patch("toinflux.philipshue.requests.get", return_value=mock_response) as mock_get:
+            with patch.object(hue.session, "get", return_value=mock_response) as mock_get:
                 hue.get_data_from_hue_bridge()
                 assert mock_get.call_args[1]["verify"] is False
 
@@ -63,7 +63,7 @@ class TestHue:
             hue = Hue(source="hue")
             mock_response = MagicMock()
             mock_response.json.return_value = {"sensors": {}, "lights": {}}
-            with patch("toinflux.philipshue.requests.get", return_value=mock_response) as mock_get:
+            with patch.object(hue.session, "get", return_value=mock_response) as mock_get:
                 hue.get_data_from_hue_bridge()
                 assert mock_get.call_args[1]["verify"] is True
 
@@ -75,7 +75,7 @@ class TestHue:
             hue = Hue(source="hue")
             mock_response = MagicMock()
             mock_response.json.return_value = {"sensors": {}, "lights": {}}
-            with patch("toinflux.philipshue.requests.get", return_value=mock_response):
+            with patch.object(hue.session, "get", return_value=mock_response):
                 with patch("toinflux.philipshue.warnings.simplefilter") as mock_simplefilter:
                     hue.get_data_from_hue_bridge()
                     mock_simplefilter.assert_not_called()
@@ -87,7 +87,7 @@ class TestHue:
             hue = Hue(source="hue")
             mock_response = MagicMock()
             mock_response.json.return_value = [{"error": {"description": "unauthorized"}}]
-            with patch("toinflux.philipshue.requests.get", return_value=mock_response):
+            with patch.object(hue.session, "get", return_value=mock_response):
                 with pytest.raises(SourceConnectionError):
                     hue.get_data_from_hue_bridge()
 

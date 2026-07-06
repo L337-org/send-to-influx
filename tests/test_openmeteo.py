@@ -38,7 +38,7 @@ class TestOpenMeteo:
             handler = OpenMeteo(source="openmeteo")
             mock_resp = MagicMock()
             mock_resp.json.return_value = api_response
-            with patch("toinflux.openmeteo.requests.get", return_value=mock_resp):
+            with patch.object(handler.session, "get", return_value=mock_resp):
                 result = handler.get_data()
                 assert result["temperature_2m"] == 18.5
                 assert result["relative_humidity_2m"] == 72
@@ -56,7 +56,7 @@ class TestOpenMeteo:
             handler = OpenMeteo(source="openmeteo")
             mock_resp = MagicMock()
             mock_resp.json.return_value = api_response
-            with patch("toinflux.openmeteo.requests.get", return_value=mock_resp):
+            with patch.object(handler.session, "get", return_value=mock_resp):
                 result = handler.get_data()
                 assert result == {"temperature_2m": 15.0}
                 assert "nonexistent_field" not in result
@@ -70,7 +70,7 @@ class TestOpenMeteo:
             handler = OpenMeteo(source="openmeteo")
             mock_resp = MagicMock()
             mock_resp.json.return_value = api_response
-            with patch("toinflux.openmeteo.requests.get", return_value=mock_resp) as mock_get:
+            with patch.object(handler.session, "get", return_value=mock_resp) as mock_get:
                 handler.get_data()
                 call_kwargs = mock_get.call_args[1]
                 params = call_kwargs["params"]
@@ -85,8 +85,9 @@ class TestOpenMeteo:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = OpenMeteo(source="openmeteo")
-            with patch(
-                "toinflux.openmeteo.requests.get",
+            with patch.object(
+                handler.session,
+                "get",
                 side_effect=requests.exceptions.ConnectionError("timeout"),
             ):
                 with pytest.raises(SourceConnectionError):

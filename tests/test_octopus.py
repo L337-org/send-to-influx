@@ -42,7 +42,7 @@ class TestOctopus:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
-            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([consumption_response])):
+            with patch.object(handler.session, "get", side_effect=_mock_get([consumption_response])):
                 result = handler.get_data()
                 assert result["consumption_kwh"] == 0.123
                 assert handler.influx_header == "octopus,source=octopus_energy "
@@ -92,9 +92,7 @@ class TestOctopus:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
-            with patch(
-                "toinflux.octopus.requests.get", side_effect=_mock_get([elec_response, gas_response])
-            ) as mock_get:
+            with patch.object(handler.session, "get", side_effect=_mock_get([elec_response, gas_response])) as mock_get:
                 result = handler.get_data()
                 assert result["consumption_kwh"] == 0.123
                 assert result["gas_consumption"] == 1.5
@@ -108,7 +106,7 @@ class TestOctopus:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
-            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([consumption_response])) as mock_get:
+            with patch.object(handler.session, "get", side_effect=_mock_get([consumption_response])) as mock_get:
                 result = handler.get_data()
                 assert "gas_consumption" not in result
                 assert mock_get.call_count == 1
@@ -122,7 +120,7 @@ class TestOctopus:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
-            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([elec_response, {"results": []}])):
+            with patch.object(handler.session, "get", side_effect=_mock_get([elec_response, {"results": []}])):
                 result = handler.get_data()
                 assert "gas_consumption" not in result
 
@@ -136,7 +134,7 @@ class TestOctopus:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
-            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([consumption_response, rate_response])):
+            with patch.object(handler.session, "get", side_effect=_mock_get([consumption_response, rate_response])):
                 result = handler.get_data()
                 assert result["consumption_kwh"] == 0.25
                 assert result["unit_rate_p_per_kwh"] == 18.5
@@ -148,7 +146,7 @@ class TestOctopus:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
-            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([consumption_response])):
+            with patch.object(handler.session, "get", side_effect=_mock_get([consumption_response])):
                 result = handler.get_data()
                 assert "unit_rate_p_per_kwh" not in result
 
@@ -158,7 +156,7 @@ class TestOctopus:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
-            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([{"results": []}])):
+            with patch.object(handler.session, "get", side_effect=_mock_get([{"results": []}])):
                 result = handler.get_data()
                 assert result == {}
 
@@ -168,8 +166,9 @@ class TestOctopus:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
-            with patch(
-                "toinflux.octopus.requests.get",
+            with patch.object(
+                handler.session,
+                "get",
                 side_effect=requests.exceptions.ConnectionError("refused"),
             ):
                 with pytest.raises(SourceConnectionError):
@@ -182,7 +181,7 @@ class TestOctopus:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             handler = Octopus(source="octopus")
-            with patch("toinflux.octopus.requests.get", side_effect=_mock_get([consumption_response])) as mock_get:
+            with patch.object(handler.session, "get", side_effect=_mock_get([consumption_response])) as mock_get:
                 handler.get_data()
                 auth_used = mock_get.call_args[1]["auth"]
                 assert auth_used == ("test_api_key", "")
