@@ -169,9 +169,6 @@ different location (e.g. `/etc/send-to-influx/settings.yaml` for a packaged inst
 
     sendtoinflux.py --settings /etc/send-to-influx/settings.yaml
 
-`INFLUX_TOKEN` and `INFLUX_PASSWORD` environment variables, if set, override the corresponding
-values in the `influx` settings block, so secrets need not be stored in the settings file itself.
-
 By default, `sendtoinflux.py` starts one worker per source listed in the `sources` setting. Each source runs in its own loop using its own `interval`.
 
 Worker start times are slightly staggered to avoid all collectors firing at exactly the same moment when intervals are equal.
@@ -245,9 +242,6 @@ first:
 
 - Edit `/etc/send-to-influx/settings.yaml` (copied from `example_settings.yaml` on install; dpkg
   preserves your edits across upgrades).
-- Optionally put `INFLUX_TOKEN`/`INFLUX_PASSWORD` in `/etc/send-to-influx/environment`
-  (`KEY=VALUE`, one per line) instead of in the settings file - see the `--settings`/env var
-  override notes above.
 - Then enable and start it: `systemctl enable --now send-to-influx`
 
 Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as

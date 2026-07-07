@@ -77,7 +77,7 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 
 - `toinflux/general.py`: `load_settings(settings_file=None)` (raises `ConfigError` on missing/invalid YAML; `settings_file` defaults to `settings.yaml` in the project root when omitted), `get_class(source, settings_file=None)` (case-insensitive factory → correct DataHandler subclass; raises `ConfigError` for an unknown source, including `DataHandler` itself — it's the abstract base, not a selectable source; threads `settings_file` through to the handler's `load_settings()` call), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped stdout logging, plus an optional `RotatingFileHandler`; raises `ConfigError` instead of a raw `OSError` if `logfile` can't be opened, e.g. a permissions problem).
 - `configure_logging()` is called via `_configure_logging_or_exit()` in `main()` after settings are loaded and `--check-config` has short-circuited - this catches that `ConfigError`, logs it (the stdout handler is already attached by the time it's raised, so this still reaches the journal under systemd as a normal formatted line, not a traceback), and exits 1. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`. Effective log level is `-v`/`--verbose` (forces `DEBUG`) > `loglevel` settings.yaml key > `INFO` default.
-- Config file: `settings.yaml` (copy from `example_settings.yaml`), or a custom path via `--settings`. Required at runtime; not committed. Optional `logfile` key adds a rotating file log destination (`log_max_bytes`/`log_backup_count` settings keys control rotation, defaulting to 10 MiB / 3 backups). `INFLUX_TOKEN`/`INFLUX_PASSWORD` environment variables override the matching `influx` settings block values, for keeping secrets out of the file on disk.
+- Config file: `settings.yaml` (copy from `example_settings.yaml`), or a custom path via `--settings`. Required at runtime; not committed. Optional `logfile` key adds a rotating file log destination (`log_max_bytes`/`log_backup_count` settings keys control rotation, defaulting to 10 MiB / 3 backups). No environment-variable secret-override mechanism (considered and deliberately rejected - see "Rejected: environment-variable secrets" below).
 
 ### Adding a new data source
 
@@ -108,6 +108,40 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 - `.github/workflows/release.yaml`: pushing a bare `MAJOR.MINOR` tag (e.g. `3.0` - matching this project's existing tags/releases, no `v` prefix) runs the test suite, verifies the tag matches `pyproject.toml`'s version exactly, builds the `.deb`, and attaches it to a GitHub Release. A second job publishes it to a flat APT repo on the `gh-pages` branch (served via GitHub Pages) - it prunes to the last `KEEP_LAST_N` (currently 5) `.deb` files, full history stays in Releases.
   - The APT repo job needs a one-time setup and is skipped (not failed) until it exists: generate a GPG key (`gpg --batch --gen-key`), add the private key as the `APT_GPG_PRIVATE_KEY` repo secret (`gpg --export-secret-keys --armor <key-id> | base64`), and the public key ends up published as `send-to-influx.gpg` in the repo automatically on first successful run.
   - `gh-pages`'s ruleset requires signed commits (see "Branch protection" below), so the job also imports a *second*, separate `CI_COMMIT_SIGNING_KEY` and signs the publish commit with it - kept apart from `APT_GPG_PRIVATE_KEY` since the two have different trust domains (end users trust the APT key to verify packages; GitHub verifies this one against the maintainer's account) and different rotation needs. The commit is authored with the maintainer's real email (not the usual `github-actions[bot]` noreply address), since GitHub's "verified" signature check requires the commit email to match a verified email on the account the key is registered to.
+
+### Rejected: environment-variable secrets
+
+An earlier version of this project let `INFLUX_TOKEN`/`INFLUX_PASSWORD` environment variables
+(sourced from an optional `/etc/send-to-influx/environment`, via the systemd unit's
+`EnvironmentFile=`) override the corresponding `settings.yaml` values, intended to let a packaged
+install keep secrets out of the settings file. Removed after review concluded it added no real
+security value:
+
+- Both files end up owned by the same service user with the same permissions - there is no actual
+  security *boundary* between "secrets in settings.yaml" and "secrets in an env file," only an
+  organizational one. Splitting secrets into a separate file that is equally (or, in practice, worse
+  - see below) protected is security theatre, not a mitigation.
+- The environment file was never created or permission-locked by `postinst` - a user following the
+  documented advice (`sudo nano /etc/send-to-influx/environment`) would create it with whatever
+  default permissions their editor/umask gave it, likely world-readable, ending up *less* secure than
+  leaving the secret in the already-`chmod 600` settings file. A real implementation would need
+  `postinst` to pre-create and lock down that file, but even then:
+- Environment variables add a genuinely distinct exposure path a plain file doesn't have -
+  `/proc/<pid>/environ` and (if ever enabled) core dumps both capture them - without removing any
+  existing one, since `settings.yaml` still needs to stay locked down regardless (not every field is
+  a candidate for env-var override, and the override is opt-in/unverifiable).
+- The one semi-plausible benefit (a locked-down settings file is safer to attach to a bug report)
+  doesn't hold up: since moving a secret to the env file is optional and unenforced, you can never
+  trust that a given user's `settings.yaml` has no secrets in it, so the advice would always have to
+  be "redact before sharing" regardless of whether this feature exists.
+
+If genuinely stronger credential handling is wanted later, `systemd`'s `LoadCredential=`/
+`systemd-creds encrypt` is the option worth investigating - it creates a *real* boundary (TPM-bound
+encryption at rest, credentials materialized only in a restricted tmpfs for the service's lifetime)
+rather than an organizational one. Not yet implemented: it only helps the packaged systemd install
+(not the plain screen-session/source-checkout path this project treats as equally first-class), and
+would be a third credential-handling mechanism alongside the YAML file - a bigger, separate design
+conversation, not a small addition.
 
 ### Branch protection
 

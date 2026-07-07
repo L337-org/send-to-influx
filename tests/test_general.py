@@ -121,49 +121,6 @@ class TestLoadSettings:
             with pytest.raises(ConfigError):
                 load_settings()
 
-    def test_env_influx_token_overrides_yaml(self, sample_settings):
-        """INFLUX_TOKEN environment variable overrides influx.token from the YAML file."""
-        sample_settings["influx"] = {
-            "url": "https://influx.example.com:8086",
-            "token": "yaml-token",
-            "org": "my-org",
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-            yaml.dump(sample_settings, f)
-            path = f.name
-        try:
-            with patch.dict(os.environ, {"INFLUX_TOKEN": "env-token"}):
-                result = load_settings(settings_file=path)
-            assert result["influx"]["token"] == "env-token"
-        finally:
-            Path(path).unlink(missing_ok=True)
-
-    def test_env_influx_password_overrides_yaml(self, sample_settings):
-        """INFLUX_PASSWORD environment variable overrides influx.password from the YAML file."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-            yaml.dump(sample_settings, f)
-            path = f.name
-        try:
-            with patch.dict(os.environ, {"INFLUX_PASSWORD": "env-password"}):
-                result = load_settings(settings_file=path)
-            assert result["influx"]["password"] == "env-password"
-        finally:
-            Path(path).unlink(missing_ok=True)
-
-    def test_no_env_override_when_unset(self, sample_settings):
-        """load_settings leaves influx.token/password untouched when the env vars aren't set."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-            yaml.dump(sample_settings, f)
-            path = f.name
-        try:
-            with patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("INFLUX_TOKEN", None)
-                os.environ.pop("INFLUX_PASSWORD", None)
-                result = load_settings(settings_file=path)
-            assert result["influx"]["password"] == sample_settings["influx"]["password"]
-        finally:
-            Path(path).unlink(missing_ok=True)
-
 
 class TestValidateSettings:
     """Tests for validate_settings function."""

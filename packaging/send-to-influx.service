@@ -8,7 +8,6 @@ Type=simple
 User=send-to-influx
 Group=send-to-influx
 WorkingDirectory=/opt/send-to-influx
-EnvironmentFile=-/etc/send-to-influx/environment
 ExecStart=/opt/send-to-influx/venv/bin/send-to-influx --settings /etc/send-to-influx/settings.yaml
 Restart=on-failure
 RestartSec=5
