@@ -116,12 +116,13 @@ tiering pattern used on the maintainer's other repos (e.g. `docker-mcp`), adapte
 CI check names:
 
 - `main`: no force-pushes/deletion, PR required (1 approval, code-owner review, resolved review
-  threads, squash-merge only), Copilot auto-review, CodeQL code scanning, and every CI status check
-  listed under "Commands" above (`flake8`, `mypy`, the full `pytest` matrix, `arm64-verify`) required.
+  threads, squash-merge only), Copilot auto-review, CodeQL code scanning, and every check from
+  `premerge.yaml` required ("Run flake8", "Run mypy", "Run pytest (3.10)"-"Run pytest (3.14)", "Verify
+  .deb build on arm64").
 - `release/**/*`: same PR requirements as `main` (1 approval, code-owner review, resolved threads) but
-  merge method widened to squash/merge/rebase, and CodeQL and `arm64-verify` dropped from the required
-  checks (still run, just not a merge-blocking gate at this tier) - kept for longer-lived release-prep
-  branches that don't need the full ceremony of `main` on every push.
+  merge method widened to squash/merge/rebase, and CodeQL and "Verify .deb build on arm64" dropped from
+  the required checks (still run, just not a merge-blocking gate at this tier) - kept for longer-lived
+  release-prep branches that don't need the full ceremony of `main` on every push.
 - `feature/**/*`: one tier looser again - force-pushes/rebasing allowed (no `non_fast_forward` rule),
   and the PR rule relaxed to 0 required approvals and no code-owner review (changes still go through a
   PR and must have review threads resolved, just without needing anyone's sign-off) - for fast
@@ -133,6 +134,6 @@ CI check names:
   does *not* require PRs, since that would need a carefully-configured bypass for the workflow's
   direct push and getting that wrong silently breaks every release.
 
-All four use a `RepositoryRole` bypass actor for the repo admin, though `main`'s predates the other
+All four use a `RepositoryRole` bypass actor for the repo admin, though `main`'s bypass actor predates the other
 three and is scoped to `bypass_mode: "pull_request"` (bypasses the PR requirement only) rather than
 `"always"` (bypasses every rule) used on the newer three - not yet reconciled.
