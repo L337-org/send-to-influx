@@ -134,8 +134,8 @@ Running the script
 - Install runtime requirements with `pip install -r requirements.txt`
 - Leave the script running in a screen session and sit back and watch the data roll in.
 
-Alternatively, see [Running as a systemd service](#running-as-a-systemd-service) below for a
-`.deb` package that installs and supervises it properly instead.
+Alternatively, see [Using the .deb package](#using-the-deb-package) below for a
+`.deb` package that installs and runs it under systemd instead.
 
 Log output goes to stdout with timestamps and log level, e.g.:
 
@@ -152,7 +152,7 @@ once it reaches `log_max_bytes` (default 10 MiB), keeping `log_backup_count` old
     # log_max_bytes: 10485760
     # log_backup_count: 3
 
-If you're running the [systemd service](#running-as-a-systemd-service), logs already go to the
+If you're [using the .deb package](#using-the-deb-package), logs already go to the
 journal, so `logfile` is rarely needed there - and the packaged service's `ProtectSystem=strict`
 sandboxing means `/var/log/...` isn't writable by it. If you do want a file as well under systemd,
 point `logfile` at a path under `/etc/send-to-influx/` (the one directory the service can write to),
