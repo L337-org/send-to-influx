@@ -168,6 +168,31 @@ def signal_handler(sig, _frame):
     sys.exit(0)
 
 
+def _configure_logging_or_exit(settings, args):
+    """
+    Configure logging from settings/args, exiting 1 with a clean message on failure.
+
+    :param settings: loaded settings dict
+    :type settings: dict
+    :param args: parsed CLI arguments
+    :type args: argparse.Namespace
+    """
+    loglevel = "DEBUG" if args.verbose else settings.get("loglevel", "INFO")
+    try:
+        toinflux.configure_logging(
+            settings.get("logfile"),
+            loglevel=loglevel,
+            log_max_bytes=settings.get("log_max_bytes", toinflux.DEFAULT_LOG_MAX_BYTES),
+            log_backup_count=settings.get("log_backup_count", toinflux.DEFAULT_LOG_BACKUP_COUNT),
+        )
+    except ConfigError as exc:
+        # configure_logging() already attached the stdout handler before hitting this
+        # error (see its implementation), so this still lands as a normal formatted
+        # log line - not a raw traceback - and reaches the systemd journal.
+        logging.critical("%s", exc)
+        sys.exit(1)
+
+
 def main():
     """
     The main function
@@ -253,13 +278,7 @@ def main():
         print("Configuration OK")
         sys.exit(0)
 
-    loglevel = "DEBUG" if args.verbose else settings.get("loglevel", "INFO")
-    toinflux.configure_logging(
-        settings.get("logfile"),
-        loglevel=loglevel,
-        log_max_bytes=settings.get("log_max_bytes", toinflux.DEFAULT_LOG_MAX_BYTES),
-        log_backup_count=settings.get("log_backup_count", toinflux.DEFAULT_LOG_BACKUP_COUNT),
-    )
+    _configure_logging_or_exit(settings, args)
     default_source = settings.get("default_source", "hue")
 
     if args.source:

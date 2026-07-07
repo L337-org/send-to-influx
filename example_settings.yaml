@@ -17,6 +17,9 @@ stagger_seconds: 10
 
 # Optional log file path; if omitted, logs go to stdout only.
 # The file is rotated automatically once it reaches log_max_bytes.
+# If running under the packaged systemd service, only /etc/send-to-influx/ is writable by
+# default (e.g. "/etc/send-to-influx/send-to-influx.log") - see the README's "Running as a
+# systemd service" section before pointing this at /var/log or anywhere else.
 # logfile: "/var/log/send-to-influx.log"
 # log_max_bytes: 10485760
 # log_backup_count: 3

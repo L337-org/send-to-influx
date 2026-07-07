@@ -2,7 +2,7 @@
 
 import signal
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 import pytest
 import sendtoinflux
 from toinflux.exceptions import ConfigError, SourceConnectionError
@@ -298,6 +298,20 @@ octopus:
             kwargs = mock_configure_logging.call_args.kwargs
             assert kwargs["log_max_bytes"] == 123
             assert kwargs["log_backup_count"] == 7
+
+    def test_main_logs_and_exits_one_when_configure_logging_raises_config_error(self, mock_main_deps):
+        """main catches ConfigError from configure_logging (e.g. an unwritable logfile) and exits 1 cleanly."""
+        with (
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+            patch("sendtoinflux.toinflux.configure_logging", side_effect=ConfigError("Cannot open logfile 'x'")),
+            patch("sendtoinflux.logging.critical") as mock_critical,
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(1)) as mock_exit,
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            mock_exit.assert_called_once_with(1)
+            mock_critical.assert_called_once_with("%s", ANY)
+            assert "Cannot open logfile" in str(mock_critical.call_args[0][1])
 
     def test_main_multi_source_dump_requires_source(self):
         """main in multi-source mode exits when --dump is used without --source."""
@@ -814,3 +828,17 @@ class TestConfigureLogging:
         finally:
             self._remove_handlers(root, [h for h in root.handlers if h not in before])
             os.unlink(logfile)
+
+    def test_unwritable_logfile_raises_config_error(self):
+        """configure_logging raises ConfigError (not a raw OSError) when the logfile can't be opened."""
+        import logging
+        from toinflux.general import configure_logging
+        from toinflux.exceptions import ConfigError
+
+        root = logging.getLogger()
+        before = set(root.handlers)
+        try:
+            with pytest.raises(ConfigError, match="Cannot open logfile"):
+                configure_logging(logfile="/nonexistent-directory/send-to-influx.log")
+        finally:
+            self._remove_handlers(root, [h for h in root.handlers if h not in before])
