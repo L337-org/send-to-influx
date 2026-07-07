@@ -96,10 +96,9 @@ jobs:
     # charset-normalizer's C extensions are stripped post-install for exactly this
     # reason). This job builds and installs that same .deb on a real arm64 runner and
     # smoke-tests it, to catch a future dependency change that makes a compiled
-    # extension load-bearing rather than optional. Only runs on merges to main (not
-    # every PR) since it's a regression check on the packaging pipeline, not a
-    # per-change gate.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # extension load-bearing rather than optional. Runs on every push/PR (not gated
+    # to main) and is a required status check, so a regression here blocks the merge
+    # instead of only being noticed after it's already on main.
     runs-on: [ubuntu-24.04-arm]
     name: Verify .deb build on arm64
     steps:
