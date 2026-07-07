@@ -9,8 +9,9 @@
 # (see the .so-stripping step below), and the venv's own python3 is a symlink
 # to the system-provided /usr/bin/python3 (declared as a Depends:), not a
 # bundled interpreter binary. A CI job builds and smoke-tests this same script
-# on an arm64 runner on every merge to main, to catch a future dependency
-# change that makes a compiled extension load-bearing rather than optional.
+# on an arm64 runner on every push/PR (a required status check), to catch a
+# future dependency change that makes a compiled extension load-bearing
+# rather than optional before it can merge.
 #
 # Usage: packaging/build-deb.sh [output-path.deb]
 set -euo pipefail
@@ -29,9 +30,10 @@ PKG_ROOT="$BUILD_DIR/pkg"
 # correctly on any Debian/Ubuntu install target regardless of build host.
 BUILD_PYTHON=/usr/bin/python3
 if [ ! -x "$BUILD_PYTHON" ]; then
-    echo "Warning: /usr/bin/python3 not found, falling back to \$PATH's python3." >&2
-    echo "Fine for local testing, but the resulting venv's interpreter symlink may not be portable." >&2
-    BUILD_PYTHON=python3
+    echo "Error: /usr/bin/python3 not found. This script builds a distributable .deb, and a" >&2
+    echo "fallback to whatever python3 happens to be on \$PATH would silently reintroduce a" >&2
+    echo "non-portable interpreter symlink - run this on a real Debian/Ubuntu host instead." >&2
+    exit 1
 fi
 
 cleanup() {
