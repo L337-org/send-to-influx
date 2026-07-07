@@ -70,12 +70,12 @@ jobs:
           # A release for this tag may already exist - e.g. GitHub's "Draft a new
           # release" UI creates the tag and the release together when you publish,
           # so by the time this runs (triggered by that same tag push) the release
-          # is already there. Attach the .deb to it instead of failing; only create
-          # a fresh release (with generated notes) if one doesn't already exist.
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          # is already there. Try creating first; if that fails for any reason
+          # (already exists, including the race where it's created in the window
+          # between a separate check and this create), fall back to uploading the
+          # .deb to whatever release now exists for this tag instead of failing.
+          if ! gh release create "$GITHUB_REF_NAME" send-to-influx_*.deb --title "$GITHUB_REF_NAME" --generate-notes; then
             gh release upload "$GITHUB_REF_NAME" send-to-influx_*.deb --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" send-to-influx_*.deb --title "$GITHUB_REF_NAME" --generate-notes
           fi
 
   check_apt_secret:
