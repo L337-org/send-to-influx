@@ -56,9 +56,12 @@ echo "Building venv payload from $REPO_ROOT ..."
 # shebang interpreter) and activate exports the wrong VIRTUAL_ENV.
 VENV_STAGING_PATH="$PKG_ROOT/opt/send-to-influx/venv"
 VENV_INSTALL_PATH="/opt/send-to-influx/venv"
-grep -rl "$VENV_STAGING_PATH" "$VENV_STAGING_PATH/bin" 2>/dev/null | while IFS= read -r f; do
+# -I skips binary files (e.g. the python3 symlink target); the process substitution
+# (rather than a literal `| while`) plus `|| true` keeps `grep` finding zero matches
+# from tripping `set -o pipefail` and aborting the whole build.
+while IFS= read -r f; do
     sed -i.bak "s|$VENV_STAGING_PATH|$VENV_INSTALL_PATH|g" "$f"
-done
+done < <(grep -rlI "$VENV_STAGING_PATH" "$VENV_STAGING_PATH/bin" 2>/dev/null || true)
 find "$VENV_STAGING_PATH/bin" -name "*.bak" -delete
 
 # A venv's site-packages lives at lib/pythonX.Y/site-packages, named after the exact

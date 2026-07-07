@@ -201,8 +201,9 @@ The repo only keeps the last few releases' `.deb` files (older versions remain a
 
 The package is architecture-independent (`all`) - the app and its dependencies are pure Python,
 and any optional compiled accelerators (e.g. PyYAML's) are stripped from the bundled venv at build
-time in favour of their pure-Python fallbacks - so it can be built on any machine and installed on
-any Debian/Ubuntu architecture, including arm64 (e.g. Raspberry Pi). CI builds and smoke-tests the
+time in favour of their pure-Python fallbacks - so it can be built on any Debian/Ubuntu machine
+(the script requires `/usr/bin/python3` and `dpkg-deb`) and installed on any Debian/Ubuntu
+architecture, including arm64 (e.g. Raspberry Pi). CI builds and smoke-tests the
 same script on an arm64 runner on every push/PR (a required status check), to catch a future
 dependency change that would make a compiled extension load-bearing rather than optional before
 it can merge.
