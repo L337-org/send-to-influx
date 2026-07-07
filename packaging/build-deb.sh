@@ -84,10 +84,15 @@ find "$PKG_ROOT/opt/send-to-influx/venv/lib" -type f \( -name "*.so" -o -name "*
 # interpreter can safely use the exact same site-packages - the only thing tying it to
 # one minor is the directory name. Symlink every other plausible minor to the real one so
 # apt can use a plain floor (Depends: below) instead of a brittle exact-version pin.
+# PYTHON_MAX_SUPPORTED_MINOR bounds both the symlink range and Depends:'s upper bound
+# together (below) - keeping them as one source of truth, since a target whose python3
+# is newer than the last symlinked minor would otherwise hit the exact same missing-
+# site-packages failure this change exists to prevent, just at a higher version number.
 PYTHON_MAJOR_MINOR="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
     'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+PYTHON_MAX_SUPPORTED_MINOR=30
 VENV_LIB_DIR="$PKG_ROOT/opt/send-to-influx/venv/lib"
-for minor in $(seq 10 20); do
+for minor in $(seq 10 "$PYTHON_MAX_SUPPORTED_MINOR"); do
     candidate="python3.${minor}"
     if [ "$candidate" != "python${PYTHON_MAJOR_MINOR}" ] && [ ! -e "$VENV_LIB_DIR/$candidate" ]; then
         ln -s "python${PYTHON_MAJOR_MINOR}" "$VENV_LIB_DIR/$candidate"
@@ -117,7 +122,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: all
-Depends: systemd, python3 (>= 3.10)
+Depends: systemd, python3 (>= 3.10), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
 Maintainer: Gavin Lucas
 Description: Collects data from smart home / energy devices and writes it to InfluxDB
  send-to-influx polls Hue, MyEnergi, Octopus, Open-Meteo, National Grid Carbon

@@ -231,10 +231,12 @@ A venv's `site-packages` normally lives under `lib/pythonX.Y/`, named after the 
 of the interpreter that created it - which would otherwise tie an installable target to whatever
 Python version happened to be on the build host (e.g. GitHub's CI runner image) rather than
 whatever the *install target* actually has, and those two drift out of sync over time. Since
-everything in the venv is pure Python (see above), `build-deb.sh` symlinks every plausible 3.10+
-minor's `lib/pythonX.Y` to the one that was actually populated, so the package only needs a plain
-`python3 (>= 3.10)` dependency and installs correctly regardless of which supported minor version
-the target's `/usr/bin/python3` happens to be.
+everything in the venv is pure Python (see above), `build-deb.sh` symlinks every minor from 3.10
+through 3.30's `lib/pythonX.Y` to the one that was actually populated, and declares a matching
+`python3 (>= 3.10), python3 (<< 3.31)` dependency, so the package installs correctly regardless of
+which minor in that range the target's `/usr/bin/python3` happens to be (the upper bound keeps the
+dependency and the symlink range from silently drifting apart - both are bumped together if Python
+ever gets close to 3.30).
 
 ### After installing
 
