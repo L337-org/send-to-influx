@@ -10,6 +10,23 @@ It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo
 
 For a full field-by-field reference of what each source collects and the units it's reported in, see [UNITS.md](UNITS.md).
 
+Contents
+--------
+
+- Data sources
+  - [Hue Bridge](#hue-bridge)
+  - [MyEnergi Zappi / Eddi / Harvi](#myenergi-zappi--eddi--harvi)
+  - [UK National Grid Carbon Intensity](#uk-national-grid-carbon-intensity)
+  - [Open-Meteo](#open-meteo)
+  - [Octopus Energy](#octopus-energy)
+  - [Speedtest](#speedtest)
+- [InfluxDB setup](#influxdb)
+- [Running the script](#running-the-script)
+- **[Running as a systemd service (.deb package + APT repo)](#running-as-a-systemd-service)**
+- [Usage / CLI reference](#usage)
+- [Contributing](#contributing)
+- [Privacy and Security](#privacy-and-security)
+
 Hue Bridge
 ----------
 
@@ -247,16 +264,6 @@ Usage
 > &emsp; -p, --print           print the raw data rather than sending it to InfluxDB  
 > &emsp; -s, --source SOURCE   the source of the data to send to InfluxDB (hue, zappi, etc.). If this parameter is omitted, all sources in the settings file
 > &emsp;                       'sources' list are started. If no sources are specified in the settings file, the 'default_source' settings key is used.
-
-Running the unit tests
-----------------------
-The project uses pytest for unit tests. To run the tests:
-
-- Create a virtual environment (recommended) and install development dependencies:
-  `python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`
-- Run the test suite: `pytest -v` (or `./.venv/bin/pytest -v` if using the venv above)
-
-No real configuration or network access is required; tests use mocks for settings and HTTP. The same test suite runs in CI on every push and pull request.
 
 Contributing
 ------------
