@@ -136,14 +136,22 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev gnupg
 
       - name: Import APT package-signing key
-        run: echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: printf '%s' "$APT_GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
 
       - name: Import commit-signing key
         env:
           GNUPGHOME: ${{ env.COMMIT_SIGNING_GNUPGHOME }}
+          CI_COMMIT_SIGNING_KEY: ${{ secrets.CI_COMMIT_SIGNING_KEY }}
         run: |
+          if [ -z "$CI_COMMIT_SIGNING_KEY" ]; then
+            echo "::error::CI_COMMIT_SIGNING_KEY secret is not set - required now that gh-pages's" \
+                 "ruleset enforces signed commits (see CLAUDE.md's 'Branch protection' section)." >&2
+            exit 1
+          fi
           mkdir -m 700 "$GNUPGHOME"
-          echo "${{ secrets.CI_COMMIT_SIGNING_KEY }}" | base64 -d | gpg --batch --import
+          printf '%s' "$CI_COMMIT_SIGNING_KEY" | base64 -d | gpg --batch --import
 
       - name: Update repo contents
         working-directory: gh-pages
