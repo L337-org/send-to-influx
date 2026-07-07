@@ -106,4 +106,31 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 - `sendtoinflux.py`'s `__version__` is read from installed package metadata (`importlib.metadata.version("send-to-influx")`), falling back to `"0.0.0-dev"` when run from a source checkout without the package installed. `requirements-dev.txt` includes `-e .` so dev/test environments have it installed and see the real version.
 - `packaging/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service`) and maintainer scripts (`postinst`/`prerm`/`postrm`). Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead symlinks every minor from 3.10 through 3.30's `lib/pythonX.Y` to the one actually populated (both bounds come from one `PYTHON_MAX_SUPPORTED_MINOR` variable, so `Depends:` and the symlink range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds and smoke-tests the same script on an `ubuntu-24.04-arm` runner on every push/PR (a required status check), to catch a future dependency change that makes a compiled extension load-bearing rather than optional before it can merge. See the README's "Running as a systemd service" section.
 - `.github/workflows/release.yaml`: pushing a bare `MAJOR.MINOR` tag (e.g. `3.0` - matching this project's existing tags/releases, no `v` prefix) runs the test suite, verifies the tag matches `pyproject.toml`'s version exactly, builds the `.deb`, and attaches it to a GitHub Release. A second job publishes it to a flat APT repo on the `gh-pages` branch (served via GitHub Pages) - it prunes to the last `KEEP_LAST_N` (currently 5) `.deb` files, full history stays in Releases.
+
+### Branch protection
+
+Four rulesets, in decreasing order of strictness - `release/**/*` and `feature/**/*` mirror the same
+tiering pattern used on the maintainer's other repos (e.g. `docker-mcp`), adapted to this repo's own
+CI check names:
+
+- `main`: no force-pushes/deletion, PR required (1 approval, code-owner review, resolved review
+  threads, squash-merge only), Copilot auto-review, CodeQL code scanning, and every CI status check
+  listed under "Commands" above (`flake8`, `mypy`, the full `pytest` matrix, `arm64-verify`) required.
+- `release/**/*`: same PR requirements as `main` (1 approval, code-owner review, resolved threads) but
+  merge method widened to squash/merge/rebase, and CodeQL and `arm64-verify` dropped from the required
+  checks (still run, just not a merge-blocking gate at this tier) - kept for longer-lived release-prep
+  branches that don't need the full ceremony of `main` on every push.
+- `feature/**/*`: one tier looser again - force-pushes/rebasing allowed (no `non_fast_forward` rule),
+  and the PR rule relaxed to 0 required approvals and no code-owner review (changes still go through a
+  PR and must have review threads resolved, just without needing anyone's sign-off) - for fast
+  iteration on shared topic branches without losing CI coverage entirely.
+- `gh-pages`: pushed to directly by `release.yaml`'s `apt-repo` job (no PR - there's no human review
+  step for an auto-generated APT repo), so its ruleset only has `non_fast_forward` (no force-pushes/
+  history rewrites) and `deletion` (branch can't be deleted). It deliberately does *not* require PRs,
+  since that would need a carefully-configured bypass for the workflow's direct push and getting that
+  wrong silently breaks every release.
+
+All four use a `RepositoryRole` bypass actor for the repo admin, though `main`'s predates the other
+three and is scoped to `bypass_mode: "pull_request"` (bypasses the PR requirement only) rather than
+`"always"` (bypasses every rule) used on the newer three - not yet reconciled.
   - The APT repo job needs a one-time setup and is skipped (not failed) until it exists: generate a GPG key (`gpg --batch --gen-key`), add the private key as the `APT_GPG_PRIVATE_KEY` repo secret (`gpg --export-secret-keys --armor <key-id> | base64`), and the public key ends up published as `send-to-influx.gpg` in the repo automatically on first successful run.
