@@ -46,6 +46,17 @@ echo "Building venv payload from $REPO_ROOT ..."
 "$PKG_ROOT/opt/send-to-influx/venv/bin/pip" install --upgrade pip --quiet
 "$PKG_ROOT/opt/send-to-influx/venv/bin/pip" install "$REPO_ROOT" --quiet
 
+# A venv's site-packages lives at lib/pythonX.Y/site-packages, named after the exact
+# major.minor of the interpreter that created it - a system python3 of a *different*
+# minor version would still satisfy a loose "python3 (>= 3.10)" dependency, but would
+# look for that directory under its own X.Y and find it missing (silent
+# ModuleNotFoundError at runtime, not a clean dpkg/apt failure). Pin Depends: to the
+# exact major.minor used here so apt can only install this onto a matching interpreter.
+PYTHON_MAJOR_MINOR="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
+    'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+PYTHON_NEXT_MINOR="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
+    'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor + 1}")')"
+
 # Strip any compiled extensions pip's dependency resolution happened to pull
 # in (e.g. PyYAML's / charset-normalizer's optional C accelerators) - both
 # have documented pure-Python fallbacks, and stripping these makes the
@@ -76,7 +87,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: all
-Depends: systemd, python3 (>= 3.10)
+Depends: systemd, python3 (>= ${PYTHON_MAJOR_MINOR}), python3 (<< ${PYTHON_NEXT_MINOR})
 Maintainer: Gavin Lucas
 Description: Collects data from smart home / energy devices and writes it to InfluxDB
  send-to-influx polls Hue, MyEnergi, Octopus, Open-Meteo, National Grid Carbon
