@@ -34,7 +34,7 @@ Contributor-facing project structure and conventions live in [CONTRIBUTING.md](.
 The project uses a plugin-like architecture where each data source is implemented as a separate module:
 
 #### Base Classes
-- **`toinflux/general.py`**: `load_settings(settings_file=None)` (loads YAML configuration and returns a dictionary; raises `ConfigError` on missing/invalid YAML; defaults to `settings.yaml` in the project root, overridable via the `--settings` CLI flag; `INFLUX_TOKEN`/`INFLUX_PASSWORD` env vars override the matching `influx` settings values), `get_class(source, settings_file=None)` (case-insensitive factory function to instantiate data source classes dynamically; raises `ConfigError` for an unknown source, including `DataHandler` itself, since it's the abstract base, not a selectable source), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped stdout logging with an optional rotating file handler; raises `ConfigError` - not a raw `OSError` - if `logfile` can't be opened for writing)
+- **`toinflux/general.py`**: `load_settings(settings_file=None)` (loads YAML configuration and returns a dictionary; raises `ConfigError` on missing/invalid YAML; defaults to `settings.yaml` in the project root, overridable via the `--settings` CLI flag), `get_class(source, settings_file=None)` (case-insensitive factory function to instantiate data source classes dynamically; raises `ConfigError` for an unknown source, including `DataHandler` itself, since it's the abstract base, not a selectable source), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped stdout logging with an optional rotating file handler; raises `ConfigError` - not a raw `OSError` - if `logfile` can't be opened for writing)
 - **`toinflux/influx.py`**: `DataHandler` (base class for all data sources)
 - **`toinflux/exceptions.py`**: `ConfigError` (fatal, not retried) and `SourceConnectionError` (transient, retried with backoff)
 
@@ -213,7 +213,6 @@ python sendtoinflux.py --settings /etc/send-to-influx/settings.yaml
 
 - `pyproject.toml` is the single source of truth for the package version (`[project].version`) and dependencies (dynamically sourced from `requirements.txt`). `sendtoinflux.py`'s `__version__` is read back from installed package metadata via `importlib.metadata`, falling back to `"0.0.0-dev"` when running from an uninstalled source checkout.
 - `packaging/build-deb.sh` builds a `.deb` bundling the app and its dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service`) to run it as a service. Package is `Architecture: all` — the venv's `python3` is a symlink to the system-provided `/usr/bin/python3` (`Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pip pulls in (PyYAML, charset-normalizer) are stripped post-install in favour of pure-Python fallbacks. Since everything left is pure Python, the script also symlinks every minor from 3.10 through 3.30's `lib/pythonX.Y` to the one actually populated, so the package works on any target whose `python3` falls in that range (rather than pinning `Depends:` to the build host's exact minor, which broke once a real target's Python drifted from CI's). Verified on real arm64 hardware by the `arm64-verify` CI job (every push/PR, required status check) — see the README's "Running as a systemd service" section.
-- `INFLUX_TOKEN`/`INFLUX_PASSWORD` environment variables override the matching `influx` settings values, so a systemd deployment can keep secrets out of `settings.yaml` (e.g. via the service's `EnvironmentFile`).
 
 ## Configuration Examples
 
@@ -311,11 +310,13 @@ if yours has a valid cert.
 - **Error Recovery**: Graceful handling of temporary network issues
 
 ## Security Notes
-- **Credentials**: Store sensitive data in `settings.yaml` with appropriate file permissions
+- **Credentials**: Store sensitive data in `settings.yaml` with appropriate file permissions (the
+  packaged install locks it to `chmod 600`). An environment-variable secrets override was
+  implemented and then deliberately removed - see CLAUDE.md's "Rejected: environment-variable
+  secrets" section before re-proposing it.
 - **HTTPS**: Use HTTPS for all API connections in production
 - **Validation**: Validate all input data before processing
 - **Logging**: Avoid logging sensitive information
-- **Environment Variables**: Consider using environment variables for sensitive data
 
 ## Common Tasks
 

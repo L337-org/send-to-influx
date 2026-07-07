@@ -20,9 +20,7 @@ send-to-influx installed. Before starting the service:
 
   1. Edit /etc/send-to-influx/settings.yaml with your device and InfluxDB details.
      (Copied from example_settings.yaml - it will not work as-is.)
-  2. Optionally put INFLUX_TOKEN/INFLUX_PASSWORD in /etc/send-to-influx/environment
-     (KEY=VALUE, one per line) instead of putting secrets in settings.yaml.
-  3. Enable and start the service:
+  2. Enable and start the service:
        systemctl enable --now send-to-influx
 
 The service is not started automatically since it needs configuration first.

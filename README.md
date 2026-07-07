@@ -134,8 +134,8 @@ Running the script
 - Install runtime requirements with `pip install -r requirements.txt`
 - Leave the script running in a screen session and sit back and watch the data roll in.
 
-Alternatively, see [Running as a systemd service](#running-as-a-systemd-service) below for a
-`.deb` package that installs and supervises it properly instead.
+Alternatively, see [Using the .deb package](#using-the-deb-package) below for a
+`.deb` package that installs and runs it under systemd instead.
 
 Log output goes to stdout with timestamps and log level, e.g.:
 
@@ -152,7 +152,7 @@ once it reaches `log_max_bytes` (default 10 MiB), keeping `log_backup_count` old
     # log_max_bytes: 10485760
     # log_backup_count: 3
 
-If you're running the [systemd service](#running-as-a-systemd-service), logs already go to the
+If you're [using the .deb package](#using-the-deb-package), logs already go to the
 journal, so `logfile` is rarely needed there - and the packaged service's `ProtectSystem=strict`
 sandboxing means `/var/log/...` isn't writable by it. If you do want a file as well under systemd,
 point `logfile` at a path under `/etc/send-to-influx/` (the one directory the service can write to),
@@ -168,9 +168,6 @@ different location (e.g. `/etc/send-to-influx/settings.yaml` for a packaged inst
 `--settings <path>`:
 
     sendtoinflux.py --settings /etc/send-to-influx/settings.yaml
-
-`INFLUX_TOKEN` and `INFLUX_PASSWORD` environment variables, if set, override the corresponding
-values in the `influx` settings block, so secrets need not be stored in the settings file itself.
 
 By default, `sendtoinflux.py` starts one worker per source listed in the `sources` setting. Each source runs in its own loop using its own `interval`.
 
@@ -245,9 +242,6 @@ first:
 
 - Edit `/etc/send-to-influx/settings.yaml` (copied from `example_settings.yaml` on install; dpkg
   preserves your edits across upgrades).
-- Optionally put `INFLUX_TOKEN`/`INFLUX_PASSWORD` in `/etc/send-to-influx/environment`
-  (`KEY=VALUE`, one per line) instead of in the settings file - see the `--settings`/env var
-  override notes above.
 - Then enable and start it: `systemctl enable --now send-to-influx`
 
 Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as

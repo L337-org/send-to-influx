@@ -16,10 +16,12 @@ network listener and no handling of untrusted input from the network - the main 
 being deliberate about are credential storage and TLS verification:
 
 - **Credentials on disk**: `settings.yaml` holds API keys/passwords in plain text. Restrict its
-  permissions (`chmod 600 settings.yaml`), as the README recommends. `INFLUX_TOKEN` and
-  `INFLUX_PASSWORD` environment variables, if set, override the corresponding values in the
-  `influx` settings block, so a systemd deployment can keep those two secrets out of the file
-  entirely (e.g. via the service's `EnvironmentFile`).
+  permissions (`chmod 600 settings.yaml`), as the README recommends (the packaged install does this
+  automatically). An environment-variable override for InfluxDB's credentials was implemented and
+  then deliberately removed - splitting secrets into a second file with the same effective
+  permissions added no real security boundary, and risked the file being created less securely than
+  `settings.yaml` itself. See `CLAUDE.md`'s "Rejected: environment-variable secrets" for the full
+  reasoning.
 - **TLS verification defaults differ by source, deliberately**: the `influx` block defaults to
   verifying TLS certificates (`insecure: true` is an explicit opt-out); the `hue` block defaults
   the other way (`insecure: true`, i.e. verification skipped), since Hue bridges are commonly

@@ -206,34 +206,11 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
         raise ConfigError("; ".join(errors))
 
 
-def _apply_env_overrides(settings):
-    """Override secret-bearing influx settings from the environment, if set.
-
-    Lets a packaged/systemd deployment keep tokens and passwords out of the
-    settings file on disk (e.g. in an EnvironmentFile), instead of requiring
-    them in plain YAML.
-
-    :param settings: parsed settings dictionary, modified in place
-    :type settings: dict
-    """
-    influx = settings.get("influx")
-    if not isinstance(influx, dict):
-        return
-    if os.environ.get("INFLUX_TOKEN"):
-        influx["token"] = os.environ["INFLUX_TOKEN"]
-    if os.environ.get("INFLUX_PASSWORD"):
-        influx["password"] = os.environ["INFLUX_PASSWORD"]
-
-
 def load_settings(settings_file=None):
     """Load settings from a YAML file and return as a dictionary.
 
     When the resolved path does not exist and ends with ``.yaml``, the function
     falls back to the ``.yml`` equivalent for backwards compatibility.
-
-    ``INFLUX_TOKEN`` and ``INFLUX_PASSWORD`` environment variables, if set,
-    override the corresponding values in the ``influx`` settings block, so
-    secrets need not be stored in the settings file itself.
 
     :param settings_file: path to the settings file (absolute, or relative to the project
         root); defaults to ``settings.yaml`` in the project root when omitted
@@ -259,7 +236,6 @@ def load_settings(settings_file=None):
             logging.critical("Invalid or empty configuration in %s. Please check %s.", settings_path, settings_path)
             raise ConfigError(f"Invalid or empty configuration in {settings_path}")
 
-        _apply_env_overrides(settings)
         validate_settings(settings, settings_path=settings_path)
         return settings
     except FileNotFoundError:
