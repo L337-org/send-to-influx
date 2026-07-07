@@ -6,7 +6,9 @@ permissions:
 on:
   push:
     tags:
-      - 'v*'
+      # Bare "MAJOR.MINOR" tags, matching this project's existing releases (1.0, 1.1,
+      # 2.0, 2.1, ...) - no "v" prefix.
+      - '[0-9]+.[0-9]+'
 
 jobs:
 
@@ -37,9 +39,8 @@ jobs:
 
       - name: Verify tag matches pyproject.toml version
         run: |
-          tag_version="${GITHUB_REF_NAME#v}"
           pkg_version="$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')"
-          if [ "$tag_version" != "$pkg_version" ]; then
+          if [ "$GITHUB_REF_NAME" != "$pkg_version" ]; then
             echo "Tag ${GITHUB_REF_NAME} does not match pyproject.toml version ${pkg_version}"
             exit 1
           fi
