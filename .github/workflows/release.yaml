@@ -112,7 +112,10 @@ jobs:
     name: Publish APT repo to GitHub Pages
     env:
       KEEP_LAST_N: 5
-      COMMIT_SIGNING_KEY_FINGERPRINT: EA20403748B47716E87D56E37FECBE1F16617F8B
+      # Repo variables (not hardcoded) so rotating either is a settings change, not a code
+      # change - see the check in "Commit and push" below that fails fast if either is unset.
+      COMMIT_SIGNING_KEY_FINGERPRINT: ${{ vars.COMMIT_SIGNING_KEY_FINGERPRINT }}
+      COMMIT_SIGNING_EMAIL: ${{ vars.COMMIT_SIGNING_EMAIL }}
       # Isolated from the default keyring (used for APT package signing) so the two
       # keys can never collide - otherwise gpg's default-key selection for Release
       # signing becomes ambiguous, and `gpg --export` (used to publish send-to-influx.gpg)
@@ -176,13 +179,19 @@ jobs:
           # keyring so it can only ever use the commit-signing key, never the APT key.
           GNUPGHOME: ${{ env.COMMIT_SIGNING_GNUPGHOME }}
         run: |
+          if [ -z "$COMMIT_SIGNING_EMAIL" ] || [ -z "$COMMIT_SIGNING_KEY_FINGERPRINT" ]; then
+            echo "::error::COMMIT_SIGNING_EMAIL and/or COMMIT_SIGNING_KEY_FINGERPRINT repo" \
+                 "variable is not set - required now that gh-pages's ruleset enforces signed" \
+                 "commits (see CLAUDE.md's 'Branch protection' section)." >&2
+            exit 1
+          fi
           # GitHub's "verified signature" check (what the gh-pages ruleset's required
           # signed-commits rule actually enforces, not just "a signature is present")
           # requires the commit's email to match a verified email on the account the
           # signing key is registered to - so this has to be the maintainer's real
           # email, not the usual bot noreply address, or the push gets rejected.
           git config user.name "github-actions[bot]"
-          git config user.email "Gavin@l337.org"
+          git config user.email "$COMMIT_SIGNING_EMAIL"
           git config user.signingkey "$COMMIT_SIGNING_KEY_FINGERPRINT"
           git config commit.gpgsign true
           git add -A
