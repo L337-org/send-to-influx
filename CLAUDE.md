@@ -111,5 +111,28 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 
 ### Branch protection
 
-- `main`'s ruleset requires PRs (1 approval, code-owner review, resolved review threads, squash-merge only) and the CI status checks listed under "Commands" above.
-- `gh-pages` is pushed to directly by `release.yaml`'s `apt-repo` job (no PR - there's no human review step for an auto-generated APT repo), so its ruleset only has `non_fast_forward` (no force-pushes/history rewrites), `deletion` (branch can't be deleted), and `required_signatures` (every commit must have a GitHub-verified signature - see the `CI_COMMIT_SIGNING_KEY` note above). It deliberately does *not* require PRs, since that would need a carefully-configured bypass for the workflow's direct push and getting that wrong silently breaks every release.
+Four rulesets, in decreasing order of strictness - `release/**/*` and `feature/**/*` mirror the same
+tiering pattern used on the maintainer's other repos (e.g. `docker-mcp`), adapted to this repo's own
+CI check names:
+
+- `main`: no force-pushes/deletion, PR required (1 approval, code-owner review, resolved review
+  threads, squash-merge only), Copilot auto-review, CodeQL code scanning, and every CI status check
+  listed under "Commands" above (`flake8`, `mypy`, the full `pytest` matrix, `arm64-verify`) required.
+- `release/**/*`: same PR requirements as `main` (1 approval, code-owner review, resolved threads) but
+  merge method widened to squash/merge/rebase, and CodeQL and `arm64-verify` dropped from the required
+  checks (still run, just not a merge-blocking gate at this tier) - kept for longer-lived release-prep
+  branches that don't need the full ceremony of `main` on every push.
+- `feature/**/*`: one tier looser again - force-pushes/rebasing allowed (no `non_fast_forward` rule),
+  and the PR rule relaxed to 0 required approvals and no code-owner review (changes still go through a
+  PR and must have review threads resolved, just without needing anyone's sign-off) - for fast
+  iteration on shared topic branches without losing CI coverage entirely.
+- `gh-pages`: pushed to directly by `release.yaml`'s `apt-repo` job (no PR - there's no human review
+  step for an auto-generated APT repo), so its ruleset only has `non_fast_forward` (no force-pushes/
+  history rewrites), `deletion` (branch can't be deleted), and `required_signatures` (every commit
+  must have a GitHub-verified signature - see the `CI_COMMIT_SIGNING_KEY` note above). It deliberately
+  does *not* require PRs, since that would need a carefully-configured bypass for the workflow's
+  direct push and getting that wrong silently breaks every release.
+
+All four use a `RepositoryRole` bypass actor for the repo admin, though `main`'s predates the other
+three and is scoped to `bypass_mode: "pull_request"` (bypasses the PR requirement only) rather than
+`"always"` (bypasses every rule) used on the newer three - not yet reconciled.
