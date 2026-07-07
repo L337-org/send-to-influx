@@ -8,6 +8,8 @@ Script to take data from various APIs and post it to InfluxDB in order to view t
 
 It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid Carbon Intensity, Octopus Energy, and Speedtest network performance data sources.
 
+It can be installed as a .deb package on supported platforms, or run directly from the source code in a Python virtual environment.
+
 For a full field-by-field reference of what each source collects and the units it's reported in, see [UNITS.md](UNITS.md).
 
 Contents
@@ -22,7 +24,7 @@ Contents
   - [Speedtest](#speedtest)
 - [InfluxDB setup](#influxdb)
 - [Running the script](#running-the-script)
-- **[Running as a systemd service (.deb package + APT repo)](#running-as-a-systemd-service)**
+- [Using the .deb package](#using-the-deb-package)
 - [Usage / CLI reference](#usage)
 - [Contributing](#contributing)
 - [Privacy and Security](#privacy-and-security)
@@ -195,10 +197,10 @@ Configuration options for multi-source mode:
 - `stagger_seconds` (optional): delay between source starts (default `10`)
 - failed source retries: exponential backoff with a 5 second base and 300 second maximum
 
-Running as a systemd service
------------------------------
+Using the .deb package
+----------------------
 Instead of a screen session, you can install send-to-influx as a systemd-managed service via a
-`.deb` package, either built yourself or from the project's APT repo.
+`.deb` package.
 
 ### Installing from the APT repo
 
