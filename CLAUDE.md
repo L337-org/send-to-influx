@@ -25,9 +25,12 @@ python -m venv .venv
 .venv/bin/mypy toinflux sendtoinflux.py   # static type check (permissive, see pyproject.toml)
 ```
 
-CI runs `pytest` (with coverage, matrixed across Python 3.10-3.14), `flake8`, and `mypy` in parallel on
-every push to `main` and every PR (`.github/workflows/premerge.yaml`). Dependency and GitHub Actions
-updates are managed by Dependabot (`.github/dependabot.yml`), weekly.
+CI runs `pytest` (with coverage, matrixed across Python 3.10-3.14), `flake8`, `mypy`, and `arm64-verify`
+(builds and smoke-tests the `.deb` on a real `ubuntu-24.04-arm` runner, see "Packaging" below) in
+parallel on every push to `main` and every PR (`.github/workflows/premerge.yaml`) - all are required
+status checks on `main`'s ruleset, so a failure blocks merging rather than only being noticed
+afterward. Dependency and GitHub Actions updates are managed by Dependabot
+(`.github/dependabot.yml`), weekly.
 
 ## Architecture
 
@@ -101,6 +104,6 @@ Each subclass implements `get_data()` which populates `self.data` (dict) and `se
 
 - `pyproject.toml` is the single source of truth for the package version (`[project].version`) and runtime dependencies (dynamically read from `requirements.txt`). Bump the version there, not in `sendtoinflux.py`.
 - `sendtoinflux.py`'s `__version__` is read from installed package metadata (`importlib.metadata.version("send-to-influx")`), falling back to `"0.0.0-dev"` when run from a source checkout without the package installed. `requirements-dev.txt` includes `-e .` so dev/test environments have it installed and see the real version.
-- `packaging/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service`) and maintainer scripts (`postinst`/`prerm`/`postrm`). Must be built on the target architecture. See the README's "Running as a systemd service" section.
+- `packaging/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service`) and maintainer scripts (`postinst`/`prerm`/`postrm`). Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends:`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. `.github/workflows/premerge.yaml`'s `arm64-verify` job builds and smoke-tests the same script on an `ubuntu-24.04-arm` runner on every push/PR (a required status check), to catch a future dependency change that makes a compiled extension load-bearing rather than optional before it can merge. See the README's "Running as a systemd service" section.
 - `.github/workflows/release.yaml`: pushing a bare `MAJOR.MINOR` tag (e.g. `3.0` - matching this project's existing tags/releases, no `v` prefix) runs the test suite, verifies the tag matches `pyproject.toml`'s version exactly, builds the `.deb`, and attaches it to a GitHub Release. A second job publishes it to a flat APT repo on the `gh-pages` branch (served via GitHub Pages) - it prunes to the last `KEEP_LAST_N` (currently 5) `.deb` files, full history stays in Releases.
   - The APT repo job needs a one-time setup and is skipped (not failed) until it exists: generate a GPG key (`gpg --batch --gen-key`), add the private key as the `APT_GPG_PRIVATE_KEY` repo secret (`gpg --export-secret-keys --armor <key-id> | base64`), and the public key ends up published as `send-to-influx.gpg` in the repo automatically on first successful run.
