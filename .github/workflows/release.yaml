@@ -100,12 +100,19 @@ jobs:
     # armored) as the APT_GPG_PRIVATE_KEY secret, and publish the public key for users to
     # import - see the README's "Running as a systemd service" / APT repo section. Skipped
     # until that secret exists, so tagging a release doesn't require the APT repo to be set up.
+    #
+    # gh-pages's ruleset requires signed commits, so this job also imports a *separate*
+    # dedicated commit-signing key (CI_COMMIT_SIGNING_KEY secret, its public half added to
+    # the maintainer's GitHub account) and signs the publish commit with it - kept apart
+    # from the APT package-signing key above since the two have different trust domains
+    # (end users trust the APT key; GitHub verifies this one) and different rotation needs.
     needs: [build-and-release, check_apt_secret]
     if: needs.check_apt_secret.outputs.has_secret == 'true'
     runs-on: [ubuntu-latest]
     name: Publish APT repo to GitHub Pages
     env:
       KEEP_LAST_N: 5
+      COMMIT_SIGNING_KEY_FINGERPRINT: EA20403748B47716E87D56E37FECBE1F16617F8B
     steps:
       - name: Download .deb artifact
         uses: actions/download-artifact@v8
@@ -123,8 +130,11 @@ jobs:
       - name: Install apt repo tooling
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev gnupg
 
-      - name: Import GPG signing key
+      - name: Import APT package-signing key
         run: echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+
+      - name: Import commit-signing key
+        run: echo "${{ secrets.CI_COMMIT_SIGNING_KEY }}" | base64 -d | gpg --batch --import
 
       - name: Update repo contents
         working-directory: gh-pages
@@ -145,8 +155,15 @@ jobs:
       - name: Commit and push
         working-directory: gh-pages
         run: |
+          # GitHub's "verified signature" check (what the gh-pages ruleset's required
+          # signed-commits rule actually enforces, not just "a signature is present")
+          # requires the commit's email to match a verified email on the account the
+          # signing key is registered to - so this has to be the maintainer's real
+          # email, not the usual bot noreply address, or the push gets rejected.
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.email "Gavin@l337.org"
+          git config user.signingkey "$COMMIT_SIGNING_KEY_FINGERPRINT"
+          git config commit.gpgsign true
           git add -A
           git commit -m "Publish ${GITHUB_REF_NAME} to APT repo" || echo "Nothing to commit"
           git push origin gh-pages
