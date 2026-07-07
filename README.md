@@ -227,12 +227,16 @@ same script on an arm64 runner on every push/PR (a required status check), to ca
 dependency change that would make a compiled extension load-bearing rather than optional before
 it can merge.
 
-The bundled venv is still tied to the exact Python major.minor used to build it (a venv's
-`site-packages` lives under `lib/pythonX.Y/`), so the package declares a tight
-`python3 (>= X.Y), python3 (<< X.(Y+1))` dependency rather than a loose floor - it can be installed
-on any *architecture*, but only on a system whose `/usr/bin/python3` is the same minor version as
-the build host's. A package built on one distro release may not install on another whose default
-`python3` is a different minor version.
+A venv's `site-packages` normally lives under `lib/pythonX.Y/`, named after the exact major.minor
+of the interpreter that created it - which would otherwise tie an installable target to whatever
+Python version happened to be on the build host (e.g. GitHub's CI runner image) rather than
+whatever the *install target* actually has, and those two drift out of sync over time. Since
+everything in the venv is pure Python (see above), `build-deb.sh` symlinks every minor from 3.10
+through 3.30's `lib/pythonX.Y` to the one that was actually populated, and declares a matching
+`python3 (>= 3.10), python3 (<< 3.31)` dependency, so the package installs correctly regardless of
+which minor in that range the target's `/usr/bin/python3` happens to be (the upper bound keeps the
+dependency and the symlink range from silently drifting apart - both are bumped together if Python
+ever gets close to 3.30).
 
 ### After installing
 

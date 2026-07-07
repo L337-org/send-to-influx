@@ -64,23 +64,40 @@ while IFS= read -r f; do
 done < <(grep -rlI "$VENV_STAGING_PATH" "$VENV_STAGING_PATH/bin" 2>/dev/null || true)
 find "$VENV_STAGING_PATH/bin" -name "*.bak" -delete
 
-# A venv's site-packages lives at lib/pythonX.Y/site-packages, named after the exact
-# major.minor of the interpreter that created it - a system python3 of a *different*
-# minor version would still satisfy a loose "python3 (>= 3.10)" dependency, but would
-# look for that directory under its own X.Y and find it missing (silent
-# ModuleNotFoundError at runtime, not a clean dpkg/apt failure). Pin Depends: to the
-# exact major.minor used here so apt can only install this onto a matching interpreter.
-PYTHON_MAJOR_MINOR="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
-    'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-PYTHON_NEXT_MINOR="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
-    'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor + 1}")')"
-
 # Strip any compiled extensions pip's dependency resolution happened to pull
 # in (e.g. PyYAML's / charset-normalizer's optional C accelerators) - both
 # have documented pure-Python fallbacks, and stripping these makes the
 # resulting package genuinely architecture-independent regardless of what
 # wheels were available on the build host.
 find "$PKG_ROOT/opt/send-to-influx/venv/lib" -type f \( -name "*.so" -o -name "*.pyd" \) -delete
+
+# A venv's site-packages lives at lib/pythonX.Y/site-packages, named after the exact
+# major.minor of the interpreter that created it - so a target system whose python3 is
+# a *different* minor than the build host's would normally find that directory missing
+# (silent ModuleNotFoundError at runtime). An earlier version of this script "fixed"
+# that by pinning Depends: to the exact build-time major.minor - but that just traded
+# one failure for another: it made the package installable only on systems whose python3
+# happens to match whatever GitHub's CI runner image ships *at build time*, which drifts
+# out of sync with real target systems (confirmed in practice: built against 3.12,
+# rejected on a target running 3.13). Since everything left in the venv after the
+# .so-stripping above is pure Python (no version-specific compiled ABI code), any 3.10+
+# interpreter can safely use the exact same site-packages - the only thing tying it to
+# one minor is the directory name. Symlink every other plausible minor to the real one so
+# apt can use a plain floor (Depends: below) instead of a brittle exact-version pin.
+# PYTHON_MAX_SUPPORTED_MINOR bounds both the symlink range and Depends:'s upper bound
+# together (below) - keeping them as one source of truth, since a target whose python3
+# is newer than the last symlinked minor would otherwise hit the exact same missing-
+# site-packages failure this change exists to prevent, just at a higher version number.
+PYTHON_MAJOR_MINOR="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
+    'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+PYTHON_MAX_SUPPORTED_MINOR=30
+VENV_LIB_DIR="$PKG_ROOT/opt/send-to-influx/venv/lib"
+for minor in $(seq 10 "$PYTHON_MAX_SUPPORTED_MINOR"); do
+    candidate="python3.${minor}"
+    if [ "$candidate" != "python${PYTHON_MAJOR_MINOR}" ] && [ ! -e "$VENV_LIB_DIR/$candidate" ]; then
+        ln -s "python${PYTHON_MAJOR_MINOR}" "$VENV_LIB_DIR/$candidate"
+    fi
+done
 
 VERSION="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
     "from importlib.metadata import version; print(version('${PKG_NAME}'))")"
@@ -105,7 +122,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: all
-Depends: systemd, python3 (>= ${PYTHON_MAJOR_MINOR}), python3 (<< ${PYTHON_NEXT_MINOR})
+Depends: systemd, python3 (>= 3.10), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
 Maintainer: Gavin Lucas
 Description: Collects data from smart home / energy devices and writes it to InfluxDB
  send-to-influx polls Hue, MyEnergi, Octopus, Open-Meteo, National Grid Carbon
