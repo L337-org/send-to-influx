@@ -6,9 +6,13 @@ permissions:
 on:
   push:
     tags:
-      # Bare "MAJOR.MINOR" tags, matching this project's existing releases (1.0, 1.1,
-      # 2.0, 2.1, ...) - no "v" prefix.
-      - '[0-9]+.[0-9]+'
+      # Match every tag rather than trying to be precise about version-number shape -
+      # GitHub's tag-filter glob syntax doesn't clearly document whether `+`/character
+      # classes work as quantifiers or literals, so relying on that got this wrong twice.
+      # The "Verify tag matches pyproject.toml version" step below is the real gate;
+      # this trigger only needs to not silently exclude this project's actual tags
+      # (bare MAJOR.MINOR, e.g. 3.0 - no "v" prefix, unlike the previous 'v*' pattern).
+      - '*'
 
 jobs:
 
