@@ -8,7 +8,26 @@ Script to take data from various APIs and post it to InfluxDB in order to view t
 
 It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid Carbon Intensity, Octopus Energy, and Speedtest network performance data sources.
 
+It can be installed as a .deb package on supported platforms, or run directly from the source code in a Python virtual environment.
+
 For a full field-by-field reference of what each source collects and the units it's reported in, see [UNITS.md](UNITS.md).
+
+Contents
+--------
+
+- Data sources
+  - [Hue Bridge](#hue-bridge)
+  - [MyEnergi Zappi / Eddi / Harvi](#myenergi-zappi--eddi--harvi)
+  - [UK National Grid Carbon Intensity](#uk-national-grid-carbon-intensity)
+  - [Open-Meteo](#open-meteo)
+  - [Octopus Energy](#octopus-energy)
+  - [Speedtest](#speedtest)
+- [InfluxDB setup](#influxdb)
+- [Running the script](#running-the-script)
+- [Using the .deb package](#using-the-deb-package)
+- [Usage / CLI reference](#usage)
+- [Contributing](#contributing)
+- [Privacy and Security](#privacy-and-security)
 
 Hue Bridge
 ----------
@@ -178,10 +197,10 @@ Configuration options for multi-source mode:
 - `stagger_seconds` (optional): delay between source starts (default `10`)
 - failed source retries: exponential backoff with a 5 second base and 300 second maximum
 
-Running as a systemd service
------------------------------
+Using the .deb package
+----------------------
 Instead of a screen session, you can install send-to-influx as a systemd-managed service via a
-`.deb` package, either built yourself or from the project's APT repo.
+`.deb` package.
 
 ### Installing from the APT repo
 
@@ -247,16 +266,6 @@ Usage
 > &emsp; -p, --print           print the raw data rather than sending it to InfluxDB  
 > &emsp; -s, --source SOURCE   the source of the data to send to InfluxDB (hue, zappi, etc.). If this parameter is omitted, all sources in the settings file
 > &emsp;                       'sources' list are started. If no sources are specified in the settings file, the 'default_source' settings key is used.
-
-Running the unit tests
-----------------------
-The project uses pytest for unit tests. To run the tests:
-
-- Create a virtual environment (recommended) and install development dependencies:
-  `python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`
-- Run the test suite: `pytest -v` (or `./.venv/bin/pytest -v` if using the venv above)
-
-No real configuration or network access is required; tests use mocks for settings and HTTP. The same test suite runs in CI on every push and pull request.
 
 Contributing
 ------------
