@@ -199,8 +199,12 @@ The repo only keeps the last few releases' `.deb` files (older versions remain a
     packaging/build-deb.sh
     sudo dpkg -i send-to-influx_*.deb
 
-This must be built on the target architecture (it bundles the app and its Python dependencies
-into a venv under `/opt/send-to-influx`, rather than pure source, so it's not architecture-agnostic).
+The package is architecture-independent (`all`) - the app and its dependencies are pure Python,
+and any optional compiled accelerators (e.g. PyYAML's) are stripped from the bundled venv at build
+time in favour of their pure-Python fallbacks - so it can be built on any machine and installed on
+any Debian/Ubuntu architecture, including arm64 (e.g. Raspberry Pi). CI builds and smoke-tests the
+same script on an arm64 runner on every merge to main, to catch a future dependency change that
+would make a compiled extension load-bearing rather than optional.
 
 ### After installing
 

@@ -212,7 +212,7 @@ python sendtoinflux.py --settings /etc/send-to-influx/settings.yaml
 ## Packaging & Deployment
 
 - `pyproject.toml` is the single source of truth for the package version (`[project].version`) and dependencies (dynamically sourced from `requirements.txt`). `sendtoinflux.py`'s `__version__` is read back from installed package metadata via `importlib.metadata`, falling back to `"0.0.0-dev"` when running from an uninstalled source checkout.
-- `packaging/build-deb.sh` builds a `.deb` bundling the app and its dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service`) to run it as a service — see the README's "Running as a systemd service" section.
+- `packaging/build-deb.sh` builds a `.deb` bundling the app and its dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service`) to run it as a service. Package is `Architecture: all` — the venv's `python3` is a symlink to the system-provided `/usr/bin/python3` (a `Depends:`, not bundled), and any optional compiled accelerators pip pulls in (PyYAML, charset-normalizer) are stripped post-install in favour of pure-Python fallbacks. Verified on real arm64 hardware by the `arm64-verify` CI job (merges to `main` only) — see the README's "Running as a systemd service" section.
 - `INFLUX_TOKEN`/`INFLUX_PASSWORD` environment variables override the matching `influx` settings values, so a systemd deployment can keep secrets out of `settings.yaml` (e.g. via the service's `EnvironmentFile`).
 
 ## Configuration Examples
@@ -342,7 +342,7 @@ if yours has a valid cert.
 - **Framework**: pytest. Tests live under `tests/`.
 - **Coverage**: Write unit tests for new and modified code. Tests should cover public functions and classes; use mocks for `load_settings`, file I/O, and HTTP so tests run without real config or network.
 - **Virtual environment requirement**: Always run Python tooling from the repo-local virtual environment (`.venv`). Do not rely on globally installed `python`, `pip`, or `pytest`.
-- **Running tests**: Install dev dependencies (`.venv/bin/pip install -r requirements-dev.txt`) then run `.venv/bin/pytest -v` (or `.venv/bin/python -m pytest -v`). CI runs this (matrixed across Python 3.10-3.14, with coverage), plus `flake8` and `mypy`, on every push to `main` and every pull request. Dependabot keeps pip and GitHub Actions dependencies up to date weekly.
+- **Running tests**: Install dev dependencies (`.venv/bin/pip install -r requirements-dev.txt`) then run `.venv/bin/pytest -v` (or `.venv/bin/python -m pytest -v`). CI runs this (matrixed across Python 3.10-3.14, with coverage), plus `flake8` and `mypy`, on every push to `main` and every pull request. On merges to `main` only, an additional `arm64-verify` job builds and smoke-tests the `.deb` on a real `ubuntu-24.04-arm` runner. Dependabot keeps pip and GitHub Actions dependencies up to date weekly.
 - **Adding tests**: When adding a new data source or changing behaviour, add or update tests in the appropriate `tests/test_*.py` module. Reuse fixtures from `tests/conftest.py` (e.g. `sample_settings`) where applicable.
 
 ## Development Workflow
