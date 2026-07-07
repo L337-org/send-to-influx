@@ -53,7 +53,14 @@ def configure_logging(
     root.addHandler(stdout_handler)
 
     if logfile:
-        file_handler = RotatingFileHandler(logfile, maxBytes=log_max_bytes, backupCount=log_backup_count)
+        try:
+            file_handler = RotatingFileHandler(logfile, maxBytes=log_max_bytes, backupCount=log_backup_count)
+        except OSError as exc:
+            raise ConfigError(
+                f"Cannot open logfile '{logfile}' for writing ({exc.strerror or exc}). If this is the "
+                "packaged systemd service, only /etc/send-to-influx/ is writable by default - see the "
+                "README's 'Running as a systemd service' section for how to log to a file under systemd."
+            ) from exc
         file_handler.setFormatter(fmt)
         file_handler._send_to_influx_handler = True
         root.addHandler(file_handler)
