@@ -46,6 +46,19 @@ echo "Building venv payload from $REPO_ROOT ..."
 "$PKG_ROOT/opt/send-to-influx/venv/bin/pip" install --upgrade pip --quiet
 "$PKG_ROOT/opt/send-to-influx/venv/bin/pip" install "$REPO_ROOT" --quiet
 
+# pip bakes the venv's *build-time* staging path (this script's mktemp -d, not
+# where the venv actually ends up once installed) into console-script shebangs
+# and venv/bin/activate*'s VIRTUAL_ENV - rewrite them to the real install path,
+# or the resulting .deb installs "successfully" but every entry point is
+# non-executable ("cannot execute: required file not found", a missing
+# shebang interpreter) and activate exports the wrong VIRTUAL_ENV.
+VENV_STAGING_PATH="$PKG_ROOT/opt/send-to-influx/venv"
+VENV_INSTALL_PATH="/opt/send-to-influx/venv"
+grep -rl "$VENV_STAGING_PATH" "$VENV_STAGING_PATH/bin" 2>/dev/null | while IFS= read -r f; do
+    sed -i.bak "s|$VENV_STAGING_PATH|$VENV_INSTALL_PATH|g" "$f"
+done
+find "$VENV_STAGING_PATH/bin" -name "*.bak" -delete
+
 # A venv's site-packages lives at lib/pythonX.Y/site-packages, named after the exact
 # major.minor of the interpreter that created it - a system python3 of a *different*
 # minor version would still satisfy a loose "python3 (>= 3.10)" dependency, but would
