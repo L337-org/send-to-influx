@@ -61,8 +61,9 @@ class TestSpeedtest:
                 assert "upload" not in result
 
     def test_get_data_raises_source_connection_error_on_implausible_ping(self, sample_settings):
-        """get_data rejects a ping >= 3600ms, the sentinel speedtest-cli emits when all latency
-        probes to a server fail, rather than writing it to InfluxDB as a real measurement."""
+        """get_data rejects an implausible ping >= 3600ms - the kind of value speedtest-cli
+        produces by averaging failed-probe penalties into the result - rather than writing it
+        to InfluxDB as a real measurement."""
         settings = {**sample_settings, "speedtest": {"db": "speedtest_db", "interval": 300}}
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings

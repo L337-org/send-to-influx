@@ -12,10 +12,11 @@ from toinflux.influx import DataHandler
 from toinflux.general import flatten_dict
 from toinflux.exceptions import SourceConnectionError
 
-# speedtest-cli's get_best_server() penalises a failed latency probe with a hardcoded 3600
-# (seconds) instead of raising, then averages penalties in with any real samples - so a single
-# failed probe out of the 3 it tries per server already skews the reported "ping" to ~600,000 ms,
-# nowhere near a real-world value. Treat anything at or above 3600 ms as an unreliable measurement.
+# speedtest-cli's get_best_server() penalises a failed latency probe with a hardcoded 3600-second
+# penalty instead of raising, then averages penalties in with any real samples before converting to
+# milliseconds - so even a single failed probe out of the 3 it tries per server skews the reported
+# "ping" to ~600,000 ms, orders of magnitude above any real-world value. The 3600 ms cutoff below is
+# an unrelated round number chosen for that same reason - no genuine ping comes remotely close to it.
 MAX_PLAUSIBLE_PING_MS = 3600
 
 
