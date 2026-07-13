@@ -12,6 +12,20 @@ from toinflux.influx import DataHandler
 from toinflux.general import flatten_dict
 from toinflux.exceptions import SourceConnectionError
 
+# speedtest-cli's get_best_server() times each of the 3 latency probes it makes per candidate
+# server using SpeedtestHTTPConnection/SpeedtestHTTPSConnection, whose __init__ defaults to a
+# hardcoded timeout=10 (seconds) - get_best_server() never overrides it, so this 10s cap applies
+# regardless of the `timeout` passed to speedtest.Speedtest() (that one only reaches the config-
+# fetch/download/upload opener). Any probe that doesn't complete within that 10s therefore raises
+# socket.timeout - caught alongside every other connection failure - and gets penalised with a
+# hardcoded 3600 (seconds) instead of a real sample. The 3 per-server samples (real or penalty) are
+# summed, divided by a fixed 6 - not the sample count - and converted to milliseconds, so a real
+# (non-penalised) probe can never contribute more than 10s to that sum: the true ceiling for a
+# genuine "ping" is (3 * 10 / 6) * 1000 = 5000 ms. Anything at or above that is provably longer
+# than get_best_server() could actually have measured, and must include at least one 3600s
+# penalty - which alone already yields ~600,000 ms, so there's no ambiguous middle ground.
+MAX_PLAUSIBLE_PING_MS = 5000
+
 
 class Speedtest(DataHandler):
     """Speedtest class to send data to InfluxDB"""
@@ -39,6 +53,11 @@ class Speedtest(DataHandler):
         if not isinstance(st_data, dict):
             logging.error("Error running Speedtest - invalid results")
             raise SourceConnectionError("invalid results")
+
+        ping = st_data.get("ping")
+        if isinstance(ping, (int, float)) and ping >= MAX_PLAUSIBLE_PING_MS:
+            logging.error("Error running Speedtest - implausible ping %s ms (server probes likely failed)", ping)
+            raise SourceConnectionError(f"implausible ping {ping} ms (server probes likely failed)")
 
         # flatten the speedtest payload so nested values can be filtered and sent
         flattened_data = flatten_dict(st_data)

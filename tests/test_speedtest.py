@@ -4,7 +4,7 @@ from socket import gethostname
 from unittest.mock import MagicMock, patch
 import pytest
 from toinflux.speedtest import Speedtest
-from toinflux.exceptions import ConfigError
+from toinflux.exceptions import ConfigError, SourceConnectionError
 
 
 class TestSpeedtest:
@@ -59,6 +59,38 @@ class TestSpeedtest:
                 assert result == {"download": 200.0, "ping": 12.3}
                 assert "missing" not in result
                 assert "upload" not in result
+
+    def test_get_data_raises_source_connection_error_on_implausible_ping(self, sample_settings):
+        """get_data rejects an implausible ping >= 5000ms - the kind of value speedtest-cli
+        produces by averaging failed-probe penalties into the result - rather than writing it
+        to InfluxDB as a real measurement."""
+        settings = {**sample_settings, "speedtest": {"db": "speedtest_db", "interval": 300}}
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = settings
+            handler = Speedtest(source="speedtest")
+
+            st_payload = {"download": 123.4, "upload": 56.7, "ping": 1800000}
+            mock_st = MagicMock()
+            mock_st.results.dict.return_value = st_payload
+
+            with patch("toinflux.speedtest.speedtest.Speedtest", return_value=mock_st):
+                with pytest.raises(SourceConnectionError):
+                    handler.get_data()
+
+    def test_get_data_accepts_ping_just_below_threshold(self, sample_settings):
+        """A ping just under the implausibility threshold is treated as a real measurement."""
+        settings = {**sample_settings, "speedtest": {"db": "speedtest_db", "interval": 300}}
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = settings
+            handler = Speedtest(source="speedtest")
+
+            st_payload = {"download": 123.4, "upload": 56.7, "ping": 4999.999}
+            mock_st = MagicMock()
+            mock_st.results.dict.return_value = st_payload
+
+            with patch("toinflux.speedtest.speedtest.Speedtest", return_value=mock_st):
+                result = handler.get_data()
+                assert result == st_payload
 
     def test_get_data_returns_empty_dict_when_only_missing_fields_configured(self, sample_settings):
         """get_data returns empty dict when configured fields are absent."""

@@ -44,7 +44,7 @@ The project uses a plugin-like architecture where each data source is implemente
 - **`toinflux/carbonintensity.py`**: National Grid carbon intensity and generation fuel mix (no API key)
 - **`toinflux/openmeteo.py`**: Open-Meteo weather data (no API key, lat/lon configuration)
 - **`toinflux/octopus.py`**: Octopus Energy electricity/gas consumption and unit rates (API key auth)
-- **`toinflux/speedtest.py`**: Speedtest network performance integration
+- **`toinflux/speedtest.py`**: Speedtest network performance integration; rejects an implausible `ping` (>= 5000 ms - the ceiling imposed by speedtest-cli's own hardcoded 10s per-probe connection timeout, `(3 * 10 / 6) * 1000`) as a connection error instead of writing it
 
 ### Configuration (`settings.yaml`)
 YAML-based configuration supporting multiple data sources:
