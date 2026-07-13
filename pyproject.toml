@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "send-to-influx"
-version = "3.0"
+version = "3.1"
 description = "Collects data from smart home / energy monitoring devices and sends it to InfluxDB"
 readme = "README.md"
 license = { file = "LICENSE.md" }

@@ -53,6 +53,8 @@ DataHandler      (toinflux/influx.py)          — base; owns send_data() → In
 
 Each subclass implements `get_data()` which populates `self.data` (dict) and `self.influx_header` (InfluxDB measurement/tag string); `send_data()` in the base class takes it from there. Points are written with an explicit unix-epoch-seconds timestamp: `self.timestamp` if `get_data()` set it (e.g. Octopus uses the reading's own `interval_start` so re-writes of the same reading overwrite rather than duplicate), otherwise the time `send_data()` is called. Field keys are escaped per line protocol rules (commas, `=`, spaces).
 
+Speedtest's `get_data()` additionally rejects an implausible `ping` (>= 3600 ms) as a `SourceConnectionError` rather than writing it: speedtest-cli's `get_best_server()` penalises each failed latency probe to a candidate server with a hardcoded `3600` (seconds) instead of raising, then averages that penalty in alongside any real samples - so if every probe to a server fails (observed in practice during a transient network blip), the reported `ping` comes out around 1,800,000 ms instead of triggering an error, and would otherwise be written to InfluxDB as if it were real.
+
 ### Entry point (`sendtoinflux.py`)
 
 - **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source. Connection failures (`SourceConnectionError`) are retried with exponential backoff (base 5 s, max 300 s); a `ConfigError` is not retried — it exits the process immediately with code 1.

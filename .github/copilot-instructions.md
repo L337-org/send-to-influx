@@ -44,7 +44,7 @@ The project uses a plugin-like architecture where each data source is implemente
 - **`toinflux/carbonintensity.py`**: National Grid carbon intensity and generation fuel mix (no API key)
 - **`toinflux/openmeteo.py`**: Open-Meteo weather data (no API key, lat/lon configuration)
 - **`toinflux/octopus.py`**: Octopus Energy electricity/gas consumption and unit rates (API key auth)
-- **`toinflux/speedtest.py`**: Speedtest network performance integration
+- **`toinflux/speedtest.py`**: Speedtest network performance integration; rejects an implausible `ping` (>= 3600 ms - the sentinel speedtest-cli emits when every latency probe to a server fails) as a connection error instead of writing it
 
 ### Configuration (`settings.yaml`)
 YAML-based configuration supporting multiple data sources:

@@ -92,6 +92,11 @@ Speedtest
 
 This uses the speedtest-cli python library and will run download and upload tests and store the results.
 
+If every latency probe to a candidate server fails, speedtest-cli reports a nonsensical `ping`
+(hardcoded penalty values averaged in place of real samples - can come out as high as 1,800,000 ms)
+rather than raising an error. Any `ping` >= 3600 ms is treated as an implausible/failed measurement
+and raises a connection error (retried with backoff) instead of being written to InfluxDB.
+
 InfluxDB
 --------
 

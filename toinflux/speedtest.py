@@ -12,6 +12,12 @@ from toinflux.influx import DataHandler
 from toinflux.general import flatten_dict
 from toinflux.exceptions import SourceConnectionError
 
+# speedtest-cli's get_best_server() penalises a failed latency probe with a hardcoded 3600
+# (seconds) instead of raising, then averages penalties in with any real samples - so a single
+# failed probe out of the 3 it tries per server already skews the reported "ping" to ~600,000 ms,
+# nowhere near a real-world value. Treat anything at or above 3600 ms as an unreliable measurement.
+MAX_PLAUSIBLE_PING_MS = 3600
+
 
 class Speedtest(DataHandler):
     """Speedtest class to send data to InfluxDB"""
@@ -39,6 +45,11 @@ class Speedtest(DataHandler):
         if not isinstance(st_data, dict):
             logging.error("Error running Speedtest - invalid results")
             raise SourceConnectionError("invalid results")
+
+        ping = st_data.get("ping")
+        if isinstance(ping, (int, float)) and ping >= MAX_PLAUSIBLE_PING_MS:
+            logging.error("Error running Speedtest - implausible ping %s ms (server probes likely failed)", ping)
+            raise SourceConnectionError(f"implausible ping {ping} ms (server probes likely failed)")
 
         # flatten the speedtest payload so nested values can be filtered and sent
         flattened_data = flatten_dict(st_data)
