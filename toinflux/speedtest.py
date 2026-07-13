@@ -12,13 +12,19 @@ from toinflux.influx import DataHandler
 from toinflux.general import flatten_dict
 from toinflux.exceptions import SourceConnectionError
 
-# speedtest-cli's get_best_server() penalises a failed latency probe with a hardcoded 3600-second
-# penalty instead of raising, then sums the 3 per-server samples (real or penalty) and divides by a
-# fixed 6 - not the sample count - before converting to milliseconds. So even a single failed probe
-# out of the 3 it tries per server skews the reported "ping" to ~600,000 ms ((3600 / 6) * 1000),
-# orders of magnitude above any real-world value. The 3600 ms cutoff below is an unrelated round
-# number chosen for that same reason - no genuine ping comes remotely close to it.
-MAX_PLAUSIBLE_PING_MS = 3600
+# speedtest-cli's get_best_server() times each of the 3 latency probes it makes per candidate
+# server using SpeedtestHTTPConnection/SpeedtestHTTPSConnection, whose __init__ defaults to a
+# hardcoded timeout=10 (seconds) - get_best_server() never overrides it, so this 10s cap applies
+# regardless of the `timeout` passed to speedtest.Speedtest() (that one only reaches the config-
+# fetch/download/upload opener). Any probe that doesn't complete within that 10s therefore raises
+# socket.timeout - caught alongside every other connection failure - and gets penalised with a
+# hardcoded 3600 (seconds) instead of a real sample. The 3 per-server samples (real or penalty) are
+# summed, divided by a fixed 6 - not the sample count - and converted to milliseconds, so a real
+# (non-penalised) probe can never contribute more than 10s to that sum: the true ceiling for a
+# genuine "ping" is (3 * 10 / 6) * 1000 = 5000 ms. Anything at or above that is provably longer
+# than get_best_server() could actually have measured, and must include at least one 3600s
+# penalty - which alone already yields ~600,000 ms, so there's no ambiguous middle ground.
+MAX_PLAUSIBLE_PING_MS = 5000
 
 
 class Speedtest(DataHandler):

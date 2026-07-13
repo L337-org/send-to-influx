@@ -61,7 +61,7 @@ class TestSpeedtest:
                 assert "upload" not in result
 
     def test_get_data_raises_source_connection_error_on_implausible_ping(self, sample_settings):
-        """get_data rejects an implausible ping >= 3600ms - the kind of value speedtest-cli
+        """get_data rejects an implausible ping >= 5000ms - the kind of value speedtest-cli
         produces by averaging failed-probe penalties into the result - rather than writing it
         to InfluxDB as a real measurement."""
         settings = {**sample_settings, "speedtest": {"db": "speedtest_db", "interval": 300}}
@@ -84,7 +84,7 @@ class TestSpeedtest:
             mock_load_settings.return_value = settings
             handler = Speedtest(source="speedtest")
 
-            st_payload = {"download": 123.4, "upload": 56.7, "ping": 3599.999}
+            st_payload = {"download": 123.4, "upload": 56.7, "ping": 4999.999}
             mock_st = MagicMock()
             mock_st.results.dict.return_value = st_payload
 
