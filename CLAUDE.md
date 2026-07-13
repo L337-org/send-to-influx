@@ -30,7 +30,8 @@ CI runs `pytest` (with coverage, matrixed across Python 3.10-3.14), `flake8`, `m
 parallel on every push to `main` and every PR (`.github/workflows/premerge.yaml`) - all are required
 status checks on `main`'s ruleset, so a failure blocks merging rather than only being noticed
 afterward. Dependency and GitHub Actions updates are managed by Dependabot
-(`.github/dependabot.yml`), weekly.
+(`.github/dependabot.yml`): `pip` weekly, `github-actions` monthly (actions bump less often and don't
+need the same cadence as Python dependencies).
 
 ## Architecture
 
