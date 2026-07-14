@@ -13,10 +13,10 @@
 # future dependency change that makes a compiled extension load-bearing
 # rather than optional before it can merge.
 #
-# Usage: packaging/build-deb.sh [output-path.deb]
+# Usage: packaging/deb/build-deb.sh [output-path.deb]
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PKG_NAME="send-to-influx"
 BUILD_DIR="$(mktemp -d)"
 PKG_ROOT="$BUILD_DIR/pkg"
@@ -105,11 +105,11 @@ VERSION="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
 # Config (marked as a conffile below so dpkg preserves local edits on upgrade)
 cp "$REPO_ROOT/example_settings.yaml" "$PKG_ROOT/etc/send-to-influx/settings.yaml"
 
-# systemd unit and maintainer scripts
+# systemd unit (format-agnostic, stays at the top of packaging/) and .deb-specific maintainer scripts
 cp "$REPO_ROOT/packaging/send-to-influx.service" "$PKG_ROOT/lib/systemd/system/send-to-influx.service"
-cp "$REPO_ROOT/packaging/postinst" "$PKG_ROOT/DEBIAN/postinst"
-cp "$REPO_ROOT/packaging/prerm" "$PKG_ROOT/DEBIAN/prerm"
-cp "$REPO_ROOT/packaging/postrm" "$PKG_ROOT/DEBIAN/postrm"
+cp "$REPO_ROOT/packaging/deb/postinst" "$PKG_ROOT/DEBIAN/postinst"
+cp "$REPO_ROOT/packaging/deb/prerm" "$PKG_ROOT/DEBIAN/prerm"
+cp "$REPO_ROOT/packaging/deb/postrm" "$PKG_ROOT/DEBIAN/postrm"
 chmod 755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm"
 
 cat > "$PKG_ROOT/DEBIAN/conffiles" <<CONFFILES

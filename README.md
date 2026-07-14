@@ -219,7 +219,7 @@ The repo only keeps the last few releases' `.deb` files (older versions remain a
 
 ### Building it yourself
 
-    packaging/build-deb.sh
+    packaging/deb/build-deb.sh
     sudo dpkg -i send-to-influx_*.deb
 
 The package is architecture-independent (`all`) - the app and its dependencies are pure Python,
