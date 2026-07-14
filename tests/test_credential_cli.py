@@ -218,6 +218,17 @@ class TestRewriteSettingsField:
         assert open(path, encoding="utf8").read() == content
         yaml.safe_load(content)  # sanity: the untouched original is still valid YAML
 
+    def test_accepts_whitespace_before_colon(self, tmp_path):
+        """`field : value` (whitespace before the colon) is unusual but still
+        valid, plain single-line block-style YAML - the flow-style safety check
+        must not reject it just because it doesn't match `field:` exactly."""
+        content = 'influx:\n  token : "old_value"\n  org: "myorg"\n'
+        path = self._write(tmp_path, content)
+        _rewrite_settings_field(path, "influx", "token", "new_value")
+        result = open(path, encoding="utf8").read()
+        assert 'token : "new_value"' in result
+        assert yaml.safe_load(result)["influx"]["token"] == "new_value"
+
     def test_preserves_file_permissions(self, tmp_path):
         import os
         import stat
@@ -775,7 +786,17 @@ class TestMain:
         assert settings_path.read_text() == original
         run.assert_not_called()
 
-    def test_list_does_not_require_root(self, tmp_path, capsys):
+    def test_list_requires_root(self, monkeypatch):
+        """credstore_dir is 0700 root:root, so a non-root caller wouldn't get a
+        clean error from _cmd_list() - os.path.isfile() just silently reports
+        every credential as absent. Require root up front instead, so --list
+        fails loudly rather than reporting misleading status."""
+        monkeypatch.setattr("os.geteuid", lambda: 1000)
+        code = main(["--list"])
+        assert code == 1
+
+    def test_list_as_root_succeeds(self, monkeypatch, capsys):
+        monkeypatch.setattr("os.geteuid", lambda: 0)
         code = main(["--list"])
         assert code == 0
         out = capsys.readouterr().out

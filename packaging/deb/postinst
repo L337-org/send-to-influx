@@ -308,7 +308,7 @@ send-to-influx installed. Before starting the service:
      the install prompts, some sources may already be fully configured and enabled.)
   2. Optionally store secrets in systemd-creds instead of plaintext (requires systemd >= 250):
        sudo send-to-influx-set-credential <name>
-     Run 'send-to-influx-set-credential --list' to see the available credential names.
+     Run 'sudo send-to-influx-set-credential --list' to see the available credential names.
      Run 'sudo dpkg-reconfigure send-to-influx' to revisit the install prompts.
   3. Enable and start the service:
        systemctl enable --now send-to-influx

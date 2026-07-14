@@ -325,24 +325,29 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
     line = lines[line_no]
     indent = line[: len(line) - len(line.lstrip())]
     # The splice below assumes the line reads `<indent>field: <value>...` - true for a
-    # normal block-style mapping, but not for e.g. `influx: {token: "old", org: "x"}`
-    # (a flow-style section), where value_node's own line doesn't start with the field
-    # name at all. Verify that assumption before writing rather than after - a flow-style
-    # section would otherwise have its `top_key: {` prefix silently overwritten by the
-    # naive `indent + field + ": " + value` reconstruction below, producing invalid YAML.
-    if not line[len(indent) :].startswith(f"{field}:"):
+    # normal block-style mapping (whitespace before the colon, e.g. `field : value`, is
+    # unusual but still valid YAML and still safe here), but not for e.g.
+    # `influx: {token: "old", org: "x"}` (a flow-style section), where value_node's own
+    # line doesn't start with the field name at all. Verify that assumption before
+    # writing rather than after - a flow-style section would otherwise have its
+    # `top_key: {` prefix silently overwritten by the naive `indent + field + ": " +
+    # value` reconstruction below, producing invalid YAML.
+    if not re.match(rf"^{re.escape(field)}\s*:", line[len(indent) :]):
         raise CredentialCliError(
             f"{settings_path}: could not safely rewrite {top_key}.{field} automatically "
             "(unexpected line format, e.g. a flow-style mapping) - edit it by hand instead"
         )
-    # Preserve whatever followed the original scalar on this line verbatim - typically
-    # nothing, but could be a trailing inline comment (e.g. `token: "old"  # note`).
-    # value_node.end_mark.column is the column immediately after the scalar ends, since
-    # the earlier start_mark.line == end_mark.line check already guarantees this is a
-    # single-line value.
+    # Preserve everything around the value verbatim: the prefix (indent, field name,
+    # colon, and whatever whitespace separated them in the original - e.g. `field : `
+    # is unusual but valid, and reconstructing a hardcoded `field: ` would needlessly
+    # reformat it) up to where the old value started, and whatever followed the old
+    # value - typically nothing, but could be a trailing inline comment (e.g.
+    # `token: "old"  # note`). Only the value itself is replaced, always as a
+    # double-quoted scalar regardless of the original's quoting style.
+    prefix = line[: value_node.start_mark.column]
     trailing = line[value_node.end_mark.column :].rstrip("\n")
     escaped = _yaml_double_quoted_escape(new_value)
-    lines[line_no] = f'{indent}{field}: "{escaped}"{trailing}\n'
+    lines[line_no] = f'{prefix}"{escaped}"{trailing}\n'
 
     try:
         _atomic_write(settings_path, "".join(lines))
@@ -682,18 +687,23 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     try:
-        # Read-only subcommands - no root needed, checked before _require_root().
-        if args.list:
-            _cmd_list()
-            return 0
+        # --detect-influx-version is the one truly read-only subcommand - a network
+        # probe, unrelated to any local file - so it's the only one checked before
+        # _require_root().
         if args.detect_influx_version is not None:
             _cmd_detect_influx_version(args.detect_influx_version)
             return 0
 
-        # Everything else writes to /etc/send-to-influx and/or systemd unit config -
-        # require root consistently across all of them, not just name/--remove.
+        # Everything else writes to /etc/send-to-influx and/or systemd unit config,
+        # or (--list) reads credstore_dir - which is 0700 root:root, so a non-root
+        # caller wouldn't get a PermissionError here, just os.path.isfile() silently
+        # returning False for every credential and --list misreporting everything
+        # as "not set". Require root consistently across all of them.
         _require_root()
 
+        if args.list:
+            _cmd_list()
+            return 0
         if args.set_field is not None:
             _cmd_set_field(args.set_field[0], args.set_field[1], args.settings)
             return 0
