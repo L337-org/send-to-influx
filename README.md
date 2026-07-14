@@ -266,8 +266,10 @@ meter number; tuning settings like intervals keep their shipped defaults and can
 `settings.yaml` afterwards). Secrets you enter are moved into `systemd-creds` (see below)
 and never written into `settings.yaml` in plaintext. Debconf itself briefly holds what you type in
 its own separate, `chmod 600` password store while `postinst` runs, then actively unregisters each
-question once it's been read and migrated - see SECURITY.md if you want the detail. If every required
-field for a source was answered, it's automatically added to
+password-type question once it's been read and migrated - see SECURITY.md if you want the detail.
+Non-secret answers (a Hue bridge hostname, an Octopus meter number, and so on) aren't password-type
+and stay in debconf's regular database as normal, same as any other package's debconf answers. If
+every required field for a source was answered, it's automatically added to
 `sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is created for you where
 possible.
 
