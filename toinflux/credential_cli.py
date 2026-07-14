@@ -258,6 +258,20 @@ def _find_mapping_value(node, key):
     return None
 
 
+def _yaml_double_quoted_escape(value):
+    """Escape value for safe embedding inside a YAML double-quoted scalar.
+
+    Order matters: backslashes must be doubled first, so the backslashes this
+    function itself introduces for the quote/CR/LF escapes below aren't
+    re-escaped by a later step. YAML double-quoted scalars support \\r/\\n as
+    genuine escape sequences (unlike single-quoted or plain scalars), so a
+    literal newline/carriage return in value becomes an escaped, single-line
+    representation rather than splitting the quoted scalar across multiple
+    lines - which would otherwise write invalid YAML.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
+
+
 def _rewrite_settings_field(settings_path, top_key, field, new_value):
     """Replace a single scalar field's value in place, preserving every other byte of
     the file (comments, ordering, blank lines) by locating the exact source line via
@@ -302,7 +316,7 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
     # the earlier start_mark.line == end_mark.line check already guarantees this is a
     # single-line value.
     trailing = line[value_node.end_mark.column :].rstrip("\n")
-    escaped = new_value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = _yaml_double_quoted_escape(new_value)
     lines[line_no] = f'{indent}{field}: "{escaped}"{trailing}\n'
 
     try:
@@ -332,6 +346,15 @@ def _load_sources_sequence(settings_path):
     sources_node = _find_mapping_value(root, "sources")
     if sources_node is None or not isinstance(sources_node, yaml.SequenceNode):
         raise CredentialCliError(f"{settings_path}: no 'sources:' sequence found - add it manually first")
+    if sources_node.flow_style:
+        # e.g. `sources: ["hue", "zappi"]` on one line - inserting a new block-style
+        # `  - "name"` line after it (this function's only insertion strategy) would
+        # leave a dangling sequence item with no key of its own, invalid YAML. The
+        # shipped example_settings.yaml always uses block style; asking the user to
+        # add flow-style entries by hand is a fine trade-off for how rare this is.
+        raise CredentialCliError(
+            f"{settings_path}: 'sources:' uses flow style (e.g. [a, b]) - add the new source manually"
+        )
     if not sources_node.value:
         # A block-style `sources:` with nothing under it parses as `sources: null`
         # (a scalar), not an empty sequence - so this only happens for something
@@ -353,6 +376,10 @@ def _enable_source(name, settings_path=None):
     Used instead of _rewrite_settings_field(), which only handles a single-line
     scalar value - `sources:` is a YAML sequence, a structurally different edit.
 
+    :return: True if the file was actually changed, False if `name` was already
+        present (so callers - e.g. the CLI - can report an accurate message
+        instead of always claiming "enabled")
+    :rtype: bool
     :raises CredentialCliError: see _load_sources_sequence(), plus if settings_path
         can't be written back
     """
@@ -362,7 +389,7 @@ def _enable_source(name, settings_path=None):
 
     existing = [item.value for item in sources_node.value if isinstance(item, yaml.ScalarNode)]
     if name in existing:
-        return
+        return False
 
     lines = text.splitlines(keepends=True)
     last_item = sources_node.value[-1]
@@ -370,12 +397,13 @@ def _enable_source(name, settings_path=None):
     indent = item_line[: len(item_line) - len(item_line.lstrip())]
     insert_at = last_item.end_mark.line + 1
 
-    lines.insert(insert_at, f'{indent}- "{name}"\n')
+    lines.insert(insert_at, f'{indent}- "{_yaml_double_quoted_escape(name)}"\n')
 
     try:
         _atomic_write(settings_path, "".join(lines))
     except OSError as exc:
         raise CredentialCliError(f"could not write {settings_path}: {exc}") from exc
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -551,8 +579,10 @@ def _cmd_ensure_influx_storage(name, settings_path):
 
 
 def _cmd_enable_source(name, settings_path):
-    _enable_source(name, settings_path=settings_path)
-    print(f"Enabled '{name}' in {settings_path}.")
+    if _enable_source(name, settings_path=settings_path):
+        print(f"Enabled '{name}' in {settings_path}.")
+    else:
+        print(f"'{name}' was already enabled in {settings_path} - nothing to do.")
 
 
 # --------------------------------------------------------------------------- #

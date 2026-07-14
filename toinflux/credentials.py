@@ -82,10 +82,13 @@ def apply_credential_substitution(settings):
         if block is None:
             block = settings[top_key] = {}
         elif not isinstance(block, dict):
-            # A malformed settings.yaml (e.g. `influx: []` or `hue: "oops"`) - this
-            # runs before validate_settings() gets a chance to report it as a
-            # ConfigError, so don't crash here; skip this credential and let
-            # validation surface the real problem.
+            # A malformed settings.yaml (e.g. `influx: []` or `hue: "oops"`) - don't
+            # crash here (this function's own contract), just skip this credential.
+            # Note this doesn't guarantee a clean ConfigError downstream:
+            # validate_settings() itself currently assumes every section is a
+            # mapping too (e.g. `_validate_source_block`'s `"interval" not in
+            # source_cfg` also raises TypeError on a non-mapping source_cfg) - a
+            # pre-existing gap in validate_settings(), not something fixed here.
             logging.warning(
                 "settings.yaml's '%s' section is not a mapping (got %s) - cannot apply the "
                 "'%s' credential from systemd-creds",

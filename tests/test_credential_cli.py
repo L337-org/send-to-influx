@@ -114,6 +114,19 @@ class TestRewriteSettingsField:
         result = open(path, encoding="utf8").read()
         assert '  token: "new_value"  # rotate this monthly\n' in result
 
+    def test_escapes_embedded_newline_and_carriage_return(self, tmp_path):
+        """A value containing a literal newline/CR must not split the quoted
+        scalar across lines (which would be invalid YAML) - it's escaped into
+        the \\n/\\r sequence instead, which YAML double-quoted scalars support."""
+        content = 'influx:\n  token: "old_value"\n'
+        path = self._write(tmp_path, content)
+        _rewrite_settings_field(path, "influx", "token", "line1\nline2\r\n")
+        result_text = open(path, encoding="utf8").read()
+        assert result_text.count("\n") == content.count("\n")  # no new physical lines
+        assert '  token: "line1\\nline2\\r\\n"\n' in result_text
+        # and it round-trips back to the real value when parsed
+        assert yaml.safe_load(result_text)["influx"]["token"] == "line1\nline2\r\n"
+
     def test_raises_when_section_missing(self, tmp_path):
         content = 'hue:\n  user: "someone"\n'
         path = self._write(tmp_path, content)
@@ -336,10 +349,41 @@ class TestEnableSource:
             _cmd_enable_source("hue", str(settings_path))
 
     def test_raises_on_explicit_empty_sequence(self, tmp_path):
+        """`[]` is itself flow-style syntax, so this hits the flow-style rejection
+        (more specific/accurate) rather than a separate "is empty" message."""
         settings_path = tmp_path / "settings.yaml"
         settings_path.write_text("sources: []\n")
-        with pytest.raises(CredentialCliError, match="is empty"):
+        with pytest.raises(CredentialCliError, match="flow style"):
             _cmd_enable_source("hue", str(settings_path))
+
+    def test_raises_on_populated_flow_style_sequence(self, tmp_path):
+        """`sources: ["hue", "zappi"]` on one line - inserting a new block-style
+        `  - "name"` line after it would leave a dangling sequence item with no
+        key of its own, invalid YAML. Must be rejected, not silently corrupted."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('sources: ["hue", "zappi"]\n')
+        with pytest.raises(CredentialCliError, match="flow style"):
+            _cmd_enable_source("octopus", str(settings_path))
+        # and the file must be untouched
+        assert settings_path.read_text() == 'sources: ["hue", "zappi"]\n'
+
+    def test_escapes_source_name(self, tmp_path):
+        """Defensive escaping even though `name` only ever comes from the fixed
+        set of known source names in practice - cheap to get right regardless."""
+        content = 'sources:\n  - "hue"\n'
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(content)
+        _cmd_enable_source('weird"name\\here', str(settings_path))
+        result_yaml = yaml.safe_load(settings_path.read_text())
+        assert result_yaml["sources"] == ["hue", 'weird"name\\here']
+
+    def test_reports_idempotent_no_op_distinctly(self, tmp_path, capsys):
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('sources:\n  - "hue"\n')
+        _cmd_enable_source("hue", str(settings_path))
+        out = capsys.readouterr().out
+        assert "already enabled" in out
+        assert "Enabled" not in out
 
     def test_raises_when_sources_key_missing(self, tmp_path):
         settings_path = tmp_path / "settings.yaml"
