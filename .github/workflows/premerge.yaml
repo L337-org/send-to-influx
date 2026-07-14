@@ -90,7 +90,7 @@ jobs:
         run: mypy toinflux sendtoinflux.py
 
   arm64-verify:
-    # packaging/build-deb.sh ships the .deb as Architecture: all (no separate per-arch
+    # packaging/deb/build-deb.sh ships the .deb as Architecture: all (no separate per-arch
     # build) on the assumption that the app and every dependency has a working
     # pure-Python fallback for any optional compiled accelerator (PyYAML's/
     # charset-normalizer's C extensions are stripped post-install for exactly this
@@ -119,7 +119,7 @@ jobs:
         run: pytest -v
 
       - name: Build .deb package
-        run: packaging/build-deb.sh
+        run: packaging/deb/build-deb.sh
 
       - name: Install and smoke-test the .deb
         run: |

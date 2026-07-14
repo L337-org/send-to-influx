@@ -53,7 +53,7 @@ jobs:
       - name: Build .deb package
         id: build
         run: |
-          packaging/build-deb.sh
+          packaging/deb/build-deb.sh
           deb_name="$(basename send-to-influx_*.deb)"
           echo "deb_name=${deb_name}" >> "$GITHUB_OUTPUT"
 
