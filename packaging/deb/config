@@ -59,12 +59,22 @@ case "$SOURCES" in
         # minimal/headless installs, which is the common case for this
         # collector. A plain string match on the locale env vars is
         # simpler and degrades safely to Celsius when no locale is set.
-        loc="${LC_ALL:-${LANG:-}}"
-        case "$loc" in
-            *_US*) default_unit=F ;;
-            *) default_unit=C ;;
-        esac
-        db_set send-to-influx/hue-temperature-units "$default_unit"
+        #
+        # Only db_set this on the question's first-ever appearance (seen =
+        # false) - db_set unconditionally overwrites whatever's already in
+        # debconf's database, and dpkg-reconfigure forces questions to be
+        # redisplayed *without* resetting their seen flag, so an unguarded
+        # db_set here would silently clobber a user's previous choice with
+        # a freshly-recomputed locale guess on every reconfigure.
+        db_fget send-to-influx/hue-temperature-units seen
+        if [ "$RET" = "false" ]; then
+            loc="${LC_ALL:-${LANG:-}}"
+            case "$loc" in
+                *_US*) default_unit=F ;;
+                *) default_unit=C ;;
+            esac
+            db_set send-to-influx/hue-temperature-units "$default_unit"
+        fi
         db_input medium send-to-influx/hue-temperature-units || true
         db_go || true
         ;;
