@@ -13,10 +13,10 @@
 # future dependency change that makes a compiled extension load-bearing
 # rather than optional before it can merge.
 #
-# Usage: packaging/build-deb.sh [output-path.deb]
+# Usage: packaging/deb/build-deb.sh [output-path.deb]
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PKG_NAME="send-to-influx"
 BUILD_DIR="$(mktemp -d)"
 PKG_ROOT="$BUILD_DIR/pkg"
@@ -41,7 +41,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$PKG_ROOT/DEBIAN" "$PKG_ROOT/opt/send-to-influx" "$PKG_ROOT/etc/send-to-influx" "$PKG_ROOT/lib/systemd/system"
+mkdir -p "$PKG_ROOT/DEBIAN" "$PKG_ROOT/opt/send-to-influx" "$PKG_ROOT/etc/send-to-influx" \
+    "$PKG_ROOT/lib/systemd/system" "$PKG_ROOT/usr/sbin"
 
 echo "Building venv payload from $REPO_ROOT ..."
 "$BUILD_PYTHON" -m venv "$PKG_ROOT/opt/send-to-influx/venv"
@@ -63,6 +64,17 @@ while IFS= read -r f; do
     sed -i.bak "s|$VENV_STAGING_PATH|$VENV_INSTALL_PATH|g" "$f"
 done < <(grep -rlI "$VENV_STAGING_PATH" "$VENV_STAGING_PATH/bin" 2>/dev/null || true)
 find "$VENV_STAGING_PATH/bin" -name "*.bak" -delete
+
+# venv/bin isn't on $PATH, so send-to-influx-set-credential (meant for direct human/
+# debconf invocation, unlike the main send-to-influx binary which is only ever
+# invoked via the systemd unit's absolute ExecStart= path) needs a $PATH-reachable
+# symlink. Shipped as part of the package's own file tree (built here, at package
+# build time) rather than created imperatively by postinst - /usr/local is reserved
+# for locally-installed, non-package-managed software (FHS/Debian policy), so
+# /usr/sbin is the correct target; and a dpkg-tracked file gets removed automatically
+# on both `dpkg -r` and `--purge`, unlike a symlink postinst/postrm would otherwise
+# have to create and clean up by hand outside dpkg's own file-list tracking.
+ln -s /opt/send-to-influx/venv/bin/send-to-influx-set-credential "$PKG_ROOT/usr/sbin/send-to-influx-set-credential"
 
 # Strip any compiled extensions pip's dependency resolution happened to pull
 # in (e.g. PyYAML's / charset-normalizer's optional C accelerators) - both
@@ -105,12 +117,14 @@ VERSION="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
 # Config (marked as a conffile below so dpkg preserves local edits on upgrade)
 cp "$REPO_ROOT/example_settings.yaml" "$PKG_ROOT/etc/send-to-influx/settings.yaml"
 
-# systemd unit and maintainer scripts
+# systemd unit (format-agnostic, stays at the top of packaging/) and .deb-specific maintainer scripts
 cp "$REPO_ROOT/packaging/send-to-influx.service" "$PKG_ROOT/lib/systemd/system/send-to-influx.service"
-cp "$REPO_ROOT/packaging/postinst" "$PKG_ROOT/DEBIAN/postinst"
-cp "$REPO_ROOT/packaging/prerm" "$PKG_ROOT/DEBIAN/prerm"
-cp "$REPO_ROOT/packaging/postrm" "$PKG_ROOT/DEBIAN/postrm"
-chmod 755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm"
+cp "$REPO_ROOT/packaging/deb/postinst" "$PKG_ROOT/DEBIAN/postinst"
+cp "$REPO_ROOT/packaging/deb/prerm" "$PKG_ROOT/DEBIAN/prerm"
+cp "$REPO_ROOT/packaging/deb/postrm" "$PKG_ROOT/DEBIAN/postrm"
+cp "$REPO_ROOT/packaging/deb/config" "$PKG_ROOT/DEBIAN/config"
+cp "$REPO_ROOT/packaging/deb/send-to-influx.templates" "$PKG_ROOT/DEBIAN/templates"
+chmod 755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm" "$PKG_ROOT/DEBIAN/config"
 
 cat > "$PKG_ROOT/DEBIAN/conffiles" <<CONFFILES
 /etc/send-to-influx/settings.yaml
@@ -122,7 +136,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: all
-Depends: systemd, python3 (>= 3.10), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
+Depends: systemd, debconf (>= 0.5), python3 (>= 3.10), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
 Maintainer: Gavin Lucas
 Description: Collects data from smart home / energy devices and writes it to InfluxDB
  send-to-influx polls Hue, MyEnergi, Octopus, Open-Meteo, National Grid Carbon

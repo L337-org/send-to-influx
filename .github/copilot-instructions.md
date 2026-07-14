@@ -212,7 +212,7 @@ python sendtoinflux.py --settings /etc/send-to-influx/settings.yaml
 ## Packaging & Deployment
 
 - `pyproject.toml` is the single source of truth for the package version (`[project].version`) and dependencies (dynamically sourced from `requirements.txt`). `sendtoinflux.py`'s `__version__` is read back from installed package metadata via `importlib.metadata`, falling back to `"0.0.0-dev"` when running from an uninstalled source checkout.
-- `packaging/build-deb.sh` builds a `.deb` bundling the app and its dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service`) to run it as a service. Package is `Architecture: all` — the venv's `python3` is a symlink to the system-provided `/usr/bin/python3` (`Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pip pulls in (PyYAML, charset-normalizer) are stripped post-install in favour of pure-Python fallbacks. Since everything left is pure Python, the script also symlinks every minor from 3.10 through 3.30's `lib/pythonX.Y` to the one actually populated, so the package works on any target whose `python3` falls in that range (rather than pinning `Depends:` to the build host's exact minor, which broke once a real target's Python drifted from CI's). Verified on real arm64 hardware by the `arm64-verify` CI job (every push/PR, required status check) — see the README's "Running as a systemd service" section.
+- `packaging/deb/build-deb.sh` builds a `.deb` bundling the app and its dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service`, kept at the top level since it's format-agnostic - the `.deb`-specific files live under `packaging/deb/`) to run it as a service. Package is `Architecture: all` — the venv's `python3` is a symlink to the system-provided `/usr/bin/python3` (`Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pip pulls in (PyYAML, charset-normalizer) are stripped post-install in favour of pure-Python fallbacks. Since everything left is pure Python, the script also symlinks every minor from 3.10 through 3.30's `lib/pythonX.Y` to the one actually populated, so the package works on any target whose `python3` falls in that range (rather than pinning `Depends:` to the build host's exact minor, which broke once a real target's Python drifted from CI's). Verified on real arm64 hardware by the `arm64-verify` CI job (every push/PR, required status check) — see the README's "Running as a systemd service" section.
 
 ## Configuration Examples
 
@@ -310,10 +310,18 @@ if yours has a valid cert.
 - **Error Recovery**: Graceful handling of temporary network issues
 
 ## Security Notes
-- **Credentials**: Store sensitive data in `settings.yaml` with appropriate file permissions (the
-  packaged install locks it to `chmod 600`). An environment-variable secrets override was
-  implemented and then deliberately removed - see CLAUDE.md's "Rejected: environment-variable
-  secrets" section before re-proposing it.
+- **Credentials**: Store sensitive data in `settings.yaml` with appropriate file permissions if you
+  keep them there in plaintext - the packaged install's fresh-install default is `644`, not `600`
+  (safe because a freshly-packaged file never contains a real secret, only placeholder/sentinel text,
+  unless hand-edited). An environment-variable secrets override was implemented and then deliberately
+  removed - see CLAUDE.md's "Rejected: environment-variable secrets" section before re-proposing it.
+- **`systemd-creds`**: on the packaged install (`systemd >= 250`), `send-to-influx-set-credential
+  <name>` moves a credential out of `settings.yaml` into `systemd-creds` (TPM/host-key encryption at
+  rest) - see CLAUDE.md's "Credential storage (`systemd-creds`)" section. Opt-in, per-field;
+  `toinflux/credentials.py` is the single source of truth for which fields are eligible.
+- **`enforce_permissions`**: settings.yaml key, default `false`; `true` makes `send-to-influx` refuse
+  to start (not just warn) if the file is group/other-readable and contains a real credential. New
+  installs ship it `true`.
 - **HTTPS**: Use HTTPS for all API connections in production
 - **Validation**: Validate all input data before processing
 - **Logging**: Avoid logging sensitive information

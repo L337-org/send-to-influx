@@ -219,7 +219,7 @@ The repo only keeps the last few releases' `.deb` files (older versions remain a
 
 ### Building it yourself
 
-    packaging/build-deb.sh
+    packaging/deb/build-deb.sh
     sudo dpkg -i send-to-influx_*.deb
 
 The package is architecture-independent (`all`) - the app and its dependencies are pure Python,
@@ -253,6 +253,48 @@ first:
 
 Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as
 stdout above.
+
+### Configuring during install (debconf)
+
+Installing (or upgrading to) the `.deb` interactively presents a debconf prompt: a checklist of
+which data sources you want to configure now, then - only for the ones you pick - the fields
+needed to actually reach that source's API (credentials plus things like a Hue bridge hostname or
+an Octopus meter number; tuning settings like intervals keep their shipped defaults and can be
+adjusted in `settings.yaml` afterwards). Secrets you enter are moved into `systemd-creds` (see below)
+and never written into `settings.yaml` in plaintext. Debconf itself briefly holds what you type in
+its own separate, `chmod 600` password store while `postinst` runs, then actively unregisters each
+question once it's been read and migrated - see SECURITY.md if you want the detail. If every required
+field for a source was answered, it's automatically added to
+`sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is created for you where
+possible.
+
+You can leave every question blank and configure `settings.yaml` by hand instead - nothing here is
+required. Re-run `sudo dpkg-reconfigure send-to-influx` at any time to change your answers; secret
+prompts always come back blank on a reconfigure (debconf's own UI convention for password-type
+questions - it doesn't redisplay a previous answer), so leaving one blank keeps whatever's already
+stored rather than clearing it.
+
+### Storing secrets in systemd-creds
+
+By default, `settings.yaml` holds credentials (InfluxDB token/user/password, Hue bridge user,
+MyEnergi API key, Octopus API key) in plaintext, same as the source-checkout path. On the packaged
+install (requires `systemd >= 250`), you can instead move them into
+[systemd-creds](https://systemd.io/CREDENTIALS/) - encrypted at rest with a TPM-bound or host-derived
+key, decrypted only into a restricted, in-memory location for the service's lifetime:
+
+    sudo send-to-influx-set-credential influx-token
+    sudo send-to-influx-set-credential --list
+
+Run `send-to-influx-set-credential --list` to see the full set of available credential names. Each
+`set` call prompts for the value (or reads it from stdin if piped, e.g.
+`echo -n "$TOKEN" | sudo send-to-influx-set-credential influx-token`) and replaces the plaintext value
+in `settings.yaml` with a note that it's now managed elsewhere - the file stays readable for the rest
+of its content, but that field is never used from it again. Use
+`send-to-influx-set-credential <name> --remove` to revert a credential back to plaintext.
+
+This is entirely optional and per-field - you can mix systemd-creds and plaintext values freely, and
+the source-checkout/screen-session path is unaffected either way, since systemd-creds only applies
+under the packaged systemd service.
 
 Usage
 -----

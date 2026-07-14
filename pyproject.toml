@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "send-to-influx"
-version = "3.1"
+version = "4.0"
 description = "Collects data from smart home / energy monitoring devices and sends it to InfluxDB"
 readme = "README.md"
 license = { file = "LICENSE.md" }
@@ -16,6 +16,7 @@ Homepage = "https://github.com/GavinLucas/send-to-influx"
 
 [project.scripts]
 send-to-influx = "sendtoinflux:main"
+send-to-influx-set-credential = "toinflux.credential_cli:main"
 
 [tool.setuptools]
 py-modules = ["sendtoinflux"]

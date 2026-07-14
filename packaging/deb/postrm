@@ -4,6 +4,7 @@ set -e
 
 if [ "$1" = "purge" ]; then
     rm -rf /etc/send-to-influx
+    rm -rf /etc/systemd/system/send-to-influx.service.d
     if getent passwd send-to-influx >/dev/null 2>&1; then
         deluser --system send-to-influx || true
     fi

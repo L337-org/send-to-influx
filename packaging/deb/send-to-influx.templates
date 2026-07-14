@@ -1,0 +1,98 @@
+Template: send-to-influx/sources-to-configure
+Type: multiselect
+Choices: hue, zappi, harvi, eddi, octopus, openmeteo, carbonintensity, speedtest
+Default:
+Description: Which data sources do you want to configure now?
+ You can leave this empty and edit /etc/send-to-influx/settings.yaml by hand
+ later, or run 'dpkg-reconfigure send-to-influx' at any time to change this.
+ Only the fields needed to actually reach each source's API are asked here -
+ tuning settings (intervals, timeouts, which fields to collect) keep their
+ shipped defaults and can be adjusted in settings.yaml afterwards.
+
+Template: send-to-influx/influx-url
+Type: string
+Default:
+Description: InfluxDB URL (leave blank for a local instance)
+ The base URL of your InfluxDB server, e.g. https://influx.example.com:8086.
+ Leave this blank to default to http://localhost:8086.
+
+Template: send-to-influx/influx-identity
+Type: string
+Default:
+Description: InfluxDB user (v1) or organisation (v2)
+ For InfluxDB v1 (username/password authentication) enter the username. For
+ InfluxDB v2 (token authentication) enter the organisation name. Which one
+ applies is detected automatically once the server is reachable - you don't
+ need to know your InfluxDB version to answer this.
+
+Template: send-to-influx/influx-secret
+Type: password
+Description: InfluxDB password (v1) or API token (v2)
+ For InfluxDB v1 enter the password. For InfluxDB v2 enter the API token.
+
+Template: send-to-influx/hue-host
+Type: string
+Default:
+Description: Hue bridge hostname or IP address
+
+Template: send-to-influx/hue-user
+Type: password
+Description: Hue bridge username/API key
+ See https://developers.meethue.com/develop/get-started-2/ for how to
+ generate this.
+
+Template: send-to-influx/hue-temperature-units
+Type: select
+Choices: C, F
+Default: C
+Description: Temperature units for Hue sensor readings
+ Pre-filled from your system locale where possible, but always worth
+ double-checking.
+
+Template: send-to-influx/myenergi-apikey
+Type: password
+Description: MyEnergi API key
+ Shared across Zappi/Eddi/Harvi devices - asked once regardless of how many
+ of those you selected.
+
+Template: send-to-influx/zappi-serial
+Type: string
+Default:
+Description: Zappi device serial number
+
+Template: send-to-influx/harvi-serial
+Type: string
+Default:
+Description: Harvi device serial number
+
+Template: send-to-influx/eddi-serial
+Type: string
+Default:
+Description: Eddi device serial number
+
+Template: send-to-influx/octopus-api-key
+Type: password
+Description: Octopus Energy API key
+ From https://octopus.energy/dashboard/developer/
+
+Template: send-to-influx/octopus-mpan
+Type: string
+Default:
+Description: Octopus Energy electricity meter MPAN
+ The 13-digit MPAN number found on your bill.
+
+Template: send-to-influx/octopus-meter-serial
+Type: string
+Default:
+Description: Octopus Energy electricity meter serial number
+ Found on your bill or on the meter itself.
+
+Template: send-to-influx/openmeteo-latitude
+Type: string
+Default:
+Description: Latitude for Open-Meteo weather data
+
+Template: send-to-influx/openmeteo-longitude
+Type: string
+Default:
+Description: Longitude for Open-Meteo weather data
