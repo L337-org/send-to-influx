@@ -614,10 +614,11 @@ def _cmd_remove(name, settings_path):
     #    fully intact and the service is unaffected, rather than ending up with the
     #    drop-in/`.cred` file already gone but settings.yaml still holding the old
     #    systemd-creds sentinel. That sentinel isn't valid placeholder text, so a
-    #    later load_settings() would blank it via _clear_unsubstituted_credential_
-    #    sentinels() and fail validate_settings() with a ConfigError - a broken,
-    #    unrecoverable service (the actual secret is gone from systemd-creds too)
-    #    for a failure that should have been a clean no-op.
+    #    later load_settings() would blank it via
+    #    _clear_unsubstituted_credential_sentinels() and fail validate_settings()
+    #    with a ConfigError - a broken, unrecoverable service (the actual secret
+    #    is gone from systemd-creds too) for a failure that should have been a
+    #    clean no-op.
     # 2. Once settings.yaml is safely reverted, regenerate the drop-in (dropping
     #    this credential's line) before deleting the .cred file, never after -
     #    LoadCredentialEncrypted= referencing a missing path hard-fails unit
