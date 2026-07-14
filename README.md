@@ -226,10 +226,13 @@ The package is architecture-independent (`all`) - the app and its dependencies a
 and any optional compiled accelerators (e.g. PyYAML's) are stripped from the bundled venv at build
 time in favour of their pure-Python fallbacks - so it can be built on any Debian/Ubuntu machine
 (the script requires `/usr/bin/python3` and `dpkg-deb`) and installed on any Debian/Ubuntu
-architecture, including arm64 (e.g. Raspberry Pi). CI builds and smoke-tests the
-same script on an arm64 runner on every push/PR (a required status check), to catch a future
-dependency change that would make a compiled extension load-bearing rather than optional before
-it can merge.
+architecture, including arm64 (e.g. Raspberry Pi). CI builds the package on an arm64 runner on
+every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - a
+scenario suite covering upgrade over the latest published release, a fresh debconf-seeded install,
+plain-upgrade silence over a hand-edited config, restart-on-upgrade of a running service,
+`dpkg-reconfigure` semantics, question visibility at debconf's default priority, and purge - as
+well as catching a future dependency change that would make a compiled extension load-bearing
+rather than optional before it can merge.
 
 A venv's `site-packages` normally lives under `lib/pythonX.Y/`, named after the exact major.minor
 of the interpreter that created it - which would otherwise tie an installable target to whatever
