@@ -396,7 +396,7 @@ send-to-influx upgraded. It was running before this upgrade and this upgrade
 does not stop, start, or restart it - it's still running now, unaffected, on
 its existing /etc/send-to-influx/settings.yaml and any systemd-creds credentials.
 
-New in this release: secrets can optionally be moved out of settings.yaml and into
+Reminder: secrets can optionally be moved out of settings.yaml and into
 systemd-creds. Run 'sudo send-to-influx-set-credential --list' to see what's
 already migrated, or 'sudo dpkg-reconfigure send-to-influx' to revisit the
 interactive setup (including migrating just your InfluxDB credential, without
@@ -410,7 +410,7 @@ service - it's left exactly as it was before (not currently running). Your
 existing /etc/send-to-influx/settings.yaml and any systemd-creds credentials
 are unaffected.
 
-New in this release: secrets can optionally be moved out of settings.yaml and into
+Reminder: secrets can optionally be moved out of settings.yaml and into
 systemd-creds. Run 'sudo send-to-influx-set-credential --list' to see what's
 already migrated, or 'sudo dpkg-reconfigure send-to-influx' to revisit the
 interactive setup (including migrating just your InfluxDB credential, without
