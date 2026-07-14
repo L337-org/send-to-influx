@@ -55,6 +55,18 @@ class TestApplyCredentialSubstitution:
         result = apply_credential_substitution(sample_settings)
         assert result["hue"]["user"] == "  secret-value  "
 
+    def test_non_utf8_credential_file_does_not_crash(self, sample_settings, monkeypatch, tmp_path, caplog):
+        """systemd credentials are arbitrary bytes with no guarantee of being
+        valid UTF-8 - a bad one must be logged and skipped, not crash
+        load_settings() with an unhandled UnicodeDecodeError."""
+        (tmp_path / "hue-user").write_bytes(b"\xff\xfe not valid utf-8")
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+        original = sample_settings["hue"]["user"]
+        with caplog.at_level("WARNING"):
+            result = apply_credential_substitution(sample_settings)
+        assert result["hue"]["user"] == original  # left alone, not substituted
+        assert any("Could not read credential" in r.message for r in caplog.records)
+
     def test_ignores_unrelated_files_in_directory(self, sample_settings, monkeypatch, tmp_path):
         """Extra, unrelated files in CREDENTIALS_DIRECTORY don't cause errors or changes."""
         (tmp_path / "some-other-credential").write_text("irrelevant")

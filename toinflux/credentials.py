@@ -79,7 +79,12 @@ def apply_credential_substitution(settings):
                 # _encrypt_credential() never appends one, but strip defensively
                 # in case anything else in the pipeline did.
                 value = f.read().rstrip("\r\n")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
+            # UnicodeDecodeError alongside OSError: systemd credentials are
+            # arbitrary bytes with no guarantee of being valid UTF-8 (this
+            # project's own CLI always writes UTF-8, but LoadCredentialEncrypted=
+            # isn't exclusive to it) - never let a bad credential crash
+            # load_settings() entirely, same contract as an unreadable file.
             logging.warning("Could not read credential '%s' from %s: %s", name, cred_path, exc)
             continue
         block = settings.get(top_key)

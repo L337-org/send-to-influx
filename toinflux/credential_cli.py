@@ -260,10 +260,14 @@ def _decrypt_credential(name, credstore_dir=None):
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode(errors="replace") if exc.stderr else str(exc)
         raise CredentialCliError(f"systemd-creds decrypt failed for '{name}': {stderr}") from exc
+    try:
+        decoded = result.stdout.decode()
+    except UnicodeDecodeError as exc:
+        raise CredentialCliError(f"decrypted value for '{name}' is not valid UTF-8: {exc}") from exc
     # Only strip a trailing line ending, not all whitespace - a password can
     # legitimately start/end with spaces, and _encrypt_credential() never appends
     # one, but strip defensively in case anything else in the pipeline did.
-    return result.stdout.decode().rstrip("\r\n")
+    return decoded.rstrip("\r\n")
 
 
 # --------------------------------------------------------------------------- #

@@ -212,6 +212,19 @@ class TestDecryptCredential:
         with pytest.raises(CredentialCliError, match="No stored credential"):
             _decrypt_credential("influx-token", credstore_dir=str(credstore))
 
+    def test_non_utf8_output_raises_credential_cli_error_not_unicode_error(self, tmp_path):
+        """systemd-creds decrypt's stdout must surface a decode failure as
+        CredentialCliError - the type main()'s exception handler actually
+        catches - not a raw UnicodeDecodeError escaping as an unhandled
+        traceback."""
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+
+        with patch("subprocess.run", return_value=MagicMock(stdout=b"\xff\xfe not valid utf-8")):
+            with pytest.raises(CredentialCliError, match="not valid UTF-8"):
+                _decrypt_credential("influx-token", credstore_dir=str(credstore))
+
 
 # --------------------------------------------------------------------------- #
 # _rewrite_settings_field
