@@ -4,8 +4,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 from toinflux import credential_cli
+from toinflux.credentials import sentinel_for
 from toinflux.credential_cli import (
     CredentialCliError,
+    _cmd_enable_source,
     _cmd_ensure_influx_storage,
     _cmd_list,
     _cmd_remove,
@@ -113,6 +115,19 @@ class TestRewriteSettingsField:
         result = open(path, encoding="utf8").read()
         assert '  token: "new_value"  # rotate this monthly\n' in result
 
+    def test_escapes_embedded_newline_and_carriage_return(self, tmp_path):
+        """A value containing a literal newline/CR must not split the quoted
+        scalar across lines (which would be invalid YAML) - it's escaped into
+        the \\n/\\r sequence instead, which YAML double-quoted scalars support."""
+        content = 'influx:\n  token: "old_value"\n'
+        path = self._write(tmp_path, content)
+        _rewrite_settings_field(path, "influx", "token", "line1\nline2\r\n")
+        result_text = open(path, encoding="utf8").read()
+        assert result_text.count("\n") == content.count("\n")  # no new physical lines
+        assert '  token: "line1\\nline2\\r\\n"\n' in result_text
+        # and it round-trips back to the real value when parsed
+        assert yaml.safe_load(result_text)["influx"]["token"] == "line1\nline2\r\n"
+
     def test_raises_when_section_missing(self, tmp_path):
         content = 'hue:\n  user: "someone"\n'
         path = self._write(tmp_path, content)
@@ -135,6 +150,21 @@ class TestRewriteSettingsField:
         _rewrite_settings_field(path, "influx", "token", "new_value")
         mode = stat.S_IMODE(os.stat(path).st_mode)
         assert mode == (stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_missing_file_raises_credential_cli_error_not_oserror(self, tmp_path):
+        """A missing/unreadable settings_path must surface as CredentialCliError -
+        the type main()'s exception handler actually catches - not a raw OSError
+        escaping as an unhandled traceback."""
+        missing_path = tmp_path / "does-not-exist.yaml"
+        with pytest.raises(CredentialCliError, match="could not read"):
+            _rewrite_settings_field(str(missing_path), "influx", "token", "new_value")
+
+    def test_write_failure_raises_credential_cli_error_not_oserror(self, tmp_path):
+        content = 'influx:\n  token: "old_value"\n'
+        path = self._write(tmp_path, content)
+        with patch("toinflux.credential_cli._atomic_write", side_effect=OSError("disk full")):
+            with pytest.raises(CredentialCliError, match="could not write"):
+                _rewrite_settings_field(path, "influx", "token", "new_value")
 
 
 # --------------------------------------------------------------------------- #
@@ -286,6 +316,84 @@ class TestCmdSetField:
 
 
 # --------------------------------------------------------------------------- #
+# _enable_source / --enable-source
+# --------------------------------------------------------------------------- #
+
+
+class TestEnableSource:
+    def test_appends_new_source_preserving_comments(self, tmp_path):
+        content = 'sources:\n  - "hue"\n  - "speedtest"\n  # - "octopus"\nstagger_seconds: 10\n'
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(content)
+        _cmd_enable_source("octopus", str(settings_path))
+        result_text = settings_path.read_text()
+        result_yaml = yaml.safe_load(result_text)
+        assert result_yaml["sources"] == ["hue", "speedtest", "octopus"]
+        assert '  # - "octopus"' in result_text  # the pre-existing comment survives
+        assert "stagger_seconds: 10" in result_text
+
+    def test_idempotent_when_already_present(self, tmp_path):
+        content = 'sources:\n  - "hue"\n  - "octopus"\n'
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(content)
+        _cmd_enable_source("octopus", str(settings_path))
+        result_yaml = yaml.safe_load(settings_path.read_text())
+        assert result_yaml["sources"] == ["hue", "octopus"]  # not duplicated
+
+    def test_raises_on_bare_sources_key(self, tmp_path):
+        """A bare `sources:` with nothing after it parses as `sources: null` (a
+        scalar), not an empty sequence - correctly rejected rather than silently
+        writing something that isn't valid YAML."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("sources:\nstagger_seconds: 10\n")
+        with pytest.raises(CredentialCliError, match="no 'sources:'"):
+            _cmd_enable_source("hue", str(settings_path))
+
+    def test_raises_on_explicit_empty_sequence(self, tmp_path):
+        """`[]` is itself flow-style syntax, so this hits the flow-style rejection
+        (more specific/accurate) rather than a separate "is empty" message."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("sources: []\n")
+        with pytest.raises(CredentialCliError, match="flow style"):
+            _cmd_enable_source("hue", str(settings_path))
+
+    def test_raises_on_populated_flow_style_sequence(self, tmp_path):
+        """`sources: ["hue", "zappi"]` on one line - inserting a new block-style
+        `  - "name"` line after it would leave a dangling sequence item with no
+        key of its own, invalid YAML. Must be rejected, not silently corrupted."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('sources: ["hue", "zappi"]\n')
+        with pytest.raises(CredentialCliError, match="flow style"):
+            _cmd_enable_source("octopus", str(settings_path))
+        # and the file must be untouched
+        assert settings_path.read_text() == 'sources: ["hue", "zappi"]\n'
+
+    def test_escapes_source_name(self, tmp_path):
+        """Defensive escaping even though `name` only ever comes from the fixed
+        set of known source names in practice - cheap to get right regardless."""
+        content = 'sources:\n  - "hue"\n'
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(content)
+        _cmd_enable_source('weird"name\\here', str(settings_path))
+        result_yaml = yaml.safe_load(settings_path.read_text())
+        assert result_yaml["sources"] == ["hue", 'weird"name\\here']
+
+    def test_reports_idempotent_no_op_distinctly(self, tmp_path, capsys):
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('sources:\n  - "hue"\n')
+        _cmd_enable_source("hue", str(settings_path))
+        out = capsys.readouterr().out
+        assert "already enabled" in out
+        assert "Enabled" not in out
+
+    def test_raises_when_sources_key_missing(self, tmp_path):
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("stagger_seconds: 10\n")
+        with pytest.raises(CredentialCliError, match="no 'sources:'"):
+            _cmd_enable_source("hue", str(settings_path))
+
+
+# --------------------------------------------------------------------------- #
 # --detect-influx-version
 # --------------------------------------------------------------------------- #
 
@@ -330,43 +438,96 @@ class TestDetectInfluxVersion:
 
 
 class TestEnsureInfluxStorage:
-    def test_v1_create_database_idempotent_success(self, tmp_path, monkeypatch):
+    def test_v1_migrated_credentials_are_decrypted(self, tmp_path, monkeypatch):
+        """influx.user/password both migrated to systemd-creds (settings.yaml holds
+        the sentinel text, real values are in credstore.encrypted) - both must be
+        decrypted, not read as their literal (sentinel) settings.yaml text. This is
+        exactly the postinst v1 flow: identity and secret both go through
+        send-to-influx-set-credential."""
         settings_path = tmp_path / "settings.yaml"
-        settings_path.write_text('influx:\n  url: "http://localhost:8086"\n  user: "admin"\n  password: "sentinel"\n')
+        settings_path.write_text(
+            "influx:\n"
+            f'  url: "http://localhost:8086"\n'
+            f'  user: "{sentinel_for("influx-user")}"\n'
+            f'  password: "{sentinel_for("influx-password")}"\n'
+        )
         credstore = tmp_path / "credstore"
         credstore.mkdir()
+        (credstore / "influx-user.cred").write_text("ciphertext")
         (credstore / "influx-password.cred").write_text("ciphertext")
         monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
 
-        decrypt_result = MagicMock(stdout=b"real-password\n")
-        post_result = MagicMock(status_code=200)
-        post_result.raise_for_status.return_value = None
-
         def fake_run(cmd, **kwargs):
             if cmd[:2] == ["systemd-creds", "decrypt"]:
-                return decrypt_result
+                if cmd[2] == str(credstore / "influx-user.cred"):
+                    return MagicMock(stdout=b"real-admin\n")
+                if cmd[2] == str(credstore / "influx-password.cred"):
+                    return MagicMock(stdout=b"real-password\n")
             raise AssertionError(f"unexpected subprocess call: {cmd}")
+
+        post_result = MagicMock(status_code=200)
+        post_result.raise_for_status.return_value = None
 
         with patch("subprocess.run", side_effect=fake_run), patch("requests.post", return_value=post_result) as post:
             _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
 
         _, kwargs = post.call_args
-        assert kwargs["auth"] == ("admin", "real-password")
+        assert kwargs["auth"] == ("real-admin", "real-password")
         assert kwargs["params"]["q"] == 'CREATE DATABASE "speedtest_db"'
 
-    def test_v1_failure_does_not_raise(self, tmp_path, monkeypatch):
-        import requests
-
+    def test_v1_plain_never_migrated_credentials_are_used_directly(self, tmp_path, monkeypatch):
+        """A user who never touched systemd-creds at all (plain-YAML path, same as
+        source-checkout installs) must still work - user/password are the real
+        values already, nothing to decrypt, and no .cred files exist at all."""
         settings_path = tmp_path / "settings.yaml"
-        settings_path.write_text('influx:\n  url: "http://localhost:8086"\n  user: "admin"\n  password: "sentinel"\n')
+        settings_path.write_text('influx:\n  url: "http://localhost:8086"\n  user: "admin"\n  password: "plainpass"\n')
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()  # empty - nothing migrated
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+
+        post_result = MagicMock(status_code=200)
+        post_result.raise_for_status.return_value = None
+
+        with patch("subprocess.run") as run, patch("requests.post", return_value=post_result) as post:
+            _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
+
+        run.assert_not_called()  # nothing to decrypt
+        _, kwargs = post.call_args
+        assert kwargs["auth"] == ("admin", "plainpass")
+
+    def test_v1_mixed_migration_is_handled_field_by_field(self, tmp_path, monkeypatch):
+        """Migration is opt-in and per-field - password migrated, user left plain."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(
+            "influx:\n"
+            f'  url: "http://localhost:8086"\n  user: "admin"\n  password: "{sentinel_for("influx-password")}"\n'
+        )
         credstore = tmp_path / "credstore"
         credstore.mkdir()
         (credstore / "influx-password.cred").write_text("ciphertext")
         monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
 
+        post_result = MagicMock(status_code=200)
+        post_result.raise_for_status.return_value = None
+
         with patch("subprocess.run", return_value=MagicMock(stdout=b"real-password\n")):
-            with patch("requests.post", side_effect=requests.exceptions.ConnectionError):
-                _cmd_ensure_influx_storage("speedtest_db", str(settings_path))  # does not raise
+            with patch("requests.post", return_value=post_result) as post:
+                _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
+
+        _, kwargs = post.call_args
+        assert kwargs["auth"] == ("admin", "real-password")
+
+    def test_v1_failure_does_not_raise(self, tmp_path, monkeypatch):
+        import requests
+
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('influx:\n  url: "http://localhost:8086"\n  user: "admin"\n  password: "plainpass"\n')
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+
+        with patch("requests.post", side_effect=requests.exceptions.ConnectionError):
+            _cmd_ensure_influx_storage("speedtest_db", str(settings_path))  # does not raise
 
     def test_missing_settings_file_does_not_raise(self, tmp_path):
         """A settings_path that doesn't exist (or isn't readable) must not crash the
@@ -388,7 +549,9 @@ class TestEnsureInfluxStorage:
 
     def test_v2_lists_before_creating_and_skips_if_present(self, tmp_path, monkeypatch):
         settings_path = tmp_path / "settings.yaml"
-        settings_path.write_text('influx:\n  url: "http://localhost:8086"\n  org: "myorg"\n  token: "sentinel"\n')
+        settings_path.write_text(
+            "influx:\n" f'  url: "http://localhost:8086"\n  org: "myorg"\n  token: "{sentinel_for("influx-token")}"\n'
+        )
         credstore = tmp_path / "credstore"
         credstore.mkdir()
         (credstore / "influx-token.cred").write_text("ciphertext")
@@ -404,6 +567,36 @@ class TestEnsureInfluxStorage:
 
         assert get.called
         post.assert_not_called()
+
+    def test_v2_detected_correctly_even_when_token_never_migrated(self, tmp_path, monkeypatch):
+        """is_v2 must be derived from the token's presence in settings.yaml (plain
+        or sentinel, both truthy) - not from whether a .cred file happens to exist,
+        which gets this wrong for a v2 install that never used systemd-creds."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('influx:\n  url: "http://localhost:8086"\n  org: "myorg"\n  token: "plaintoken"\n')
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()  # no influx-token.cred - never migrated
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+
+        def fake_get(url, **kwargs):
+            resp = MagicMock(status_code=200)
+            resp.raise_for_status.return_value = None
+            if url.endswith("/api/v2/buckets"):
+                resp.json.return_value = {"buckets": []}
+            elif url.endswith("/api/v2/orgs"):
+                resp.json.return_value = {"orgs": [{"id": "org-id-123"}]}
+            return resp
+
+        create_resp = MagicMock(status_code=200)
+        create_resp.raise_for_status.return_value = None
+
+        with patch("subprocess.run") as run:
+            with patch("requests.get", side_effect=fake_get), patch("requests.post", return_value=create_resp) as post:
+                _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
+
+        run.assert_not_called()  # nothing to decrypt
+        _, kwargs = post.call_args
+        assert kwargs["headers"]["Authorization"] == "Token plaintoken"
 
 
 # --------------------------------------------------------------------------- #

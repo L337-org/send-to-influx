@@ -75,6 +75,25 @@ class TestApplyCredentialSubstitution:
         result = apply_credential_substitution(sample_settings)
         assert result["hue"]["user"] == "secret-value"
 
+    def test_non_mapping_top_level_key_does_not_crash(self, sample_settings, monkeypatch, tmp_path, caplog):
+        """A malformed settings.yaml (e.g. `hue: "oops"` instead of a mapping) must
+        not crash substitution with a TypeError - that would happen before
+        validate_settings() gets a chance to report it as a proper ConfigError."""
+        sample_settings["hue"] = "oops"
+        (tmp_path / "hue-user").write_text("secret-value")
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+        with caplog.at_level("WARNING"):
+            result = apply_credential_substitution(sample_settings)
+        assert result["hue"] == "oops"  # left alone for validate_settings() to catch
+        assert any("is not a mapping" in r.message for r in caplog.records)
+
+    def test_non_mapping_list_top_level_key_does_not_crash(self, sample_settings, monkeypatch, tmp_path):
+        sample_settings["influx"] = []
+        (tmp_path / "influx-token").write_text("secret-value")
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+        result = apply_credential_substitution(sample_settings)  # does not raise
+        assert result["influx"] == []
+
 
 class TestSettingsFilePermissionCheck:
     """Integration tests for _enforce_settings_file_permissions via load_settings()."""

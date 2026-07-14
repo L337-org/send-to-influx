@@ -254,6 +254,26 @@ first:
 Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as
 stdout above.
 
+### Configuring during install (debconf)
+
+Installing (or upgrading to) the `.deb` interactively presents a debconf prompt: a checklist of
+which data sources you want to configure now, then - only for the ones you pick - the fields
+needed to actually reach that source's API (credentials plus things like a Hue bridge hostname or
+an Octopus meter number; tuning settings like intervals keep their shipped defaults and can be
+adjusted in `settings.yaml` afterwards). Secrets you enter are moved into `systemd-creds` (see below)
+and never written into `settings.yaml` in plaintext. Debconf itself briefly holds what you type in
+its own separate, `chmod 600` password store while `postinst` runs, then actively unregisters each
+question once it's been read and migrated - see SECURITY.md if you want the detail. If every required
+field for a source was answered, it's automatically added to
+`sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is created for you where
+possible.
+
+You can leave every question blank and configure `settings.yaml` by hand instead - nothing here is
+required. Re-run `sudo dpkg-reconfigure send-to-influx` at any time to change your answers; secret
+prompts always come back blank on a reconfigure (debconf's own UI convention for password-type
+questions - it doesn't redisplay a previous answer), so leaving one blank keeps whatever's already
+stored rather than clearing it.
+
 ### Storing secrets in systemd-creds
 
 By default, `settings.yaml` holds credentials (InfluxDB token/user/password, Hue bridge user,

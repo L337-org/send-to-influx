@@ -1,0 +1,118 @@
+#!/bin/sh
+# config for send-to-influx.deb.
+#
+# debconf question-gathering ONLY - no side effects. This is a hard Debian
+# packaging convention: config must be safe to run (and re-run, via
+# dpkg-reconfigure) without touching the filesystem, so a user can back out of
+# an install or change their answers without partial changes having already
+# happened. All the actual work (systemd-creds encryption, settings.yaml
+# edits, source auto-enable) happens later in postinst, once package files
+# are unpacked and everything asked here has been answered.
+#
+# See CLAUDE.md's "Credential storage (systemd-creds)" section for the full
+# design and why InfluxDB version detection is deliberately NOT done here.
+set -e
+
+. /usr/share/debconf/confmodule
+
+db_input high send-to-influx/sources-to-configure || true
+db_go || true
+
+db_get send-to-influx/sources-to-configure
+# Normalise debconf's multiselect answer (comma-separated, with or without a
+# following space depending on frontend) into a space-padded string so a
+# simple `case ... *" name "*` substring match works reliably either way.
+SOURCES=" $(echo "$RET" | tr ',' ' ') "
+
+# Nothing selected - don't bother asking about InfluxDB or anything else.
+# A plain non-interactive install with nothing answered ends up here too,
+# and postinst's own gating (on this same template) then behaves exactly
+# like a source-checkout-style manual settings.yaml edit - no regression.
+if [ "$SOURCES" = "  " ]; then
+    exit 0
+fi
+
+# InfluxDB connection - always asked, since every selected source needs it.
+# influx-identity/influx-secret are generic (org+token for v2, user+password
+# for v1) and always asked together, regardless of whether influx-url was
+# left blank - leaving the URL blank only changes its *default* (defaults to
+# a local instance), it doesn't mean "skip InfluxDB auth". Which of v1/v2
+# applies is detected later in postinst (see --detect-influx-version), once
+# the app's own venv/requests is available and the URL can actually be
+# probed - not here, since config runs before the package is even unpacked
+# on a first install, and gating what's asked on being able to reach an
+# arbitrary, possibly-remote, possibly-not-yet-provisioned URL at this exact
+# moment would be the wrong place to depend on that reachability at all.
+db_input medium send-to-influx/influx-url || true
+db_input medium send-to-influx/influx-identity || true
+db_input medium send-to-influx/influx-secret || true
+db_go || true
+
+case "$SOURCES" in
+    *" hue "*)
+        db_input medium send-to-influx/hue-host || true
+        db_input medium send-to-influx/hue-user || true
+        # Computed default, not a static one - db_set before the first
+        # db_input makes it the pre-filled, fully user-editable default,
+        # not a silent unreviewable guess. locale -k LC_MEASUREMENT was
+        # considered and rejected: that data isn't reliably populated on
+        # minimal/headless installs, which is the common case for this
+        # collector. A plain string match on the locale env vars is
+        # simpler and degrades safely to Celsius when no locale is set.
+        loc="${LC_ALL:-${LANG:-}}"
+        case "$loc" in
+            *_US*) default_unit=F ;;
+            *) default_unit=C ;;
+        esac
+        db_set send-to-influx/hue-temperature-units "$default_unit"
+        db_input medium send-to-influx/hue-temperature-units || true
+        db_go || true
+        ;;
+esac
+
+case "$SOURCES" in
+    *" zappi "*|*" harvi "*|*" eddi "*)
+        db_input medium send-to-influx/myenergi-apikey || true
+        db_go || true
+        ;;
+esac
+
+case "$SOURCES" in
+    *" zappi "*)
+        db_input medium send-to-influx/zappi-serial || true
+        db_go || true
+        ;;
+esac
+
+case "$SOURCES" in
+    *" harvi "*)
+        db_input medium send-to-influx/harvi-serial || true
+        db_go || true
+        ;;
+esac
+
+case "$SOURCES" in
+    *" eddi "*)
+        db_input medium send-to-influx/eddi-serial || true
+        db_go || true
+        ;;
+esac
+
+case "$SOURCES" in
+    *" octopus "*)
+        db_input medium send-to-influx/octopus-api-key || true
+        db_input medium send-to-influx/octopus-mpan || true
+        db_input medium send-to-influx/octopus-meter-serial || true
+        db_go || true
+        ;;
+esac
+
+case "$SOURCES" in
+    *" openmeteo "*)
+        db_input medium send-to-influx/openmeteo-latitude || true
+        db_input medium send-to-influx/openmeteo-longitude || true
+        db_go || true
+        ;;
+esac
+
+exit 0

@@ -205,6 +205,68 @@ the source-checkout/screen-session path, where `systemd-creds` doesn't apply at 
   would make the whole package uninstallable there just to gate one opt-in feature. A missing/too-old
   `systemd-creds` fails with a specific message rather than blocking install.
 
+#### debconf-driven install
+
+`packaging/deb/send-to-influx.templates` + `packaging/deb/config` (copied into `DEBIAN/templates`/
+`DEBIAN/config` by `build-deb.sh`, which also adds `debconf (>= 0.5)` to `Depends:`): `config`'s job
+is *only* asking questions and stashing answers in debconf's database - a hard Debian packaging
+convention, so `dpkg-reconfigure`/backing out of an install never leaves partial side effects. It
+never touches the filesystem and never calls into `credential_cli.py` - that only happens later,
+from `postinst`, once package files are unpacked and everything's been answered.
+
+- `send-to-influx/sources-to-configure` (`Type: multiselect`, priority `high`) is asked first and
+  gates everything else - if nothing's selected, `config` exits immediately, and per-source blocks
+  are only shown (via `db_input` called conditionally, not declaratively in the template file) for
+  sources actually picked, so choosing one or two sources doesn't walk through prompts for the other
+  six. Tuning fields (`interval`, `timeout`, `fields` lists, `stagger_seconds`/`default_source`) are
+  never prompted for - see the "Template structure" reasoning in the original plan for why (`fields`
+  particularly can't be validated against a source's real field names at install time). The one
+  deliberate exception is `hue-temperature-units`, which gets a *computed* default (checks
+  `$LC_ALL`/`$LANG` for a `_US` territory code, defaulting to Celsius otherwise) via `db_set` before
+  the first `db_input`, rather than a silent guess - getting temperature units wrong is immediately
+  visible to the user in a way the other tuning fields aren't.
+- InfluxDB's `influx-url`/`influx-identity`/`influx-secret` are asked unconditionally (every selected
+  source needs a working InfluxDB connection) - `identity`/`secret` are generic (org+token for v2,
+  user+password for v1), asked without knowing which version applies yet. Version detection
+  deliberately does **not** happen in `config`: `config` runs *before* the package is unpacked on a
+  first install, so it can't rely on the app's own venv/`requests`, and more fundamentally, gating
+  *what gets asked* on being able to reach an arbitrary, possibly-remote, possibly-not-yet-provisioned
+  URL at the exact moment of package install would defeat the point of the URL being configurable.
+  Detection happens later, in `postinst`, via `send-to-influx-set-credential --detect-influx-version`.
+- `postinst` (gated on `sources-to-configure` being non-empty, so a plain non-interactive install
+  behaves exactly like the non-debconf flow above): resolves the InfluxDB block first via
+  `--detect-influx-version` and routes `identity`/`secret` accordingly - v2 writes `identity` to the
+  plain (non-secret) `influx.org` field via `--set-field` and `secret` to the `influx-token` credential;
+  v1 routes both `identity` and `secret` to the `influx-user`/`influx-password` credentials - if
+  detection comes back `unknown` (URL unreachable at install time, expected to happen sometimes since
+  the URL can point anywhere), nothing is written and no source is auto-enabled this run; a secret
+  prompt is never pre-filled with a previous answer on a later `dpkg-reconfigure` (see the `Type:
+  password` note below), so that re-run cleanly re-collects them rather than silently reusing something
+  stale. Then, per selected source: secrets via `send-to-influx-set-credential <name>`, non-secret fields via
+  `--set-field`, both reusing the same CLI rather than a second YAML-patcher in shell. **Auto-enable**:
+  a source is only added to `sources:` (via `--enable-source` - `default_source:` is never touched,
+  since `sendtoinflux.py` only falls back to it when `sources:` is absent entirely, which is never true
+  once `example_settings.yaml` has shipped it non-empty) if *every* required field for it (and the
+  InfluxDB block) actually resolved - not just "was it ticked" - with `--ensure-influx-storage`
+  attempted first (best-effort database/bucket creation, logged-not-raised on failure).
+- `Type: password` answers *are* written to disk by debconf - contrary to an earlier version of this
+  note - into a dedicated `passwords.dat` store kept separate from its general-purpose, more widely
+  readable answer database, and restricted to `chmod 600`. Debian's own developers' guide
+  (`debconf-devel(7)`) advises clearing a password value out of it "as soon as is possible" once
+  consumed, so `postinst` does: immediately after each `db_get` on a password-type template
+  (`influx-secret`, `hue-user`, `myenergi-apikey`, `octopus-api-key`), it calls `db_unregister` on
+  that question - this removes the question, and its stored answer, from debconf's database entirely,
+  regardless of whether the subsequent `systemd-creds` migration for that value goes on to succeed or
+  fail. The template definition itself lives in `send-to-influx.templates`, not in the database entry
+  that got removed, so it's re-registered fresh the next time `config`/`postinst` run -
+  `dpkg-reconfigure` is unaffected. Separately, and unrelated to whether the value is unregistered,
+  debconf *never* redisplays/pre-fills a previous password answer in the prompt on a later
+  invocation - a UI convention for this template type. So a reconfigure always shows secret prompts
+  blank, with no way for `postinst` to distinguish "leave it as-is" from "clear it" from that alone -
+  resolved by not supporting clearing via debconf at all: `postinst` treats blank as "keep the existing
+  systemd-creds value," and removing a credential goes through `send-to-influx-set-credential <name>
+  --remove` directly instead.
+
 ### Branch protection
 
 Four rulesets, in decreasing order of strictness - `release/**/*` and `feature/**/*` mirror the same
