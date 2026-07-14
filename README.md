@@ -266,12 +266,14 @@ meter number; tuning settings like intervals keep their shipped defaults and can
 `settings.yaml` afterwards). Secrets you enter are moved into `systemd-creds` (see below)
 and never written into `settings.yaml` in plaintext. Debconf itself briefly holds what you type in
 its own separate, `chmod 600` password store while `postinst` runs, then actively unregisters each
-password-type question once it's been read and migrated - see SECURITY.md if you want the detail.
-Non-secret answers (a Hue bridge hostname, an Octopus meter number, and so on) aren't password-type
-and stay in debconf's regular database as normal, same as any other package's debconf answers. If
-every required field for a source was answered, it's automatically added to
-`sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is created for you where
-possible.
+password-type question immediately after reading it - regardless of whether the subsequent migration
+into `systemd-creds` goes on to succeed - see SECURITY.md if you want the detail. Non-secret answers
+(a Hue bridge hostname, an Octopus meter number, and so on) aren't password-type and stay in
+debconf's regular database as normal, same as any other package's debconf answers. If every required
+field for a source was answered *and* your InfluxDB connection details resolved successfully, it's
+automatically added to `sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is
+created for you where possible - a source with everything else filled in still won't be enabled if
+InfluxDB itself couldn't be reached or authenticated.
 
 You can leave every question blank and configure `settings.yaml` by hand instead - nothing here is
 required. Re-run `sudo dpkg-reconfigure send-to-influx` at any time to change your answers; secret
