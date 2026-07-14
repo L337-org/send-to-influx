@@ -138,13 +138,20 @@ cp "$REPO_ROOT/packaging/deb/config" "$PKG_ROOT/DEBIAN/config"
 cp "$REPO_ROOT/packaging/deb/send-to-influx.templates" "$PKG_ROOT/DEBIAN/templates"
 chmod 755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm" "$PKG_ROOT/DEBIAN/config"
 
+# No hard Depends: on systemd - shipping a unit file doesn't require it
+# (Debian packages with units conventionally don't depend on an init), every
+# systemctl call in the maintainer scripts is already guarded on
+# /run/systemd/system (systemd running, not merely installed - the guard a
+# hard dependency couldn't replace anyway, e.g. in a chroot/container), and
+# systemd-creds availability is checked at runtime with its own specific
+# error message (see CLAUDE.md's "Credential storage" section).
 cat > "$PKG_ROOT/DEBIAN/control" <<CONTROL
 Package: ${PKG_NAME}
 Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: all
-Depends: systemd, debconf (>= 0.5), python3 (>= 3.10), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
+Depends: debconf (>= 0.5), python3 (>= 3.10), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
 Maintainer: Gavin Lucas
 Description: Collects data from smart home / energy devices and writes it to InfluxDB
  send-to-influx polls Hue, MyEnergi, Octopus, Open-Meteo, National Grid Carbon

@@ -20,7 +20,12 @@ if ! getent passwd send-to-influx >/dev/null 2>&1; then
     adduser --system --group --no-create-home --shell /usr/sbin/nologin send-to-influx
 fi
 
-chown -R send-to-influx:send-to-influx /opt/send-to-influx
+# /opt/send-to-influx (the code) deliberately stays root-owned, exactly as
+# dpkg unpacked it: the service only needs read/execute access (the venv is
+# world-readable by default), and a service user that can write its own code
+# turns any service compromise into persistent arbitrary-code execution. (An
+# earlier version chown -R'ed the whole tree to send-to-influx on every
+# configure, for no operational benefit.)
 
 # settings.yaml is deliberately NOT a dpkg conffile (see build-deb.sh for the
 # full reasoning: this script and send-to-influx-set-credential write into it,
@@ -125,7 +130,6 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     INFLUX_OK=0
     if [ -n "$INFLUX_IDENTITY" ] && [ -n "$INFLUX_SECRET" ]; then
         INFLUX_VERSION="$("$CLI" --detect-influx-version "$INFLUX_URL" 2>/dev/null || echo unknown)"
-        CLI_FAILED=0
         if [ "$INFLUX_VERSION" = "v2" ]; then
             # example_settings.yaml ships influx.org/influx.token as real, empty
             # keys (alongside the v1 user/password placeholders) specifically so
@@ -398,16 +402,14 @@ fi
 # guidance about an upgrade that didn't happen - the restart above still
 # applies so their new answers take effect, noted with a single line.
 #
-# $2's meaning (previously-configured version, empty only on a fresh install)
-# only holds for the "configure" action - postinst is also called as
-# abort-upgrade/abort-remove/abort-deconfigure/triggered, where $2 means
-# something else entirely (or nothing). Guard on $1 explicitly so this can't
-# print the wrong guidance during one of those other invocations.
-if [ "$1" = "configure" ] && [ "${DEBCONF_RECONFIGURE:-}" = "1" ] && [ -n "$2" ]; then
+# ($1 is guaranteed to be "configure" this far down - every other action
+# no-ops at the top of the script - so $2 reliably means "previously-
+# configured version, empty only on a fresh install" here.)
+if [ "${DEBCONF_RECONFIGURE:-}" = "1" ] && [ -n "$2" ]; then
     if [ "$RESTARTED" = 1 ]; then
         echo "send-to-influx: service restarted to apply the new configuration."
     fi
-elif [ "$1" = "configure" ]; then
+else
     if [ -z "$2" ]; then
         cat <<'MSG'
 
