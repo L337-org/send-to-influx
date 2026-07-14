@@ -342,8 +342,15 @@ fi
 # keeps running on its existing configuration across an upgrade (postinst never
 # stops or restarts it), so telling the admin it needs configuring and isn't
 # started is simply wrong for that case.
-if [ -z "$2" ]; then
-    cat <<'MSG'
+#
+# $2's meaning (previously-configured version, empty only on a fresh install)
+# only holds for the "configure" action - postinst is also called as
+# abort-upgrade/abort-remove/abort-deconfigure/triggered, where $2 means
+# something else entirely (or nothing). Guard on $1 explicitly so this can't
+# print the wrong guidance during one of those other invocations.
+if [ "$1" = "configure" ]; then
+    if [ -z "$2" ]; then
+        cat <<'MSG'
 
 send-to-influx installed. Before starting the service:
 
@@ -360,16 +367,16 @@ send-to-influx installed. Before starting the service:
 The service is not started automatically since it needs configuration first.
 
 MSG
-else
-    # "enabled" doesn't imply "running" (could be enabled-but-currently-stopped,
-    # or never enabled at all) - check the actual current state rather than
-    # hedging with "if enabled". Nothing in this script stops/starts/restarts
-    # the service at any point during an upgrade, so is-active here reflects
-    # both its state before and after this upgrade ran. Guarded the same way
-    # as the daemon-reload above - on a non-systemd host systemctl may not
-    # exist at all, and short-circuiting here means it's never invoked.
-    if [ -d /run/systemd/system ] && systemctl is-active --quiet send-to-influx 2>/dev/null; then
-        cat <<'MSG'
+    else
+        # "enabled" doesn't imply "running" (could be enabled-but-currently-stopped,
+        # or never enabled at all) - check the actual current state rather than
+        # hedging with "if enabled". Nothing in this script stops/starts/restarts
+        # the service at any point during an upgrade, so is-active here reflects
+        # both its state before and after this upgrade ran. Guarded the same way
+        # as the daemon-reload above - on a non-systemd host systemctl may not
+        # exist at all, and short-circuiting here means it's never invoked.
+        if [ -d /run/systemd/system ] && systemctl is-active --quiet send-to-influx 2>/dev/null; then
+            cat <<'MSG'
 
 send-to-influx upgraded. It was running before this upgrade and this upgrade
 does not stop, start, or restart it - it's still running now, unaffected, on
@@ -381,8 +388,8 @@ already migrated, or 'sudo dpkg-reconfigure send-to-influx' to revisit the
 interactive setup (including migrating just your InfluxDB credential, without
 touching source configuration).
 MSG
-    else
-        cat <<'MSG'
+        else
+            cat <<'MSG'
 
 send-to-influx upgraded. This upgrade does not stop, start, or restart the
 service - it's left exactly as it was before (not currently running). Your
@@ -396,6 +403,7 @@ interactive setup (including migrating just your InfluxDB credential, without
 touching source configuration).
 
 MSG
+        fi
     fi
 fi
 
