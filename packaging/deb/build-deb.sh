@@ -41,8 +41,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# /etc/send-to-influx ships as an (empty) directory even though settings.yaml
+# itself is no longer packaged (see the /usr/share example note below): dpkg
+# then keeps owning the directory across upgrades from versions that *did*
+# ship a file inside it, instead of warning "unable to delete old directory:
+# Directory not empty" on the first upgrade past that change.
 mkdir -p "$PKG_ROOT/DEBIAN" "$PKG_ROOT/opt/send-to-influx" "$PKG_ROOT/usr/share/send-to-influx" \
-    "$PKG_ROOT/lib/systemd/system" "$PKG_ROOT/usr/sbin"
+    "$PKG_ROOT/etc/send-to-influx" "$PKG_ROOT/lib/systemd/system" "$PKG_ROOT/usr/sbin"
 
 echo "Building venv payload from $REPO_ROOT ..."
 "$BUILD_PYTHON" -m venv "$PKG_ROOT/opt/send-to-influx/venv"
