@@ -121,9 +121,45 @@ jobs:
       - name: Build .deb package
         run: packaging/deb/build-deb.sh
 
+      - name: Seed debconf answers for the interactive install flow
+        # Exercises config's conditional prompts and postinst's db_get/set_secret/
+        # set_field/db_unregister wiring - without this, a plain `dpkg -i` with
+        # nothing pre-seeded takes the "nothing selected" early-exit in config, and
+        # the entire debconf-driven branch of postinst (including db_unregister)
+        # never runs in CI at all. Hue is picked as a representative source: it has
+        # one of each prompt type (string, password, select). InfluxDB's
+        # identity/secret are deliberately left blank - version detection against a
+        # real server is out of scope for this smoke test (see README's "leave
+        # every question blank" supported flow), so Hue won't get auto-enabled into
+        # sources:, but its own credential still gets migrated and unregistered
+        # regardless, which is what this step exists to verify.
+        run: |
+          {
+            echo "send-to-influx send-to-influx/sources-to-configure multiselect hue"
+            echo "send-to-influx send-to-influx/influx-url string"
+            echo "send-to-influx send-to-influx/influx-identity string"
+            echo "send-to-influx send-to-influx/influx-secret password"
+            echo "send-to-influx send-to-influx/hue-host string ci-test-bridge.example.com"
+            echo "send-to-influx send-to-influx/hue-user password ci-test-hue-secret-value"
+            echo "send-to-influx send-to-influx/hue-temperature-units select C"
+          } | sudo debconf-set-selections
+
       - name: Install and smoke-test the .deb
         run: |
-          sudo dpkg -i send-to-influx_*.deb
+          sudo DEBIAN_FRONTEND=noninteractive dpkg -i send-to-influx_*.deb
           /opt/send-to-influx/venv/bin/send-to-influx --version
           cp example_settings.yaml /tmp/settings.yaml
           /opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/settings.yaml
+
+      - name: Verify the debconf-driven install applied the Hue credential and cleaned up after itself
+        run: |
+          sudo grep -q 'host: "ci-test-bridge.example.com"' /etc/send-to-influx/settings.yaml
+          sudo grep -q 'stored in systemd-creds' /etc/send-to-influx/settings.yaml
+          sudo test -f /etc/send-to-influx/credstore.encrypted/hue-user.cred
+          # The plaintext secret must not be sitting anywhere on disk once postinst
+          # is done with it: not in settings.yaml (migrated to systemd-creds), and
+          # not still in debconf's own passwords.dat (db_unregister must have
+          # purged it - see debconf-devel(7)'s "clear a password value out of it as
+          # soon as is possible" guidance, and CLAUDE.md's "Credential storage" doc).
+          ! sudo grep -rq 'ci-test-hue-secret-value' /etc/send-to-influx/settings.yaml
+          ! sudo grep -rq 'ci-test-hue-secret-value' /var/cache/debconf/

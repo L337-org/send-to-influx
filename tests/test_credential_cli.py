@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 import pytest
+import requests
 import yaml
 from toinflux import credential_cli
 from toinflux.credentials import sentinel_for
@@ -14,6 +15,7 @@ from toinflux.credential_cli import (
     _cmd_set,
     _cmd_set_field,
     _detect_influx_version,
+    _encrypt_credential,
     _parse_systemd_creds_version,
     _regenerate_dropin,
     _require_systemd_creds,
@@ -80,6 +82,57 @@ class TestValidateSecretValue:
 
 
 # --------------------------------------------------------------------------- #
+# _encrypt_credential
+# --------------------------------------------------------------------------- #
+
+
+class TestEncryptCredential:
+    def test_creates_missing_credstore_dir_at_0700(self, tmp_path):
+        """os.makedirs() alone creates a missing dir at the process umask's default
+        (commonly 0755) - credstore_dir must always end up 0700 regardless, since
+        postinst normally pre-creates it that way and this is the fallback for
+        whenever the CLI runs standalone without that having happened."""
+        import os
+        import stat as stat_module
+
+        credstore_dir = tmp_path / "credstore.encrypted"  # deliberately not pre-created
+        assert not credstore_dir.exists()
+
+        def fake_run(cmd, **kwargs):
+            with open(cmd[-1], "w", encoding="utf8") as f:
+                f.write("ciphertext")
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=fake_run):
+            _encrypt_credential("influx-token", "a-real-secret", credstore_dir=str(credstore_dir))
+
+        mode = stat_module.S_IMODE(os.stat(credstore_dir).st_mode)
+        assert mode == stat_module.S_IRWXU
+
+    def test_reasserts_0700_on_already_existing_credstore_dir(self, tmp_path):
+        """Self-healing: even if credstore_dir already exists with looser
+        permissions (e.g. a prior interrupted run, or manual tampering), a
+        subsequent _encrypt_credential call fixes it rather than trusting it."""
+        import os
+        import stat as stat_module
+
+        credstore_dir = tmp_path / "credstore.encrypted"
+        credstore_dir.mkdir()
+        os.chmod(credstore_dir, 0o755)  # mkdir(mode=...) is subject to umask; be explicit
+
+        def fake_run(cmd, **kwargs):
+            with open(cmd[-1], "w", encoding="utf8") as f:
+                f.write("ciphertext")
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=fake_run):
+            _encrypt_credential("influx-token", "a-real-secret", credstore_dir=str(credstore_dir))
+
+        mode = stat_module.S_IMODE(os.stat(credstore_dir).st_mode)
+        assert mode == stat_module.S_IRWXU
+
+
+# --------------------------------------------------------------------------- #
 # _rewrite_settings_field
 # --------------------------------------------------------------------------- #
 
@@ -139,6 +192,19 @@ class TestRewriteSettingsField:
         path = self._write(tmp_path, content)
         with pytest.raises(CredentialCliError, match="could not safely rewrite"):
             _rewrite_settings_field(path, "influx", "token", "new_value")
+
+    def test_raises_on_flow_style_section_without_corrupting_file(self, tmp_path):
+        """A flow-style section (`influx: {token: "old", org: "x"}`) puts other
+        keys/braces on the same line as the target scalar - the naive
+        indent+field+value reconstruction would silently drop everything before
+        the field name (including the top_key: { prefix), producing invalid
+        YAML. Must refuse instead, leaving the file untouched."""
+        content = 'influx: {token: "old_value", org: "myorg"}\n'
+        path = self._write(tmp_path, content)
+        with pytest.raises(CredentialCliError, match="could not safely rewrite"):
+            _rewrite_settings_field(path, "influx", "token", "new_value")
+        assert open(path, encoding="utf8").read() == content
+        yaml.safe_load(content)  # sanity: the untouched original is still valid YAML
 
     def test_preserves_file_permissions(self, tmp_path):
         import os
@@ -273,6 +339,40 @@ class TestCmdSet:
         assert "  # a comment that must survive" in result_lines
         assert '  org: "myorg"' in result_lines
 
+    def test_settings_rewrite_failure_after_successful_encrypt_says_so(self, tmp_path, monkeypatch):
+        """If settings.yaml can't be rewritten (e.g. a flow-style section) after the
+        secret has already been successfully encrypted into systemd-creds, don't
+        silently leave the user in a half-migrated state with only the generic
+        _rewrite_settings_field error - say explicitly that the secret is safely
+        stored and only the settings.yaml side needs manual attention."""
+        original = 'influx: {token: "your_influx_token", org: "myorg"}\n'
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(original)
+        credstore = tmp_path / "credstore"
+        dropin = tmp_path / "dropin.conf"
+
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+        monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(dropin))
+        monkeypatch.setattr(credential_cli.sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr(credential_cli.sys.stdin, "read", lambda: "real-secret-value")
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["systemd-creds", "--version"]:
+                return MagicMock(stdout="systemd 257\n")
+            if cmd[:2] == ["systemd-creds", "encrypt"]:
+                credstore.mkdir(parents=True, exist_ok=True)
+                (credstore / "influx-token.cred").write_text("ciphertext")
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=fake_run):
+            with pytest.raises(CredentialCliError, match="was encrypted and stored in systemd-creds"):
+                _cmd_set("influx-token", str(settings_path))
+
+        # the secret really was stored - not rolled back
+        assert (credstore / "influx-token.cred").exists()
+        # settings.yaml is untouched, not corrupted
+        assert settings_path.read_text() == original
+
 
 class TestCmdRemove:
     def test_removes_cred_file_and_reverts_settings(self, tmp_path, monkeypatch):
@@ -293,6 +393,28 @@ class TestCmdRemove:
         assert not (credstore / "influx-token.cred").exists()
         result_yaml = yaml.safe_load(settings_path.read_text())
         assert result_yaml["influx"]["token"] == "your_influx_token"
+
+    def test_noop_remove_says_it_was_not_stored(self, tmp_path, monkeypatch, capsys):
+        """Removing a credential that was never migrated (no .cred file) still
+        reverts settings.yaml to the placeholder - which is one-sided, useful
+        behaviour worth keeping - but must say so plainly rather than claiming
+        to have 'Removed ... from systemd-creds' when there was never anything
+        there to remove."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('influx:\n  token: "some_hand_typed_value"\n')
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        dropin = tmp_path / "dropin.conf"
+
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+        monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(dropin))
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+            _cmd_remove("influx-token", str(settings_path))
+
+        out = capsys.readouterr().out
+        assert "was not stored in systemd-creds" in out
+        assert "Removed 'influx-token' from systemd-creds" not in out
 
 
 # --------------------------------------------------------------------------- #
@@ -646,3 +768,39 @@ class TestMain:
         assert code == 0
         out = capsys.readouterr().out
         assert "influx-token" in out
+
+    def test_detect_influx_version_does_not_require_root(self, monkeypatch, capsys):
+        monkeypatch.setattr("os.geteuid", lambda: 1000)
+        with patch("requests.get", side_effect=requests.RequestException):
+            code = main(["--detect-influx-version", "http://example.com:8086"])
+        assert code == 0
+        assert "unknown" in capsys.readouterr().out
+
+    def test_non_root_set_field_exits_without_touching_any_file(self, tmp_path, monkeypatch):
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('hue:\n  host: "old.example.com"\n')
+        original = settings_path.read_text()
+
+        monkeypatch.setattr("os.geteuid", lambda: 1000)
+        code = main(["--set-field", "hue.host", "new.example.com", "--settings", str(settings_path)])
+
+        assert code == 1
+        assert settings_path.read_text() == original
+
+    def test_non_root_enable_source_exits_without_touching_any_file(self, tmp_path, monkeypatch):
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("sources:\n  - hue\n")
+        original = settings_path.read_text()
+
+        monkeypatch.setattr("os.geteuid", lambda: 1000)
+        code = main(["--enable-source", "zappi", "--settings", str(settings_path)])
+
+        assert code == 1
+        assert settings_path.read_text() == original
+
+    def test_non_root_ensure_influx_storage_does_not_run(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("os.geteuid", lambda: 1000)
+        with patch("subprocess.run") as run:
+            code = main(["--ensure-influx-storage", "hue_db"])
+        assert code == 1
+        run.assert_not_called()
