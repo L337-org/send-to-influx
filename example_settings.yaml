@@ -38,22 +38,23 @@ stagger_seconds: 10
 default_source: "hue"
 
 # InfluxDB settings
-# For InfluxDB v1, use user/password and per-source db:
 influx:
   url: "https://influx.example.com:8086"
+  # For InfluxDB v1, use user/password and per-source db:
   user: "your_influx_user"
   password: "your_influx_password"
+  # For InfluxDB v2, use token/org instead and per-source bucket: instead of db. Leave
+  # both blank (as shipped) for v1 - an empty token is falsy, so it's correctly
+  # ignored rather than mistaken for real v2 config. token/org are shipped here as
+  # real, empty keys rather than commented out specifically so the packaged
+  # install's debconf flow (send-to-influx-set-credential --set-field/the dedicated
+  # credential subcommand) can write into them directly - a commented-out line
+  # isn't a YAML key at all, so those tools have nothing to rewrite.
+  token: ""
+  org: ""
   timeout: 5
   # Uncomment the line below to skip TLS certificate verification (e.g. self-signed/internal certs)
   # insecure: true
-
-# For InfluxDB v2, use token/org instead and per-source bucket: instead of db:
-# influx:
-#   url: "https://influx.example.com:8086"
-#   token: "your_influx_token"
-#   org: "your_org"
-#   timeout: 5
-#   insecure: false
 
 # Hue bridge settings
 hue:

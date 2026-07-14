@@ -1,5 +1,6 @@
 """Unit tests for toinflux.credential_cli (send-to-influx-set-credential)."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 import requests
@@ -686,6 +687,51 @@ class TestCmdSetField:
         for name, (top_key, field) in CREDENTIAL_FIELDS.items():
             with pytest.raises(CredentialCliError, match=f"send-to-influx-set-credential {name}"):
                 _cmd_set_field(f"{top_key}.{field}", "value", str(settings_path))
+
+
+# --------------------------------------------------------------------------- #
+# example_settings.yaml must support a fresh debconf v2 install
+# --------------------------------------------------------------------------- #
+
+
+class TestExampleSettingsSupportsV2Install:
+    """The packaged .deb ships example_settings.yaml verbatim as the fresh-install
+    settings.yaml (see build-deb.sh). postinst's debconf-driven v2 path calls
+    set_field influx.org then _rewrite_settings_field for influx.token - both need
+    real (if empty) keys to exist, or a fresh v2 install silently can't be
+    configured at all. This guards against that shape regressing."""
+
+    EXAMPLE_SETTINGS_PATH = Path(__file__).resolve().parent.parent / "example_settings.yaml"
+
+    def test_org_and_token_are_real_empty_keys_not_comments(self):
+        with open(self.EXAMPLE_SETTINGS_PATH, encoding="utf8") as f:
+            settings = yaml.safe_load(f)
+        assert settings["influx"]["org"] == ""
+        assert settings["influx"]["token"] == ""
+
+    def test_fresh_install_is_v2_false_until_token_is_set(self):
+        """Empty token must stay falsy - otherwise a fresh v1-only install (which
+        never touches influx.token) would be misclassified as v2 by
+        is_v2 = bool(influx.get("token")), both in validate_settings() and in the
+        real runtime auth dispatch in toinflux/influx.py."""
+        with open(self.EXAMPLE_SETTINGS_PATH, encoding="utf8") as f:
+            settings = yaml.safe_load(f)
+        assert bool(settings["influx"]["token"]) is False
+
+    def test_debconf_v2_write_path_succeeds_against_the_real_file(self, tmp_path):
+        """Simulates exactly what postinst does for a fresh v2 install: set_field
+        influx.org, then migrate influx.token via the same surgical rewrite
+        _cmd_set uses. Both must succeed against the file as actually shipped."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(self.EXAMPLE_SETTINGS_PATH.read_text(encoding="utf8"))
+
+        _cmd_set_field("influx.org", "myorg", str(settings_path))
+        _rewrite_settings_field(str(settings_path), "influx", "token", sentinel_for("influx-token"))
+
+        result = yaml.safe_load(settings_path.read_text())
+        assert result["influx"]["org"] == "myorg"
+        assert result["influx"]["token"].startswith("<stored in systemd-creds")
+        assert bool(result["influx"]["token"]) is True  # is_v2 now correctly True
 
 
 # --------------------------------------------------------------------------- #

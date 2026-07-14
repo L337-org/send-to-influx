@@ -88,16 +88,18 @@ if [ "$SOURCES" != "  " ]; then
         INFLUX_VERSION="$("$CLI" --detect-influx-version "$INFLUX_URL" 2>/dev/null || echo unknown)"
         CLI_FAILED=0
         if [ "$INFLUX_VERSION" = "v2" ]; then
-            # example_settings.yaml ships the v1 shape by default (url/user/
-            # password) - influx.org/influx.token don't exist as real keys until
-            # someone edits them in (see CLAUDE.md's "Credential storage" notes on
-            # why placeholder scalars can't just be added for both shapes at
-            # once). set_field influx.org therefore fails here on a fresh
-            # install. Only attempt set_secret influx-token if that succeeded -
-            # otherwise the token would end up encrypted into systemd-creds with
-            # the drop-in already referencing it, while settings.yaml still has
-            # no influx.token key at all to point back at it: a partially
-            # migrated, inconsistent state, worse than just failing cleanly.
+            # example_settings.yaml ships influx.org/influx.token as real, empty
+            # keys (alongside the v1 user/password placeholders) specifically so
+            # set_field/set_secret below have something to rewrite on a fresh
+            # install - an empty token is falsy, so it doesn't make is_v2 = bool(
+            # token) misfire for a v1-only install that never touches these
+            # fields. Only attempt set_secret influx-token if set_field succeeded
+            # first, defense-in-depth against a hand-edited settings.yaml that's
+            # since had these keys removed - otherwise the token would end up
+            # encrypted into systemd-creds with the drop-in already referencing
+            # it, while settings.yaml has no influx.token key left to point back
+            # at it: a partially migrated, inconsistent state, worse than just
+            # failing cleanly.
             set_field influx.url "$INFLUX_URL"
             set_field influx.org "$INFLUX_IDENTITY"
             if [ "$CLI_FAILED" = 0 ]; then
