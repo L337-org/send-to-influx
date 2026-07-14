@@ -606,20 +606,31 @@ def _cmd_set(name, settings_path):
 
 
 def _cmd_remove(name, settings_path):
-    # Order matters: regenerate the drop-in (dropping this credential's line) before
-    # deleting the .cred file, never after - LoadCredentialEncrypted= referencing a
-    # missing path hard-fails unit startup, so the drop-in must never be left
-    # pointing at a file that's already gone, even transiently if this is
-    # interrupted mid-way.
+    # Order matters, in two different ways:
+    #
+    # 1. settings.yaml is rewritten *first*, before anything else is touched. If
+    #    that fails (e.g. a hand-edited flow-style section _rewrite_settings_field
+    #    refuses to touch), nothing else has happened yet - the credential is still
+    #    fully intact and the service is unaffected, rather than ending up with the
+    #    drop-in/`.cred` file already gone but settings.yaml still holding the old
+    #    systemd-creds sentinel. That sentinel isn't valid placeholder text, so a
+    #    later load_settings() would blank it via _clear_unsubstituted_credential_
+    #    sentinels() and fail validate_settings() with a ConfigError - a broken,
+    #    unrecoverable service (the actual secret is gone from systemd-creds too)
+    #    for a failure that should have been a clean no-op.
+    # 2. Once settings.yaml is safely reverted, regenerate the drop-in (dropping
+    #    this credential's line) before deleting the .cred file, never after -
+    #    LoadCredentialEncrypted= referencing a missing path hard-fails unit
+    #    startup, so the drop-in must never be left pointing at a file that's
+    #    already gone, even transiently if this is interrupted mid-way.
+    top_key, field = CREDENTIAL_FIELDS[name]
+    _rewrite_settings_field(settings_path, top_key, field, PLACEHOLDER_VALUES[name])
     _regenerate_dropin(exclude=name)
     _reload_systemd()
     cred_path = _cred_path(name)
     was_stored = os.path.isfile(cred_path)
     if was_stored:
         os.remove(cred_path)
-    top_key, field = CREDENTIAL_FIELDS[name]
-    _rewrite_settings_field(settings_path, top_key, field, PLACEHOLDER_VALUES[name])
-    if was_stored:
         print(f"Removed '{name}' from systemd-creds and reverted {settings_path} to the placeholder value.")
     else:
         print(f"'{name}' was not stored in systemd-creds - reverted {settings_path} to the placeholder value.")

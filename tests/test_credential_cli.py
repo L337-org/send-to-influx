@@ -439,6 +439,33 @@ class TestCmdRemove:
         assert "was not stored in systemd-creds" in out
         assert "Removed 'influx-token' from systemd-creds" not in out
 
+    def test_settings_rewrite_failure_leaves_credential_untouched(self, tmp_path, monkeypatch):
+        """settings.yaml must be rewritten *before* the drop-in is regenerated or
+        the .cred file is deleted. If the rewrite fails (e.g. a flow-style
+        section), nothing else should have happened - the credential must still
+        be fully intact and usable, not silently removed out from under a
+        settings.yaml that still references it via the old sentinel (which
+        would otherwise get blanked by _clear_unsubstituted_credential_sentinels
+        on the next load_settings(), breaking the service for what should have
+        been a clean, reversible failure)."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('influx: {token: "<stored in systemd-creds - x>", org: "myorg"}\n')
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+        dropin = tmp_path / "dropin.conf"
+
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+        monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(dropin))
+
+        with patch("subprocess.run") as run:
+            with pytest.raises(CredentialCliError, match="could not safely rewrite"):
+                _cmd_remove("influx-token", str(settings_path))
+            run.assert_not_called()  # never reached _regenerate_dropin/_reload_systemd
+
+        assert (credstore / "influx-token.cred").exists()
+        assert not dropin.exists()
+
 
 # --------------------------------------------------------------------------- #
 # --set-field

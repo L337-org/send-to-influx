@@ -188,11 +188,18 @@ the source-checkout/screen-session path, where `systemd-creds` doesn't apply at 
   file) with the matching `LoadCredentialEncrypted=` line, and rewrites the corresponding
   `settings.yaml` field to the sentinel text via a `yaml.compose()`-based surgical edit (preserves every
   other byte of the file - comments, ordering - rather than a full load+dump round trip, and refuses
-  rather than corrupts if the target isn't a plain single-line scalar). `--remove` reverses this -
-  critically, it regenerates the drop-in (dropping the credential's line) *before* deleting the `.cred`
-  file, never after, since `LoadCredentialEncrypted=NAME:PATH` referencing a missing `PATH` hard-fails
-  unit startup with `243/CREDENTIALS` (confirmed via systemd's own issue tracker: systemd/systemd#35077,
-  #32667) - the drop-in must never be left pointing at a file that's already gone, even transiently.
+  rather than corrupts if the target isn't a plain single-line scalar). `--remove` reverses this, in a
+  specific order for two independent reasons: it rewrites `settings.yaml` back to the placeholder
+  *first*, before touching anything else - if that fails (the same "not a plain single-line scalar"
+  refusal), nothing else has happened yet, so the credential is still fully intact rather than ending
+  up deleted from `systemd-creds` while `settings.yaml` still holds the now-orphaned sentinel (which a
+  later `load_settings()` would blank out via `_clear_unsubstituted_credential_sentinels()` and then
+  fail `validate_settings()` on - a broken, unrecoverable service for what should have been a clean,
+  reversible failure). Only then does it regenerate the drop-in (dropping the credential's line)
+  *before* deleting the `.cred` file, never after, since `LoadCredentialEncrypted=NAME:PATH`
+  referencing a missing `PATH` hard-fails unit startup with `243/CREDENTIALS` (confirmed via systemd's
+  own issue tracker: systemd/systemd#35077, #32667) - the drop-in must never be left pointing at a file
+  that's already gone, even transiently.
   `--list` shows configured/not-set per credential. `--set-field`/`--detect-influx-version`/
   `--ensure-influx-storage` support the debconf-driven install flow (below).
 - The base `packaging/send-to-influx.service` unit ships zero `LoadCredentialEncrypted=` directives -
