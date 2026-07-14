@@ -298,7 +298,15 @@ from `postinst`, once package files are unpacked and everything's been answered.
   since `sendtoinflux.py` only falls back to it when `sources:` is absent entirely, which is never true
   once `example_settings.yaml` has shipped it non-empty) if *every* required field for it (and the
   InfluxDB block) actually resolved - not just "was it ticked" - with `--ensure-influx-storage`
-  attempted first (best-effort database/bucket creation, logged-not-raised on failure).
+  attempted first (best-effort database/bucket creation, logged-not-raised on failure). A secret
+  field also counts as resolved when its credential is already stored in systemd-creds (`.cred`
+  file present in the credstore) - secret prompts always come back blank on a reconfigure ("blank
+  keeps the stored value"), so an already-configured install revisiting the prompts (e.g. to add
+  one new source) isn't wrongly reported "not fully configured", and `--ensure-influx-storage`
+  resolves stored credentials itself, so InfluxDB counting as configured this way still lets
+  newly-added sources auto-enable. (A credential kept in plaintext `settings.yaml` and never
+  migrated doesn't get this treatment - postinst can't cheaply distinguish it from a placeholder -
+  so that setup re-enters secrets on reconfigure or hand-edits `sources:`.)
 - `Type: password` answers *are* written to disk by debconf - contrary to an earlier version of this
   note - into a dedicated `passwords.dat` store kept separate from its general-purpose, more widely
   readable answer database, and restricted to `chmod 600`. Debian's own developers' guide

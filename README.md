@@ -283,7 +283,10 @@ debconf's regular database as normal, same as any other package's debconf answer
 field for a source was answered *and* your InfluxDB connection details resolved successfully, it's
 automatically added to `sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is
 created for you where possible - a source with everything else filled in still won't be enabled if
-InfluxDB itself couldn't be reached or authenticated.
+InfluxDB itself couldn't be reached or authenticated. When you revisit the prompts with
+`dpkg-reconfigure`, a secret left blank counts as provided if it's already stored in
+`systemd-creds`, so adding a new source never requires re-entering credentials that are already
+migrated.
 
 You can leave every question blank and configure `settings.yaml` by hand instead - nothing here is
 required. Re-run `sudo dpkg-reconfigure send-to-influx` at any time to change your answers; secret

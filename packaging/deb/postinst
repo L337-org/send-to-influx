@@ -77,6 +77,16 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
 
     CLI=/usr/sbin/send-to-influx-set-credential
     CLI_FAILED=0
+    # Secret prompts always come back blank on a reconfigure (debconf never
+    # redisplays a password answer, and postinst clears the stored values
+    # anyway - see below), with blank meaning "keep the previously stored
+    # value". So everywhere below that requires a secret, a credential
+    # already migrated into systemd-creds satisfies the requirement just as
+    # well as a freshly-typed answer - otherwise every reconfigure of an
+    # already-configured install would wrongly report its sources "not fully
+    # configured" and skip auto-enable, purely because the admin (correctly)
+    # left the secret prompts blank.
+    CREDSTORE=/etc/send-to-influx/credstore.encrypted
 
     # $1 = credential name, $2 = value. Failure is recorded in $CLI_FAILED rather
     # than aborting (this whole flow is best-effort - a systemd-creds problem must
@@ -161,6 +171,13 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
         else
             echo "send-to-influx: could not detect the InfluxDB version at $INFLUX_URL (unreachable?) - run 'sudo dpkg-reconfigure send-to-influx' once it's reachable." >&2
         fi
+    elif [ -e "$CREDSTORE/influx-token.cred" ] || { [ -e "$CREDSTORE/influx-user.cred" ] && [ -e "$CREDSTORE/influx-password.cred" ]; }; then
+        # Blank identity/secret with InfluxDB credentials already stored in
+        # systemd-creds: keep them (nothing to write - influx.url/org in
+        # settings.yaml are equally untouched), and count InfluxDB as
+        # configured so newly-selected sources below can still auto-enable.
+        # --ensure-influx-storage resolves the stored credentials itself.
+        INFLUX_OK=1
     else
         # Only warn if the admin actually engaged with the prompts this run -
         # selected a source (which needs InfluxDB to do anything useful) or
@@ -182,10 +199,12 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
             HUE_USER="$RET"
             # Clear the consumed password (see influx-secret above).
             db_set send-to-influx/hue-user "" || true
-            if [ -n "$HUE_HOST" ] && [ -n "$HUE_USER" ]; then
+            if [ -n "$HUE_HOST" ] && { [ -n "$HUE_USER" ] || [ -e "$CREDSTORE/hue-user.cred" ]; }; then
                 CLI_FAILED=0
                 set_field hue.host "$HUE_HOST"
-                set_secret hue-user "$HUE_USER"
+                if [ -n "$HUE_USER" ]; then
+                    set_secret hue-user "$HUE_USER"
+                fi
                 db_get send-to-influx/hue-temperature-units
                 if [ -n "$RET" ]; then
                     set_field hue.temperature_units "$RET"
@@ -200,7 +219,9 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     esac
 
     # --- MyEnergi (apikey shared across zappi/harvi/eddi - asked/applied once) ---
-    MYENERGI_APIKEY=""
+    # MYENERGI_OK=1 means the API key is available: freshly entered and
+    # successfully stored, or already sitting in systemd-creds from before.
+    MYENERGI_OK=0
     case "$SOURCES" in
         *" zappi "*|*" harvi "*|*" eddi "*)
             db_get send-to-influx/myenergi-apikey
@@ -210,9 +231,11 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
             if [ -n "$MYENERGI_APIKEY" ]; then
                 CLI_FAILED=0
                 set_secret myenergi-apikey "$MYENERGI_APIKEY"
-                if [ "$CLI_FAILED" != 0 ]; then
-                    MYENERGI_APIKEY=""
+                if [ "$CLI_FAILED" = 0 ]; then
+                    MYENERGI_OK=1
                 fi
+            elif [ -e "$CREDSTORE/myenergi-apikey.cred" ]; then
+                MYENERGI_OK=1
             fi
             ;;
     esac
@@ -222,7 +245,7 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
         *" zappi "*)
             db_get send-to-influx/zappi-serial
             ZAPPI_SERIAL="$RET"
-            if [ -n "$MYENERGI_APIKEY" ] && [ -n "$ZAPPI_SERIAL" ]; then
+            if [ "$MYENERGI_OK" = 1 ] && [ -n "$ZAPPI_SERIAL" ]; then
                 CLI_FAILED=0
                 set_field zappi.serial "$ZAPPI_SERIAL"
                 if [ "$CLI_FAILED" = 0 ]; then
@@ -239,7 +262,7 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
         *" harvi "*)
             db_get send-to-influx/harvi-serial
             HARVI_SERIAL="$RET"
-            if [ -n "$MYENERGI_APIKEY" ] && [ -n "$HARVI_SERIAL" ]; then
+            if [ "$MYENERGI_OK" = 1 ] && [ -n "$HARVI_SERIAL" ]; then
                 CLI_FAILED=0
                 set_field harvi.serial "$HARVI_SERIAL"
                 if [ "$CLI_FAILED" = 0 ]; then
@@ -256,7 +279,7 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
         *" eddi "*)
             db_get send-to-influx/eddi-serial
             EDDI_SERIAL="$RET"
-            if [ -n "$MYENERGI_APIKEY" ] && [ -n "$EDDI_SERIAL" ]; then
+            if [ "$MYENERGI_OK" = 1 ] && [ -n "$EDDI_SERIAL" ]; then
                 CLI_FAILED=0
                 set_field eddi.serial "$EDDI_SERIAL"
                 if [ "$CLI_FAILED" = 0 ]; then
@@ -280,9 +303,11 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
             OCTOPUS_MPAN="$RET"
             db_get send-to-influx/octopus-meter-serial
             OCTOPUS_METER="$RET"
-            if [ -n "$OCTOPUS_KEY" ] && [ -n "$OCTOPUS_MPAN" ] && [ -n "$OCTOPUS_METER" ]; then
+            if { [ -n "$OCTOPUS_KEY" ] || [ -e "$CREDSTORE/octopus-api-key.cred" ]; } && [ -n "$OCTOPUS_MPAN" ] && [ -n "$OCTOPUS_METER" ]; then
                 CLI_FAILED=0
-                set_secret octopus-api-key "$OCTOPUS_KEY"
+                if [ -n "$OCTOPUS_KEY" ]; then
+                    set_secret octopus-api-key "$OCTOPUS_KEY"
+                fi
                 set_field octopus.mpan "$OCTOPUS_MPAN"
                 set_field octopus.meter_serial "$OCTOPUS_METER"
                 if [ "$CLI_FAILED" = 0 ]; then
