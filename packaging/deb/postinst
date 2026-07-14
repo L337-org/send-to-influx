@@ -129,12 +129,17 @@ if [ -n "$INFLUX_IDENTITY" ] && [ -n "$INFLUX_SECRET" ]; then
     fi
 else
     # Only warn if the admin actually engaged with this somehow - selected a
-    # source (which needs InfluxDB to do anything useful) or started typing
-    # InfluxDB credentials but didn't finish both fields. A run where nothing
-    # at all was touched (common on an upgrade where the admin isn't using
-    # debconf/systemd-creds at all) is a silent, expected no-op, not something
-    # worth a warning on every single upgrade.
-    if [ "$SOURCES" != "  " ] || [ -n "$INFLUX_IDENTITY" ] || [ -n "$INFLUX_SECRET" ]; then
+    # source (which needs InfluxDB to do anything useful) or started typing an
+    # InfluxDB secret but didn't finish both fields. Deliberately not checking
+    # $INFLUX_IDENTITY here: it's Type: string, so unlike $INFLUX_SECRET
+    # (Type: password, never persisted, and actively unregistered above) it
+    # silently persists across every future run once answered once - a normal
+    # (non-reconfigure) invocation reuses it without re-prompting, so it stays
+    # non-empty forever after the first time, making it a false signal that
+    # "something happened this run" on every subsequent untouched/unattended
+    # upgrade from then on. $INFLUX_SECRET never has that problem, so it alone
+    # is what actually indicates fresh input.
+    if [ "$SOURCES" != "  " ] || [ -n "$INFLUX_SECRET" ]; then
         echo "send-to-influx: InfluxDB user/org or password/token not provided - skipping InfluxDB setup and any source auto-enable this run." >&2
     fi
 fi
