@@ -235,14 +235,17 @@ from `postinst`, once package files are unpacked and everything's been answered.
   Detection happens later, in `postinst`, via `send-to-influx-set-credential --detect-influx-version`.
 - `postinst` (gated on `sources-to-configure` being non-empty, so a plain non-interactive install
   behaves exactly like the non-debconf flow above): resolves the InfluxDB block first via
-  `--detect-influx-version` and routes `identity`/`secret` to the right credential names
-  (`influx-org`/`influx-token` for v2, `influx-user`/`influx-password` for v1) - if detection comes
-  back `unknown` (URL unreachable at install time, expected to happen sometimes since the URL can
-  point anywhere), nothing is written and no source is auto-enabled this run; secrets were never
-  persisted by debconf in the first place, so a later `dpkg-reconfigure` cleanly re-collects them.
+  `--detect-influx-version` and routes `identity`/`secret` accordingly - v2 writes `identity` to the
+  plain (non-secret) `influx.org` field via `--set-field` and `secret` to the `influx-token` credential;
+  v1 routes both `identity` and `secret` to the `influx-user`/`influx-password` credentials - if
+  detection comes back `unknown` (URL unreachable at install time, expected to happen sometimes since
+  the URL can point anywhere), nothing is written and no source is auto-enabled this run; secrets were
+  never persisted by debconf in the first place, so a later `dpkg-reconfigure` cleanly re-collects them.
   Then, per selected source: secrets via `send-to-influx-set-credential <name>`, non-secret fields via
   `--set-field`, both reusing the same CLI rather than a second YAML-patcher in shell. **Auto-enable**:
-  a source is only added to `sources:`/`default_source:` if *every* required field for it (and the
+  a source is only added to `sources:` (via `--enable-source` - `default_source:` is never touched,
+  since `sendtoinflux.py` only falls back to it when `sources:` is absent entirely, which is never true
+  once `example_settings.yaml` has shipped it non-empty) if *every* required field for it (and the
   InfluxDB block) actually resolved - not just "was it ticked" - with `--ensure-influx-storage`
   attempted first (best-effort database/bucket creation, logged-not-raised on failure).
 - `Type: password` answers are never written to debconf's database - deliberate, so debconf itself
