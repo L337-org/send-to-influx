@@ -117,6 +117,24 @@ def _validate_secret_value(name, value):
         raise CredentialCliError("Value must not contain embedded newlines.")
 
 
+def _validate_storage_name(name):
+    """Reject anything that isn't a safe, simple database/bucket name.
+
+    _ensure_influx_storage() interpolates name directly into an InfluxQL
+    `CREATE DATABASE "{name}"` query (v1) and into a JSON field (v2) - a name
+    containing quotes or control characters could break the query or change what
+    actually gets executed. postinst's own hardcoded names (hue_db, zappi_db, ...)
+    all satisfy this; this only matters for --ensure-influx-storage's admin-supplied
+    argument.
+
+    :raises CredentialCliError: if name isn't letters/digits/underscore/hyphen
+    """
+    if not re.match(r"^[A-Za-z0-9_-]+$", name):
+        raise CredentialCliError(
+            f"'{name}' is not a valid database/bucket name - use only letters, digits, underscores, and hyphens."
+        )
+
+
 # --------------------------------------------------------------------------- #
 # credstore.encrypted / drop-in management
 # --------------------------------------------------------------------------- #
@@ -658,6 +676,11 @@ def _cmd_detect_influx_version(url):
 
 
 def _cmd_ensure_influx_storage(name, settings_path):
+    # Validated here, before the best-effort/never-raises _ensure_influx_storage(),
+    # so a bad name from --ensure-influx-storage's admin-supplied argument gets an
+    # immediate, actionable CredentialCliError instead of a swallowed warning log
+    # line - postinst's own calls always pass a hardcoded, already-valid name.
+    _validate_storage_name(name)
     _ensure_influx_storage(name, settings_path=settings_path)
 
 

@@ -21,6 +21,7 @@ from toinflux.credential_cli import (
     _require_systemd_creds,
     _rewrite_settings_field,
     _validate_secret_value,
+    _validate_storage_name,
     main,
 )
 
@@ -79,6 +80,29 @@ class TestValidateSecretValue:
 
     def test_accepts_real_value(self):
         _validate_secret_value("influx-token", "a-real-token-value")  # does not raise
+
+
+class TestValidateStorageName:
+    def test_accepts_hardcoded_postinst_names(self):
+        for name in ("hue_db", "zappi_db", "myenergi_db", "octopus_db", "weather_db", "grid_db", "speedtest_db"):
+            _validate_storage_name(name)  # does not raise
+
+    def test_accepts_hyphenated_name(self):
+        _validate_storage_name("my-bucket")  # does not raise
+
+    def test_rejects_embedded_quote(self):
+        """name is interpolated directly into CREATE DATABASE "{name}" - a quote
+        could break out of the InfluxQL string and change what gets executed."""
+        with pytest.raises(CredentialCliError, match="not a valid database/bucket name"):
+            _validate_storage_name('foo" ; DROP DATABASE "bar')
+
+    def test_rejects_whitespace(self):
+        with pytest.raises(CredentialCliError, match="not a valid database/bucket name"):
+            _validate_storage_name("has space")
+
+    def test_rejects_empty(self):
+        with pytest.raises(CredentialCliError, match="not a valid database/bucket name"):
+            _validate_storage_name("")
 
 
 # --------------------------------------------------------------------------- #
@@ -610,6 +634,20 @@ class TestDetectInfluxVersion:
 
 
 class TestEnsureInfluxStorage:
+    def test_cmd_rejects_bad_name_before_any_network_call(self, tmp_path):
+        """_cmd_ensure_influx_storage must validate name before calling into
+        _ensure_influx_storage() at all - that function's contract is
+        best-effort/never-raises, which would otherwise silently swallow a bad
+        name as a logged warning instead of giving the admin an immediate,
+        actionable error."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('influx:\n  url: "http://localhost:8086"\n  token: "tok"\n')
+        with patch("requests.get") as get, patch("requests.post") as post:
+            with pytest.raises(CredentialCliError, match="not a valid database/bucket name"):
+                _cmd_ensure_influx_storage('bad" name', str(settings_path))
+        get.assert_not_called()
+        post.assert_not_called()
+
     def test_v1_migrated_credentials_are_decrypted(self, tmp_path, monkeypatch):
         """influx.user/password both migrated to systemd-creds (settings.yaml holds
         the sentinel text, real values are in credstore.encrypted) - both must be

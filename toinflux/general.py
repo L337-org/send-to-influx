@@ -218,14 +218,21 @@ def _contains_real_secret(settings):
     :type settings: dict
     :rtype: bool
     """
-    for top_key, field in CREDENTIAL_FIELDS.values():
+    for name, (top_key, field) in CREDENTIAL_FIELDS.items():
         block = settings.get(top_key)
         if not isinstance(block, dict):
             continue
         value = block.get(field)
-        if not value:
+        # `not value` would also skip a falsy-but-real value (e.g. an unquoted `0`
+        # in YAML) - check emptiness explicitly instead, so anything that isn't
+        # genuinely absent is treated as a potential real secret.
+        if value is None or value == "":
             continue
-        if value in PLACEHOLDER_VALUES.values():
+        # Compare against *this* field's own placeholder, not any placeholder in
+        # the whole set - otherwise a real secret that happens to equal a
+        # *different* field's placeholder text (e.g. influx.user == "your_api_key")
+        # would be wrongly treated as empty/placeholder and skip the warning.
+        if value == PLACEHOLDER_VALUES[name]:
             continue
         if isinstance(value, str) and value.startswith(SENTINEL_PREFIX):
             continue

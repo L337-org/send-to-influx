@@ -164,6 +164,43 @@ class TestSettingsFilePermissionCheck:
         finally:
             Path(path).unlink(missing_ok=True)
 
+    def test_0644_with_a_different_fields_placeholder_still_warns(self, sample_settings, caplog):
+        """A real secret that happens to equal a *different* credential field's
+        placeholder text (e.g. influx.user == myenergi.apikey's placeholder) must
+        still be treated as a real secret - _contains_real_secret() must compare
+        against each field's own placeholder, not the placeholder set as a whole.
+        Every *other* credential field is set to its own genuine placeholder, so
+        only the one deliberately-mismatched field under test can trigger this."""
+        sample_settings["hue"]["user"] = "your_hue_user"
+        sample_settings["influx"]["password"] = "your_influx_password"
+        sample_settings["myenergi"]["apikey"] = "your_api_key"
+        sample_settings["influx"]["user"] = "your_api_key"  # myenergi-apikey's placeholder, not influx-user's
+        path = self._write_settings(sample_settings, 0o644)
+        try:
+            with caplog.at_level("WARNING"):
+                load_settings(settings_file=path)
+            assert any("readable by group/other" in r.message for r in caplog.records)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_0644_with_falsy_but_real_value_still_warns(self, sample_settings, caplog):
+        """A credential field holding a falsy-but-real value (e.g. an unquoted `0`
+        in YAML, parsed as an int) must still be treated as a real secret - `not
+        value` would incorrectly treat it the same as a genuinely absent value.
+        Every *other* credential field is set to its own genuine placeholder, so
+        only the deliberately-falsy field under test can trigger this."""
+        sample_settings["influx"]["user"] = "your_influx_user"
+        sample_settings["influx"]["password"] = "your_influx_password"
+        sample_settings["myenergi"]["apikey"] = "your_api_key"
+        sample_settings["hue"]["user"] = 0
+        path = self._write_settings(sample_settings, 0o644)
+        try:
+            with caplog.at_level("WARNING"):
+                load_settings(settings_file=path)
+            assert any("readable by group/other" in r.message for r in caplog.records)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
     def test_0644_with_real_secret_and_enforce_true_raises(self, sample_settings, caplog):
         """A 0644 file with a real secret and enforce_permissions: true refuses to load."""
         sample_settings["enforce_permissions"] = True
