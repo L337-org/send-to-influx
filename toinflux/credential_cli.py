@@ -491,27 +491,37 @@ def _detect_influx_version(url):
     needing any credential - both /health (v2) and /ping (v1, and v2 for backward
     compat) are unauthenticated health-check endpoints on real InfluxDB servers.
 
+    Always skips TLS verification, unconditionally - unlike _ensure_influx_storage(),
+    this never transmits a credential (no auth header, no auth tuple) and the result
+    only picks which prompt fields get routed to (v1 user/password vs v2 org/token),
+    not a trust decision that could be meaningfully downgraded by a MITM'd response.
+    influx.insecure also isn't necessarily known yet when this runs - postinst's
+    debconf-driven flow calls this before that field could even be collected (it's
+    never asked by debconf, only ever hand-edited into settings.yaml afterwards).
+
     :return: "v1", "v2", or "unknown" (unreachable/ambiguous - never raises)
     :rtype: str
     """
-    try:
-        resp = requests.get(f"{url.rstrip('/')}/health", timeout=HTTP_TIMEOUT_SECONDS)
-        if resp.status_code == 200:
-            data = resp.json()
-            if str(data.get("version", "")).startswith("2."):
-                return "v2"
-    except (requests.RequestException, ValueError):
-        pass
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+        try:
+            resp = requests.get(f"{url.rstrip('/')}/health", verify=False, timeout=HTTP_TIMEOUT_SECONDS)
+            if resp.status_code == 200:
+                data = resp.json()
+                if str(data.get("version", "")).startswith("2."):
+                    return "v2"
+        except (requests.RequestException, ValueError):
+            pass
 
-    try:
-        resp = requests.get(f"{url.rstrip('/')}/ping", timeout=HTTP_TIMEOUT_SECONDS)
-        version = resp.headers.get("X-Influxdb-Version", "")
-        if version.startswith("1."):
-            return "v1"
-        if version.startswith("2."):
-            return "v2"
-    except requests.RequestException:
-        pass
+        try:
+            resp = requests.get(f"{url.rstrip('/')}/ping", verify=False, timeout=HTTP_TIMEOUT_SECONDS)
+            version = resp.headers.get("X-Influxdb-Version", "")
+            if version.startswith("1."):
+                return "v1"
+            if version.startswith("2."):
+                return "v2"
+        except requests.RequestException:
+            pass
 
     return "unknown"
 

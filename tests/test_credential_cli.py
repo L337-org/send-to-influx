@@ -759,6 +759,19 @@ class TestDetectInfluxVersion:
         with patch("requests.get", return_value=health_resp):
             assert _detect_influx_version("http://localhost:8086") == "v2"
 
+    def test_always_skips_tls_verification(self):
+        """No credential is ever sent by this probe, and its result only routes
+        which prompt fields get used - not a trust decision a MITM'd response
+        could meaningfully downgrade. Unlike _ensure_influx_storage(), this must
+        skip verification unconditionally, since influx.insecure isn't
+        necessarily known yet when postinst calls this during install."""
+        health_resp = MagicMock(status_code=200)
+        health_resp.json.return_value = {"version": "2.7.1"}
+        with patch("requests.get", return_value=health_resp) as get:
+            _detect_influx_version("https://localhost:8086")
+        _, kwargs = get.call_args
+        assert kwargs["verify"] is False
+
     def test_v1_from_ping_header_when_health_absent(self):
         def fake_get(url, **kwargs):
             if url.endswith("/health"):

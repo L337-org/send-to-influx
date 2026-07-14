@@ -240,6 +240,12 @@ from `postinst`, once package files are unpacked and everything's been answered.
   *what gets asked* on being able to reach an arbitrary, possibly-remote, possibly-not-yet-provisioned
   URL at the exact moment of package install would defeat the point of the URL being configurable.
   Detection happens later, in `postinst`, via `send-to-influx-set-credential --detect-influx-version`.
+  This always skips TLS verification, unconditionally - unlike `--ensure-influx-storage` (which
+  respects `influx.insecure`), it never transmits a credential (both `/health` and `/ping` are
+  unauthenticated probes) and its result only picks which prompt fields get routed to, not a trust
+  decision a MITM'd response could meaningfully downgrade; `influx.insecure` also isn't necessarily
+  known yet at this point, since debconf never asks for it (only ever hand-edited into settings.yaml
+  afterwards).
 - `postinst` (gated on `sources-to-configure` being non-empty, so a plain non-interactive install
   behaves exactly like the non-debconf flow above): resolves the InfluxDB block first via
   `--detect-influx-version` and routes `identity`/`secret` accordingly - v2 writes `identity` to the
