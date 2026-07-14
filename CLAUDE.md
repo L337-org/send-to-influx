@@ -221,34 +221,42 @@ convention, so `dpkg-reconfigure`/backing out of an install never leaves partial
 never touches the filesystem and never calls into `credential_cli.py` - that only happens later,
 from `postinst`, once package files are unpacked and everything's been answered.
 
-- `send-to-influx/sources-to-configure` (`Type: multiselect`, priority `high`) is asked first and
-  gates everything else - if nothing's selected, `config` exits immediately, and per-source blocks
-  are only shown (via `db_input` called conditionally, not declaratively in the template file) for
-  sources actually picked, so choosing one or two sources doesn't walk through prompts for the other
-  six. Tuning fields (`interval`, `timeout`, `fields` lists, `stagger_seconds`/`default_source`) are
-  never prompted for - see the "Template structure" reasoning in the original plan for why (`fields`
-  particularly can't be validated against a source's real field names at install time). The one
-  deliberate exception is `hue-temperature-units`, which gets a *computed* default (checks
-  `$LC_ALL`/`$LANG` for a `_US` territory code, defaulting to Celsius otherwise) via `db_set` before
-  the first `db_input`, rather than a silent guess - getting temperature units wrong is immediately
-  visible to the user in a way the other tuning fields aren't.
-- InfluxDB's `influx-url`/`influx-identity`/`influx-secret` are asked unconditionally (every selected
-  source needs a working InfluxDB connection) - `identity`/`secret` are generic (org+token for v2,
-  user+password for v1), asked without knowing which version applies yet. Version detection
-  deliberately does **not** happen in `config`: `config` runs *before* the package is unpacked on a
-  first install, so it can't rely on the app's own venv/`requests`, and more fundamentally, gating
-  *what gets asked* on being able to reach an arbitrary, possibly-remote, possibly-not-yet-provisioned
-  URL at the exact moment of package install would defeat the point of the URL being configurable.
-  Detection happens later, in `postinst`, via `send-to-influx-set-credential --detect-influx-version`.
-  This always skips TLS verification, unconditionally - unlike `--ensure-influx-storage` (which
-  respects `influx.insecure`), it never transmits a credential (both `/health` and `/ping` are
-  unauthenticated probes) and its result only picks which prompt fields get routed to, not a trust
-  decision a MITM'd response could meaningfully downgrade; `influx.insecure` also isn't necessarily
-  known yet at this point, since debconf never asks for it (only ever hand-edited into settings.yaml
-  afterwards).
-- `postinst` (gated on `sources-to-configure` being non-empty, so a plain non-interactive install
-  behaves exactly like the non-debconf flow above): resolves the InfluxDB block first via
-  `--detect-influx-version` and routes `identity`/`secret` accordingly - v2 writes `identity` to the
+- InfluxDB's `influx-url`/`influx-identity`/`influx-secret` are asked *first*, unconditionally -
+  deliberately **not** gated on any source being selected. An earlier version of this design asked
+  them only after `sources-to-configure` and only if at least one source was picked, exiting `config`
+  immediately otherwise - this made InfluxDB unreachable both interactively (an admin who only wants
+  to migrate an already-configured InfluxDB credential into systemd-creds, without touching source
+  config at all, had no way to get there) and via `dpkg-reconfigure` on a later run. That's a real,
+  common case: an admin upgrading an already-working install has no reason to re-answer per-source
+  questions for sources that already work, but commonly does want the new systemd-creds option for
+  the credential they already have. `identity`/`secret` are generic (org+token for v2, user+password
+  for v1), asked without knowing which version applies yet. Version detection deliberately does
+  **not** happen in `config`: `config` runs *before* the package is unpacked on a first install, so it
+  can't rely on the app's own venv/`requests`, and more fundamentally, gating *what gets asked* on
+  being able to reach an arbitrary, possibly-remote, possibly-not-yet-provisioned URL at the exact
+  moment of package install would defeat the point of the URL being configurable. Detection happens
+  later, in `postinst`, via `send-to-influx-set-credential --detect-influx-version`. This always skips
+  TLS verification, unconditionally - unlike `--ensure-influx-storage` (which respects
+  `influx.insecure`), it never transmits a credential (both `/health` and `/ping` are unauthenticated
+  probes) and its result only picks which prompt fields get routed to, not a trust decision a MITM'd
+  response could meaningfully downgrade; `influx.insecure` also isn't necessarily known yet at this
+  point, since debconf never asks for it (only ever hand-edited into settings.yaml afterwards).
+- `send-to-influx/sources-to-configure` (`Type: multiselect`, priority `high` - matching InfluxDB's
+  questions above, so a debconf priority threshold can't show one but silently hide the other) is
+  asked next. Per-source blocks are only shown (via `db_input` called conditionally, not declaratively
+  in the template file) for sources actually picked, so choosing one or two sources doesn't walk
+  through prompts for the other six. Tuning fields (`interval`, `timeout`, `fields` lists,
+  `stagger_seconds`/`default_source`) are never prompted for - see the "Template structure" reasoning
+  in the original plan for why (`fields` particularly can't be validated against a source's real field
+  names at install time). The one deliberate exception is `hue-temperature-units`, which gets a
+  *computed* default (checks `$LC_ALL`/`$LANG` for a `_US` territory code, defaulting to Celsius
+  otherwise) via `db_set` before the first `db_input`, rather than a silent guess - getting temperature
+  units wrong is immediately visible to the user in a way the other tuning fields aren't.
+- `postinst`: InfluxDB is processed unconditionally too, before reading `sources-to-configure` at
+  all - a plain non-interactive install (or one where every question was left blank) is still a no-op
+  for all of it, since each per-source block below self-gates on `$SOURCES` containing that source's
+  name; nothing here requires the outer "was anything selected" gate the earlier design used. Resolves
+  the InfluxDB block via `--detect-influx-version` and routes `identity`/`secret` accordingly - v2 writes `identity` to the
   plain (non-secret) `influx.org` field via `--set-field` and `secret` to the `influx-token` credential;
   v1 routes both `identity` and `secret` to the `influx-user`/`influx-password` credentials - if
   detection comes back `unknown` (URL unreachable at install time, expected to happen sometimes since

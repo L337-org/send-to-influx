@@ -256,11 +256,14 @@ stdout above.
 
 ### Configuring during install (debconf)
 
-Installing (or upgrading to) the `.deb` interactively presents a debconf prompt: a checklist of
-which data sources you want to configure now, then - only for the ones you pick - the fields
-needed to actually reach that source's API (credentials plus things like a Hue bridge hostname or
-an Octopus meter number; tuning settings like intervals keep their shipped defaults and can be
-adjusted in `settings.yaml` afterwards). Secrets you enter are moved into `systemd-creds` (see below)
+Installing (or upgrading to) the `.deb` interactively presents a debconf prompt: your InfluxDB
+connection details first (asked unconditionally, regardless of what else you answer - useful on
+its own if you're upgrading an already-working install and just want to move an existing InfluxDB
+credential into `systemd-creds` without touching anything else), then a checklist of which data
+sources you want to configure now, then - only for the ones you pick - the fields needed to
+actually reach that source's API (credentials plus things like a Hue bridge hostname or an Octopus
+meter number; tuning settings like intervals keep their shipped defaults and can be adjusted in
+`settings.yaml` afterwards). Secrets you enter are moved into `systemd-creds` (see below)
 and never written into `settings.yaml` in plaintext. Debconf itself briefly holds what you type in
 its own separate, `chmod 600` password store while `postinst` runs, then actively unregisters each
 question once it's been read and migrated - see SECURITY.md if you want the detail. If every required
