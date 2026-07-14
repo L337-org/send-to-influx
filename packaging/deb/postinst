@@ -116,7 +116,8 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     # Leaving influx-url blank defaults to a local instance; identity/secret are
     # always applied regardless - even a bare local InfluxDB v2 needs a token.
     db_get send-to-influx/influx-url
-    INFLUX_URL="$RET"
+    INFLUX_URL_RAW="$RET"
+    INFLUX_URL="$INFLUX_URL_RAW"
     if [ -z "$INFLUX_URL" ]; then
         INFLUX_URL="http://localhost:8086"
     fi
@@ -172,12 +173,36 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
             echo "send-to-influx: could not detect the InfluxDB version at $INFLUX_URL (unreachable?) - run 'sudo dpkg-reconfigure send-to-influx' once it's reachable." >&2
         fi
     elif [ -e "$CREDSTORE/influx-token.cred" ] || { [ -e "$CREDSTORE/influx-user.cred" ] && [ -e "$CREDSTORE/influx-password.cred" ]; }; then
-        # Blank identity/secret with InfluxDB credentials already stored in
-        # systemd-creds: keep them (nothing to write - influx.url/org in
-        # settings.yaml are equally untouched), and count InfluxDB as
-        # configured so newly-selected sources below can still auto-enable.
-        # --ensure-influx-storage resolves the stored credentials itself.
-        INFLUX_OK=1
+        # Blank secret with InfluxDB credentials already stored in
+        # systemd-creds: keep them, count InfluxDB as configured so
+        # newly-selected sources below can still auto-enable
+        # (--ensure-influx-storage resolves the stored credentials itself),
+        # and still apply any *non-secret* connection details actually
+        # provided this run - a changed URL or user/org on a reconfigure must
+        # not be silently dropped just because the secret prompt was
+        # (correctly) left blank. Which field the identity belongs to is
+        # inferred from which credential exists rather than re-running URL
+        # detection: a stored token means v2 (identity = org, a plain field),
+        # stored user+password means v1 (identity = username, itself kept in
+        # systemd-creds). Blank means "keep" for every field here, matching
+        # the secret's own semantics - notably a blank URL is NOT rewritten
+        # to the localhost default, since this branch is also reached by
+        # installs whose custom influx.url was only ever hand-edited into
+        # settings.yaml and never answered via debconf.
+        CLI_FAILED=0
+        if [ -n "$INFLUX_URL_RAW" ]; then
+            set_field influx.url "$INFLUX_URL_RAW"
+        fi
+        if [ -n "$INFLUX_IDENTITY" ]; then
+            if [ -e "$CREDSTORE/influx-token.cred" ]; then
+                set_field influx.org "$INFLUX_IDENTITY"
+            else
+                set_secret influx-user "$INFLUX_IDENTITY"
+            fi
+        fi
+        if [ "$CLI_FAILED" = 0 ]; then
+            INFLUX_OK=1
+        fi
     else
         # Only warn if the admin actually engaged with the prompts this run -
         # selected a source (which needs InfluxDB to do anything useful) or
