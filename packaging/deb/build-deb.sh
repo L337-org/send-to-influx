@@ -122,7 +122,9 @@ cp "$REPO_ROOT/packaging/send-to-influx.service" "$PKG_ROOT/lib/systemd/system/s
 cp "$REPO_ROOT/packaging/deb/postinst" "$PKG_ROOT/DEBIAN/postinst"
 cp "$REPO_ROOT/packaging/deb/prerm" "$PKG_ROOT/DEBIAN/prerm"
 cp "$REPO_ROOT/packaging/deb/postrm" "$PKG_ROOT/DEBIAN/postrm"
-chmod 755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm"
+cp "$REPO_ROOT/packaging/deb/config" "$PKG_ROOT/DEBIAN/config"
+cp "$REPO_ROOT/packaging/deb/send-to-influx.templates" "$PKG_ROOT/DEBIAN/templates"
+chmod 755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm" "$PKG_ROOT/DEBIAN/config"
 
 cat > "$PKG_ROOT/DEBIAN/conffiles" <<CONFFILES
 /etc/send-to-influx/settings.yaml
@@ -134,7 +136,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: all
-Depends: systemd, python3 (>= 3.10), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
+Depends: systemd, debconf (>= 0.5), python3 (>= 3.10), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
 Maintainer: Gavin Lucas
 Description: Collects data from smart home / energy devices and writes it to InfluxDB
  send-to-influx polls Hue, MyEnergi, Octopus, Open-Meteo, National Grid Carbon
