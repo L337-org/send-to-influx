@@ -154,4 +154,8 @@ case "$SOURCES" in
         ;;
 esac
 
+# Release the frontend cleanly at the end of the conversation, matching the
+# upgrade early-exit path above.
+db_stop || true
+
 exit 0
