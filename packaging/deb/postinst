@@ -2,6 +2,20 @@
 # postinst for send-to-influx.deb
 set -e
 
+# Only "configure" has a well-defined role for a plain, non-debhelper package
+# like this one - postinst can also be invoked as abort-upgrade/abort-remove/
+# abort-deconfigure/triggered, which exist to let dpkg roll back a failed
+# operation or process triggers, not to (re)apply this package's own
+# configuration. $2's meaning ("previously-configured version, empty only on
+# a fresh install", used throughout below) specifically assumes "configure"
+# too - everything in this script (user/ownership setup, debconf-driven
+# configuration, the final status message) only makes sense in that context,
+# so treat every other action as a clean no-op rather than risk running any
+# of it on a wrong assumption about what $2 means.
+if [ "$1" != "configure" ]; then
+    exit 0
+fi
+
 if ! getent passwd send-to-influx >/dev/null 2>&1; then
     adduser --system --group --no-create-home --shell /usr/sbin/nologin send-to-influx
 fi
