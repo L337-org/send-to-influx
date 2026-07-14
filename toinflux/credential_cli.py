@@ -311,6 +311,73 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
         raise CredentialCliError(f"could not write {settings_path}: {exc}") from exc
 
 
+def _load_sources_sequence(settings_path):
+    """Read and parse settings_path, returning (text, sources_node) for its
+    top-level `sources:` sequence.
+
+    :raises CredentialCliError: if the file can't be read, isn't valid YAML, or
+        `sources:` isn't a plain (non-empty) sequence
+    """
+    try:
+        with open(settings_path, encoding="utf8") as f:
+            text = f.read()
+    except OSError as exc:
+        raise CredentialCliError(f"could not read {settings_path}: {exc}") from exc
+
+    try:
+        root = yaml.compose(text)
+    except yaml.YAMLError as exc:
+        raise CredentialCliError(f"{settings_path}: could not parse YAML: {exc}") from exc
+
+    sources_node = _find_mapping_value(root, "sources")
+    if sources_node is None or not isinstance(sources_node, yaml.SequenceNode):
+        raise CredentialCliError(f"{settings_path}: no 'sources:' sequence found - add it manually first")
+    if not sources_node.value:
+        # A block-style `sources:` with nothing under it parses as `sources: null`
+        # (a scalar), not an empty sequence - so this only happens for something
+        # like the (unusual) explicit flow-style `sources: []`, and there's no safe
+        # way to turn that into a populated block sequence by just inserting a line
+        # after it without risking invalid YAML. Rare enough in practice (the
+        # shipped example_settings.yaml always ships several sources uncommented)
+        # that asking the user to add the first entry by hand is a fine trade-off.
+        raise CredentialCliError(f"{settings_path}: 'sources:' is empty - add at least one source manually first")
+
+    return text, sources_node
+
+
+def _enable_source(name, settings_path=None):
+    """Idempotently append `name` to settings.yaml's top-level `sources:` sequence,
+    preserving the rest of the file untouched - a no-op if already present, so a
+    later dpkg-reconfigure re-running this doesn't duplicate entries.
+
+    Used instead of _rewrite_settings_field(), which only handles a single-line
+    scalar value - `sources:` is a YAML sequence, a structurally different edit.
+
+    :raises CredentialCliError: see _load_sources_sequence(), plus if settings_path
+        can't be written back
+    """
+    if settings_path is None:
+        settings_path = DEFAULT_SETTINGS_PATH
+    text, sources_node = _load_sources_sequence(settings_path)
+
+    existing = [item.value for item in sources_node.value if isinstance(item, yaml.ScalarNode)]
+    if name in existing:
+        return
+
+    lines = text.splitlines(keepends=True)
+    last_item = sources_node.value[-1]
+    item_line = lines[last_item.start_mark.line]
+    indent = item_line[: len(item_line) - len(item_line.lstrip())]
+    insert_at = last_item.end_mark.line + 1
+
+    lines.insert(insert_at, f'{indent}- "{name}"\n')
+
+    try:
+        _atomic_write(settings_path, "".join(lines))
+    except OSError as exc:
+        raise CredentialCliError(f"could not write {settings_path}: {exc}") from exc
+
+
 # --------------------------------------------------------------------------- #
 # InfluxDB version detection / storage creation (used by Part 2's debconf postinst)
 # --------------------------------------------------------------------------- #
@@ -483,6 +550,11 @@ def _cmd_ensure_influx_storage(name, settings_path):
     _ensure_influx_storage(name, settings_path=settings_path)
 
 
+def _cmd_enable_source(name, settings_path):
+    _enable_source(name, settings_path=settings_path)
+    print(f"Enabled '{name}' in {settings_path}.")
+
+
 # --------------------------------------------------------------------------- #
 # argparse entry point
 # --------------------------------------------------------------------------- #
@@ -499,6 +571,7 @@ def _build_parser():
     group.add_argument("--set-field", nargs=2, metavar=("PATH", "VALUE"), help="write a plain, non-secret YAML field")
     group.add_argument("--detect-influx-version", metavar="URL", help="probe URL and print v1/v2/unknown")
     group.add_argument("--ensure-influx-storage", metavar="NAME", help="best-effort create a v1 database/v2 bucket")
+    group.add_argument("--enable-source", metavar="NAME", help="add NAME to settings.yaml's sources: list")
     parser.add_argument("--remove", action="store_true", help="remove the named credential instead of setting it")
     return parser
 
@@ -519,6 +592,9 @@ def main(argv=None):
             return 0
         if args.ensure_influx_storage is not None:
             _cmd_ensure_influx_storage(args.ensure_influx_storage, args.settings)
+            return 0
+        if args.enable_source is not None:
+            _cmd_enable_source(args.enable_source, args.settings)
             return 0
 
         if os.geteuid() != 0:

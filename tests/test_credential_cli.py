@@ -6,6 +6,7 @@ import yaml
 from toinflux import credential_cli
 from toinflux.credential_cli import (
     CredentialCliError,
+    _cmd_enable_source,
     _cmd_ensure_influx_storage,
     _cmd_list,
     _cmd_remove,
@@ -298,6 +299,53 @@ class TestCmdSetField:
         settings_path.write_text('hue:\n  host: "old.example.com"\n')
         with pytest.raises(CredentialCliError, match=r"<section>"):
             _cmd_set_field("nofield", "value", str(settings_path))
+
+
+# --------------------------------------------------------------------------- #
+# _enable_source / --enable-source
+# --------------------------------------------------------------------------- #
+
+
+class TestEnableSource:
+    def test_appends_new_source_preserving_comments(self, tmp_path):
+        content = 'sources:\n  - "hue"\n  - "speedtest"\n  # - "octopus"\nstagger_seconds: 10\n'
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(content)
+        _cmd_enable_source("octopus", str(settings_path))
+        result_text = settings_path.read_text()
+        result_yaml = yaml.safe_load(result_text)
+        assert result_yaml["sources"] == ["hue", "speedtest", "octopus"]
+        assert '  # - "octopus"' in result_text  # the pre-existing comment survives
+        assert "stagger_seconds: 10" in result_text
+
+    def test_idempotent_when_already_present(self, tmp_path):
+        content = 'sources:\n  - "hue"\n  - "octopus"\n'
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(content)
+        _cmd_enable_source("octopus", str(settings_path))
+        result_yaml = yaml.safe_load(settings_path.read_text())
+        assert result_yaml["sources"] == ["hue", "octopus"]  # not duplicated
+
+    def test_raises_on_bare_sources_key(self, tmp_path):
+        """A bare `sources:` with nothing after it parses as `sources: null` (a
+        scalar), not an empty sequence - correctly rejected rather than silently
+        writing something that isn't valid YAML."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("sources:\nstagger_seconds: 10\n")
+        with pytest.raises(CredentialCliError, match="no 'sources:'"):
+            _cmd_enable_source("hue", str(settings_path))
+
+    def test_raises_on_explicit_empty_sequence(self, tmp_path):
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("sources: []\n")
+        with pytest.raises(CredentialCliError, match="is empty"):
+            _cmd_enable_source("hue", str(settings_path))
+
+    def test_raises_when_sources_key_missing(self, tmp_path):
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("stagger_seconds: 10\n")
+        with pytest.raises(CredentialCliError, match="no 'sources:'"):
+            _cmd_enable_source("hue", str(settings_path))
 
 
 # --------------------------------------------------------------------------- #
