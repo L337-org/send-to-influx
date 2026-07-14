@@ -262,3 +262,29 @@ class TestClearUnsubstitutedCredentialSentinels:
                 load_settings(settings_file=path)
         finally:
             Path(path).unlink(missing_ok=True)
+
+    def test_influx_token_sentinel_raises_specific_error_not_misclassified_as_v1(self, sample_settings, monkeypatch):
+        """influx.token specifically must not be silently blanked like the other
+        sentinel fields - doing so would flip validate_settings()'s
+        is_v2 = bool(token) check to False, misclassifying a broken v2 config as
+        v1 and producing a confusing "<source>.db is required for v1" error for a
+        source that only defines bucket (valid v2 shorthand) and was never using
+        v1 authentication at all."""
+        monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+        sample_settings["influx"] = {
+            "url": "https://influx.example.com:8086",
+            "org": "myorg",
+            "token": sentinel_for("influx-token"),
+        }
+        sample_settings["sources"] = ["zappi"]
+        sample_settings["default_source"] = "zappi"
+        sample_settings["zappi"] = {"interval": 300, "bucket": "zappi_bucket", "serial": "12345"}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(sample_settings, f)
+            path = f.name
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        try:
+            with pytest.raises(ConfigError, match="migrated to systemd-creds but could not be loaded"):
+                load_settings(settings_file=path)
+        finally:
+            Path(path).unlink(missing_ok=True)

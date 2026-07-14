@@ -296,20 +296,40 @@ def _clear_unsubstituted_credential_sentinels(settings):
     passes validate_settings()'s existing truthiness checks, and the daemon starts
     "successfully" then fails auth forever as a retried SourceConnectionError instead
     of failing fast as the ConfigError it actually is - this reuses
-    validate_settings()'s existing required-field logic for free.
+    validate_settings()'s existing required-field logic for free, for every
+    credential field except influx-token (raised directly instead - see below).
 
     :param settings: settings dict, mutated in place and returned
     :type settings: dict
     :return: the same dict
     :rtype: dict
+    :raises ConfigError: if influx-token specifically is still a sentinel - see the
+        note below on why this one field can't just be blanked like the others
     """
-    for top_key, field in CREDENTIAL_FIELDS.values():
+    for name, (top_key, field) in CREDENTIAL_FIELDS.items():
         block = settings.get(top_key)
         if not isinstance(block, dict):
             continue
         value = block.get(field)
-        if isinstance(value, str) and value.startswith(SENTINEL_PREFIX):
-            block[field] = ""
+        if not (isinstance(value, str) and value.startswith(SENTINEL_PREFIX)):
+            continue
+        if name == "influx-token":
+            # Blanking this one specifically (unlike every other credential field)
+            # would corrupt a *different* check downstream: validate_settings()'s
+            # is_v2 = bool(influx.get("token")) would then see an empty string and
+            # misclassify a broken v2 config as v1 - producing a confusing
+            # "<source>.db is required when using InfluxDB v1" error (or a bucket-
+            # only source rejected) instead of the real problem, for a source that
+            # was never using v1 at all. Raise directly here, before that
+            # misclassification can happen, with a message that actually points at
+            # the credential.
+            raise ConfigError(
+                "influx.token was migrated to systemd-creds but could not be loaded in "
+                "this execution context (drop-in removed? not running under systemd?) - "
+                "run 'send-to-influx-set-credential --list' to check its status, or run "
+                "this under the packaged systemd service."
+            )
+        block[field] = ""
     return settings
 
 

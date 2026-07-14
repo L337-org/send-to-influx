@@ -8,6 +8,7 @@ from toinflux import credential_cli
 from toinflux.credentials import sentinel_for
 from toinflux.credential_cli import (
     CredentialCliError,
+    _atomic_write,
     _cmd_enable_source,
     _cmd_ensure_influx_storage,
     _cmd_list,
@@ -227,6 +228,40 @@ class TestDecryptCredential:
 
 
 # --------------------------------------------------------------------------- #
+# _atomic_write
+# --------------------------------------------------------------------------- #
+
+
+class TestAtomicWrite:
+    def test_writes_through_a_symlink_without_replacing_it(self, tmp_path):
+        """os.replace() operates on the given path as a directory entry, not
+        through it - writing straight to a symlink's own path would silently
+        detach it (replace the symlink with a plain file) rather than updating
+        the real file it points to. Some admins manage settings.yaml as a
+        symlink into a separately-managed config source, so this must write
+        through to the resolved target and leave the symlink itself intact."""
+        import os
+
+        real_target = tmp_path / "real-settings.yaml"
+        real_target.write_text("original content\n")
+        symlink_path = tmp_path / "settings.yaml"
+        symlink_path.symlink_to(real_target)
+
+        _atomic_write(str(symlink_path), "new content\n")
+
+        assert symlink_path.is_symlink()
+        assert os.readlink(symlink_path) == str(real_target)
+        assert real_target.read_text() == "new content\n"
+
+    def test_non_symlink_path_is_unaffected(self, tmp_path):
+        path = tmp_path / "settings.yaml"
+        path.write_text("original content\n")
+        _atomic_write(str(path), "new content\n")
+        assert not path.is_symlink()
+        assert path.read_text() == "new content\n"
+
+
+# --------------------------------------------------------------------------- #
 # _rewrite_settings_field
 # --------------------------------------------------------------------------- #
 
@@ -321,6 +356,23 @@ class TestRewriteSettingsField:
         _rewrite_settings_field(path, "influx", "token", "new_value")
         mode = stat.S_IMODE(os.stat(path).st_mode)
         assert mode == (stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_settings_path_as_symlink_is_preserved(self, tmp_path):
+        """settings_path may itself be a symlink (e.g. into a separately-managed
+        config source) - the rewrite must land on the real target, not replace
+        the symlink with a plain file."""
+        import os
+
+        real_target = tmp_path / "real-settings.yaml"
+        real_target.write_text('influx:\n  token: "old_value"\n')
+        symlink_path = tmp_path / "settings.yaml"
+        symlink_path.symlink_to(real_target)
+
+        _rewrite_settings_field(str(symlink_path), "influx", "token", "new_value")
+
+        assert symlink_path.is_symlink()
+        assert os.readlink(symlink_path) == str(real_target)
+        assert 'token: "new_value"' in real_target.read_text()
 
     def test_missing_file_raises_credential_cli_error_not_oserror(self, tmp_path):
         """A missing/unreadable settings_path must surface as CredentialCliError -

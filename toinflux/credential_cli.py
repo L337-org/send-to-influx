@@ -280,19 +280,28 @@ def _atomic_write(path, content):
     original file's owner/mode if it already exists - a naive rewrite would
     otherwise land owned by whoever ran this script instead of
     send-to-influx:send-to-influx 0600/0644.
+
+    If path is a symlink, writes through to its resolved target instead of
+    replacing the symlink itself - some admins manage settings.yaml as a symlink
+    into a separately-managed config source (e.g. a checked-out dotfiles repo).
+    os.replace() operates on the given path as a directory entry, not through it,
+    so writing to the symlink's own path would silently detach it - the symlink
+    gets replaced by a plain file, rather than the thing it points to being
+    updated - breaking whatever was managing it that way.
     """
-    directory = os.path.dirname(path) or "."
+    target = os.path.realpath(path) if os.path.islink(path) else path
+    directory = os.path.dirname(target) or "."
     fd, tmp_path = tempfile.mkstemp(dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf8") as f:
             f.write(content)
         try:
-            st = os.stat(path)
+            st = os.stat(target)
             os.chown(tmp_path, st.st_uid, st.st_gid)
             os.chmod(tmp_path, stat_module.S_IMODE(st.st_mode))
         except OSError:
             pass
-        os.replace(tmp_path, path)
+        os.replace(tmp_path, target)
     except BaseException:
         os.unlink(tmp_path)
         raise
