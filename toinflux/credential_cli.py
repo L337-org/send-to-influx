@@ -180,13 +180,15 @@ def _regenerate_dropin(credstore_dir=None, dropin_path=None, exclude=None):
         if os.path.isfile(cred_path):
             lines.append(f"LoadCredentialEncrypted={name}:{cred_path}")
 
-    if len(lines) == 1:
-        if os.path.exists(dropin_path):
-            os.remove(dropin_path)
-        return
-
-    os.makedirs(os.path.dirname(dropin_path), exist_ok=True)
-    _atomic_write(dropin_path, "\n".join(lines) + "\n")
+    try:
+        if len(lines) == 1:
+            if os.path.exists(dropin_path):
+                os.remove(dropin_path)
+            return
+        os.makedirs(os.path.dirname(dropin_path), exist_ok=True)
+        _atomic_write(dropin_path, "\n".join(lines) + "\n")
+    except OSError as exc:
+        raise CredentialCliError(f"could not update {dropin_path}: {exc}") from exc
 
 
 def _reload_systemd():
@@ -649,7 +651,10 @@ def _cmd_remove(name, settings_path):
     cred_path = _cred_path(name)
     was_stored = os.path.isfile(cred_path)
     if was_stored:
-        os.remove(cred_path)
+        try:
+            os.remove(cred_path)
+        except OSError as exc:
+            raise CredentialCliError(f"could not remove {cred_path}: {exc}") from exc
         print(f"Removed '{name}' from systemd-creds and reverted {settings_path} to the placeholder value.")
     else:
         print(f"'{name}' was not stored in systemd-creds - reverted {settings_path} to the placeholder value.")

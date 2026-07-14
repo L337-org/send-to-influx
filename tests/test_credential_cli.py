@@ -314,6 +314,30 @@ class TestRegenerateDropin:
         _regenerate_dropin(credstore_dir=str(credstore), dropin_path=str(dropin))
         assert not dropin.exists()
 
+    def test_write_failure_raises_credential_cli_error_not_oserror(self, tmp_path):
+        """os.makedirs()/_atomic_write() on the drop-in path must surface as
+        CredentialCliError - the type main()'s exception handler actually
+        catches - not a raw OSError escaping as an unhandled traceback."""
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+        blocker = tmp_path / "not_a_dir"
+        blocker.write_text("a file, not a directory")
+        dropin = blocker / "dropin.conf"  # parent is a file: NotADirectoryError
+
+        with pytest.raises(CredentialCliError, match="could not update"):
+            _regenerate_dropin(credstore_dir=str(credstore), dropin_path=str(dropin))
+
+    def test_removal_failure_raises_credential_cli_error_not_oserror(self, tmp_path):
+        """Same, for the 'nothing configured, remove the stale drop-in' branch."""
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()  # no .cred files - takes the removal branch
+        dropin = tmp_path / "dropin.conf"
+        dropin.mkdir()  # a directory, not a file - os.remove() raises IsADirectoryError
+
+        with pytest.raises(CredentialCliError, match="could not update"):
+            _regenerate_dropin(credstore_dir=str(credstore), dropin_path=str(dropin))
+
 
 # --------------------------------------------------------------------------- #
 # _cmd_set / _cmd_remove happy paths
@@ -440,6 +464,30 @@ class TestCmdRemove:
         assert not (credstore / "influx-token.cred").exists()
         result_yaml = yaml.safe_load(settings_path.read_text())
         assert result_yaml["influx"]["token"] == "your_influx_token"
+
+    def test_cred_file_removal_failure_raises_credential_cli_error(self, tmp_path, monkeypatch):
+        """os.remove() on the .cred file must surface as CredentialCliError, not a
+        raw OSError - simulated by making credstore_dir unwritable (os.remove()
+        needs write access to the *directory*, not the file itself)."""
+        import os
+
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('influx:\n  token: "<stored in systemd-creds - x>"\n')
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+        dropin = tmp_path / "dropin.conf"
+
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+        monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(dropin))
+
+        os.chmod(credstore, 0o500)  # read+execute only, no write
+        try:
+            with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+                with pytest.raises(CredentialCliError, match="could not remove"):
+                    _cmd_remove("influx-token", str(settings_path))
+        finally:
+            os.chmod(credstore, 0o700)  # restore so tmp_path cleanup can remove it
 
     def test_noop_remove_says_it_was_not_stored(self, tmp_path, monkeypatch, capsys):
         """Removing a credential that was never migrated (no .cred file) still
