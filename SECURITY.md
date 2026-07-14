@@ -51,7 +51,8 @@ being deliberate about are credential storage and TLS verification:
   `settings.yaml` never contains a real secret (only placeholder text, or once systemd-creds is used, a
   cosmetic sentinel) unless you hand-edit one in, which is exactly the case this check catches
   regardless of file mode. An upgrade never resets permissions/ownership you've since changed
-  yourself - only a genuinely fresh install sets them.
+  yourself - they're only set when `postinst` creates the file in the first place (a genuinely
+  fresh install, or a `settings.yaml` that's been deleted since).
 - **TLS verification defaults differ by source, deliberately**: the `influx` block defaults to
   verifying TLS certificates (`insecure: true` is an explicit opt-out); the `hue` block defaults
   the other way (`insecure: true`, i.e. verification skipped), since Hue bridges are commonly

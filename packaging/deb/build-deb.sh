@@ -41,7 +41,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$PKG_ROOT/DEBIAN" "$PKG_ROOT/opt/send-to-influx" "$PKG_ROOT/etc/send-to-influx" \
+mkdir -p "$PKG_ROOT/DEBIAN" "$PKG_ROOT/opt/send-to-influx" "$PKG_ROOT/usr/share/send-to-influx" \
     "$PKG_ROOT/lib/systemd/system" "$PKG_ROOT/usr/sbin"
 
 echo "Building venv payload from $REPO_ROOT ..."
@@ -114,8 +114,20 @@ done
 VERSION="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
     "from importlib.metadata import version; print(version('${PKG_NAME}'))")"
 
-# Config (marked as a conffile below so dpkg preserves local edits on upgrade)
-cp "$REPO_ROOT/example_settings.yaml" "$PKG_ROOT/etc/send-to-influx/settings.yaml"
+# The example settings ship under /usr/share; postinst copies them to
+# /etc/send-to-influx/settings.yaml only if that file doesn't exist yet.
+# Deliberately NOT a dpkg conffile: postinst and send-to-influx-set-credential
+# write debconf answers/sentinels into settings.yaml, and dpkg's conffile
+# machinery treats any such write as a local modification - guaranteeing a
+# confusing "modified (by you or by a script)" prompt on every upgrade that
+# ships a changed example_settings.yaml, with a one-keypress path to replacing
+# a fully-configured file with the pristine example. Debian Policy 10.7.3
+# forbids maintainer scripts modifying conffiles for exactly this reason; this
+# is the Policy-blessed alternative ("configuration files" managed by the
+# maintainer scripts, removed by postrm on purge). Upgrades never touch the
+# file at all - the earlier conffile-shipped copy simply goes obsolete in
+# dpkg's records and stays in place on disk.
+cp "$REPO_ROOT/example_settings.yaml" "$PKG_ROOT/usr/share/send-to-influx/example_settings.yaml"
 
 # systemd unit (format-agnostic, stays at the top of packaging/) and .deb-specific maintainer scripts
 cp "$REPO_ROOT/packaging/send-to-influx.service" "$PKG_ROOT/lib/systemd/system/send-to-influx.service"
@@ -125,10 +137,6 @@ cp "$REPO_ROOT/packaging/deb/postrm" "$PKG_ROOT/DEBIAN/postrm"
 cp "$REPO_ROOT/packaging/deb/config" "$PKG_ROOT/DEBIAN/config"
 cp "$REPO_ROOT/packaging/deb/send-to-influx.templates" "$PKG_ROOT/DEBIAN/templates"
 chmod 755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm" "$PKG_ROOT/DEBIAN/config"
-
-cat > "$PKG_ROOT/DEBIAN/conffiles" <<CONFFILES
-/etc/send-to-influx/settings.yaml
-CONFFILES
 
 cat > "$PKG_ROOT/DEBIAN/control" <<CONTROL
 Package: ${PKG_NAME}

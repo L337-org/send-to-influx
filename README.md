@@ -247,8 +247,9 @@ ever gets close to 3.30).
 Either way, the package installs (but does not start) the service, since it needs configuration
 first:
 
-- Edit `/etc/send-to-influx/settings.yaml` (copied from `example_settings.yaml` on install; dpkg
-  preserves your edits across upgrades).
+- Edit `/etc/send-to-influx/settings.yaml` (created from `example_settings.yaml` the first time the
+  package is installed, and never touched by upgrades - only a fresh install or your own edits, or
+  the debconf/`send-to-influx-set-credential` flows described below, ever write to it).
 - Then enable and start it: `systemctl enable --now send-to-influx`
 
 Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as
