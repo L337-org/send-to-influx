@@ -5,7 +5,7 @@ import pytest
 import requests
 import yaml
 from toinflux import credential_cli
-from toinflux.credentials import sentinel_for
+from toinflux.credentials import CREDENTIAL_FIELDS, sentinel_for
 from toinflux.credential_cli import (
     CredentialCliError,
     _atomic_write,
@@ -667,6 +667,25 @@ class TestCmdSetField:
         settings_path.write_text('hue:\n  host: "old.example.com"\n')
         with pytest.raises(CredentialCliError, match=r"<section>"):
             _cmd_set_field("nofield", "value", str(settings_path))
+
+    def test_rejects_credential_field_without_touching_the_file(self, tmp_path):
+        """--set-field only writes plain, non-secret values - allowing it to also
+        target a credential field (e.g. influx.password) would be an easy way to
+        put a secret back into settings.yaml in plaintext, defeating the whole
+        point of systemd-creds storage."""
+        settings_path = tmp_path / "settings.yaml"
+        original = 'influx:\n  password: "your_influx_password"\n'
+        settings_path.write_text(original)
+        with pytest.raises(CredentialCliError, match="send-to-influx-set-credential influx-password"):
+            _cmd_set_field("influx.password", "a-real-secret", str(settings_path))
+        assert settings_path.read_text() == original
+
+    def test_rejects_every_known_credential_field(self, tmp_path):
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("influx: {}\nhue: {}\nmyenergi: {}\noctopus: {}\n")
+        for name, (top_key, field) in CREDENTIAL_FIELDS.items():
+            with pytest.raises(CredentialCliError, match=f"send-to-influx-set-credential {name}"):
+                _cmd_set_field(f"{top_key}.{field}", "value", str(settings_path))
 
 
 # --------------------------------------------------------------------------- #

@@ -724,6 +724,13 @@ def _cmd_set_field(dotted_path, value, settings_path):
     top_key, _, field = dotted_path.partition(".")
     if not field:
         raise CredentialCliError(f"'{dotted_path}' must be in the form <section>.<field>, e.g. hue.host")
+    for name, (cred_top_key, cred_field) in CREDENTIAL_FIELDS.items():
+        if (top_key, field) == (cred_top_key, cred_field):
+            raise CredentialCliError(
+                f"'{dotted_path}' is a credential field - --set-field only writes plain, "
+                f"non-secret values, and would put it back into {settings_path} in plaintext. "
+                f"Use 'send-to-influx-set-credential {name}' instead."
+            )
     _rewrite_settings_field(settings_path, top_key, field, value)
     print(f"Updated {top_key}.{field} in {settings_path}.")
 
