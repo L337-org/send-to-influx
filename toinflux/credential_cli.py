@@ -179,11 +179,22 @@ def _reload_systemd():
 def _encrypt_credential(name, value, credstore_dir=None):
     """Encrypt value with systemd-creds and write it to credstore_dir/<name>.cred.
 
-    :raises CredentialCliError: if systemd-creds encrypt fails
+    :raises CredentialCliError: if credstore_dir can't be created/secured, if
+        systemd-creds encrypt fails, or if the written .cred file can't be secured
     """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
-    os.makedirs(credstore_dir, exist_ok=True)
+    # postinst normally pre-creates credstore_dir at 0700, but this must hold even if
+    # it's ever missing when the CLI runs standalone - os.makedirs() alone would create
+    # it at the process umask's default (commonly 0755), making credential *names*
+    # (not contents, which get their own 0600 below) enumerable by other local users.
+    # Always re-asserting 0700 here (not just on first creation) is a harmless no-op
+    # against postinst's own already-correct directory, and self-healing otherwise.
+    try:
+        os.makedirs(credstore_dir, exist_ok=True)
+        os.chmod(credstore_dir, stat_module.S_IRWXU)
+    except OSError as exc:
+        raise CredentialCliError(f"could not create/secure {credstore_dir}: {exc}") from exc
     cred_path = _cred_path(name, credstore_dir)
     try:
         subprocess.run(
@@ -195,7 +206,10 @@ def _encrypt_credential(name, value, credstore_dir=None):
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode(errors="replace") if exc.stderr else str(exc)
         raise CredentialCliError(f"systemd-creds encrypt failed for '{name}': {stderr}") from exc
-    os.chmod(cred_path, stat_module.S_IRUSR | stat_module.S_IWUSR)
+    try:
+        os.chmod(cred_path, stat_module.S_IRUSR | stat_module.S_IWUSR)
+    except OSError as exc:
+        raise CredentialCliError(f"could not secure {cred_path}: {exc}") from exc
 
 
 def _decrypt_credential(name, credstore_dir=None):
@@ -310,14 +324,30 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
     line_no = value_node.start_mark.line
     line = lines[line_no]
     indent = line[: len(line) - len(line.lstrip())]
-    # Preserve whatever followed the original scalar on this line verbatim - typically
-    # nothing, but could be a trailing inline comment (e.g. `token: "old"  # note`).
-    # value_node.end_mark.column is the column immediately after the scalar ends, since
-    # the earlier start_mark.line == end_mark.line check already guarantees this is a
-    # single-line value.
+    # The splice below assumes the line reads `<indent>field: <value>...` - true for a
+    # normal block-style mapping (whitespace before the colon, e.g. `field : value`, is
+    # unusual but still valid YAML and still safe here), but not for e.g.
+    # `influx: {token: "old", org: "x"}` (a flow-style section), where value_node's own
+    # line doesn't start with the field name at all. Verify that assumption before
+    # writing rather than after - a flow-style section would otherwise have its
+    # `top_key: {` prefix silently overwritten by the naive `indent + field + ": " +
+    # value` reconstruction below, producing invalid YAML.
+    if not re.match(rf"^{re.escape(field)}\s*:", line[len(indent) :]):
+        raise CredentialCliError(
+            f"{settings_path}: could not safely rewrite {top_key}.{field} automatically "
+            "(unexpected line format, e.g. a flow-style mapping) - edit it by hand instead"
+        )
+    # Preserve everything around the value verbatim: the prefix (indent, field name,
+    # colon, and whatever whitespace separated them in the original - e.g. `field : `
+    # is unusual but valid, and reconstructing a hardcoded `field: ` would needlessly
+    # reformat it) up to where the old value started, and whatever followed the old
+    # value - typically nothing, but could be a trailing inline comment (e.g.
+    # `token: "old"  # note`). Only the value itself is replaced, always as a
+    # double-quoted scalar regardless of the original's quoting style.
+    prefix = line[: value_node.start_mark.column]
     trailing = line[value_node.end_mark.column :].rstrip("\n")
     escaped = _yaml_double_quoted_escape(new_value)
-    lines[line_no] = f'{indent}{field}: "{escaped}"{trailing}\n'
+    lines[line_no] = f'{prefix}"{escaped}"{trailing}\n'
 
     try:
         _atomic_write(settings_path, "".join(lines))
@@ -558,7 +588,20 @@ def _cmd_set(name, settings_path):
     _regenerate_dropin()
     _reload_systemd()
     top_key, field = CREDENTIAL_FIELDS[name]
-    _rewrite_settings_field(settings_path, top_key, field, sentinel_for(name))
+    try:
+        _rewrite_settings_field(settings_path, top_key, field, sentinel_for(name))
+    except CredentialCliError as exc:
+        # The secret is already safely encrypted in systemd-creds at this point -
+        # don't roll that back (discarding a successful encryption to "fix" a
+        # settings.yaml formatting problem would be worse, not better). But the
+        # plaintext copy in settings.yaml is still sitting there unremoved, and the
+        # generic "edit it by hand instead" message from _rewrite_settings_field
+        # alone wouldn't tell the user that - make it explicit here instead.
+        raise CredentialCliError(
+            f"'{name}' was encrypted and stored in systemd-creds, but {settings_path} "
+            f"could not be updated to match ({exc}) - the plaintext value is still "
+            f"there and should be removed by hand."
+        ) from exc
     print(f"Stored '{name}' in systemd-creds and updated {settings_path}.")
 
 
@@ -571,11 +614,15 @@ def _cmd_remove(name, settings_path):
     _regenerate_dropin(exclude=name)
     _reload_systemd()
     cred_path = _cred_path(name)
-    if os.path.isfile(cred_path):
+    was_stored = os.path.isfile(cred_path)
+    if was_stored:
         os.remove(cred_path)
     top_key, field = CREDENTIAL_FIELDS[name]
     _rewrite_settings_field(settings_path, top_key, field, PLACEHOLDER_VALUES[name])
-    print(f"Removed '{name}' from systemd-creds and reverted {settings_path} to the placeholder value.")
+    if was_stored:
+        print(f"Removed '{name}' from systemd-creds and reverted {settings_path} to the placeholder value.")
+    else:
+        print(f"'{name}' was not stored in systemd-creds - reverted {settings_path} to the placeholder value.")
 
 
 def _cmd_list(credstore_dir=None):
@@ -630,19 +677,35 @@ def _build_parser():
     return parser
 
 
+def _require_root():
+    if os.geteuid() != 0:
+        raise CredentialCliError("must be run as root (sudo) - it writes /etc/send-to-influx and systemd unit config")
+
+
 def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
 
     try:
+        # --detect-influx-version is the one truly read-only subcommand - a network
+        # probe, unrelated to any local file - so it's the only one checked before
+        # _require_root().
+        if args.detect_influx_version is not None:
+            _cmd_detect_influx_version(args.detect_influx_version)
+            return 0
+
+        # Everything else writes to /etc/send-to-influx and/or systemd unit config,
+        # or (--list) reads credstore_dir - which is 0700 root:root, so a non-root
+        # caller wouldn't get a PermissionError here, just os.path.isfile() silently
+        # returning False for every credential and --list misreporting everything
+        # as "not set". Require root consistently across all of them.
+        _require_root()
+
         if args.list:
             _cmd_list()
             return 0
         if args.set_field is not None:
             _cmd_set_field(args.set_field[0], args.set_field[1], args.settings)
-            return 0
-        if args.detect_influx_version is not None:
-            _cmd_detect_influx_version(args.detect_influx_version)
             return 0
         if args.ensure_influx_storage is not None:
             _cmd_ensure_influx_storage(args.ensure_influx_storage, args.settings)
@@ -651,10 +714,6 @@ def main(argv=None):
             _cmd_enable_source(args.enable_source, args.settings)
             return 0
 
-        if os.geteuid() != 0:
-            raise CredentialCliError(
-                "must be run as root (sudo) - it writes /etc/send-to-influx and systemd unit config"
-            )
         if args.remove:
             _cmd_remove(args.name, args.settings)
         else:

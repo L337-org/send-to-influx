@@ -121,9 +121,85 @@ jobs:
       - name: Build .deb package
         run: packaging/deb/build-deb.sh
 
+      - name: Generate a random test secret for the Hue credential
+        # Generated fresh and masked each run, rather than a fixed string
+        # committed to the repo - avoids both a secret-scanning false positive
+        # on a debconf `password`-typed field and printing a recognisable
+        # constant in job logs (the `run:` script text itself is echoed to the
+        # log, and so is the settings.yaml diff a later step reads back).
+        run: |
+          secret="ci-test-$(openssl rand -hex 16)"
+          echo "::add-mask::$secret"
+          echo "HUE_TEST_SECRET=$secret" >> "$GITHUB_ENV"
+
+      - name: Seed debconf answers for the interactive install flow
+        # Exercises config's conditional prompts and postinst's db_get/set_secret/
+        # set_field/db_unregister wiring - without this, a plain `dpkg -i` with
+        # nothing pre-seeded takes the "nothing selected" early-exit in config, and
+        # the entire debconf-driven branch of postinst (including db_unregister)
+        # never runs in CI at all. Hue is picked as a representative source: it has
+        # one of each prompt type (string, password, select). InfluxDB's
+        # identity/secret are deliberately left blank - version detection against a
+        # real server is out of scope for this smoke test (see README's "leave
+        # every question blank" supported flow), so Hue won't get auto-enabled into
+        # sources:, but its own credential still gets migrated and unregistered
+        # regardless, which is what this step exists to verify.
+        run: |
+          {
+            echo "send-to-influx send-to-influx/sources-to-configure multiselect hue"
+            echo "send-to-influx send-to-influx/influx-url string"
+            echo "send-to-influx send-to-influx/influx-identity string"
+            echo "send-to-influx send-to-influx/influx-secret password"
+            echo "send-to-influx send-to-influx/hue-host string ci-test-bridge.example.com"
+            echo "send-to-influx send-to-influx/hue-user password ${HUE_TEST_SECRET}"
+            echo "send-to-influx send-to-influx/hue-temperature-units select C"
+          } | sudo debconf-set-selections
+
       - name: Install and smoke-test the .deb
         run: |
-          sudo dpkg -i send-to-influx_*.deb
+          sudo DEBIAN_FRONTEND=noninteractive dpkg -i send-to-influx_*.deb
           /opt/send-to-influx/venv/bin/send-to-influx --version
           cp example_settings.yaml /tmp/settings.yaml
           /opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/settings.yaml
+
+      - name: Verify the debconf-driven install applied the Hue credential and cleaned up after itself
+        run: |
+          # Parse the actual YAML rather than grepping for a substring that could in
+          # principle match some unrelated field - proves hue.host/hue.user
+          # specifically got the intended values, not just that the right text
+          # appears *somewhere* in the file.
+          sudo /opt/send-to-influx/venv/bin/python3 - <<PYEOF
+          import yaml
+
+          with open("/etc/send-to-influx/settings.yaml", encoding="utf8") as f:
+              settings = yaml.safe_load(f)
+
+          hue = settings["hue"]
+          assert hue["host"] == "ci-test-bridge.example.com", hue["host"]
+          assert hue["user"].startswith("<stored in systemd-creds"), hue["user"]
+          assert "${HUE_TEST_SECRET}" not in hue["user"]
+          print("settings.yaml: hue.host/hue.user assertions OK")
+          PYEOF
+          sudo test -f /etc/send-to-influx/credstore.encrypted/hue-user.cred
+
+          # The plaintext secret must not be sitting anywhere on disk once postinst
+          # is done with it: not in settings.yaml (migrated to systemd-creds), and
+          # not still in debconf's own passwords.dat (db_unregister must have
+          # purged it - see debconf-devel(7)'s "clear a password value out of it as
+          # soon as is possible" guidance, and CLAUDE.md's "Credential storage" doc).
+          # grep -q exits 1 for "no match" (the outcome we want here) but also 2 for
+          # a genuine error (e.g. an unreadable path) - a bare `! grep` would treat
+          # both alike, silently passing on an error without having actually
+          # checked anything. Assert the exact exit code instead of just negating.
+          assert_secret_absent() {
+            set +e
+            sudo grep -rq "$HUE_TEST_SECRET" "$1"
+            local status=$?
+            set -e
+            if [ "$status" -ne 1 ]; then
+              echo "assert_secret_absent: expected grep to find no match (exit 1) in $1, got exit $status" >&2
+              exit 1
+            fi
+          }
+          assert_secret_absent /etc/send-to-influx/settings.yaml
+          assert_secret_absent /var/cache/debconf/
