@@ -31,11 +31,16 @@ being deliberate about are credential storage and TLS verification:
   `.deb` install prompt (debconf) can also collect these directly, using debconf's `Type: password`
   widget - contrary to an earlier version of this note, debconf *does* write password-type answers to
   disk (a dedicated `passwords.dat` store, kept separate from its general-purpose, more widely-readable
-  answer database, and restricted to `chmod 600`; per Debian's own debconf specification, packages are
-  advised - not required - to clear a value out of it once consumed). `postinst` reads it once, via
-  `db_get`, to migrate the value into `systemd-creds`, but doesn't itself go back and purge debconf's
-  own copy afterward. The prompt appearing blank on a later `dpkg-reconfigure` is a separate UI
-  convention (password answers are never redisplayed), not evidence the value wasn't retained on disk.
+  answer database, and restricted to `chmod 600`). Debian's own developers' guide
+  (`debconf-devel(7)`) advises clearing a password value out of that store "as soon as is possible"
+  once consumed, so `postinst` does exactly that: right after each `db_get` on a password-type
+  template, it calls `db_unregister` on that question, which removes it - and its stored answer -
+  from debconf's database entirely. This doesn't change the already-separate UI convention that
+  password answers are never redisplayed on a later `dpkg-reconfigure` (secret prompts always come
+  back blank regardless); it removes the actual leftover copy in `passwords.dat`, not just the
+  redisplay behaviour. The template itself is unaffected - it's re-registered fresh from
+  `send-to-influx.templates` on the next `config`/`postinst` run, so `dpkg-reconfigure` still works
+  normally.
 - **`enforce_permissions` (settings.yaml key)**: if `settings.yaml` is readable by group/other *and*
   actually contains a real credential (not just placeholder or systemd-creds-sentinel text),
   `send-to-influx` always logs a warning. Setting `enforce_permissions: true` additionally refuses to

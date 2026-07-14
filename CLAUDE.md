@@ -251,15 +251,21 @@ from `postinst`, once package files are unpacked and everything's been answered.
   attempted first (best-effort database/bucket creation, logged-not-raised on failure).
 - `Type: password` answers *are* written to disk by debconf - contrary to an earlier version of this
   note - into a dedicated `passwords.dat` store kept separate from its general-purpose, more widely
-  readable answer database, and restricted to `chmod 600` (Debian's own debconf specification advises,
-  but doesn't require, that a package clear a value out of it once consumed - `postinst` doesn't
-  currently do this, it only reads the value once via `db_get` to migrate it into `systemd-creds`).
-  What debconf *doesn't* do is redisplay/pre-fill a previous password answer in the prompt on a later
-  invocation - a UI convention for this template type, independent of what's sitting in `passwords.dat`.
-  So a reconfigure always shows secret prompts blank, with no way for `postinst` to distinguish "leave
-  it as-is" from "clear it" from that alone - resolved by not supporting clearing via debconf at all:
-  `postinst` treats blank as "keep the existing systemd-creds value," and removing a credential goes
-  through `send-to-influx-set-credential <name> --remove` directly instead.
+  readable answer database, and restricted to `chmod 600`. Debian's own developers' guide
+  (`debconf-devel(7)`) advises clearing a password value out of it "as soon as is possible" once
+  consumed, so `postinst` does: immediately after each `db_get` on a password-type template
+  (`influx-secret`, `hue-user`, `myenergi-apikey`, `octopus-api-key`), it calls `db_unregister` on
+  that question - this removes the question, and its stored answer, from debconf's database entirely,
+  regardless of whether the subsequent `systemd-creds` migration for that value goes on to succeed or
+  fail. The template definition itself lives in `send-to-influx.templates`, not in the database entry
+  that got removed, so it's re-registered fresh the next time `config`/`postinst` run -
+  `dpkg-reconfigure` is unaffected. Separately, and unrelated to whether the value is unregistered,
+  debconf *never* redisplays/pre-fills a previous password answer in the prompt on a later
+  invocation - a UI convention for this template type. So a reconfigure always shows secret prompts
+  blank, with no way for `postinst` to distinguish "leave it as-is" from "clear it" from that alone -
+  resolved by not supporting clearing via debconf at all: `postinst` treats blank as "keep the existing
+  systemd-creds value," and removing a credential goes through `send-to-influx-set-credential <name>
+  --remove` directly instead.
 
 ### Branch protection
 

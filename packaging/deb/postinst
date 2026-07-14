@@ -73,6 +73,15 @@ if [ "$SOURCES" != "  " ]; then
     INFLUX_IDENTITY="$RET"
     db_get send-to-influx/influx-secret
     INFLUX_SECRET="$RET"
+    # Type: password answers are written to debconf's own database (a separate
+    # passwords.dat store, chmod 600) - debconf-devel(7) advises clearing a
+    # password value out of it "as soon as is possible" once consumed. We've
+    # just read it into $INFLUX_SECRET, so unregister the question now,
+    # regardless of what happens with the value from here - this doesn't
+    # affect a later dpkg-reconfigure, which re-registers the question fresh
+    # from send-to-influx.templates and prompts for it again either way (a
+    # Type: password prompt is never pre-filled, unregistered or not).
+    db_unregister send-to-influx/influx-secret || true
 
     INFLUX_OK=0
     if [ -n "$INFLUX_IDENTITY" ] && [ -n "$INFLUX_SECRET" ]; then
@@ -107,6 +116,7 @@ if [ "$SOURCES" != "  " ]; then
             HUE_HOST="$RET"
             db_get send-to-influx/hue-user
             HUE_USER="$RET"
+            db_unregister send-to-influx/hue-user || true
             if [ -n "$HUE_HOST" ] && [ -n "$HUE_USER" ]; then
                 CLI_FAILED=0
                 set_field hue.host "$HUE_HOST"
@@ -130,6 +140,7 @@ if [ "$SOURCES" != "  " ]; then
         *" zappi "*|*" harvi "*|*" eddi "*)
             db_get send-to-influx/myenergi-apikey
             MYENERGI_APIKEY="$RET"
+            db_unregister send-to-influx/myenergi-apikey || true
             if [ -n "$MYENERGI_APIKEY" ]; then
                 CLI_FAILED=0
                 set_secret myenergi-apikey "$MYENERGI_APIKEY"
@@ -197,6 +208,7 @@ if [ "$SOURCES" != "  " ]; then
         *" octopus "*)
             db_get send-to-influx/octopus-api-key
             OCTOPUS_KEY="$RET"
+            db_unregister send-to-influx/octopus-api-key || true
             db_get send-to-influx/octopus-mpan
             OCTOPUS_MPAN="$RET"
             db_get send-to-influx/octopus-meter-serial
