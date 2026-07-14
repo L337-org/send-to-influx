@@ -310,10 +310,18 @@ if yours has a valid cert.
 - **Error Recovery**: Graceful handling of temporary network issues
 
 ## Security Notes
-- **Credentials**: Store sensitive data in `settings.yaml` with appropriate file permissions (the
-  packaged install locks it to `chmod 600`). An environment-variable secrets override was
-  implemented and then deliberately removed - see CLAUDE.md's "Rejected: environment-variable
-  secrets" section before re-proposing it.
+- **Credentials**: Store sensitive data in `settings.yaml` with appropriate file permissions if you
+  keep them there in plaintext - the packaged install's fresh-install default is `644`, not `600`
+  (safe because a freshly-packaged file never contains a real secret, only placeholder/sentinel text,
+  unless hand-edited). An environment-variable secrets override was implemented and then deliberately
+  removed - see CLAUDE.md's "Rejected: environment-variable secrets" section before re-proposing it.
+- **`systemd-creds`**: on the packaged install (`systemd >= 250`), `send-to-influx-set-credential
+  <name>` moves a credential out of `settings.yaml` into `systemd-creds` (TPM/host-key encryption at
+  rest) - see CLAUDE.md's "Credential storage (`systemd-creds`)" section. Opt-in, per-field;
+  `toinflux/credentials.py` is the single source of truth for which fields are eligible.
+- **`enforce_permissions`**: settings.yaml key, default `false`; `true` makes `send-to-influx` refuse
+  to start (not just warn) if the file is group/other-readable and contains a real credential. New
+  installs ship it `true`.
 - **HTTPS**: Use HTTPS for all API connections in production
 - **Validation**: Validate all input data before processing
 - **Logging**: Avoid logging sensitive information

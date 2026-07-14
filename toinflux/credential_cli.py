@@ -1,0 +1,517 @@
+"""send-to-influx-set-credential: manage secrets in systemd-creds for the packaged
+.deb/systemd install, and make small direct edits to settings.yaml alongside them.
+
+Only meaningful on a systemd host with systemd-creds (systemd >= 250) - not a
+requirement of the base package, since that would make the whole package
+uninstallable on currently-supported platforms whose systemd is just under that
+(e.g. Ubuntu 22.04/jammy ships 249). Checked at runtime instead; see
+_require_systemd_creds().
+"""
+
+__author__ = "Gavin Lucas"
+__copyright__ = "Copyright (C) 2025 Gavin Lucas"
+__license__ = "MIT License"
+
+import argparse
+import getpass
+import logging
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import stat as stat_module
+
+import requests
+import yaml
+
+from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, sentinel_for
+
+DEFAULT_SETTINGS_PATH = "/etc/send-to-influx/settings.yaml"
+CREDSTORE_DIR = "/etc/send-to-influx/credstore.encrypted"
+DROPIN_DIR = "/etc/systemd/system/send-to-influx.service.d"
+DROPIN_PATH = os.path.join(DROPIN_DIR, "50-credentials.conf")
+MIN_SYSTEMD_CREDS_VERSION = 250
+HTTP_TIMEOUT_SECONDS = 5
+
+
+class CredentialCliError(Exception):
+    """A user-facing error - message is printed to stderr, process exits 1."""
+
+
+# --------------------------------------------------------------------------- #
+# systemd-creds runtime capability check
+# --------------------------------------------------------------------------- #
+
+
+def _parse_systemd_creds_version(version_output):
+    """Parse the leading version number out of `systemd-creds --version` output
+    (e.g. "systemd 255 (255.4-1ubuntu8.4)\\n+PAM +AUDIT ...").
+
+    :param version_output: raw stdout from `systemd-creds --version`
+    :type version_output: str
+    :return: the version number, or None if it couldn't be parsed
+    :rtype: int or None
+    """
+    match = re.search(r"systemd\s+(\d+)", version_output)
+    return int(match.group(1)) if match else None
+
+
+def _require_systemd_creds():
+    """Confirm systemd-creds exists and is new enough. Raises CredentialCliError with
+    a specific, actionable message otherwise.
+
+    :raises CredentialCliError: if systemd-creds is missing or older than
+        MIN_SYSTEMD_CREDS_VERSION
+    """
+    try:
+        result = subprocess.run(["systemd-creds", "--version"], capture_output=True, text=True, check=True)
+    except FileNotFoundError as exc:
+        raise CredentialCliError(
+            "systemd-creds not found. It requires systemd >= "
+            f"{MIN_SYSTEMD_CREDS_VERSION}; credential storage isn't available on this "
+            "host - edit settings.yaml directly instead."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise CredentialCliError(f"'systemd-creds --version' failed: {exc}") from exc
+
+    version = _parse_systemd_creds_version(result.stdout)
+    if version is None or version < MIN_SYSTEMD_CREDS_VERSION:
+        found = version if version is not None else "an unrecognised version"
+        raise CredentialCliError(
+            f"systemd-creds requires systemd >= {MIN_SYSTEMD_CREDS_VERSION}; this host has "
+            f"{found} - credential storage isn't available here, edit settings.yaml "
+            "directly instead."
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Secret input / validation
+# --------------------------------------------------------------------------- #
+
+
+def _read_secret_value(name):
+    """Read a secret from stdin if piped, else prompt interactively (masked).
+
+    :param name: credential name, used only in the interactive prompt
+    :type name: str
+    :rtype: str
+    """
+    if sys.stdin.isatty():
+        return getpass.getpass(f"Value for {name}: ").strip()
+    return sys.stdin.read().strip()
+
+
+def _validate_secret_value(name, value):
+    """Reject empty/placeholder/multiline input before anything is touched on disk.
+
+    :raises CredentialCliError: if the value looks invalid
+    """
+    if not value.strip():
+        raise CredentialCliError("Value must not be empty.")
+    if value == PLACEHOLDER_VALUES.get(name):
+        raise CredentialCliError(
+            "That's still the placeholder value from example_settings.yaml - enter the real secret."
+        )
+    if "\n" in value:
+        raise CredentialCliError("Value must not contain embedded newlines.")
+
+
+# --------------------------------------------------------------------------- #
+# credstore.encrypted / drop-in management
+# --------------------------------------------------------------------------- #
+
+
+# NOTE: the credstore_dir/dropin_path parameters below default to None and resolve
+# to the module-level constant *inside* the function body, rather than
+# `def f(x=CREDSTORE_DIR)` - Python binds a default argument's value once, at def
+# time, so `def f(x=CREDSTORE_DIR)` would freeze in the value CREDSTORE_DIR had at
+# import time and silently ignore any later `monkeypatch.setattr(module,
+# "CREDSTORE_DIR", ...)` in tests (or any other reassignment of the module global).
+# Resolving inside the body reads the name from the module's global namespace fresh
+# on every call, so patching the module attribute actually takes effect.
+
+
+def _cred_path(name, credstore_dir=None):
+    if credstore_dir is None:
+        credstore_dir = CREDSTORE_DIR
+    return os.path.join(credstore_dir, f"{name}.cred")
+
+
+def _regenerate_dropin(credstore_dir=None, dropin_path=None, exclude=None):
+    """Rewrite the systemd drop-in from a fresh directory listing of credstore_dir -
+    idempotent and self-healing if a prior run was interrupted, no separate state
+    file needed.
+
+    :param exclude: a credential name to treat as absent even if its .cred file still
+        exists on disk - used by _cmd_remove so the drop-in never references a file
+        that's about to be deleted, even transiently (LoadCredentialEncrypted=
+        referencing a missing path hard-fails unit startup with 243/CREDENTIALS)
+    :type exclude: str or None
+    """
+    if credstore_dir is None:
+        credstore_dir = CREDSTORE_DIR
+    if dropin_path is None:
+        dropin_path = DROPIN_PATH
+
+    lines = ["[Service]"]
+    for name in sorted(CREDENTIAL_FIELDS):
+        if name == exclude:
+            continue
+        cred_path = _cred_path(name, credstore_dir)
+        if os.path.isfile(cred_path):
+            lines.append(f"LoadCredentialEncrypted={name}:{cred_path}")
+
+    if len(lines) == 1:
+        if os.path.exists(dropin_path):
+            os.remove(dropin_path)
+        return
+
+    os.makedirs(os.path.dirname(dropin_path), exist_ok=True)
+    _atomic_write(dropin_path, "\n".join(lines) + "\n")
+
+
+def _reload_systemd():
+    if os.path.isdir("/run/systemd/system"):
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+
+
+def _encrypt_credential(name, value, credstore_dir=None):
+    """Encrypt value with systemd-creds and write it to credstore_dir/<name>.cred.
+
+    :raises CredentialCliError: if systemd-creds encrypt fails
+    """
+    if credstore_dir is None:
+        credstore_dir = CREDSTORE_DIR
+    os.makedirs(credstore_dir, exist_ok=True)
+    cred_path = _cred_path(name, credstore_dir)
+    try:
+        subprocess.run(
+            ["systemd-creds", "encrypt", f"--name={name}", "-", cred_path],
+            input=value.encode(),
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="replace") if exc.stderr else str(exc)
+        raise CredentialCliError(f"systemd-creds encrypt failed for '{name}': {stderr}") from exc
+    os.chmod(cred_path, stat_module.S_IRUSR | stat_module.S_IWUSR)
+
+
+def _decrypt_credential(name, credstore_dir=None):
+    """Decrypt credstore_dir/<name>.cred back to plaintext, held only in memory.
+
+    Works standalone, outside of any running systemd service: this always runs as
+    root on the same host that holds the same TPM/host key systemd-creds encrypt
+    used, so it can always decrypt what it just encrypted.
+
+    :raises CredentialCliError: if the credential doesn't exist or decryption fails
+    """
+    if credstore_dir is None:
+        credstore_dir = CREDSTORE_DIR
+    cred_path = _cred_path(name, credstore_dir)
+    if not os.path.isfile(cred_path):
+        raise CredentialCliError(f"No stored credential for '{name}' at {cred_path}.")
+    try:
+        result = subprocess.run(["systemd-creds", "decrypt", cred_path, "-"], check=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="replace") if exc.stderr else str(exc)
+        raise CredentialCliError(f"systemd-creds decrypt failed for '{name}': {stderr}") from exc
+    return result.stdout.decode().strip()
+
+
+# --------------------------------------------------------------------------- #
+# settings.yaml surgical edit
+# --------------------------------------------------------------------------- #
+
+
+def _atomic_write(path, content):
+    """Write content to path atomically (temp file + os.replace), preserving the
+    original file's owner/mode if it already exists - a naive rewrite would
+    otherwise land owned by whoever ran this script instead of
+    send-to-influx:send-to-influx 0600/0644.
+    """
+    directory = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf8") as f:
+            f.write(content)
+        try:
+            st = os.stat(path)
+            os.chown(tmp_path, st.st_uid, st.st_gid)
+            os.chmod(tmp_path, stat_module.S_IMODE(st.st_mode))
+        except OSError:
+            pass
+        os.replace(tmp_path, path)
+    except BaseException:
+        os.unlink(tmp_path)
+        raise
+
+
+def _find_mapping_value(node, key):
+    """Walk one level of a yaml.compose() MappingNode looking for a scalar key."""
+    if node is None or not isinstance(node, yaml.MappingNode):
+        return None
+    for key_node, value_node in node.value:
+        if key_node.value == key:
+            return value_node
+    return None
+
+
+def _rewrite_settings_field(settings_path, top_key, field, new_value):
+    """Replace a single scalar field's value in place, preserving every other byte of
+    the file (comments, ordering, blank lines) by locating the exact source line via
+    yaml.compose() rather than a full load+dump round trip, which would silently
+    strip every comment - example_settings.yaml is comment-dense and users are
+    expected to keep reading/editing it.
+
+    :raises CredentialCliError: if the target section/field doesn't exist, or isn't a
+        plain single-line scalar (e.g. hand-edited into a block scalar) - refuses
+        rather than corrupting the file
+    """
+    with open(settings_path, encoding="utf8") as f:
+        text = f.read()
+
+    try:
+        root = yaml.compose(text)
+    except yaml.YAMLError as exc:
+        raise CredentialCliError(f"{settings_path}: could not parse YAML: {exc}") from exc
+
+    top_node = _find_mapping_value(root, top_key)
+    if top_node is None:
+        raise CredentialCliError(f"{settings_path}: no '{top_key}:' section found - add it manually first")
+    value_node = _find_mapping_value(top_node, field)
+    if value_node is None or value_node.start_mark.line != value_node.end_mark.line:
+        raise CredentialCliError(
+            f"{settings_path}: could not safely rewrite {top_key}.{field} automatically "
+            "(missing, or not a plain single-line value) - edit it by hand instead"
+        )
+
+    lines = text.splitlines(keepends=True)
+    line_no = value_node.start_mark.line
+    line = lines[line_no]
+    indent = line[: len(line) - len(line.lstrip())]
+    escaped = new_value.replace("\\", "\\\\").replace('"', '\\"')
+    lines[line_no] = f'{indent}{field}: "{escaped}"\n'
+
+    _atomic_write(settings_path, "".join(lines))
+
+
+# --------------------------------------------------------------------------- #
+# InfluxDB version detection / storage creation (used by Part 2's debconf postinst)
+# --------------------------------------------------------------------------- #
+
+
+def _detect_influx_version(url):
+    """Probe url to determine whether it's an InfluxDB v1 or v2 instance, without
+    needing any credential - both /health (v2) and /ping (v1, and v2 for backward
+    compat) are unauthenticated health-check endpoints on real InfluxDB servers.
+
+    :return: "v1", "v2", or "unknown" (unreachable/ambiguous - never raises)
+    :rtype: str
+    """
+    try:
+        resp = requests.get(f"{url.rstrip('/')}/health", timeout=HTTP_TIMEOUT_SECONDS)
+        if resp.status_code == 200:
+            data = resp.json()
+            if str(data.get("version", "")).startswith("2."):
+                return "v2"
+    except (requests.RequestException, ValueError):
+        pass
+
+    try:
+        resp = requests.get(f"{url.rstrip('/')}/ping", timeout=HTTP_TIMEOUT_SECONDS)
+        version = resp.headers.get("X-Influxdb-Version", "")
+        if version.startswith("1."):
+            return "v1"
+        if version.startswith("2."):
+            return "v2"
+    except requests.RequestException:
+        pass
+
+    return "unknown"
+
+
+def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
+    """Best-effort create the InfluxDB database (v1) or bucket (v2) named `name`.
+    Never raises on failure (permissions/auth/unreachable) - logs and returns, since
+    install/auto-enable must not be blocked by this.
+
+    Authenticates by reading url/org/user straight from settings.yaml (not secrets)
+    and decrypting the stored token/password via systemd-creds decrypt - see
+    _decrypt_credential(). The decrypted value is held only in memory for this one
+    call and never written back to disk.
+    """
+    if settings_path is None:
+        settings_path = DEFAULT_SETTINGS_PATH
+    if credstore_dir is None:
+        credstore_dir = CREDSTORE_DIR
+    with open(settings_path, encoding="utf8") as f:
+        settings = yaml.safe_load(f)
+    influx = settings.get("influx", {})
+    url = influx.get("url", "").rstrip("/")
+    if not url:
+        logging.warning("send-to-influx-set-credential: no influx.url configured, skipping storage creation")
+        return
+
+    is_v2 = os.path.isfile(_cred_path("influx-token", credstore_dir))
+    try:
+        if is_v2:
+            token = _decrypt_credential("influx-token", credstore_dir)
+            org = influx.get("org", "")
+            headers = {"Authorization": f"Token {token}"}
+            resp = requests.get(
+                f"{url}/api/v2/buckets", params={"org": org}, headers=headers, timeout=HTTP_TIMEOUT_SECONDS
+            )
+            resp.raise_for_status()
+            existing = {b.get("name") for b in resp.json().get("buckets", [])}
+            if name in existing:
+                logging.info("InfluxDB bucket '%s' already exists", name)
+                return
+            resp = requests.post(
+                f"{url}/api/v2/buckets",
+                headers=headers,
+                json={"name": name, "orgID": _resolve_org_id(url, headers, org)},
+                timeout=HTTP_TIMEOUT_SECONDS,
+            )
+            resp.raise_for_status()
+            logging.info("Created InfluxDB v2 bucket '%s'", name)
+        else:
+            password = _decrypt_credential("influx-password", credstore_dir)
+            user = influx.get("user", "")
+            resp = requests.post(
+                f"{url}/query",
+                params={"q": f'CREATE DATABASE "{name}"'},
+                auth=(user, password),
+                timeout=HTTP_TIMEOUT_SECONDS,
+            )
+            resp.raise_for_status()
+            logging.info("Ensured InfluxDB v1 database '%s' exists", name)
+    except (requests.RequestException, CredentialCliError) as exc:
+        logging.warning(
+            "Could not create InfluxDB storage '%s' automatically (%s) - create it yourself if needed.",
+            name,
+            exc,
+        )
+
+
+def _resolve_org_id(url, headers, org_name):
+    """Look up the org ID for org_name - the v2 bucket-create API needs orgID, not
+    just the org name."""
+    resp = requests.get(f"{url}/api/v2/orgs", params={"org": org_name}, headers=headers, timeout=HTTP_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    orgs = resp.json().get("orgs", [])
+    if not orgs:
+        raise CredentialCliError(f"could not resolve org id for org '{org_name}'")
+    return orgs[0]["id"]
+
+
+# --------------------------------------------------------------------------- #
+# Subcommands
+# --------------------------------------------------------------------------- #
+
+
+def _cmd_set(name, settings_path):
+    _require_systemd_creds()
+    value = _read_secret_value(name)
+    _validate_secret_value(name, value)
+    _encrypt_credential(name, value)
+    _regenerate_dropin()
+    _reload_systemd()
+    top_key, field = CREDENTIAL_FIELDS[name]
+    _rewrite_settings_field(settings_path, top_key, field, sentinel_for(name))
+    print(f"Stored '{name}' in systemd-creds and updated {settings_path}.")
+
+
+def _cmd_remove(name, settings_path):
+    # Order matters: regenerate the drop-in (dropping this credential's line) before
+    # deleting the .cred file, never after - LoadCredentialEncrypted= referencing a
+    # missing path hard-fails unit startup, so the drop-in must never be left
+    # pointing at a file that's already gone, even transiently if this is
+    # interrupted mid-way.
+    _regenerate_dropin(exclude=name)
+    _reload_systemd()
+    cred_path = _cred_path(name)
+    if os.path.isfile(cred_path):
+        os.remove(cred_path)
+    top_key, field = CREDENTIAL_FIELDS[name]
+    _rewrite_settings_field(settings_path, top_key, field, PLACEHOLDER_VALUES[name])
+    print(f"Removed '{name}' from systemd-creds and reverted {settings_path} to the placeholder value.")
+
+
+def _cmd_list(credstore_dir=CREDSTORE_DIR):
+    for name in sorted(CREDENTIAL_FIELDS):
+        status = "configured" if os.path.isfile(_cred_path(name, credstore_dir)) else "not set"
+        print(f"{name}: {status}")
+
+
+def _cmd_set_field(dotted_path, value, settings_path):
+    top_key, _, field = dotted_path.partition(".")
+    if not field:
+        raise CredentialCliError(f"'{dotted_path}' must be in the form <section>.<field>, e.g. hue.host")
+    _rewrite_settings_field(settings_path, top_key, field, value)
+    print(f"Updated {top_key}.{field} in {settings_path}.")
+
+
+def _cmd_detect_influx_version(url):
+    print(_detect_influx_version(url))
+
+
+def _cmd_ensure_influx_storage(name, settings_path):
+    _ensure_influx_storage(name, settings_path=settings_path)
+
+
+# --------------------------------------------------------------------------- #
+# argparse entry point
+# --------------------------------------------------------------------------- #
+
+
+def _build_parser():
+    parser = argparse.ArgumentParser(prog="send-to-influx-set-credential")
+    parser.add_argument(
+        "--settings", default=DEFAULT_SETTINGS_PATH, help="settings.yaml to update (default: %(default)s)"
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("name", nargs="?", choices=sorted(CREDENTIAL_FIELDS), help="credential name to set/remove")
+    group.add_argument("--list", action="store_true", help="list which credentials are configured")
+    group.add_argument("--set-field", nargs=2, metavar=("PATH", "VALUE"), help="write a plain, non-secret YAML field")
+    group.add_argument("--detect-influx-version", metavar="URL", help="probe URL and print v1/v2/unknown")
+    group.add_argument("--ensure-influx-storage", metavar="NAME", help="best-effort create a v1 database/v2 bucket")
+    parser.add_argument("--remove", action="store_true", help="remove the named credential instead of setting it")
+    return parser
+
+
+def main(argv=None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        if args.list:
+            _cmd_list()
+            return 0
+        if args.set_field is not None:
+            _cmd_set_field(args.set_field[0], args.set_field[1], args.settings)
+            return 0
+        if args.detect_influx_version is not None:
+            _cmd_detect_influx_version(args.detect_influx_version)
+            return 0
+        if args.ensure_influx_storage is not None:
+            _cmd_ensure_influx_storage(args.ensure_influx_storage, args.settings)
+            return 0
+
+        if os.geteuid() != 0:
+            raise CredentialCliError(
+                "must be run as root (sudo) - it writes /etc/send-to-influx and systemd unit config"
+            )
+        if args.remove:
+            _cmd_remove(args.name, args.settings)
+        else:
+            _cmd_set(args.name, args.settings)
+        return 0
+    except CredentialCliError as exc:
+        print(f"send-to-influx-set-credential: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

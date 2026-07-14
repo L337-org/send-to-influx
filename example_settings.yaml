@@ -1,5 +1,11 @@
 # Settings for the HueToInflux script
 
+# Refuse to start if settings.yaml is readable by group/other AND actually contains a
+# real credential (not just placeholder/systemd-creds-sentinel text). New installs
+# default this to true; upgraded installs that predate this key default to false
+# (warning-only) until you opt in - see SECURITY.md.
+enforce_permissions: true
+
 # The sources to be kicked off by the wrapper script
 sources:
   - "hue"

@@ -6,11 +6,14 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 # pylint: disable=import-outside-toplevel
+import copy
 import logging
 import os
+import stat
 import sys
 from logging.handlers import RotatingFileHandler
 import yaml
+from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, SENTINEL_PREFIX, apply_credential_substitution
 from toinflux.exceptions import ConfigError
 
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
@@ -206,6 +209,100 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
         raise ConfigError("; ".join(errors))
 
 
+def _contains_real_secret(settings):
+    """Return True if any known credential field holds something that looks like a
+    real, user-entered secret - not empty, not a placeholder, not a systemd-creds
+    sentinel.
+
+    :param settings: settings dictionary to inspect
+    :type settings: dict
+    :rtype: bool
+    """
+    for top_key, field in CREDENTIAL_FIELDS.values():
+        block = settings.get(top_key)
+        if not isinstance(block, dict):
+            continue
+        value = block.get(field)
+        if not value:
+            continue
+        if value in PLACEHOLDER_VALUES.values():
+            continue
+        if isinstance(value, str) and value.startswith(SENTINEL_PREFIX):
+            continue
+        return True
+    return False
+
+
+def _enforce_settings_file_permissions(settings_path, raw_settings):
+    """Warn (always) and optionally refuse (if enforce_permissions is true) when
+    settings_path is group/other readable and actually contains a real credential.
+
+    Takes an explicit snapshot of the raw, pre-substitution settings dict as a
+    parameter rather than depending on being called before
+    apply_credential_substitution() (which mutates its input in place) - this is what
+    makes the function genuinely callable independently/at any time, not just
+    correct-by-accident from sitting earlier in one particular call sequence.
+    Checking the raw on-disk content (not whatever ends up injected in-memory from
+    the properly-protected /run/credentials/... tmpfs) matters because that
+    substituted value would make a file that's actually clean (sentinel only) look
+    like it contains a real secret, if this were ever run against the mutated dict.
+
+    :param settings_path: path to the settings file, used only for the log/error message
+    :type settings_path: str
+    :param raw_settings: settings dict as parsed from YAML, before any substitution
+    :type raw_settings: dict
+    :raises ConfigError: if the file is group/other readable, contains a real
+        credential, and enforce_permissions is true
+    """
+    try:
+        mode = os.stat(settings_path).st_mode
+    except OSError:
+        return
+    if not (mode & (stat.S_IRGRP | stat.S_IROTH)):
+        return
+    if not _contains_real_secret(raw_settings):
+        return
+    enforce = bool(raw_settings.get("enforce_permissions", False))
+    logging.warning(
+        "%s is readable by group/other (mode %s) and contains what looks like a real credential. "
+        "Run 'chmod 600 %s' to restrict access.%s",
+        settings_path,
+        oct(mode & 0o777),
+        settings_path,
+        " Refusing to start because enforce_permissions: true is set." if enforce else "",
+    )
+    if enforce:
+        raise ConfigError(
+            f"{settings_path} is group/other readable and contains a credential, and "
+            f"enforce_permissions is true; refusing to start. Run: chmod 600 {settings_path}"
+        )
+
+
+def _clear_unsubstituted_credential_sentinels(settings):
+    """Blank any credential field that still holds the literal sentinel text after
+    apply_credential_substitution() ran - i.e. settings.yaml was migrated to
+    systemd-creds but the matching credential file wasn't found (drop-in removed,
+    service run outside systemd, etc). Left unhandled, a non-empty sentinel string
+    passes validate_settings()'s existing truthiness checks, and the daemon starts
+    "successfully" then fails auth forever as a retried SourceConnectionError instead
+    of failing fast as the ConfigError it actually is - this reuses
+    validate_settings()'s existing required-field logic for free.
+
+    :param settings: settings dict, mutated in place and returned
+    :type settings: dict
+    :return: the same dict
+    :rtype: dict
+    """
+    for top_key, field in CREDENTIAL_FIELDS.values():
+        block = settings.get(top_key)
+        if not isinstance(block, dict):
+            continue
+        value = block.get(field)
+        if isinstance(value, str) and value.startswith(SENTINEL_PREFIX):
+            block[field] = ""
+    return settings
+
+
 def load_settings(settings_file=None):
     """Load settings from a YAML file and return as a dictionary.
 
@@ -235,6 +332,11 @@ def load_settings(settings_file=None):
         if not isinstance(settings, dict) or not settings:
             logging.critical("Invalid or empty configuration in %s. Please check %s.", settings_path, settings_path)
             raise ConfigError(f"Invalid or empty configuration in {settings_path}")
+
+        raw_settings_snapshot = copy.deepcopy(settings)
+        _enforce_settings_file_permissions(settings_path, raw_settings_snapshot)
+        settings = apply_credential_substitution(settings)
+        settings = _clear_unsubstituted_credential_sentinels(settings)
 
         validate_settings(settings, settings_path=settings_path)
         return settings

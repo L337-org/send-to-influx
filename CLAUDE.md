@@ -79,7 +79,7 @@ Speedtest's `get_data()` additionally rejects an implausible `ping` (>= 5000 ms)
 
 - `toinflux/general.py`: `load_settings(settings_file=None)` (raises `ConfigError` on missing/invalid YAML; `settings_file` defaults to `settings.yaml` in the project root when omitted), `get_class(source, settings_file=None)` (case-insensitive factory → correct DataHandler subclass; raises `ConfigError` for an unknown source, including `DataHandler` itself — it's the abstract base, not a selectable source; threads `settings_file` through to the handler's `load_settings()` call), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped stdout logging, plus an optional `RotatingFileHandler`; raises `ConfigError` instead of a raw `OSError` if `logfile` can't be opened, e.g. a permissions problem).
 - `configure_logging()` is called via `_configure_logging_or_exit()` in `main()` after settings are loaded and `--check-config` has short-circuited - this catches that `ConfigError`, logs it (the stdout handler is already attached by the time it's raised, so this still reaches the journal under systemd as a normal formatted line, not a traceback), and exits 1. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`. Effective log level is `-v`/`--verbose` (forces `DEBUG`) > `loglevel` settings.yaml key > `INFO` default.
-- Config file: `settings.yaml` (copy from `example_settings.yaml`), or a custom path via `--settings`. Required at runtime; not committed. Optional `logfile` key adds a rotating file log destination (`log_max_bytes`/`log_backup_count` settings keys control rotation, defaulting to 10 MiB / 3 backups). No environment-variable secret-override mechanism (considered and deliberately rejected - see "Rejected: environment-variable secrets" below).
+- Config file: `settings.yaml` (copy from `example_settings.yaml`), or a custom path via `--settings`. Required at runtime; not committed. Optional `logfile` key adds a rotating file log destination (`log_max_bytes`/`log_backup_count` settings keys control rotation, defaulting to 10 MiB / 3 backups). Some fields can optionally be sourced from `systemd-creds` instead on the packaged install - see "Credential storage (`systemd-creds`)" below; an environment-variable secret-override mechanism was considered and deliberately rejected instead - see "Rejected: environment-variable secrets" below.
 
 ### Adding a new data source
 
@@ -137,13 +137,73 @@ security value:
   trust that a given user's `settings.yaml` has no secrets in it, so the advice would always have to
   be "redact before sharing" regardless of whether this feature exists.
 
-If genuinely stronger credential handling is wanted later, `systemd`'s `LoadCredential=`/
-`systemd-creds encrypt` is the option worth investigating - it creates a *real* boundary (TPM-bound
-encryption at rest, credentials materialized only in a restricted tmpfs for the service's lifetime)
-rather than an organizational one. Not yet implemented: it only helps the packaged systemd install
-(not the plain screen-session/source-checkout path this project treats as equally first-class), and
-would be a third credential-handling mechanism alongside the YAML file - a bigger, separate design
-conversation, not a small addition.
+`systemd`'s `LoadCredential=`/`systemd-creds encrypt` is now implemented for exactly this reason - it
+creates a *real* boundary (TPM-bound or host-key encryption at rest, credentials materialized only in
+a restricted tmpfs for the service's lifetime) rather than an organizational one. See "Credential
+storage (`systemd-creds`)" below. It only helps the packaged systemd install, same as this rejected
+approach would have - the plain screen-session/source-checkout path this project treats as equally
+first-class is unaffected either way, since `$CREDENTIALS_DIRECTORY` is simply unset there.
+
+### Credential storage (`systemd-creds`)
+
+For the packaged `.deb`/systemd install, secrets can optionally be moved out of `settings.yaml` and
+into `systemd-creds` - a real security boundary (TPM-bound or host-key-derived encryption at rest,
+decrypted only into a restricted tmpfs for the service's lifetime), unlike the rejected env-var
+mechanism above. This is opt-in: the plain-YAML path is unaffected and remains equally first-class for
+the source-checkout/screen-session path, where `systemd-creds` doesn't apply at all.
+
+- `toinflux/credentials.py`: `CREDENTIAL_FIELDS` is the single source of truth mapping a systemd-creds
+  credential name (e.g. `influx-token`) to the `(top-level key, field)` it overlays in the parsed
+  settings dict (e.g. `("influx", "token")`) - 6 credentials across `influx` (`token`, `user`,
+  `password`), `hue` (`user`), `myenergi` (`apikey`), `octopus` (`api_key`). `PLACEHOLDER_VALUES`
+  matches `example_settings.yaml`'s literal placeholder text per field; `sentinel_for(name)` returns
+  the cosmetic string written into `settings.yaml` once a field is migrated (never read back for real
+  use - purely informational for a human reading the file). `apply_credential_substitution(settings)`
+  overlays whatever's decrypted into `$CREDENTIALS_DIRECTORY` (set by systemd when the unit's
+  `LoadCredentialEncrypted=` directives are active) into the settings dict - a no-op when that env var
+  is unset, which is what keeps the source-checkout path and any not-yet-migrated packaged install
+  byte-for-byte unaffected.
+- `toinflux/general.py`'s `load_settings()` calls, in order, right after `yaml.safe_load()` and before
+  any other logic touches the parsed dict: `_enforce_settings_file_permissions()` (against an explicit
+  `copy.deepcopy()` snapshot of the raw, pre-substitution dict - not dependent on being called before
+  `apply_credential_substitution()`, which mutates its input in place), `apply_credential_substitution()`,
+  then `_clear_unsubstituted_credential_sentinels()` (blanks any of the 6 fields still holding sentinel
+  text after substitution - e.g. `settings.yaml` was migrated but the matching `.cred` file wasn't
+  found - so a decoy string can't pass `validate_settings()`'s truthiness checks as if it were real,
+  which would otherwise let the daemon start "successfully" and then fail auth forever as a retried
+  `SourceConnectionError` instead of failing fast as the `ConfigError` it actually is).
+- `_enforce_settings_file_permissions()` is content-aware, not purely mode-based: it only warns/refuses
+  when `settings.yaml` is group/other-readable *and* actually contains a real credential (not just a
+  placeholder or sentinel) - this is what makes `postinst`'s fresh-install default of `644` (not `600`)
+  safe, since a freshly-packaged file never contains a real secret unless a human hand-edits one in.
+  Controlled by the `enforce_permissions` settings.yaml key (default `false` when the key is absent, so
+  every pre-existing `settings.yaml` keeps working with just a warning; `example_settings.yaml` ships
+  `true` explicitly, so new installs enforce by default) - `true` additionally raises `ConfigError`
+  instead of just warning.
+- `toinflux/credential_cli.py` (`send-to-influx-set-credential`, a second `pyproject.toml` entry point):
+  `<name>` encrypts a secret (read from stdin if piped, else an interactive masked prompt) via
+  `systemd-creds encrypt`, writes it to `/etc/send-to-influx/credstore.encrypted/<name>.cred`,
+  regenerates a systemd drop-in (`/etc/systemd/system/send-to-influx.service.d/50-credentials.conf`,
+  rebuilt from a fresh directory listing on every call - idempotent, self-healing, no separate state
+  file) with the matching `LoadCredentialEncrypted=` line, and rewrites the corresponding
+  `settings.yaml` field to the sentinel text via a `yaml.compose()`-based surgical edit (preserves every
+  other byte of the file - comments, ordering - rather than a full load+dump round trip, and refuses
+  rather than corrupts if the target isn't a plain single-line scalar). `--remove` reverses this -
+  critically, it regenerates the drop-in (dropping the credential's line) *before* deleting the `.cred`
+  file, never after, since `LoadCredentialEncrypted=NAME:PATH` referencing a missing `PATH` hard-fails
+  unit startup with `243/CREDENTIALS` (confirmed via systemd's own issue tracker: systemd/systemd#35077,
+  #32667) - the drop-in must never be left pointing at a file that's already gone, even transiently.
+  `--list` shows configured/not-set per credential. `--set-field`/`--detect-influx-version`/
+  `--ensure-influx-storage` support the debconf-driven install flow (below).
+- The base `packaging/send-to-influx.service` unit ships zero `LoadCredentialEncrypted=` directives -
+  all credential wiring lives purely in the drop-in the CLI manages, so a fresh install that's never
+  run the script is byte-for-byte identical to before this feature existed.
+- `systemd-creds` availability is checked at runtime (`systemd-creds --version`, must be >= 250, the
+  version that introduced it), not via a package-wide `Depends:` floor - Ubuntu 22.04/jammy ships
+  systemd 249, one version short, and is otherwise a currently-supported platform (unlike Debian
+  11/bullseye, already excluded by the existing `python3 (>= 3.10)` `Depends:`) - a `Depends:` bump
+  would make the whole package uninstallable there just to gate one opt-in feature. A missing/too-old
+  `systemd-creds` fails with a specific message rather than blocking install.
 
 ### Branch protection
 

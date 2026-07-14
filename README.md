@@ -254,6 +254,28 @@ first:
 Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as
 stdout above.
 
+### Storing secrets in systemd-creds
+
+By default, `settings.yaml` holds credentials (InfluxDB token/user/password, Hue bridge user,
+MyEnergi API key, Octopus API key) in plaintext, same as the source-checkout path. On the packaged
+install (requires `systemd >= 250`), you can instead move them into
+[systemd-creds](https://systemd.io/CREDENTIALS/) - encrypted at rest with a TPM-bound or host-derived
+key, decrypted only into a restricted, in-memory location for the service's lifetime:
+
+    sudo send-to-influx-set-credential influx-token
+    sudo send-to-influx-set-credential --list
+
+Run `send-to-influx-set-credential --list` to see the full set of available credential names. Each
+`set` call prompts for the value (or reads it from stdin if piped, e.g.
+`echo -n "$TOKEN" | sudo send-to-influx-set-credential influx-token`) and replaces the plaintext value
+in `settings.yaml` with a note that it's now managed elsewhere - the file stays readable for the rest
+of its content, but that field is never used from it again. Use
+`send-to-influx-set-credential <name> --remove` to revert a credential back to plaintext.
+
+This is entirely optional and per-field - you can mix systemd-creds and plaintext values freely, and
+the source-checkout/screen-session path is unaffected either way, since systemd-creds only applies
+under the packaged systemd service.
+
 Usage
 -----
 >$ ./.venv/bin/python ./sendtoinflux.py --help  
