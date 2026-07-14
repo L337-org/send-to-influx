@@ -34,7 +34,7 @@ chown root:root /etc/send-to-influx/credstore.encrypted
 # storage (systemd-creds)" > "debconf-driven install" section for the design.
 . /usr/share/debconf/confmodule
 
-CLI=send-to-influx-set-credential
+CLI=/usr/sbin/send-to-influx-set-credential
 CLI_FAILED=0
 
 # $1 = credential name, $2 = value. Failure is recorded in $CLI_FAILED rather

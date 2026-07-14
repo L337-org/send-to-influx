@@ -25,7 +25,7 @@ import stat as stat_module
 import requests
 import yaml
 
-from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, sentinel_for
+from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, SENTINEL_PREFIX, sentinel_for
 
 DEFAULT_SETTINGS_PATH = "/etc/send-to-influx/settings.yaml"
 CREDSTORE_DIR = "/etc/send-to-influx/credstore.encrypted"
@@ -441,15 +441,33 @@ def _detect_influx_version(url):
     return "unknown"
 
 
+def _resolve_credential_value(name, influx, credstore_dir):
+    """Return the real value for one of the influx.* credential fields, whether or
+    not it's been migrated to systemd-creds - both are legitimate, since migration
+    is opt-in and per-field (see toinflux.credentials). If the plain settings.yaml
+    value is the systemd-creds sentinel, decrypt the real value instead; otherwise
+    the plain value already *is* the real value (never migrated).
+
+    :param influx: the parsed `influx:` settings block
+    :type influx: dict
+    """
+    _, field = CREDENTIAL_FIELDS[name]
+    plain_value = influx.get(field, "")
+    if isinstance(plain_value, str) and plain_value.startswith(SENTINEL_PREFIX):
+        return _decrypt_credential(name, credstore_dir)
+    return plain_value
+
+
 def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
     """Best-effort create the InfluxDB database (v1) or bucket (v2) named `name`.
     Never raises on failure (permissions/auth/unreachable) - logs and returns, since
     install/auto-enable must not be blocked by this.
 
-    Authenticates by reading url/org/user straight from settings.yaml (not secrets)
-    and decrypting the stored token/password via systemd-creds decrypt - see
-    _decrypt_credential(). The decrypted value is held only in memory for this one
-    call and never written back to disk.
+    Authenticates by reading url/org straight from settings.yaml (never secrets) and
+    resolving user/password/token via _resolve_credential_value() - each is read
+    plain if never migrated to systemd-creds, or decrypted if it has been (opt-in,
+    per-field, so a real install could have any mix of the two). Any decrypted value
+    is held only in memory for this one call and never written back to disk.
     """
     if settings_path is None:
         settings_path = DEFAULT_SETTINGS_PATH
@@ -470,9 +488,15 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
             logging.warning("send-to-influx-set-credential: no influx.url configured, skipping storage creation")
             return
 
-        is_v2 = os.path.isfile(_cred_path("influx-token", credstore_dir))
+        # A token configures v2 whether it's plain or already migrated to
+        # systemd-creds (a migrated field's plain settings.yaml value is the
+        # sentinel text, still non-empty/truthy) - matches
+        # toinflux.general._validate_influx_block's own `is_v2 = bool(token)` check.
+        # Checking for a `.cred` file's existence instead (as an earlier version of
+        # this function did) gets this wrong for a token that's never been migrated.
+        is_v2 = bool(influx.get("token"))
         if is_v2:
-            token = _decrypt_credential("influx-token", credstore_dir)
+            token = _resolve_credential_value("influx-token", influx, credstore_dir)
             org = influx.get("org", "")
             headers = {"Authorization": f"Token {token}"}
             resp = requests.get(
@@ -492,8 +516,8 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
             resp.raise_for_status()
             logging.info("Created InfluxDB v2 bucket '%s'", name)
         else:
-            password = _decrypt_credential("influx-password", credstore_dir)
-            user = influx.get("user", "")
+            user = _resolve_credential_value("influx-user", influx, credstore_dir)
+            password = _resolve_credential_value("influx-password", influx, credstore_dir)
             resp = requests.post(
                 f"{url}/query",
                 params={"q": f'CREATE DATABASE "{name}"'},
