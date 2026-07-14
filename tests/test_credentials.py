@@ -157,6 +157,20 @@ class TestSettingsFilePermissionCheck:
         finally:
             Path(path).unlink(missing_ok=True)
 
+    def test_0644_with_real_secret_and_quoted_false_string_does_not_raise(self, sample_settings, caplog):
+        """A mistakenly-quoted enforce_permissions: "false" (a truthy Python string,
+        despite reading as "false") must not be treated as enforcement being enabled -
+        only the real YAML boolean True should trigger a refusal to start."""
+        sample_settings["enforce_permissions"] = "false"
+        path = self._write_settings(sample_settings, 0o644)
+        try:
+            with caplog.at_level("WARNING"):
+                result = load_settings(settings_file=path)
+            assert result["influx"]["user"] == "influx_user"
+            assert any("readable by group/other" in r.message for r in caplog.records)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
 
 class TestClearUnsubstitutedCredentialSentinels:
     """Integration tests via load_settings(): a sentinel left in place without a

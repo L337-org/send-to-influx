@@ -7,6 +7,7 @@ from toinflux import credential_cli
 from toinflux.credential_cli import (
     CredentialCliError,
     _cmd_ensure_influx_storage,
+    _cmd_list,
     _cmd_remove,
     _cmd_set,
     _cmd_set_field,
@@ -104,6 +105,13 @@ class TestRewriteSettingsField:
         result = open(path, encoding="utf8").read()
         expected = content.replace('token: "old_value"', 'token: "new_value"')
         assert result == expected
+
+    def test_preserves_trailing_inline_comment(self, tmp_path):
+        content = 'influx:\n  token: "old_value"  # rotate this monthly\n  org: "myorg"\n'
+        path = self._write(tmp_path, content)
+        _rewrite_settings_field(path, "influx", "token", "new_value")
+        result = open(path, encoding="utf8").read()
+        assert '  token: "new_value"  # rotate this monthly\n' in result
 
     def test_raises_when_section_missing(self, tmp_path):
         content = 'hue:\n  user: "someone"\n'
@@ -360,6 +368,24 @@ class TestEnsureInfluxStorage:
             with patch("requests.post", side_effect=requests.exceptions.ConnectionError):
                 _cmd_ensure_influx_storage("speedtest_db", str(settings_path))  # does not raise
 
+    def test_missing_settings_file_does_not_raise(self, tmp_path):
+        """A settings_path that doesn't exist (or isn't readable) must not crash the
+        install/auto-enable flow that calls this - it's best-effort by contract."""
+        missing_path = tmp_path / "does-not-exist.yaml"
+        _cmd_ensure_influx_storage("speedtest_db", str(missing_path))  # does not raise
+
+    def test_empty_settings_file_does_not_raise(self, tmp_path):
+        """yaml.safe_load() on an empty/comment-only file returns None, not a dict -
+        must not crash with AttributeError on the subsequent .get() calls."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("# nothing here yet\n")
+        _cmd_ensure_influx_storage("speedtest_db", str(settings_path))  # does not raise
+
+    def test_malformed_yaml_does_not_raise(self, tmp_path):
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("influx: [unterminated\n")
+        _cmd_ensure_influx_storage("speedtest_db", str(settings_path))  # does not raise
+
     def test_v2_lists_before_creating_and_skips_if_present(self, tmp_path, monkeypatch):
         settings_path = tmp_path / "settings.yaml"
         settings_path.write_text('influx:\n  url: "http://localhost:8086"\n  org: "myorg"\n  token: "sentinel"\n')
@@ -378,6 +404,29 @@ class TestEnsureInfluxStorage:
 
         assert get.called
         post.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# _cmd_list
+# --------------------------------------------------------------------------- #
+
+
+class TestCmdList:
+    def test_respects_monkeypatched_credstore_dir(self, tmp_path, monkeypatch, capsys):
+        """_cmd_list's credstore_dir must resolve from the module global at call time,
+        not freeze in the value CREDSTORE_DIR had at import time - otherwise patching
+        credential_cli.CREDSTORE_DIR (as tests, and nothing else in this module, do)
+        would silently have no effect here specifically."""
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+
+        _cmd_list()
+
+        out = capsys.readouterr().out
+        assert "influx-token: configured" in out
+        assert "hue-user: not set" in out
 
 
 # --------------------------------------------------------------------------- #

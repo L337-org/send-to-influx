@@ -262,7 +262,10 @@ def _enforce_settings_file_permissions(settings_path, raw_settings):
         return
     if not _contains_real_secret(raw_settings):
         return
-    enforce = bool(raw_settings.get("enforce_permissions", False))
+    # Strict `is True` rather than truthiness: enforce_permissions gates a refusal to
+    # start, so a mistakenly-quoted "false" string (truthy in Python, but clearly not
+    # what the user meant) must not be treated as enforcement being enabled.
+    enforce = raw_settings.get("enforce_permissions", False) is True
     logging.warning(
         "%s is readable by group/other (mode %s) and contains what looks like a real credential. "
         "Run 'chmod 600 %s' to restrict access.%s",

@@ -291,8 +291,14 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
     line_no = value_node.start_mark.line
     line = lines[line_no]
     indent = line[: len(line) - len(line.lstrip())]
+    # Preserve whatever followed the original scalar on this line verbatim - typically
+    # nothing, but could be a trailing inline comment (e.g. `token: "old"  # note`).
+    # value_node.end_mark.column is the column immediately after the scalar ends, since
+    # the earlier start_mark.line == end_mark.line check already guarantees this is a
+    # single-line value.
+    trailing = line[value_node.end_mark.column :].rstrip("\n")
     escaped = new_value.replace("\\", "\\\\").replace('"', '\\"')
-    lines[line_no] = f'{indent}{field}: "{escaped}"\n'
+    lines[line_no] = f'{indent}{field}: "{escaped}"{trailing}\n'
 
     _atomic_write(settings_path, "".join(lines))
 
@@ -346,16 +352,22 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
         settings_path = DEFAULT_SETTINGS_PATH
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
-    with open(settings_path, encoding="utf8") as f:
-        settings = yaml.safe_load(f)
-    influx = settings.get("influx", {})
-    url = influx.get("url", "").rstrip("/")
-    if not url:
-        logging.warning("send-to-influx-set-credential: no influx.url configured, skipping storage creation")
-        return
 
-    is_v2 = os.path.isfile(_cred_path("influx-token", credstore_dir))
+    # Everything below is best-effort by contract (see docstring) - install/auto-enable
+    # must not be blocked by this failing, so catch broadly rather than enumerating
+    # every specific exception type a missing/unreadable/malformed settings.yaml,
+    # a network call, or a decrypt could raise (OSError, yaml.YAMLError, AttributeError
+    # on a non-mapping parse result, requests.RequestException, CredentialCliError, ...).
     try:
+        with open(settings_path, encoding="utf8") as f:
+            settings = yaml.safe_load(f)
+        influx = (settings or {}).get("influx") or {}
+        url = influx.get("url", "").rstrip("/")
+        if not url:
+            logging.warning("send-to-influx-set-credential: no influx.url configured, skipping storage creation")
+            return
+
+        is_v2 = os.path.isfile(_cred_path("influx-token", credstore_dir))
         if is_v2:
             token = _decrypt_credential("influx-token", credstore_dir)
             org = influx.get("org", "")
@@ -387,7 +399,7 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
             )
             resp.raise_for_status()
             logging.info("Ensured InfluxDB v1 database '%s' exists", name)
-    except (requests.RequestException, CredentialCliError) as exc:
+    except Exception as exc:  # pylint: disable=broad-except
         logging.warning(
             "Could not create InfluxDB storage '%s' automatically (%s) - create it yourself if needed.",
             name,
@@ -439,7 +451,9 @@ def _cmd_remove(name, settings_path):
     print(f"Removed '{name}' from systemd-creds and reverted {settings_path} to the placeholder value.")
 
 
-def _cmd_list(credstore_dir=CREDSTORE_DIR):
+def _cmd_list(credstore_dir=None):
+    if credstore_dir is None:
+        credstore_dir = CREDSTORE_DIR
     for name in sorted(CREDENTIAL_FIELDS):
         status = "configured" if os.path.isfile(_cred_path(name, credstore_dir)) else "not set"
         print(f"{name}: {status}")
