@@ -239,20 +239,27 @@ from `postinst`, once package files are unpacked and everything's been answered.
   plain (non-secret) `influx.org` field via `--set-field` and `secret` to the `influx-token` credential;
   v1 routes both `identity` and `secret` to the `influx-user`/`influx-password` credentials - if
   detection comes back `unknown` (URL unreachable at install time, expected to happen sometimes since
-  the URL can point anywhere), nothing is written and no source is auto-enabled this run; secrets were
-  never persisted by debconf in the first place, so a later `dpkg-reconfigure` cleanly re-collects them.
-  Then, per selected source: secrets via `send-to-influx-set-credential <name>`, non-secret fields via
+  the URL can point anywhere), nothing is written and no source is auto-enabled this run; a secret
+  prompt is never pre-filled with a previous answer on a later `dpkg-reconfigure` (see the `Type:
+  password` note below), so that re-run cleanly re-collects them rather than silently reusing something
+  stale. Then, per selected source: secrets via `send-to-influx-set-credential <name>`, non-secret fields via
   `--set-field`, both reusing the same CLI rather than a second YAML-patcher in shell. **Auto-enable**:
   a source is only added to `sources:` (via `--enable-source` - `default_source:` is never touched,
   since `sendtoinflux.py` only falls back to it when `sources:` is absent entirely, which is never true
   once `example_settings.yaml` has shipped it non-empty) if *every* required field for it (and the
   InfluxDB block) actually resolved - not just "was it ticked" - with `--ensure-influx-storage`
   attempted first (best-effort database/bucket creation, logged-not-raised on failure).
-- `Type: password` answers are never written to debconf's database - deliberate, so debconf itself
-  never becomes a plaintext secrets store. This means a reconfigure always shows secret prompts blank,
-  with no way to distinguish "leave it as-is" from "clear it" - resolved by not supporting clearing via
-  debconf at all: `postinst` treats blank as "keep the existing systemd-creds value," and removing a
-  credential goes through `send-to-influx-set-credential <name> --remove` directly instead.
+- `Type: password` answers *are* written to disk by debconf - contrary to an earlier version of this
+  note - into a dedicated `passwords.dat` store kept separate from its general-purpose, more widely
+  readable answer database, and restricted to `chmod 600` (Debian's own debconf specification advises,
+  but doesn't require, that a package clear a value out of it once consumed - `postinst` doesn't
+  currently do this, it only reads the value once via `db_get` to migrate it into `systemd-creds`).
+  What debconf *doesn't* do is redisplay/pre-fill a previous password answer in the prompt on a later
+  invocation - a UI convention for this template type, independent of what's sitting in `passwords.dat`.
+  So a reconfigure always shows secret prompts blank, with no way for `postinst` to distinguish "leave
+  it as-is" from "clear it" from that alone - resolved by not supporting clearing via debconf at all:
+  `postinst` treats blank as "keep the existing systemd-creds value," and removing a credential goes
+  through `send-to-influx-set-credential <name> --remove` directly instead.
 
 ### Branch protection
 

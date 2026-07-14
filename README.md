@@ -260,15 +260,18 @@ Installing (or upgrading to) the `.deb` interactively presents a debconf prompt:
 which data sources you want to configure now, then - only for the ones you pick - the fields
 needed to actually reach that source's API (credentials plus things like a Hue bridge hostname or
 an Octopus meter number; tuning settings like intervals keep their shipped defaults and can be
-adjusted in `settings.yaml` afterwards). Secrets you enter are stored via `systemd-creds` (see
-below), never written to disk in plaintext or to debconf's own answer database. If every required
-field for a source was answered, it's automatically added to `sources:` in `settings.yaml` and the
-InfluxDB database/bucket it needs is created for you where possible.
+adjusted in `settings.yaml` afterwards). Secrets you enter are moved into `systemd-creds` (see below)
+and never written into `settings.yaml` in plaintext. Debconf itself does briefly hold what you type in
+its own separate, `chmod 600` password store before that migration happens - see SECURITY.md if you
+want the detail. If every required field for a source was answered, it's automatically added to
+`sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is created for you where
+possible.
 
 You can leave every question blank and configure `settings.yaml` by hand instead - nothing here is
 required. Re-run `sudo dpkg-reconfigure send-to-influx` at any time to change your answers; secret
-prompts always come back blank on a reconfigure (debconf never persists them), so leaving one blank
-keeps whatever's already stored rather than clearing it.
+prompts always come back blank on a reconfigure (debconf's own UI convention for password-type
+questions - it doesn't redisplay a previous answer), so leaving one blank keeps whatever's already
+stored rather than clearing it.
 
 ### Storing secrets in systemd-creds
 

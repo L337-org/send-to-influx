@@ -28,9 +28,14 @@ being deliberate about are credential storage and TLS verification:
   in-memory location for the service's lifetime, a real security boundary rather than an
   organizational one. See the README's "Storing secrets in systemd-creds" section and CLAUDE.md's
   "Credential storage (`systemd-creds`)" for details. This is opt-in and per-field. The interactive
-  `.deb` install prompt (debconf) can also collect these directly - secrets there use debconf's
-  `Type: password` widget, which debconf never writes to its own answer database, so they don't sit
-  around in a second plaintext store either.
+  `.deb` install prompt (debconf) can also collect these directly, using debconf's `Type: password`
+  widget - contrary to an earlier version of this note, debconf *does* write password-type answers to
+  disk (a dedicated `passwords.dat` store, kept separate from its general-purpose, more widely-readable
+  answer database, and restricted to `chmod 600`; per Debian's own debconf specification, packages are
+  advised - not required - to clear a value out of it once consumed). `postinst` reads it once, via
+  `db_get`, to migrate the value into `systemd-creds`, but doesn't itself go back and purge debconf's
+  own copy afterward. The prompt appearing blank on a later `dpkg-reconfigure` is a separate UI
+  convention (password answers are never redisplayed), not evidence the value wasn't retained on disk.
 - **`enforce_permissions` (settings.yaml key)**: if `settings.yaml` is readable by group/other *and*
   actually contains a real credential (not just placeholder or systemd-creds-sentinel text),
   `send-to-influx` always logs a warning. Setting `enforce_permissions: true` additionally refuses to
