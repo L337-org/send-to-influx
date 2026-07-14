@@ -20,9 +20,11 @@ import re
 import subprocess
 import sys
 import tempfile
+import warnings
 import stat as stat_module
 
 import requests
+import urllib3
 import yaml
 
 from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, SENTINEL_PREFIX, sentinel_for
@@ -547,6 +549,12 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
         if not url:
             logging.warning("send-to-influx-set-credential: no influx.url configured, skipping storage creation")
             return
+        # Must match toinflux/influx.py's own verify=not insecure - otherwise this
+        # would fail (falls into the broad except below, logged as an opaque TLS
+        # error) against exactly the self-signed-certificate setups insecure: true
+        # exists to support, even though the normal sender path works fine.
+        insecure = bool(influx.get("insecure", False))
+        verify = not insecure
 
         # A token configures v2 whether it's plain or already migrated to
         # systemd-creds (a migrated field's plain settings.yaml value is the
@@ -555,37 +563,46 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
         # Checking for a `.cred` file's existence instead (as an earlier version of
         # this function did) gets this wrong for a token that's never been migrated.
         is_v2 = bool(influx.get("token"))
-        if is_v2:
-            token = _resolve_credential_value("influx-token", influx, credstore_dir)
-            org = influx.get("org", "")
-            headers = {"Authorization": f"Token {token}"}
-            resp = requests.get(
-                f"{url}/api/v2/buckets", params={"org": org}, headers=headers, timeout=HTTP_TIMEOUT_SECONDS
-            )
-            resp.raise_for_status()
-            existing = {b.get("name") for b in resp.json().get("buckets", [])}
-            if name in existing:
-                logging.info("InfluxDB bucket '%s' already exists", name)
-                return
-            resp = requests.post(
-                f"{url}/api/v2/buckets",
-                headers=headers,
-                json={"name": name, "orgID": _resolve_org_id(url, headers, org)},
-                timeout=HTTP_TIMEOUT_SECONDS,
-            )
-            resp.raise_for_status()
-            logging.info("Created InfluxDB v2 bucket '%s'", name)
-        else:
-            user = _resolve_credential_value("influx-user", influx, credstore_dir)
-            password = _resolve_credential_value("influx-password", influx, credstore_dir)
-            resp = requests.post(
-                f"{url}/query",
-                params={"q": f'CREATE DATABASE "{name}"'},
-                auth=(user, password),
-                timeout=HTTP_TIMEOUT_SECONDS,
-            )
-            resp.raise_for_status()
-            logging.info("Ensured InfluxDB v1 database '%s' exists", name)
+        with warnings.catch_warnings():
+            if insecure:
+                warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+            if is_v2:
+                token = _resolve_credential_value("influx-token", influx, credstore_dir)
+                org = influx.get("org", "")
+                headers = {"Authorization": f"Token {token}"}
+                resp = requests.get(
+                    f"{url}/api/v2/buckets",
+                    params={"org": org},
+                    headers=headers,
+                    verify=verify,
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                )
+                resp.raise_for_status()
+                existing = {b.get("name") for b in resp.json().get("buckets", [])}
+                if name in existing:
+                    logging.info("InfluxDB bucket '%s' already exists", name)
+                    return
+                resp = requests.post(
+                    f"{url}/api/v2/buckets",
+                    headers=headers,
+                    json={"name": name, "orgID": _resolve_org_id(url, headers, org, verify)},
+                    verify=verify,
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                )
+                resp.raise_for_status()
+                logging.info("Created InfluxDB v2 bucket '%s'", name)
+            else:
+                user = _resolve_credential_value("influx-user", influx, credstore_dir)
+                password = _resolve_credential_value("influx-password", influx, credstore_dir)
+                resp = requests.post(
+                    f"{url}/query",
+                    params={"q": f'CREATE DATABASE "{name}"'},
+                    auth=(user, password),
+                    verify=verify,
+                    timeout=HTTP_TIMEOUT_SECONDS,
+                )
+                resp.raise_for_status()
+                logging.info("Ensured InfluxDB v1 database '%s' exists", name)
     except Exception as exc:  # pylint: disable=broad-except
         logging.warning(
             "Could not create InfluxDB storage '%s' automatically (%s) - create it yourself if needed.",
@@ -594,10 +611,12 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
         )
 
 
-def _resolve_org_id(url, headers, org_name):
+def _resolve_org_id(url, headers, org_name, verify=True):
     """Look up the org ID for org_name - the v2 bucket-create API needs orgID, not
     just the org name."""
-    resp = requests.get(f"{url}/api/v2/orgs", params={"org": org_name}, headers=headers, timeout=HTTP_TIMEOUT_SECONDS)
+    resp = requests.get(
+        f"{url}/api/v2/orgs", params={"org": org_name}, headers=headers, verify=verify, timeout=HTTP_TIMEOUT_SECONDS
+    )
     resp.raise_for_status()
     orgs = resp.json().get("orgs", [])
     if not orgs:

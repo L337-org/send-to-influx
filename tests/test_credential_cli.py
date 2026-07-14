@@ -901,6 +901,77 @@ class TestEnsureInfluxStorage:
         _, kwargs = post.call_args
         assert kwargs["headers"]["Authorization"] == "Token plaintoken"
 
+    def test_v1_insecure_true_disables_tls_verification(self, tmp_path, monkeypatch):
+        """influx.insecure must be honoured here exactly like toinflux/influx.py's
+        own sender does (verify=not insecure) - otherwise auto-creation fails
+        against precisely the self-signed setups insecure: true exists for, even
+        though the normal write path works fine."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(
+            'influx:\n  url: "https://localhost:8086"\n  user: "admin"\n  password: "plainpass"\n  insecure: true\n'
+        )
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+
+        post_result = MagicMock(status_code=200)
+        post_result.raise_for_status.return_value = None
+
+        with patch("subprocess.run"), patch("requests.post", return_value=post_result) as post:
+            _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
+
+        _, kwargs = post.call_args
+        assert kwargs["verify"] is False
+
+    def test_v1_insecure_absent_keeps_tls_verification_on(self, tmp_path, monkeypatch):
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text('influx:\n  url: "https://localhost:8086"\n  user: "admin"\n  password: "p"\n')
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+
+        post_result = MagicMock(status_code=200)
+        post_result.raise_for_status.return_value = None
+
+        with patch("subprocess.run"), patch("requests.post", return_value=post_result) as post:
+            _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
+
+        _, kwargs = post.call_args
+        assert kwargs["verify"] is True
+
+    def test_v2_insecure_true_disables_tls_verification_everywhere(self, tmp_path, monkeypatch):
+        """All three v2 requests - bucket list, org-id lookup, and bucket create -
+        must honour insecure: true, not just the first one."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(
+            'influx:\n  url: "https://localhost:8086"\n  org: "myorg"\n  token: "tok"\n  insecure: true\n'
+        )
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+
+        def fake_get(url, **kwargs):
+            resp = MagicMock(status_code=200)
+            resp.raise_for_status.return_value = None
+            if url.endswith("/api/v2/buckets"):
+                resp.json.return_value = {"buckets": []}
+            elif url.endswith("/api/v2/orgs"):
+                resp.json.return_value = {"orgs": [{"id": "org-id-123"}]}
+            return resp
+
+        create_resp = MagicMock(status_code=200)
+        create_resp.raise_for_status.return_value = None
+
+        with patch("subprocess.run"):
+            with patch("requests.get", side_effect=fake_get) as get, patch(
+                "requests.post", return_value=create_resp
+            ) as post:
+                _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
+
+        assert all(kwargs["verify"] is False for _, kwargs in get.call_args_list)
+        _, post_kwargs = post.call_args
+        assert post_kwargs["verify"] is False
+
 
 # --------------------------------------------------------------------------- #
 # _cmd_list
