@@ -16,7 +16,7 @@ set -e
 . /usr/share/debconf/confmodule
 
 db_input high send-to-influx/sources-to-configure || true
-db_go
+db_go || true
 
 db_get send-to-influx/sources-to-configure
 # Normalise debconf's multiselect answer (comma-separated, with or without a
@@ -46,7 +46,7 @@ fi
 db_input medium send-to-influx/influx-url || true
 db_input medium send-to-influx/influx-identity || true
 db_input medium send-to-influx/influx-secret || true
-db_go
+db_go || true
 
 case "$SOURCES" in
     *" hue "*)
@@ -66,35 +66,35 @@ case "$SOURCES" in
         esac
         db_set send-to-influx/hue-temperature-units "$default_unit"
         db_input medium send-to-influx/hue-temperature-units || true
-        db_go
+        db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" zappi "*|*" harvi "*|*" eddi "*)
         db_input medium send-to-influx/myenergi-apikey || true
-        db_go
+        db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" zappi "*)
         db_input medium send-to-influx/zappi-serial || true
-        db_go
+        db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" harvi "*)
         db_input medium send-to-influx/harvi-serial || true
-        db_go
+        db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" eddi "*)
         db_input medium send-to-influx/eddi-serial || true
-        db_go
+        db_go || true
         ;;
 esac
 
@@ -103,7 +103,7 @@ case "$SOURCES" in
         db_input medium send-to-influx/octopus-api-key || true
         db_input medium send-to-influx/octopus-mpan || true
         db_input medium send-to-influx/octopus-meter-serial || true
-        db_go
+        db_go || true
         ;;
 esac
 
@@ -111,7 +111,7 @@ case "$SOURCES" in
     *" openmeteo "*)
         db_input medium send-to-influx/openmeteo-latitude || true
         db_input medium send-to-influx/openmeteo-longitude || true
-        db_go
+        db_go || true
         ;;
 esac
 
