@@ -362,25 +362,52 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     db_stop || true
 fi
 
+WAS_ACTIVE=0
+RESTARTED=0
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
+    # On an upgrade (or a dpkg-reconfigure that just rewrote configuration),
+    # restart the service if - and only if - it's currently running: dpkg has
+    # already replaced the code under /opt/send-to-influx, but the running
+    # process keeps executing the old version until restarted, and upgrades
+    # are commonly unattended (cron/apt timers), so a "please restart" hint
+    # in the output would never be seen - even on an attended run, nobody
+    # reads every line of every upgraded package's output. "enabled" doesn't
+    # imply "running" (could be enabled-but-stopped, or running-but-disabled),
+    # so check the actual current state; a stopped service is left exactly as
+    # it is - this never *starts* anything. Guarded on /run/systemd/system
+    # like the daemon-reload above: on a non-systemd host systemctl may not
+    # exist at all.
+    if systemctl is-active --quiet send-to-influx 2>/dev/null; then
+        WAS_ACTIVE=1
+        if [ -n "$2" ]; then
+            if systemctl restart send-to-influx; then
+                RESTARTED=1
+            else
+                echo "send-to-influx: automatic restart after upgrade failed - the service may still be running the previous version. Check 'systemctl status send-to-influx'." >&2
+            fi
+        fi
+    fi
 fi
 
-# Fresh installs get the full "here's what to do next" message; upgrades don't
-# - "configure" receives the previously-configured version as $2, empty only
-# on a genuinely fresh install (same convention used above for the settings.yaml
-# chown/chmod). Printing "the service is not started... needs configuration
-# first" on every upgrade was actively misleading: an already-running service
-# keeps running on its existing configuration across an upgrade (postinst never
-# stops or restarts it), so telling the admin it needs configuring and isn't
-# started is simply wrong for that case.
+# Fresh installs get the full "here's what to do next" message; upgrades get
+# a short factual note instead - "configure" receives the previously-
+# configured version as $2, empty only on a genuinely fresh install. A
+# dpkg-reconfigure run (also "configure" with $2 set) skips the upgrade
+# message: the admin just ran a deliberate, interactive command and needs no
+# guidance about an upgrade that didn't happen - the restart above still
+# applies so their new answers take effect, noted with a single line.
 #
 # $2's meaning (previously-configured version, empty only on a fresh install)
 # only holds for the "configure" action - postinst is also called as
 # abort-upgrade/abort-remove/abort-deconfigure/triggered, where $2 means
 # something else entirely (or nothing). Guard on $1 explicitly so this can't
 # print the wrong guidance during one of those other invocations.
-if [ "$1" = "configure" ]; then
+if [ "$1" = "configure" ] && [ "${DEBCONF_RECONFIGURE:-}" = "1" ] && [ -n "$2" ]; then
+    if [ "$RESTARTED" = 1 ]; then
+        echo "send-to-influx: service restarted to apply the new configuration."
+    fi
+elif [ "$1" = "configure" ]; then
     if [ -z "$2" ]; then
         cat <<'MSG'
 
@@ -400,39 +427,36 @@ The service is not started automatically since it needs configuration first.
 
 MSG
     else
-        # "enabled" doesn't imply "running" (could be enabled-but-currently-stopped,
-        # or never enabled at all) - check the actual current state rather than
-        # hedging with "if enabled". Nothing in this script stops/starts/restarts
-        # the service at any point during an upgrade, so is-active here reflects
-        # both its state before and after this upgrade ran. Guarded the same way
-        # as the daemon-reload above - on a non-systemd host systemctl may not
-        # exist at all, and short-circuiting here means it's never invoked.
-        if [ -d /run/systemd/system ] && systemctl is-active --quiet send-to-influx 2>/dev/null; then
+        if [ "$RESTARTED" = 1 ]; then
             cat <<'MSG'
 
-send-to-influx upgraded. It was running before this upgrade and this upgrade
-does not stop, start, or restart it - it's still running now, unaffected, on
-its existing /etc/send-to-influx/settings.yaml and any systemd-creds credentials.
+send-to-influx upgraded; the service was running, so it has been restarted
+and is now running the new version. Your /etc/send-to-influx/settings.yaml
+and any systemd-creds credentials are untouched - upgrades never modify
+them. Run 'sudo dpkg-reconfigure send-to-influx' at any time to revisit the
+interactive setup (including migrating secrets into systemd-creds).
 
-Reminder: secrets can optionally be moved out of settings.yaml and into
-systemd-creds. Run 'sudo send-to-influx-set-credential --list' to see what's
-already migrated, or 'sudo dpkg-reconfigure send-to-influx' to revisit the
-interactive setup (including migrating just your InfluxDB credential, without
-touching source configuration).
+MSG
+        elif [ "$WAS_ACTIVE" = 1 ]; then
+            # The restart failure warning has already gone to stderr above -
+            # repeat the essential fact here so it's also in the normal flow
+            # of the final status output.
+            cat <<'MSG'
+
+send-to-influx upgraded, but restarting the running service failed - it is
+likely still running the PREVIOUS version. Check
+'systemctl status send-to-influx' and restart it by hand. Your configuration
+is untouched.
+
 MSG
         else
             cat <<'MSG'
 
-send-to-influx upgraded. This upgrade does not stop, start, or restart the
-service - it's left exactly as it was before (not currently running). Your
-existing /etc/send-to-influx/settings.yaml and any systemd-creds credentials
-are unaffected.
-
-Reminder: secrets can optionally be moved out of settings.yaml and into
-systemd-creds. Run 'sudo send-to-influx-set-credential --list' to see what's
-already migrated, or 'sudo dpkg-reconfigure send-to-influx' to revisit the
-interactive setup (including migrating just your InfluxDB credential, without
-touching source configuration).
+send-to-influx upgraded. The service was not running, so it has not been
+started - it's left exactly as it was. Your /etc/send-to-influx/settings.yaml
+and any systemd-creds credentials are untouched. Run
+'sudo dpkg-reconfigure send-to-influx' at any time to revisit the interactive
+setup (including migrating secrets into systemd-creds).
 
 MSG
         fi

@@ -252,6 +252,11 @@ first:
   the debconf/`send-to-influx-set-credential` flows described below, ever write to it).
 - Then enable and start it: `systemctl enable --now send-to-influx`
 
+On upgrades, a *running* service is automatically restarted so it actually picks up the new
+version - upgrades are often unattended (cron/apt timers), where a "please restart" hint in the
+package output would never be seen, and the old code would otherwise keep running until the next
+reboot. A stopped service is left stopped; an upgrade never starts anything.
+
 Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as
 stdout above.
 
