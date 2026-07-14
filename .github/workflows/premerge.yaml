@@ -121,6 +121,17 @@ jobs:
       - name: Build .deb package
         run: packaging/deb/build-deb.sh
 
+      - name: Generate a random test secret for the Hue credential
+        # Generated fresh and masked each run, rather than a fixed string
+        # committed to the repo - avoids both a secret-scanning false positive
+        # on a debconf `password`-typed field and printing a recognisable
+        # constant in job logs (the `run:` script text itself is echoed to the
+        # log, and so is the settings.yaml diff a later step reads back).
+        run: |
+          secret="ci-test-$(openssl rand -hex 16)"
+          echo "::add-mask::$secret"
+          echo "HUE_TEST_SECRET=$secret" >> "$GITHUB_ENV"
+
       - name: Seed debconf answers for the interactive install flow
         # Exercises config's conditional prompts and postinst's db_get/set_secret/
         # set_field/db_unregister wiring - without this, a plain `dpkg -i` with
@@ -140,7 +151,7 @@ jobs:
             echo "send-to-influx send-to-influx/influx-identity string"
             echo "send-to-influx send-to-influx/influx-secret password"
             echo "send-to-influx send-to-influx/hue-host string ci-test-bridge.example.com"
-            echo "send-to-influx send-to-influx/hue-user password ci-test-hue-secret-value"
+            echo "send-to-influx send-to-influx/hue-user password ${HUE_TEST_SECRET}"
             echo "send-to-influx send-to-influx/hue-temperature-units select C"
           } | sudo debconf-set-selections
 
@@ -157,7 +168,7 @@ jobs:
           # principle match some unrelated field - proves hue.host/hue.user
           # specifically got the intended values, not just that the right text
           # appears *somewhere* in the file.
-          sudo /opt/send-to-influx/venv/bin/python3 - <<'PYEOF'
+          sudo /opt/send-to-influx/venv/bin/python3 - <<PYEOF
           import yaml
 
           with open("/etc/send-to-influx/settings.yaml", encoding="utf8") as f:
@@ -166,7 +177,7 @@ jobs:
           hue = settings["hue"]
           assert hue["host"] == "ci-test-bridge.example.com", hue["host"]
           assert hue["user"].startswith("<stored in systemd-creds"), hue["user"]
-          assert "ci-test-hue-secret-value" not in hue["user"]
+          assert "${HUE_TEST_SECRET}" not in hue["user"]
           print("settings.yaml: hue.host/hue.user assertions OK")
           PYEOF
           sudo test -f /etc/send-to-influx/credstore.encrypted/hue-user.cred
@@ -175,5 +186,5 @@ jobs:
           # not still in debconf's own passwords.dat (db_unregister must have
           # purged it - see debconf-devel(7)'s "clear a password value out of it as
           # soon as is possible" guidance, and CLAUDE.md's "Credential storage" doc).
-          ! sudo grep -rq 'ci-test-hue-secret-value' /etc/send-to-influx/settings.yaml
-          ! sudo grep -rq 'ci-test-hue-secret-value' /var/cache/debconf/
+          ! sudo grep -rq "${HUE_TEST_SECRET}" /etc/send-to-influx/settings.yaml
+          ! sudo grep -rq "${HUE_TEST_SECRET}" /var/cache/debconf/

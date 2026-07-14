@@ -179,8 +179,8 @@ def _reload_systemd():
 def _encrypt_credential(name, value, credstore_dir=None):
     """Encrypt value with systemd-creds and write it to credstore_dir/<name>.cred.
 
-    :raises CredentialCliError: if credstore_dir can't be created/secured, or if
-        systemd-creds encrypt fails
+    :raises CredentialCliError: if credstore_dir can't be created/secured, if
+        systemd-creds encrypt fails, or if the written .cred file can't be secured
     """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
