@@ -153,8 +153,22 @@ jobs:
 
       - name: Verify the debconf-driven install applied the Hue credential and cleaned up after itself
         run: |
-          sudo grep -q 'host: "ci-test-bridge.example.com"' /etc/send-to-influx/settings.yaml
-          sudo grep -q 'stored in systemd-creds' /etc/send-to-influx/settings.yaml
+          # Parse the actual YAML rather than grepping for a substring that could in
+          # principle match some unrelated field - proves hue.host/hue.user
+          # specifically got the intended values, not just that the right text
+          # appears *somewhere* in the file.
+          sudo /opt/send-to-influx/venv/bin/python3 - <<'PYEOF'
+          import yaml
+
+          with open("/etc/send-to-influx/settings.yaml", encoding="utf8") as f:
+              settings = yaml.safe_load(f)
+
+          hue = settings["hue"]
+          assert hue["host"] == "ci-test-bridge.example.com", hue["host"]
+          assert hue["user"].startswith("<stored in systemd-creds"), hue["user"]
+          assert "ci-test-hue-secret-value" not in hue["user"]
+          print("settings.yaml: hue.host/hue.user assertions OK")
+          PYEOF
           sudo test -f /etc/send-to-influx/credstore.encrypted/hue-user.cred
           # The plaintext secret must not be sitting anywhere on disk once postinst
           # is done with it: not in settings.yaml (migrated to systemd-creds), and

@@ -131,6 +131,18 @@ class TestEncryptCredential:
         mode = stat_module.S_IMODE(os.stat(credstore_dir).st_mode)
         assert mode == stat_module.S_IRWXU
 
+    def test_credstore_dir_creation_failure_raises_credential_cli_error(self, tmp_path):
+        """os.makedirs()/os.chmod() on credstore_dir must surface as CredentialCliError
+        - the type main()'s exception handler actually catches - not a raw OSError
+        escaping as an unhandled traceback (e.g. a permissions problem or a
+        read-only filesystem)."""
+        blocker = tmp_path / "not_a_dir"
+        blocker.write_text("a file, not a directory")
+        credstore_dir = blocker / "credstore.encrypted"  # parent is a file: NotADirectoryError
+
+        with pytest.raises(CredentialCliError, match="could not create/secure"):
+            _encrypt_credential("influx-token", "a-real-secret", credstore_dir=str(credstore_dir))
+
 
 # --------------------------------------------------------------------------- #
 # _rewrite_settings_field

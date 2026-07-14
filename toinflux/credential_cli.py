@@ -179,7 +179,8 @@ def _reload_systemd():
 def _encrypt_credential(name, value, credstore_dir=None):
     """Encrypt value with systemd-creds and write it to credstore_dir/<name>.cred.
 
-    :raises CredentialCliError: if systemd-creds encrypt fails
+    :raises CredentialCliError: if credstore_dir can't be created/secured, or if
+        systemd-creds encrypt fails
     """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
@@ -189,8 +190,11 @@ def _encrypt_credential(name, value, credstore_dir=None):
     # (not contents, which get their own 0600 below) enumerable by other local users.
     # Always re-asserting 0700 here (not just on first creation) is a harmless no-op
     # against postinst's own already-correct directory, and self-healing otherwise.
-    os.makedirs(credstore_dir, exist_ok=True)
-    os.chmod(credstore_dir, stat_module.S_IRWXU)
+    try:
+        os.makedirs(credstore_dir, exist_ok=True)
+        os.chmod(credstore_dir, stat_module.S_IRWXU)
+    except OSError as exc:
+        raise CredentialCliError(f"could not create/secure {credstore_dir}: {exc}") from exc
     cred_path = _cred_path(name, credstore_dir)
     try:
         subprocess.run(
@@ -202,7 +206,10 @@ def _encrypt_credential(name, value, credstore_dir=None):
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode(errors="replace") if exc.stderr else str(exc)
         raise CredentialCliError(f"systemd-creds encrypt failed for '{name}': {stderr}") from exc
-    os.chmod(cred_path, stat_module.S_IRUSR | stat_module.S_IWUSR)
+    try:
+        os.chmod(cred_path, stat_module.S_IRUSR | stat_module.S_IWUSR)
+    except OSError as exc:
+        raise CredentialCliError(f"could not secure {cred_path}: {exc}") from exc
 
 
 def _decrypt_credential(name, credstore_dir=None):
