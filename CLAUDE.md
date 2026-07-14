@@ -252,11 +252,16 @@ from `postinst`, once package files are unpacked and everything's been answered.
   *computed* default (checks `$LC_ALL`/`$LANG` for a `_US` territory code, defaulting to Celsius
   otherwise) via `db_set` before the first `db_input`, rather than a silent guess - getting temperature
   units wrong is immediately visible to the user in a way the other tuning fields aren't.
-- `postinst`: InfluxDB is processed unconditionally too, before reading `sources-to-configure` at
-  all - a plain non-interactive install (or one where every question was left blank) is still a no-op
-  for all of it, since each per-source block below self-gates on `$SOURCES` containing that source's
-  name; nothing here requires the outer "was anything selected" gate the earlier design used. Resolves
-  the InfluxDB block via `--detect-influx-version` and routes `identity`/`secret` accordingly - v2 writes `identity` to the
+- `postinst`: `sources-to-configure` is read first (`$SOURCES`, purely to know whether *anything* was
+  selected - no processing happens from it yet), then InfluxDB is processed unconditionally,
+  independent of that selection - a plain non-interactive install (or one where every question was
+  left blank) is still a no-op for all of it, since each per-source block below self-gates on
+  `$SOURCES` containing that source's name; nothing here requires the outer "was anything selected"
+  gate the earlier design used. The one place `$SOURCES` matters this early: the "InfluxDB not
+  provided" warning only fires if a source was actually selected or InfluxDB fields were partially
+  filled in - not on every untouched upgrade, which would otherwise warn on every single one even
+  when the admin isn't using debconf/systemd-creds at all. Resolves the InfluxDB block via
+  `--detect-influx-version` and routes `identity`/`secret` accordingly - v2 writes `identity` to the
   plain (non-secret) `influx.org` field via `--set-field` and `secret` to the `influx-token` credential;
   v1 routes both `identity` and `secret` to the `influx-user`/`influx-password` credentials - if
   detection comes back `unknown` (URL unreachable at install time, expected to happen sometimes since

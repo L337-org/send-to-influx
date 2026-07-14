@@ -360,8 +360,10 @@ else
     # or never enabled at all) - check the actual current state rather than
     # hedging with "if enabled". Nothing in this script stops/starts/restarts
     # the service at any point during an upgrade, so is-active here reflects
-    # both its state before and after this upgrade ran.
-    if systemctl is-active --quiet send-to-influx 2>/dev/null; then
+    # both its state before and after this upgrade ran. Guarded the same way
+    # as the daemon-reload above - on a non-systemd host systemctl may not
+    # exist at all, and short-circuiting here means it's never invoked.
+    if [ -d /run/systemd/system ] && systemctl is-active --quiet send-to-influx 2>/dev/null; then
         cat <<'MSG'
 
 send-to-influx upgraded. It was running before this upgrade and this upgrade
