@@ -19,7 +19,6 @@ if [ -z "$2" ]; then
     chmod 644 /etc/send-to-influx/settings.yaml
 fi
 
-ln -sf /opt/send-to-influx/venv/bin/send-to-influx-set-credential /usr/local/sbin/send-to-influx-set-credential
 mkdir -p /etc/send-to-influx/credstore.encrypted
 chmod 700 /etc/send-to-influx/credstore.encrypted
 chown root:root /etc/send-to-influx/credstore.encrypted

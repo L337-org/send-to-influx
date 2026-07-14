@@ -41,7 +41,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$PKG_ROOT/DEBIAN" "$PKG_ROOT/opt/send-to-influx" "$PKG_ROOT/etc/send-to-influx" "$PKG_ROOT/lib/systemd/system"
+mkdir -p "$PKG_ROOT/DEBIAN" "$PKG_ROOT/opt/send-to-influx" "$PKG_ROOT/etc/send-to-influx" \
+    "$PKG_ROOT/lib/systemd/system" "$PKG_ROOT/usr/sbin"
 
 echo "Building venv payload from $REPO_ROOT ..."
 "$BUILD_PYTHON" -m venv "$PKG_ROOT/opt/send-to-influx/venv"
@@ -63,6 +64,17 @@ while IFS= read -r f; do
     sed -i.bak "s|$VENV_STAGING_PATH|$VENV_INSTALL_PATH|g" "$f"
 done < <(grep -rlI "$VENV_STAGING_PATH" "$VENV_STAGING_PATH/bin" 2>/dev/null || true)
 find "$VENV_STAGING_PATH/bin" -name "*.bak" -delete
+
+# venv/bin isn't on $PATH, so send-to-influx-set-credential (meant for direct human/
+# debconf invocation, unlike the main send-to-influx binary which is only ever
+# invoked via the systemd unit's absolute ExecStart= path) needs a $PATH-reachable
+# symlink. Shipped as part of the package's own file tree (built here, at package
+# build time) rather than created imperatively by postinst - /usr/local is reserved
+# for locally-installed, non-package-managed software (FHS/Debian policy), so
+# /usr/sbin is the correct target; and a dpkg-tracked file gets removed automatically
+# on both `dpkg -r` and `--purge`, unlike a symlink postinst/postrm would otherwise
+# have to create and clean up by hand outside dpkg's own file-list tracking.
+ln -s /opt/send-to-influx/venv/bin/send-to-influx-set-credential "$PKG_ROOT/usr/sbin/send-to-influx-set-credential"
 
 # Strip any compiled extensions pip's dependency resolution happened to pull
 # in (e.g. PyYAML's / charset-normalizer's optional C accelerators) - both

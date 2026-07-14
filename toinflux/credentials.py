@@ -78,5 +78,21 @@ def apply_credential_substitution(settings):
         except OSError as exc:
             logging.warning("Could not read credential '%s' from %s: %s", name, cred_path, exc)
             continue
-        settings.setdefault(top_key, {})[field] = value
+        block = settings.get(top_key)
+        if block is None:
+            block = settings[top_key] = {}
+        elif not isinstance(block, dict):
+            # A malformed settings.yaml (e.g. `influx: []` or `hue: "oops"`) - this
+            # runs before validate_settings() gets a chance to report it as a
+            # ConfigError, so don't crash here; skip this credential and let
+            # validation surface the real problem.
+            logging.warning(
+                "settings.yaml's '%s' section is not a mapping (got %s) - cannot apply the "
+                "'%s' credential from systemd-creds",
+                top_key,
+                type(block).__name__,
+                name,
+            )
+            continue
+        block[field] = value
     return settings

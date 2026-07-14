@@ -267,10 +267,15 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
 
     :raises CredentialCliError: if the target section/field doesn't exist, or isn't a
         plain single-line scalar (e.g. hand-edited into a block scalar) - refuses
-        rather than corrupting the file
+        rather than corrupting the file; also raised (rather than an unhandled
+        OSError escaping main()'s exception handling) if settings_path can't be read
+        or written, e.g. missing file or a permissions problem
     """
-    with open(settings_path, encoding="utf8") as f:
-        text = f.read()
+    try:
+        with open(settings_path, encoding="utf8") as f:
+            text = f.read()
+    except OSError as exc:
+        raise CredentialCliError(f"could not read {settings_path}: {exc}") from exc
 
     try:
         root = yaml.compose(text)
@@ -300,7 +305,10 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
     escaped = new_value.replace("\\", "\\\\").replace('"', '\\"')
     lines[line_no] = f'{indent}{field}: "{escaped}"{trailing}\n'
 
-    _atomic_write(settings_path, "".join(lines))
+    try:
+        _atomic_write(settings_path, "".join(lines))
+    except OSError as exc:
+        raise CredentialCliError(f"could not write {settings_path}: {exc}") from exc
 
 
 # --------------------------------------------------------------------------- #

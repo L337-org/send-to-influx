@@ -136,6 +136,21 @@ class TestRewriteSettingsField:
         mode = stat.S_IMODE(os.stat(path).st_mode)
         assert mode == (stat.S_IRUSR | stat.S_IWUSR)
 
+    def test_missing_file_raises_credential_cli_error_not_oserror(self, tmp_path):
+        """A missing/unreadable settings_path must surface as CredentialCliError -
+        the type main()'s exception handler actually catches - not a raw OSError
+        escaping as an unhandled traceback."""
+        missing_path = tmp_path / "does-not-exist.yaml"
+        with pytest.raises(CredentialCliError, match="could not read"):
+            _rewrite_settings_field(str(missing_path), "influx", "token", "new_value")
+
+    def test_write_failure_raises_credential_cli_error_not_oserror(self, tmp_path):
+        content = 'influx:\n  token: "old_value"\n'
+        path = self._write(tmp_path, content)
+        with patch("toinflux.credential_cli._atomic_write", side_effect=OSError("disk full")):
+            with pytest.raises(CredentialCliError, match="could not write"):
+                _rewrite_settings_field(path, "influx", "token", "new_value")
+
 
 # --------------------------------------------------------------------------- #
 # _regenerate_dropin
