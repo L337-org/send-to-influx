@@ -34,7 +34,16 @@ set -e
 # would be the wrong place to depend on that reachability at all. Priority
 # high, matching sources-to-configure below - keeping both at the same
 # priority avoids a debconf priority threshold showing one but silently
-# hiding the other.
+# hiding the other. Every conditional per-source question below is high for
+# the same reason: debconf's default threshold *is* high (debconf/priority
+# defaults to "high"), so anything lower is silently skipped on a normal
+# install - the user would tick a source in the checklist and then never be
+# asked for the fields it needs (only dpkg-reconfigure, which shows
+# low-priority questions regardless, ever revealed them). "high" is also the
+# semantically correct priority per debconf(7) ("questions that don't have a
+# reasonable default" - a Hue bridge address or API key has none), and
+# there's no prompt-spam risk: each one is only asked at all if the user
+# explicitly selected that source.
 db_input high send-to-influx/influx-url || true
 db_input high send-to-influx/influx-identity || true
 db_input high send-to-influx/influx-secret || true
@@ -51,8 +60,8 @@ SOURCES=" $(echo "$RET" | tr ',' ' ') "
 
 case "$SOURCES" in
     *" hue "*)
-        db_input medium send-to-influx/hue-host || true
-        db_input medium send-to-influx/hue-user || true
+        db_input high send-to-influx/hue-host || true
+        db_input high send-to-influx/hue-user || true
         # Computed default, not a static one - db_set before the first
         # db_input makes it the pre-filled, fully user-editable default,
         # not a silent unreviewable guess. locale -k LC_MEASUREMENT was
@@ -76,52 +85,52 @@ case "$SOURCES" in
             esac
             db_set send-to-influx/hue-temperature-units "$default_unit"
         fi
-        db_input medium send-to-influx/hue-temperature-units || true
+        db_input high send-to-influx/hue-temperature-units || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" zappi "*|*" harvi "*|*" eddi "*)
-        db_input medium send-to-influx/myenergi-apikey || true
+        db_input high send-to-influx/myenergi-apikey || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" zappi "*)
-        db_input medium send-to-influx/zappi-serial || true
+        db_input high send-to-influx/zappi-serial || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" harvi "*)
-        db_input medium send-to-influx/harvi-serial || true
+        db_input high send-to-influx/harvi-serial || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" eddi "*)
-        db_input medium send-to-influx/eddi-serial || true
+        db_input high send-to-influx/eddi-serial || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" octopus "*)
-        db_input medium send-to-influx/octopus-api-key || true
-        db_input medium send-to-influx/octopus-mpan || true
-        db_input medium send-to-influx/octopus-meter-serial || true
+        db_input high send-to-influx/octopus-api-key || true
+        db_input high send-to-influx/octopus-mpan || true
+        db_input high send-to-influx/octopus-meter-serial || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" openmeteo "*)
-        db_input medium send-to-influx/openmeteo-latitude || true
-        db_input medium send-to-influx/openmeteo-longitude || true
+        db_input high send-to-influx/openmeteo-latitude || true
+        db_input high send-to-influx/openmeteo-longitude || true
         db_go || true
         ;;
 esac

@@ -245,7 +245,14 @@ from `postinst`, once package files are unpacked and everything's been answered.
   questions above, so a debconf priority threshold can't show one but silently hide the other) is
   asked next. Per-source blocks are only shown (via `db_input` called conditionally, not declaratively
   in the template file) for sources actually picked, so choosing one or two sources doesn't walk
-  through prompts for the other six. Tuning fields (`interval`, `timeout`, `fields` lists,
+  through prompts for the other six. Those conditional per-source questions are also priority `high`,
+  not `medium` - debconf's default threshold is `high` (`debconf/priority` defaults to `high`), so a
+  `medium` follow-up would be silently skipped on a normal install: the user ticks a source in the
+  checklist, is never asked for the fields it needs, and postinst then reports it "not fully
+  configured" (only `dpkg-reconfigure`, which shows low-priority questions regardless of the
+  threshold, ever revealed them - which is why this wasn't caught by reconfigure-based testing).
+  There's no prompt-spam risk in `high` here, since each question is only asked at all when its
+  source was explicitly selected. Tuning fields (`interval`, `timeout`, `fields` lists,
   `stagger_seconds`/`default_source`) are never prompted for - see the "Template structure" reasoning
   in the original plan for why (`fields` particularly can't be validated against a source's real field
   names at install time). The one deliberate exception is `hue-temperature-units`, which gets a
