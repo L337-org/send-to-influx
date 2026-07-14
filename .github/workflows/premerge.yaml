@@ -181,10 +181,25 @@ jobs:
           print("settings.yaml: hue.host/hue.user assertions OK")
           PYEOF
           sudo test -f /etc/send-to-influx/credstore.encrypted/hue-user.cred
+
           # The plaintext secret must not be sitting anywhere on disk once postinst
           # is done with it: not in settings.yaml (migrated to systemd-creds), and
           # not still in debconf's own passwords.dat (db_unregister must have
           # purged it - see debconf-devel(7)'s "clear a password value out of it as
           # soon as is possible" guidance, and CLAUDE.md's "Credential storage" doc).
-          ! sudo grep -rq "${HUE_TEST_SECRET}" /etc/send-to-influx/settings.yaml
-          ! sudo grep -rq "${HUE_TEST_SECRET}" /var/cache/debconf/
+          # grep -q exits 1 for "no match" (the outcome we want here) but also 2 for
+          # a genuine error (e.g. an unreadable path) - a bare `! grep` would treat
+          # both alike, silently passing on an error without having actually
+          # checked anything. Assert the exact exit code instead of just negating.
+          assert_secret_absent() {
+            set +e
+            sudo grep -rq "$HUE_TEST_SECRET" "$1"
+            local status=$?
+            set -e
+            if [ "$status" -ne 1 ]; then
+              echo "assert_secret_absent: expected grep to find no match (exit 1) in $1, got exit $status" >&2
+              exit 1
+            fi
+          }
+          assert_secret_absent /etc/send-to-influx/settings.yaml
+          assert_secret_absent /var/cache/debconf/
