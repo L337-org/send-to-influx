@@ -27,7 +27,10 @@ being deliberate about are credential storage and TLS verification:
   `systemd-creds` - TPM-bound or host-derived encryption at rest, decrypted only into a restricted,
   in-memory location for the service's lifetime, a real security boundary rather than an
   organizational one. See the README's "Storing secrets in systemd-creds" section and CLAUDE.md's
-  "Credential storage (`systemd-creds`)" for details. This is opt-in and per-field.
+  "Credential storage (`systemd-creds`)" for details. This is opt-in and per-field. The interactive
+  `.deb` install prompt (debconf) can also collect these directly - secrets there use debconf's
+  `Type: password` widget, which debconf never writes to its own answer database, so they don't sit
+  around in a second plaintext store either.
 - **`enforce_permissions` (settings.yaml key)**: if `settings.yaml` is readable by group/other *and*
   actually contains a real credential (not just placeholder or systemd-creds-sentinel text),
   `send-to-influx` always logs a warning. Setting `enforce_permissions: true` additionally refuses to
