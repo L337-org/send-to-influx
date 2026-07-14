@@ -7,8 +7,22 @@ if ! getent passwd send-to-influx >/dev/null 2>&1; then
 fi
 
 chown -R send-to-influx:send-to-influx /opt/send-to-influx
-chown send-to-influx:send-to-influx /etc/send-to-influx/settings.yaml
-chmod 600 /etc/send-to-influx/settings.yaml
+
+# Only set ownership/permissions on settings.yaml on a genuinely fresh install - "configure"
+# receives the previously-configured version as $2, empty only then - never on an upgrade, so
+# any permissions/ownership an admin has since changed for their own reasons persist untouched.
+# 644 (not 600) is safe as the fresh-install default: send-to-influx never writes a real secret
+# into this file, only placeholder text or (once systemd-creds is used) a cosmetic sentinel - see
+# enforce_permissions in example_settings.yaml and SECURITY.md.
+if [ -z "$2" ]; then
+    chown send-to-influx:send-to-influx /etc/send-to-influx/settings.yaml
+    chmod 644 /etc/send-to-influx/settings.yaml
+fi
+
+ln -sf /opt/send-to-influx/venv/bin/send-to-influx-set-credential /usr/local/sbin/send-to-influx-set-credential
+mkdir -p /etc/send-to-influx/credstore.encrypted
+chmod 700 /etc/send-to-influx/credstore.encrypted
+chown root:root /etc/send-to-influx/credstore.encrypted
 
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
@@ -20,7 +34,10 @@ send-to-influx installed. Before starting the service:
 
   1. Edit /etc/send-to-influx/settings.yaml with your device and InfluxDB details.
      (Copied from example_settings.yaml - it will not work as-is.)
-  2. Enable and start the service:
+  2. Optionally store secrets in systemd-creds instead of plaintext (requires systemd >= 250):
+       sudo send-to-influx-set-credential <name>
+     Run 'send-to-influx-set-credential --list' to see the available credential names.
+  3. Enable and start the service:
        systemctl enable --now send-to-influx
 
 The service is not started automatically since it needs configuration first.
