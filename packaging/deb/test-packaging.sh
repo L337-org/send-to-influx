@@ -192,7 +192,7 @@ if [ "$CREDS_WORK" = 1 ]; then
     # reconfigure with a changed URL and a blank secret: the stored token must
     # satisfy the secret requirement (no warning, auto-enable unblocked) AND
     # the new URL must still be applied - not silently dropped.
-    printf 'ci-test-influx-token' | send-to-influx-set-credential influx-token >/dev/null
+    printf 'ci-test-influx-token' | /usr/sbin/send-to-influx-set-credential influx-token >/dev/null
     debconf-set-selections <<'EOF'
 send-to-influx send-to-influx/influx-url string http://influx-changed.example.com:8086
 EOF
