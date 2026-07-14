@@ -13,7 +13,11 @@ if [ "$1" = "purge" ]; then
     # still succeed then.
     if [ -e /usr/share/debconf/confmodule ]; then
         . /usr/share/debconf/confmodule
-        db_purge
+        # || true: this whole script runs under set -e, and a debconf database
+        # hiccup must never abort the purge itself; db_stop releases the
+        # frontend cleanly once we're done with it.
+        db_purge || true
+        db_stop || true
     fi
     rm -rf /etc/send-to-influx
     rm -rf /etc/systemd/system/send-to-influx.service.d

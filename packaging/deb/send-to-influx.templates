@@ -29,7 +29,9 @@ Template: send-to-influx/influx-secret
 Type: password
 Description: InfluxDB password (v1) or API token (v2)
  For InfluxDB v1 enter the password. For InfluxDB v2 enter the API token.
- When reconfiguring, leaving this blank keeps the previously stored value.
+ When reconfiguring, leaving this blank keeps the credential already stored
+ in systemd-creds, if any (a secret kept in plaintext in settings.yaml is
+ not read back here).
 
 Template: send-to-influx/hue-host
 Type: string
@@ -41,7 +43,9 @@ Type: password
 Description: Hue bridge username/API key
  See https://developers.meethue.com/develop/get-started-2/ for how to
  generate this.
- When reconfiguring, leaving this blank keeps the previously stored value.
+ When reconfiguring, leaving this blank keeps the credential already stored
+ in systemd-creds, if any (a secret kept in plaintext in settings.yaml is
+ not read back here).
 
 Template: send-to-influx/hue-temperature-units
 Type: select
@@ -56,7 +60,9 @@ Type: password
 Description: MyEnergi API key
  Shared across Zappi/Eddi/Harvi devices - asked once regardless of how many
  of those you selected.
- When reconfiguring, leaving this blank keeps the previously stored value.
+ When reconfiguring, leaving this blank keeps the credential already stored
+ in systemd-creds, if any (a secret kept in plaintext in settings.yaml is
+ not read back here).
 
 Template: send-to-influx/zappi-serial
 Type: string
@@ -77,7 +83,9 @@ Template: send-to-influx/octopus-api-key
 Type: password
 Description: Octopus Energy API key
  From https://octopus.energy/dashboard/developer/
- When reconfiguring, leaving this blank keeps the previously stored value.
+ When reconfiguring, leaving this blank keeps the credential already stored
+ in systemd-creds, if any (a secret kept in plaintext in settings.yaml is
+ not read back here).
 
 Template: send-to-influx/octopus-mpan
 Type: string

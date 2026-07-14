@@ -28,6 +28,9 @@ set -e
 # event: answers are (re)collected when the admin explicitly asks, via
 # dpkg-reconfigure, and only then.
 if [ "$1" != "reconfigure" ] && [ -n "${2:-}" ]; then
+    # Release the frontend cleanly rather than just exiting mid-session -
+    # confmodule has already been sourced by this point.
+    db_stop || true
     exit 0
 fi
 
