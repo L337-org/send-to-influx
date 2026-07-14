@@ -42,306 +42,317 @@ chown root:root /etc/send-to-influx/credstore.encrypted
 # send-to-influx-set-credential - the only place any of this touches the
 # filesystem (config itself is side-effect-free, a hard Debian packaging
 # convention: dpkg-reconfigure/backing out of an install must never leave
-# partial changes). InfluxDB is processed unconditionally, decoupled from
-# source selection entirely - an admin with an already-configured system
-# (typically upgrading) may want to migrate just their existing InfluxDB
-# credential into systemd-creds without touching source configuration at
-# all. Each per-source block below self-gates on $SOURCES containing that
-# source's name, so a plain non-interactive run (or one where every question
-# was left blank) is still a no-op for all of it - no regression. See
-# CLAUDE.md's "Credential storage (systemd-creds)" > "debconf-driven
-# install" section for the design.
-. /usr/share/debconf/confmodule
+# partial changes). See CLAUDE.md's "Credential storage (systemd-creds)" >
+# "debconf-driven install" section for the design.
+#
+# Only applied on a genuinely fresh install or an explicit dpkg-reconfigure -
+# never on a plain upgrade. Debconf's database persists every non-password
+# answer indefinitely once given (it's a UI cache, not a change log), so
+# "read back the database and act on it" is only meaningful on a run where
+# the questions were actually (re)asked. Without this gate, every upgrade
+# re-applied stale answers: sources-to-configure persists, so each
+# previously-selected source was re-processed with its password answers long
+# since cleared - a false "not fully configured - not enabling it" warning
+# per source, on every upgrade - and Open-Meteo (no password field) silently
+# re-wrote latitude/longitude into settings.yaml with the original install's
+# answers, reverting any hand edits made since. dpkg-reconfigure exports
+# DEBCONF_RECONFIGURE=1 specifically so postinst can tell it apart from a
+# plain upgrade ($1/$2 are "configure <version>" for both); config carries
+# the matching gate on the asking side, so a plain upgrade neither asks nor
+# applies anything.
+if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
+    . /usr/share/debconf/confmodule
 
-CLI=/usr/sbin/send-to-influx-set-credential
-CLI_FAILED=0
-
-# $1 = credential name, $2 = value. Failure is recorded in $CLI_FAILED rather
-# than aborting (this whole flow is best-effort - a systemd-creds problem must
-# not block the rest of the package install).
-set_secret() {
-    if ! printf '%s' "$2" | "$CLI" "$1" >/dev/null; then
-        CLI_FAILED=1
-        echo "send-to-influx: could not store credential '$1' - run 'sudo $CLI $1' by hand to finish." >&2
-    fi
-}
-
-# $1 = dotted.path, $2 = value. Same best-effort contract as set_secret.
-set_field() {
-    if ! "$CLI" --set-field "$1" "$2" >/dev/null; then
-        CLI_FAILED=1
-        echo "send-to-influx: could not write '$1' to settings.yaml - edit it by hand." >&2
-    fi
-}
-
-db_get send-to-influx/sources-to-configure
-# Normalise debconf's multiselect answer (comma-separated, with or without a
-# following space depending on frontend) so a simple substring match works.
-# Read here, ahead of the InfluxDB block below, purely so its own "nothing
-# provided" warning can tell a genuinely untouched run (nothing selected, no
-# InfluxDB fields touched either) apart from a run where the admin engaged
-# with debconf at all - config still asks InfluxDB before sources-to-configure
-# either way, this only reorders when postinst reads the two answers back.
-SOURCES=" $(echo "$RET" | tr ',' ' ') "
-
-# --- InfluxDB connection - unconditional, regardless of source selection.
-# Leaving influx-url blank defaults to a local instance; identity/secret are
-# always applied regardless - even a bare local InfluxDB v2 needs a token.
-db_get send-to-influx/influx-url
-INFLUX_URL="$RET"
-if [ -z "$INFLUX_URL" ]; then
-    INFLUX_URL="http://localhost:8086"
-fi
-db_get send-to-influx/influx-identity
-INFLUX_IDENTITY="$RET"
-db_get send-to-influx/influx-secret
-INFLUX_SECRET="$RET"
-# Type: password answers are written to debconf's own database (a separate
-# passwords.dat store, chmod 600) - debconf-devel(7) advises clearing a
-# password value out of it "as soon as is possible" once consumed. We've
-# just read it into $INFLUX_SECRET, so unregister the question now,
-# regardless of what happens with the value from here - this doesn't
-# affect a later dpkg-reconfigure, which re-registers the question fresh
-# from send-to-influx.templates and prompts for it again either way (a
-# Type: password prompt is never pre-filled, unregistered or not).
-db_unregister send-to-influx/influx-secret || true
-
-INFLUX_OK=0
-if [ -n "$INFLUX_IDENTITY" ] && [ -n "$INFLUX_SECRET" ]; then
-    INFLUX_VERSION="$("$CLI" --detect-influx-version "$INFLUX_URL" 2>/dev/null || echo unknown)"
+    CLI=/usr/sbin/send-to-influx-set-credential
     CLI_FAILED=0
-    if [ "$INFLUX_VERSION" = "v2" ]; then
-        # example_settings.yaml ships influx.org/influx.token as real, empty
-        # keys (alongside the v1 user/password placeholders) specifically so
-        # set_field/set_secret below have something to rewrite on a fresh
-        # install - an empty token is falsy, so it doesn't make is_v2 = bool(
-        # token) misfire for a v1-only install that never touches these
-        # fields. Only attempt set_secret influx-token if set_field succeeded
-        # first, defense-in-depth against a hand-edited settings.yaml that's
-        # since had these keys removed - otherwise the token would end up
-        # encrypted into systemd-creds with the drop-in already referencing
-        # it, while settings.yaml has no influx.token key left to point back
-        # at it: a partially migrated, inconsistent state, worse than just
-        # failing cleanly.
-        set_field influx.url "$INFLUX_URL"
-        set_field influx.org "$INFLUX_IDENTITY"
-        if [ "$CLI_FAILED" = 0 ]; then
-            set_secret influx-token "$INFLUX_SECRET"
+
+    # $1 = credential name, $2 = value. Failure is recorded in $CLI_FAILED rather
+    # than aborting (this whole flow is best-effort - a systemd-creds problem must
+    # not block the rest of the package install).
+    set_secret() {
+        if ! printf '%s' "$2" | "$CLI" "$1" >/dev/null; then
+            CLI_FAILED=1
+            echo "send-to-influx: could not store credential '$1' - run 'sudo $CLI $1' by hand to finish." >&2
         fi
-        if [ "$CLI_FAILED" = 0 ]; then
-            INFLUX_OK=1
+    }
+
+    # $1 = dotted.path, $2 = value. Same best-effort contract as set_secret.
+    set_field() {
+        if ! "$CLI" --set-field "$1" "$2" >/dev/null; then
+            CLI_FAILED=1
+            echo "send-to-influx: could not write '$1' to settings.yaml - edit it by hand." >&2
         fi
-    elif [ "$INFLUX_VERSION" = "v1" ]; then
-        set_field influx.url "$INFLUX_URL"
-        set_secret influx-user "$INFLUX_IDENTITY"
-        set_secret influx-password "$INFLUX_SECRET"
-        if [ "$CLI_FAILED" = 0 ]; then
-            INFLUX_OK=1
+    }
+
+    db_get send-to-influx/sources-to-configure
+    SOURCES_RAW="$RET"
+    # Normalise debconf's multiselect answer (comma-separated, with or without a
+    # following space depending on frontend) so a simple substring match works.
+    SOURCES=" $(echo "$SOURCES_RAW" | tr ',' ' ') "
+
+    # --- InfluxDB connection - unconditional, regardless of source selection.
+    # Leaving influx-url blank defaults to a local instance; identity/secret are
+    # always applied regardless - even a bare local InfluxDB v2 needs a token.
+    db_get send-to-influx/influx-url
+    INFLUX_URL="$RET"
+    if [ -z "$INFLUX_URL" ]; then
+        INFLUX_URL="http://localhost:8086"
+    fi
+    db_get send-to-influx/influx-identity
+    INFLUX_IDENTITY="$RET"
+    db_get send-to-influx/influx-secret
+    INFLUX_SECRET="$RET"
+    # Type: password answers are written to debconf's own database (a separate
+    # passwords.dat store, chmod 600) - debconf-devel(7) advises clearing a
+    # password value out of it "as soon as is possible" once consumed, and its
+    # suggested way to do that is setting the value to the empty string: the
+    # stored copy is gone, but the question stays registered with its seen
+    # flag intact. (An earlier version used db_unregister here, which also
+    # cleared the value - but deleting the question deletes its seen flag with
+    # it, and the question was recreated fresh/unseen from the templates file
+    # on the next run, so debconf re-asked it, blank, on every upgrade.)
+    # Cleared here, right after reading, regardless of what happens with the
+    # value from here on.
+    db_set send-to-influx/influx-secret "" || true
+
+    INFLUX_OK=0
+    if [ -n "$INFLUX_IDENTITY" ] && [ -n "$INFLUX_SECRET" ]; then
+        INFLUX_VERSION="$("$CLI" --detect-influx-version "$INFLUX_URL" 2>/dev/null || echo unknown)"
+        CLI_FAILED=0
+        if [ "$INFLUX_VERSION" = "v2" ]; then
+            # example_settings.yaml ships influx.org/influx.token as real, empty
+            # keys (alongside the v1 user/password placeholders) specifically so
+            # set_field/set_secret below have something to rewrite on a fresh
+            # install - an empty token is falsy, so it doesn't make is_v2 = bool(
+            # token) misfire for a v1-only install that never touches these
+            # fields. Only attempt set_secret influx-token if set_field succeeded
+            # first, defense-in-depth against a hand-edited settings.yaml that's
+            # since had these keys removed - otherwise the token would end up
+            # encrypted into systemd-creds with the drop-in already referencing
+            # it, while settings.yaml has no influx.token key left to point back
+            # at it: a partially migrated, inconsistent state, worse than just
+            # failing cleanly.
+            set_field influx.url "$INFLUX_URL"
+            set_field influx.org "$INFLUX_IDENTITY"
+            if [ "$CLI_FAILED" = 0 ]; then
+                set_secret influx-token "$INFLUX_SECRET"
+            fi
+            if [ "$CLI_FAILED" = 0 ]; then
+                INFLUX_OK=1
+            fi
+        elif [ "$INFLUX_VERSION" = "v1" ]; then
+            set_field influx.url "$INFLUX_URL"
+            set_secret influx-user "$INFLUX_IDENTITY"
+            set_secret influx-password "$INFLUX_SECRET"
+            if [ "$CLI_FAILED" = 0 ]; then
+                INFLUX_OK=1
+            fi
+        else
+            echo "send-to-influx: could not detect the InfluxDB version at $INFLUX_URL (unreachable?) - run 'sudo dpkg-reconfigure send-to-influx' once it's reachable." >&2
         fi
     else
-        echo "send-to-influx: could not detect the InfluxDB version at $INFLUX_URL (unreachable?) - run 'sudo dpkg-reconfigure send-to-influx' once it's reachable." >&2
-    fi
-else
-    # Only warn if the admin actually engaged with this somehow - selected a
-    # source (which needs InfluxDB to do anything useful) or started typing an
-    # InfluxDB secret but didn't finish both fields. Deliberately not checking
-    # $INFLUX_IDENTITY here: it's Type: string, so unlike $INFLUX_SECRET
-    # (Type: password, never persisted, and actively unregistered above) it
-    # silently persists across every future run once answered once - a normal
-    # (non-reconfigure) invocation reuses it without re-prompting, so it stays
-    # non-empty forever after the first time, making it a false signal that
-    # "something happened this run" on every subsequent untouched/unattended
-    # upgrade from then on. $INFLUX_SECRET never has that problem, so it alone
-    # is what actually indicates fresh input.
-    if [ "$SOURCES" != "  " ] || [ -n "$INFLUX_SECRET" ]; then
-        echo "send-to-influx: InfluxDB user/org or password/token not provided - skipping InfluxDB setup and any source auto-enable this run." >&2
-    fi
-fi
-
-# --- Hue ---
-HUE_OK=0
-case "$SOURCES" in
-    *" hue "*)
-        db_get send-to-influx/hue-host
-        HUE_HOST="$RET"
-        db_get send-to-influx/hue-user
-        HUE_USER="$RET"
-        db_unregister send-to-influx/hue-user || true
-        if [ -n "$HUE_HOST" ] && [ -n "$HUE_USER" ]; then
-            CLI_FAILED=0
-            set_field hue.host "$HUE_HOST"
-            set_secret hue-user "$HUE_USER"
-            db_get send-to-influx/hue-temperature-units
-            if [ -n "$RET" ]; then
-                set_field hue.temperature_units "$RET"
-            fi
-            if [ "$CLI_FAILED" = 0 ]; then
-                HUE_OK=1
-            fi
-        else
-            echo "send-to-influx: Hue not fully configured (host/user missing) - not enabling it." >&2
+        # Only warn if the admin actually engaged with the prompts this run -
+        # selected a source (which needs InfluxDB to do anything useful) or
+        # entered a secret without the matching identity. A run where
+        # everything was left blank (e.g. a non-interactive install) stays
+        # silent.
+        if [ -n "$SOURCES_RAW" ] || [ -n "$INFLUX_SECRET" ]; then
+            echo "send-to-influx: InfluxDB user/org or password/token not provided - skipping InfluxDB setup and any source auto-enable this run." >&2
         fi
-        ;;
-esac
+    fi
 
-# --- MyEnergi (apikey shared across zappi/harvi/eddi - asked/applied once) ---
-MYENERGI_APIKEY=""
-case "$SOURCES" in
-    *" zappi "*|*" harvi "*|*" eddi "*)
-        db_get send-to-influx/myenergi-apikey
-        MYENERGI_APIKEY="$RET"
-        db_unregister send-to-influx/myenergi-apikey || true
-        if [ -n "$MYENERGI_APIKEY" ]; then
-            CLI_FAILED=0
-            set_secret myenergi-apikey "$MYENERGI_APIKEY"
-            if [ "$CLI_FAILED" != 0 ]; then
-                MYENERGI_APIKEY=""
+    # --- Hue ---
+    HUE_OK=0
+    case "$SOURCES" in
+        *" hue "*)
+            db_get send-to-influx/hue-host
+            HUE_HOST="$RET"
+            db_get send-to-influx/hue-user
+            HUE_USER="$RET"
+            # Clear the consumed password (see influx-secret above).
+            db_set send-to-influx/hue-user "" || true
+            if [ -n "$HUE_HOST" ] && [ -n "$HUE_USER" ]; then
+                CLI_FAILED=0
+                set_field hue.host "$HUE_HOST"
+                set_secret hue-user "$HUE_USER"
+                db_get send-to-influx/hue-temperature-units
+                if [ -n "$RET" ]; then
+                    set_field hue.temperature_units "$RET"
+                fi
+                if [ "$CLI_FAILED" = 0 ]; then
+                    HUE_OK=1
+                fi
+            else
+                echo "send-to-influx: Hue not fully configured (host/user missing) - not enabling it." >&2
             fi
-        fi
-        ;;
-esac
+            ;;
+    esac
 
-ZAPPI_OK=0
-case "$SOURCES" in
-    *" zappi "*)
-        db_get send-to-influx/zappi-serial
-        ZAPPI_SERIAL="$RET"
-        if [ -n "$MYENERGI_APIKEY" ] && [ -n "$ZAPPI_SERIAL" ]; then
-            CLI_FAILED=0
-            set_field zappi.serial "$ZAPPI_SERIAL"
-            if [ "$CLI_FAILED" = 0 ]; then
-                ZAPPI_OK=1
+    # --- MyEnergi (apikey shared across zappi/harvi/eddi - asked/applied once) ---
+    MYENERGI_APIKEY=""
+    case "$SOURCES" in
+        *" zappi "*|*" harvi "*|*" eddi "*)
+            db_get send-to-influx/myenergi-apikey
+            MYENERGI_APIKEY="$RET"
+            # Clear the consumed password (see influx-secret above).
+            db_set send-to-influx/myenergi-apikey "" || true
+            if [ -n "$MYENERGI_APIKEY" ]; then
+                CLI_FAILED=0
+                set_secret myenergi-apikey "$MYENERGI_APIKEY"
+                if [ "$CLI_FAILED" != 0 ]; then
+                    MYENERGI_APIKEY=""
+                fi
             fi
-        else
-            echo "send-to-influx: Zappi not fully configured (MyEnergi API key/serial missing) - not enabling it." >&2
-        fi
-        ;;
-esac
+            ;;
+    esac
 
-HARVI_OK=0
-case "$SOURCES" in
-    *" harvi "*)
-        db_get send-to-influx/harvi-serial
-        HARVI_SERIAL="$RET"
-        if [ -n "$MYENERGI_APIKEY" ] && [ -n "$HARVI_SERIAL" ]; then
-            CLI_FAILED=0
-            set_field harvi.serial "$HARVI_SERIAL"
-            if [ "$CLI_FAILED" = 0 ]; then
-                HARVI_OK=1
+    ZAPPI_OK=0
+    case "$SOURCES" in
+        *" zappi "*)
+            db_get send-to-influx/zappi-serial
+            ZAPPI_SERIAL="$RET"
+            if [ -n "$MYENERGI_APIKEY" ] && [ -n "$ZAPPI_SERIAL" ]; then
+                CLI_FAILED=0
+                set_field zappi.serial "$ZAPPI_SERIAL"
+                if [ "$CLI_FAILED" = 0 ]; then
+                    ZAPPI_OK=1
+                fi
+            else
+                echo "send-to-influx: Zappi not fully configured (MyEnergi API key/serial missing) - not enabling it." >&2
             fi
-        else
-            echo "send-to-influx: Harvi not fully configured (MyEnergi API key/serial missing) - not enabling it." >&2
-        fi
-        ;;
-esac
+            ;;
+    esac
 
-EDDI_OK=0
-case "$SOURCES" in
-    *" eddi "*)
-        db_get send-to-influx/eddi-serial
-        EDDI_SERIAL="$RET"
-        if [ -n "$MYENERGI_APIKEY" ] && [ -n "$EDDI_SERIAL" ]; then
-            CLI_FAILED=0
-            set_field eddi.serial "$EDDI_SERIAL"
-            if [ "$CLI_FAILED" = 0 ]; then
-                EDDI_OK=1
+    HARVI_OK=0
+    case "$SOURCES" in
+        *" harvi "*)
+            db_get send-to-influx/harvi-serial
+            HARVI_SERIAL="$RET"
+            if [ -n "$MYENERGI_APIKEY" ] && [ -n "$HARVI_SERIAL" ]; then
+                CLI_FAILED=0
+                set_field harvi.serial "$HARVI_SERIAL"
+                if [ "$CLI_FAILED" = 0 ]; then
+                    HARVI_OK=1
+                fi
+            else
+                echo "send-to-influx: Harvi not fully configured (MyEnergi API key/serial missing) - not enabling it." >&2
             fi
-        else
-            echo "send-to-influx: Eddi not fully configured (MyEnergi API key/serial missing) - not enabling it." >&2
-        fi
-        ;;
-esac
+            ;;
+    esac
 
-# --- Octopus ---
-OCTOPUS_OK=0
-case "$SOURCES" in
-    *" octopus "*)
-        db_get send-to-influx/octopus-api-key
-        OCTOPUS_KEY="$RET"
-        db_unregister send-to-influx/octopus-api-key || true
-        db_get send-to-influx/octopus-mpan
-        OCTOPUS_MPAN="$RET"
-        db_get send-to-influx/octopus-meter-serial
-        OCTOPUS_METER="$RET"
-        if [ -n "$OCTOPUS_KEY" ] && [ -n "$OCTOPUS_MPAN" ] && [ -n "$OCTOPUS_METER" ]; then
-            CLI_FAILED=0
-            set_secret octopus-api-key "$OCTOPUS_KEY"
-            set_field octopus.mpan "$OCTOPUS_MPAN"
-            set_field octopus.meter_serial "$OCTOPUS_METER"
-            if [ "$CLI_FAILED" = 0 ]; then
-                OCTOPUS_OK=1
+    EDDI_OK=0
+    case "$SOURCES" in
+        *" eddi "*)
+            db_get send-to-influx/eddi-serial
+            EDDI_SERIAL="$RET"
+            if [ -n "$MYENERGI_APIKEY" ] && [ -n "$EDDI_SERIAL" ]; then
+                CLI_FAILED=0
+                set_field eddi.serial "$EDDI_SERIAL"
+                if [ "$CLI_FAILED" = 0 ]; then
+                    EDDI_OK=1
+                fi
+            else
+                echo "send-to-influx: Eddi not fully configured (MyEnergi API key/serial missing) - not enabling it." >&2
             fi
-        else
-            echo "send-to-influx: Octopus not fully configured (API key/MPAN/meter serial missing) - not enabling it." >&2
-        fi
-        ;;
-esac
+            ;;
+    esac
 
-# --- Open-Meteo ---
-OPENMETEO_OK=0
-case "$SOURCES" in
-    *" openmeteo "*)
-        db_get send-to-influx/openmeteo-latitude
-        OM_LAT="$RET"
-        db_get send-to-influx/openmeteo-longitude
-        OM_LON="$RET"
-        if [ -n "$OM_LAT" ] && [ -n "$OM_LON" ]; then
-            CLI_FAILED=0
-            set_field openmeteo.latitude "$OM_LAT"
-            set_field openmeteo.longitude "$OM_LON"
-            if [ "$CLI_FAILED" = 0 ]; then
-                OPENMETEO_OK=1
+    # --- Octopus ---
+    OCTOPUS_OK=0
+    case "$SOURCES" in
+        *" octopus "*)
+            db_get send-to-influx/octopus-api-key
+            OCTOPUS_KEY="$RET"
+            # Clear the consumed password (see influx-secret above).
+            db_set send-to-influx/octopus-api-key "" || true
+            db_get send-to-influx/octopus-mpan
+            OCTOPUS_MPAN="$RET"
+            db_get send-to-influx/octopus-meter-serial
+            OCTOPUS_METER="$RET"
+            if [ -n "$OCTOPUS_KEY" ] && [ -n "$OCTOPUS_MPAN" ] && [ -n "$OCTOPUS_METER" ]; then
+                CLI_FAILED=0
+                set_secret octopus-api-key "$OCTOPUS_KEY"
+                set_field octopus.mpan "$OCTOPUS_MPAN"
+                set_field octopus.meter_serial "$OCTOPUS_METER"
+                if [ "$CLI_FAILED" = 0 ]; then
+                    OCTOPUS_OK=1
+                fi
+            else
+                echo "send-to-influx: Octopus not fully configured (API key/MPAN/meter serial missing) - not enabling it." >&2
             fi
-        else
-            echo "send-to-influx: Open-Meteo not fully configured (latitude/longitude missing) - not enabling it." >&2
+            ;;
+    esac
+
+    # --- Open-Meteo ---
+    OPENMETEO_OK=0
+    case "$SOURCES" in
+        *" openmeteo "*)
+            db_get send-to-influx/openmeteo-latitude
+            OM_LAT="$RET"
+            db_get send-to-influx/openmeteo-longitude
+            OM_LON="$RET"
+            if [ -n "$OM_LAT" ] && [ -n "$OM_LON" ]; then
+                CLI_FAILED=0
+                set_field openmeteo.latitude "$OM_LAT"
+                set_field openmeteo.longitude "$OM_LON"
+                if [ "$CLI_FAILED" = 0 ]; then
+                    OPENMETEO_OK=1
+                fi
+            else
+                echo "send-to-influx: Open-Meteo not fully configured (latitude/longitude missing) - not enabling it." >&2
+            fi
+            ;;
+    esac
+
+    # --- CarbonIntensity / Speedtest: nothing beyond selection is required ---
+    CARBONINTENSITY_OK=0
+    case "$SOURCES" in *" carbonintensity "*) CARBONINTENSITY_OK=1 ;; esac
+    SPEEDTEST_OK=0
+    case "$SOURCES" in *" speedtest "*) SPEEDTEST_OK=1 ;; esac
+
+    # --- Auto-enable: only sources that were selected AND had every required
+    # field supplied AND a working InfluxDB block get their database/bucket
+    # created (best-effort - logged, not fatal, on failure) and added to
+    # sources: in settings.yaml. Anything not fully satisfied is left exactly
+    # as opt-in as it is today, with a message explaining what's missing.
+    if [ "$INFLUX_OK" = 1 ]; then
+        if [ "$HUE_OK" = 1 ]; then
+            "$CLI" --ensure-influx-storage hue_db || true
+            "$CLI" --enable-source hue || true
         fi
-        ;;
-esac
+        if [ "$ZAPPI_OK" = 1 ]; then
+            "$CLI" --ensure-influx-storage zappi_db || true
+            "$CLI" --enable-source zappi || true
+        fi
+        if [ "$HARVI_OK" = 1 ]; then
+            "$CLI" --ensure-influx-storage myenergi_db || true
+            "$CLI" --enable-source harvi || true
+        fi
+        if [ "$EDDI_OK" = 1 ]; then
+            "$CLI" --ensure-influx-storage myenergi_db || true
+            "$CLI" --enable-source eddi || true
+        fi
+        if [ "$OCTOPUS_OK" = 1 ]; then
+            "$CLI" --ensure-influx-storage octopus_db || true
+            "$CLI" --enable-source octopus || true
+        fi
+        if [ "$OPENMETEO_OK" = 1 ]; then
+            "$CLI" --ensure-influx-storage weather_db || true
+            "$CLI" --enable-source openmeteo || true
+        fi
+        if [ "$CARBONINTENSITY_OK" = 1 ]; then
+            "$CLI" --ensure-influx-storage grid_db || true
+            "$CLI" --enable-source carbonintensity || true
+        fi
+        if [ "$SPEEDTEST_OK" = 1 ]; then
+            "$CLI" --ensure-influx-storage speedtest_db || true
+            "$CLI" --enable-source speedtest || true
+        fi
+    fi
 
-# --- CarbonIntensity / Speedtest: nothing beyond selection is required ---
-CARBONINTENSITY_OK=0
-case "$SOURCES" in *" carbonintensity "*) CARBONINTENSITY_OK=1 ;; esac
-SPEEDTEST_OK=0
-case "$SOURCES" in *" speedtest "*) SPEEDTEST_OK=1 ;; esac
-
-# --- Auto-enable: only sources that were selected AND had every required
-# field supplied AND a working InfluxDB block get their database/bucket
-# created (best-effort - logged, not fatal, on failure) and added to
-# sources: in settings.yaml. Anything not fully satisfied is left exactly
-# as opt-in as it is today, with a message explaining what's missing.
-if [ "$INFLUX_OK" = 1 ]; then
-    if [ "$HUE_OK" = 1 ]; then
-        "$CLI" --ensure-influx-storage hue_db || true
-        "$CLI" --enable-source hue || true
-    fi
-    if [ "$ZAPPI_OK" = 1 ]; then
-        "$CLI" --ensure-influx-storage zappi_db || true
-        "$CLI" --enable-source zappi || true
-    fi
-    if [ "$HARVI_OK" = 1 ]; then
-        "$CLI" --ensure-influx-storage myenergi_db || true
-        "$CLI" --enable-source harvi || true
-    fi
-    if [ "$EDDI_OK" = 1 ]; then
-        "$CLI" --ensure-influx-storage myenergi_db || true
-        "$CLI" --enable-source eddi || true
-    fi
-    if [ "$OCTOPUS_OK" = 1 ]; then
-        "$CLI" --ensure-influx-storage octopus_db || true
-        "$CLI" --enable-source octopus || true
-    fi
-    if [ "$OPENMETEO_OK" = 1 ]; then
-        "$CLI" --ensure-influx-storage weather_db || true
-        "$CLI" --enable-source openmeteo || true
-    fi
-    if [ "$CARBONINTENSITY_OK" = 1 ]; then
-        "$CLI" --ensure-influx-storage grid_db || true
-        "$CLI" --enable-source carbonintensity || true
-    fi
-    if [ "$SPEEDTEST_OK" = 1 ]; then
-        "$CLI" --ensure-influx-storage speedtest_db || true
-        "$CLI" --enable-source speedtest || true
-    fi
+    # No further db_* calls below - let the frontend go so the rest of the
+    # script's output lands directly on the terminal.
+    db_stop || true
 fi
 
 if [ -d /run/systemd/system ]; then

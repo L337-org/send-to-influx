@@ -15,6 +15,22 @@ set -e
 
 . /usr/share/debconf/confmodule
 
+# Only ask questions on a genuinely fresh install or an explicit
+# dpkg-reconfigure - never on a plain upgrade. config is invoked as
+# "configure <previously-configured-version>" by dpkg-preconfigure (and by
+# the frontend when postinst sources confmodule), with $2 empty only on a
+# fresh install, and as "reconfigure <version>" by dpkg-reconfigure. Without
+# this gate, every upgrade walked the questions again: most were skipped as
+# already seen, but the password questions - whose stored values postinst
+# deliberately clears after use - popped up again, blank and contextless
+# (postinst has the matching gate on the applying side; see there for what
+# re-applying stale answers used to do). An upgrade is not a configuration
+# event: answers are (re)collected when the admin explicitly asks, via
+# dpkg-reconfigure, and only then.
+if [ "$1" != "reconfigure" ] && [ -n "${2:-}" ]; then
+    exit 0
+fi
+
 # InfluxDB connection - asked first, unconditionally, regardless of which (if
 # any) sources get selected below. This is deliberate: an admin upgrading an
 # already-configured system commonly wants to migrate just their existing

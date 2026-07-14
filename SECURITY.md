@@ -34,13 +34,13 @@ being deliberate about are credential storage and TLS verification:
   answer database, and restricted to `chmod 600`). Debian's own developers' guide
   (`debconf-devel(7)`) advises clearing a password value out of that store "as soon as is possible"
   once consumed, so `postinst` does exactly that: right after each `db_get` on a password-type
-  template, it calls `db_unregister` on that question, which removes it - and its stored answer -
-  from debconf's database entirely. This doesn't change the already-separate UI convention that
+  template, it sets the stored answer back to the empty string (`db_set <question> ""`), removing
+  the leftover copy in `passwords.dat`. This doesn't change the already-separate UI convention that
   password answers are never redisplayed on a later `dpkg-reconfigure` (secret prompts always come
-  back blank regardless); it removes the actual leftover copy in `passwords.dat`, not just the
-  redisplay behaviour. The template itself is unaffected - it's re-registered fresh from
-  `send-to-influx.templates` on the next `config`/`postinst` run, so `dpkg-reconfigure` still works
-  normally.
+  back blank regardless); it removes the actual stored value, not just the redisplay behaviour.
+  (An earlier version used `db_unregister` instead - that cleared the value equally well, but
+  deleting the question deletes its `seen` flag too, and the recreated, unseen question was then
+  re-asked, blank and contextless, on every subsequent package upgrade.)
 - **`enforce_permissions` (settings.yaml key)**: if `settings.yaml` is readable by group/other *and*
   actually contains a real credential (not just placeholder or systemd-creds-sentinel text),
   `send-to-influx` always logs a warning. Setting `enforce_permissions: true` additionally refuses to

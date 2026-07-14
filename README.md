@@ -256,17 +256,21 @@ stdout above.
 
 ### Configuring during install (debconf)
 
-Installing (or upgrading to) the `.deb` interactively presents a debconf prompt: your InfluxDB
+A fresh interactive install of the `.deb` presents a debconf prompt: your InfluxDB
 connection details first (asked unconditionally, regardless of what else you answer - useful on
-its own if you're upgrading an already-working install and just want to move an existing InfluxDB
+its own if you just want to move an existing InfluxDB
 credential into `systemd-creds` without touching anything else), then a checklist of which data
 sources you want to configure now, then - only for the ones you pick - the fields needed to
 actually reach that source's API (credentials plus things like a Hue bridge hostname or an Octopus
 meter number; tuning settings like intervals keep their shipped defaults and can be adjusted in
-`settings.yaml` afterwards). Secrets you enter are moved into `systemd-creds` (see below)
+`settings.yaml` afterwards). A plain package *upgrade* never prompts and never applies debconf
+answers: your `settings.yaml` and credentials are only ever written by a fresh install's prompts or
+by an explicit `sudo dpkg-reconfigure send-to-influx`, which re-runs the same flow at any time.
+Secrets you enter are moved into `systemd-creds` (see below)
 and never written into `settings.yaml` in plaintext. Debconf itself briefly holds what you type in
-its own separate, `chmod 600` password store while `postinst` runs, then actively unregisters each
-password-type question immediately after reading it - regardless of whether the subsequent migration
+its own separate, `chmod 600` password store while `postinst` runs, then clears each
+password-type answer back to the empty string immediately after reading it - regardless of whether
+the subsequent migration
 into `systemd-creds` goes on to succeed - see SECURITY.md if you want the detail. Non-secret answers
 (a Hue bridge hostname, an Octopus meter number, and so on) aren't password-type and stay in
 debconf's regular database as normal, same as any other package's debconf answers. If every required

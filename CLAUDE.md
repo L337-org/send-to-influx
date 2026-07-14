@@ -221,6 +221,21 @@ convention, so `dpkg-reconfigure`/backing out of an install never leaves partial
 never touches the filesystem and never calls into `credential_cli.py` - that only happens later,
 from `postinst`, once package files are unpacked and everything's been answered.
 
+- **Install/upgrade/reconfigure gating**: both scripts run their debconf flow only on a genuinely
+  fresh install or an explicit `dpkg-reconfigure` - a plain package upgrade neither asks questions
+  nor applies answers. `config` is invoked as `configure <previously-configured-version>` by
+  `dpkg-preconfigure` (`$2` empty only on a fresh install) and as `reconfigure <version>` by
+  `dpkg-reconfigure`, so it early-exits when `$1 != reconfigure && $2` is non-empty. `postinst` is
+  invoked as `configure <version>` in both the upgrade and reconfigure cases, so it can't use its
+  arguments alone - it checks `DEBCONF_RECONFIGURE=1`, which `dpkg-reconfigure` exports precisely so
+  postinsts can tell the two apart (its source calls this "a hack to let postinsts know when they're
+  being reconfigured"). Without this gate, debconf's database - a UI cache that persists every
+  non-password answer indefinitely, not a change log - was effectively treated as a signal that
+  configuration had happened *this* run: every upgrade re-prompted for `influx-secret` (blank,
+  contextless - see the `db_set ""` note below), re-warned "not fully configured - not enabling it"
+  for every previously-selected source whose password answers had (deliberately) been cleared, and
+  re-wrote Open-Meteo's latitude/longitude into `settings.yaml` from the original install's answers,
+  reverting any hand edits made since.
 - InfluxDB's `influx-url`/`influx-identity`/`influx-secret` are asked *first*, unconditionally -
   deliberately **not** gated on any source being selected. An earlier version of this design asked
   them only after `sources-to-configure` and only if at least one source was picked, exiting `config`
@@ -259,15 +274,17 @@ from `postinst`, once package files are unpacked and everything's been answered.
   *computed* default (checks `$LC_ALL`/`$LANG` for a `_US` territory code, defaulting to Celsius
   otherwise) via `db_set` before the first `db_input`, rather than a silent guess - getting temperature
   units wrong is immediately visible to the user in a way the other tuning fields aren't.
-- `postinst`: `sources-to-configure` is read first (`$SOURCES`, purely to know whether *anything* was
+- `postinst` (inside the fresh-install-or-reconfigure gate above): `sources-to-configure` is read
+  first (`$SOURCES`, purely to know whether *anything* was
   selected - no processing happens from it yet), then InfluxDB is processed unconditionally,
-  independent of that selection - a plain non-interactive install (or one where every question was
-  left blank) is still a no-op for all of it, since each per-source block below self-gates on
+  independent of that selection - a run where every question was
+  left blank (e.g. non-interactive) is still a no-op for all of it, since each per-source block below
+  self-gates on
   `$SOURCES` containing that source's name; nothing here requires the outer "was anything selected"
   gate the earlier design used. The one place `$SOURCES` matters this early: the "InfluxDB not
-  provided" warning only fires if a source was actually selected or InfluxDB fields were partially
-  filled in - not on every untouched upgrade, which would otherwise warn on every single one even
-  when the admin isn't using debconf/systemd-creds at all. Resolves the InfluxDB block via
+  provided" warning only fires if the admin engaged with the prompts this run (selected a source, or
+  entered a secret without the matching identity) - a fully-blank run stays silent. Resolves the
+  InfluxDB block via
   `--detect-influx-version` and routes `identity`/`secret` accordingly - v2 writes `identity` to the
   plain (non-secret) `influx.org` field via `--set-field` and `secret` to the `influx-token` credential;
   v1 routes both `identity` and `secret` to the `influx-user`/`influx-password` credentials - if
@@ -287,12 +304,13 @@ from `postinst`, once package files are unpacked and everything's been answered.
   readable answer database, and restricted to `chmod 600`. Debian's own developers' guide
   (`debconf-devel(7)`) advises clearing a password value out of it "as soon as is possible" once
   consumed, so `postinst` does: immediately after each `db_get` on a password-type template
-  (`influx-secret`, `hue-user`, `myenergi-apikey`, `octopus-api-key`), it calls `db_unregister` on
-  that question - this removes the question, and its stored answer, from debconf's database entirely,
+  (`influx-secret`, `hue-user`, `myenergi-apikey`, `octopus-api-key`), it clears the stored answer
+  with `db_set <question> ""`,
   regardless of whether the subsequent `systemd-creds` migration for that value goes on to succeed or
-  fail. The template definition itself lives in `send-to-influx.templates`, not in the database entry
-  that got removed, so it's re-registered fresh the next time `config`/`postinst` run -
-  `dpkg-reconfigure` is unaffected. Separately, and unrelated to whether the value is unregistered,
+  fail. (An earlier version used `db_unregister`, which cleared the value equally well but deleted
+  the question's `seen` flag with it - the question was recreated fresh/unseen from the templates
+  file on the next run, so debconf re-asked it, blank, on every upgrade; `db_set ""` empties the
+  value while leaving the question registered and seen.) Separately, and unrelated to the clearing,
   debconf *never* redisplays/pre-fills a previous password answer in the prompt on a later
   invocation - a UI convention for this template type. So a reconfigure always shows secret prompts
   blank, with no way for `postinst` to distinguish "leave it as-is" from "clear it" from that alone -

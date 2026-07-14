@@ -134,18 +134,19 @@ jobs:
 
       - name: Seed debconf answers for the interactive install flow
         # Exercises config's conditional prompts and postinst's db_get/set_secret/
-        # set_field/db_unregister wiring - without this, a plain `dpkg -i` with
-        # nothing pre-seeded leaves every question at its blank default, so
+        # set_field/password-clearing wiring - without this, a plain `dpkg -i`
+        # with nothing pre-seeded leaves every question at its blank default, so
         # postinst's debconf-driven code still runs but has nothing to act on
         # (no credential gets migrated, settings.yaml is never touched) - the
-        # actual write/migrate/db_unregister paths this test exists to exercise
+        # actual write/migrate/clear paths this test exists to exercise
         # never run in CI at all. Hue is picked as a representative source: it has
         # one of each prompt type (string, password, select). InfluxDB's
         # identity/secret are deliberately left blank - version detection against a
         # real server is out of scope for this smoke test (see README's "leave
         # every question blank" supported flow), so Hue won't get auto-enabled into
-        # sources:, but its own credential still gets migrated and unregistered
-        # regardless, which is what this step exists to verify.
+        # sources:, but its own credential still gets migrated and cleared out
+        # of debconf's database regardless, which is what this step exists to
+        # verify.
         run: |
           {
             echo "send-to-influx send-to-influx/sources-to-configure multiselect hue"
@@ -186,9 +187,10 @@ jobs:
 
           # The plaintext secret must not be sitting anywhere on disk once postinst
           # is done with it: not in settings.yaml (migrated to systemd-creds), and
-          # not still in debconf's own passwords.dat (db_unregister must have
-          # purged it - see debconf-devel(7)'s "clear a password value out of it as
-          # soon as is possible" guidance, and CLAUDE.md's "Credential storage" doc).
+          # not still in debconf's own passwords.dat (postinst must have cleared
+          # it with `db_set <q> ""` - see debconf-devel(7)'s "clear a password
+          # value out of it as soon as is possible" guidance, and CLAUDE.md's
+          # "Credential storage" doc).
           # grep -q exits 1 for "no match" (the outcome we want here) but also 2 for
           # a genuine error (e.g. an unreadable path) - a bare `! grep` would treat
           # both alike, silently passing on an error without having actually
