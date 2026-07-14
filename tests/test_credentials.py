@@ -46,12 +46,14 @@ class TestApplyCredentialSubstitution:
         assert result["myenergi"]["apikey"] == "value-for-myenergi-apikey"
         assert result["octopus"]["api_key"] == "value-for-octopus-api-key"
 
-    def test_strips_trailing_whitespace(self, sample_settings, monkeypatch, tmp_path):
-        """Credential file content is stripped of surrounding whitespace/newlines."""
+    def test_strips_only_trailing_newlines_not_meaningful_whitespace(self, sample_settings, monkeypatch, tmp_path):
+        """Only a trailing line ending is stripped - a password can legitimately
+        start/end with spaces, and blindly stripping all whitespace would silently
+        corrupt one instead of preserving it exactly as encrypted."""
         (tmp_path / "hue-user").write_text("  secret-value  \n\n")
         monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
         result = apply_credential_substitution(sample_settings)
-        assert result["hue"]["user"] == "secret-value"
+        assert result["hue"]["user"] == "  secret-value  "
 
     def test_ignores_unrelated_files_in_directory(self, sample_settings, monkeypatch, tmp_path):
         """Extra, unrelated files in CREDENTIALS_DIRECTORY don't cause errors or changes."""

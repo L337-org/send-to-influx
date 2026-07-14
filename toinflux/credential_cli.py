@@ -93,13 +93,20 @@ def _require_systemd_creds():
 def _read_secret_value(name):
     """Read a secret from stdin if piped, else prompt interactively (masked).
 
+    Passwords/tokens can legitimately contain leading/trailing whitespace, so
+    nothing beyond a trailing line ending is trimmed - getpass.getpass() already
+    excludes the terminal's own trailing newline, and piped input only has the
+    one trailing newline typically appended by e.g. `echo "secret" | ...`
+    stripped, not any whitespace that's actually part of the value.
+    _validate_secret_value() separately rejects any *embedded* newline.
+
     :param name: credential name, used only in the interactive prompt
     :type name: str
     :rtype: str
     """
     if sys.stdin.isatty():
-        return getpass.getpass(f"Value for {name}: ").strip()
-    return sys.stdin.read().strip()
+        return getpass.getpass(f"Value for {name}: ")
+    return sys.stdin.read().rstrip("\r\n")
 
 
 def _validate_secret_value(name, value):
@@ -251,7 +258,10 @@ def _decrypt_credential(name, credstore_dir=None):
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode(errors="replace") if exc.stderr else str(exc)
         raise CredentialCliError(f"systemd-creds decrypt failed for '{name}': {stderr}") from exc
-    return result.stdout.decode().strip()
+    # Only strip a trailing line ending, not all whitespace - a password can
+    # legitimately start/end with spaces, and _encrypt_credential() never appends
+    # one, but strip defensively in case anything else in the pipeline did.
+    return result.stdout.decode().rstrip("\r\n")
 
 
 # --------------------------------------------------------------------------- #

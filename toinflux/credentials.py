@@ -74,7 +74,11 @@ def apply_credential_substitution(settings):
             continue
         try:
             with open(cred_path, encoding="utf8") as f:
-                value = f.read().strip()
+                # Only strip a trailing line ending, not all whitespace - a
+                # password can legitimately start/end with spaces, and
+                # _encrypt_credential() never appends one, but strip defensively
+                # in case anything else in the pipeline did.
+                value = f.read().rstrip("\r\n")
         except OSError as exc:
             logging.warning("Could not read credential '%s' from %s: %s", name, cred_path, exc)
             continue

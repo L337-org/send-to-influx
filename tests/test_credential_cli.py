@@ -14,9 +14,11 @@ from toinflux.credential_cli import (
     _cmd_remove,
     _cmd_set,
     _cmd_set_field,
+    _decrypt_credential,
     _detect_influx_version,
     _encrypt_credential,
     _parse_systemd_creds_version,
+    _read_secret_value,
     _regenerate_dropin,
     _require_systemd_creds,
     _rewrite_settings_field,
@@ -54,6 +56,29 @@ class TestRequireSystemdCreds:
         result = MagicMock(stdout="systemd 257 (257.13-1~deb13u1)\n")
         with patch("subprocess.run", return_value=result):
             _require_systemd_creds()  # does not raise
+
+
+# --------------------------------------------------------------------------- #
+# Secret input
+# --------------------------------------------------------------------------- #
+
+
+class TestReadSecretValue:
+    def test_interactive_preserves_leading_and_trailing_whitespace(self, monkeypatch):
+        """getpass.getpass() already excludes the terminal's own trailing
+        newline - whatever was typed must come back exactly as-is, since a
+        password can legitimately contain meaningful leading/trailing spaces."""
+        monkeypatch.setattr(credential_cli.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(credential_cli.getpass, "getpass", lambda prompt: "  spaced-secret  ")
+        assert _read_secret_value("influx-token") == "  spaced-secret  "
+
+    def test_piped_strips_only_the_trailing_newline(self, monkeypatch):
+        """`echo "secret" | ...` appends exactly one trailing newline - that
+        must be removed, but leading/trailing spaces that are actually part of
+        the value must not be."""
+        monkeypatch.setattr(credential_cli.sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr(credential_cli.sys.stdin, "read", lambda: "  spaced-secret  \n")
+        assert _read_secret_value("influx-token") == "  spaced-secret  "
 
 
 # --------------------------------------------------------------------------- #
@@ -166,6 +191,26 @@ class TestEncryptCredential:
 
         with pytest.raises(CredentialCliError, match="could not create/secure"):
             _encrypt_credential("influx-token", "a-real-secret", credstore_dir=str(credstore_dir))
+
+
+class TestDecryptCredential:
+    def test_preserves_leading_and_trailing_whitespace(self, tmp_path):
+        """Only a trailing line ending is stripped from systemd-creds decrypt's
+        stdout - a password can legitimately start/end with spaces, and
+        _encrypt_credential() never appends a newline, but strip defensively in
+        case anything else in the pipeline did."""
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+
+        with patch("subprocess.run", return_value=MagicMock(stdout=b"  spaced-secret  \n")):
+            assert _decrypt_credential("influx-token", credstore_dir=str(credstore)) == "  spaced-secret  "
+
+    def test_raises_when_credential_missing(self, tmp_path):
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        with pytest.raises(CredentialCliError, match="No stored credential"):
+            _decrypt_credential("influx-token", credstore_dir=str(credstore))
 
 
 # --------------------------------------------------------------------------- #
