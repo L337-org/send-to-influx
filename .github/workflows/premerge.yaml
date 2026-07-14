@@ -135,9 +135,11 @@ jobs:
       - name: Seed debconf answers for the interactive install flow
         # Exercises config's conditional prompts and postinst's db_get/set_secret/
         # set_field/db_unregister wiring - without this, a plain `dpkg -i` with
-        # nothing pre-seeded leaves every question at its blank default, and the
-        # whole debconf-driven branch of postinst (including db_unregister) never
-        # runs in CI at all. Hue is picked as a representative source: it has
+        # nothing pre-seeded leaves every question at its blank default, so
+        # postinst's debconf-driven code still runs but has nothing to act on
+        # (no credential gets migrated, settings.yaml is never touched) - the
+        # actual write/migrate/db_unregister paths this test exists to exercise
+        # never run in CI at all. Hue is picked as a representative source: it has
         # one of each prompt type (string, password, select). InfluxDB's
         # identity/secret are deliberately left blank - version detection against a
         # real server is out of scope for this smoke test (see README's "leave

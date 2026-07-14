@@ -343,11 +343,31 @@ The service is not started automatically since it needs configuration first.
 
 MSG
 else
-    cat <<'MSG'
+    # "enabled" doesn't imply "running" (could be enabled-but-currently-stopped,
+    # or never enabled at all) - check the actual current state rather than
+    # hedging with "if enabled". Nothing in this script stops/starts/restarts
+    # the service at any point during an upgrade, so is-active here reflects
+    # both its state before and after this upgrade ran.
+    if systemctl is-active --quiet send-to-influx 2>/dev/null; then
+        cat <<'MSG'
 
-send-to-influx upgraded. Your existing /etc/send-to-influx/settings.yaml and any
-systemd-creds credentials are unaffected - the service (if enabled) keeps running
-on its current configuration.
+send-to-influx upgraded. It was running before this upgrade and this upgrade
+does not stop, start, or restart it - it's still running now, unaffected, on
+its existing /etc/send-to-influx/settings.yaml and any systemd-creds credentials.
+
+New in this release: secrets can optionally be moved out of settings.yaml and into
+systemd-creds. Run 'sudo send-to-influx-set-credential --list' to see what's
+already migrated, or 'sudo dpkg-reconfigure send-to-influx' to revisit the
+interactive setup (including migrating just your InfluxDB credential, without
+touching source configuration).
+MSG
+    else
+        cat <<'MSG'
+
+send-to-influx upgraded. This upgrade does not stop, start, or restart the
+service - it's left exactly as it was before (not currently running). Your
+existing /etc/send-to-influx/settings.yaml and any systemd-creds credentials
+are unaffected.
 
 New in this release: secrets can optionally be moved out of settings.yaml and into
 systemd-creds. Run 'sudo send-to-influx-set-credential --list' to see what's
@@ -356,6 +376,7 @@ interactive setup (including migrating just your InfluxDB credential, without
 touching source configuration).
 
 MSG
+    fi
 fi
 
 exit 0
