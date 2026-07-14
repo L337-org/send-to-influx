@@ -88,9 +88,21 @@ if [ "$SOURCES" != "  " ]; then
         INFLUX_VERSION="$("$CLI" --detect-influx-version "$INFLUX_URL" 2>/dev/null || echo unknown)"
         CLI_FAILED=0
         if [ "$INFLUX_VERSION" = "v2" ]; then
+            # example_settings.yaml ships the v1 shape by default (url/user/
+            # password) - influx.org/influx.token don't exist as real keys until
+            # someone edits them in (see CLAUDE.md's "Credential storage" notes on
+            # why placeholder scalars can't just be added for both shapes at
+            # once). set_field influx.org therefore fails here on a fresh
+            # install. Only attempt set_secret influx-token if that succeeded -
+            # otherwise the token would end up encrypted into systemd-creds with
+            # the drop-in already referencing it, while settings.yaml still has
+            # no influx.token key at all to point back at it: a partially
+            # migrated, inconsistent state, worse than just failing cleanly.
             set_field influx.url "$INFLUX_URL"
             set_field influx.org "$INFLUX_IDENTITY"
-            set_secret influx-token "$INFLUX_SECRET"
+            if [ "$CLI_FAILED" = 0 ]; then
+                set_secret influx-token "$INFLUX_SECRET"
+            fi
             if [ "$CLI_FAILED" = 0 ]; then
                 INFLUX_OK=1
             fi
