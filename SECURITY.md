@@ -35,7 +35,9 @@ being deliberate about are credential storage and TLS verification:
   (`debconf-devel(7)`) advises clearing a password value out of that store "as soon as is possible"
   once consumed, so `postinst` does exactly that: right after each `db_get` on a password-type
   template, it sets the stored answer back to the empty string (`db_set <question> ""`), removing
-  the leftover copy in `passwords.dat`. This doesn't change the already-separate UI convention that
+  the leftover copy in `passwords.dat` (a final sweep also clears every password-type answer whether
+  or not its source was selected, so an inconsistent preseed can't leave one behind; the InfluxDB
+  user/organisation answer is cleared too, since for a v1 install it's the InfluxDB username). This doesn't change the already-separate UI convention that
   password answers are never redisplayed on a later `dpkg-reconfigure` (secret prompts always come
   back blank regardless); it removes the actual stored value, not just the redisplay behaviour.
   (An earlier version used `db_unregister` instead - that cleared the value equally well, but

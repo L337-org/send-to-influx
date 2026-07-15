@@ -282,7 +282,9 @@ password-type answer back to the empty string immediately after reading it - reg
 the subsequent migration
 into `systemd-creds` goes on to succeed - see SECURITY.md if you want the detail. Non-secret answers
 (a Hue bridge hostname, an Octopus meter number, and so on) aren't password-type and stay in
-debconf's regular database as normal, same as any other package's debconf answers. If every required
+debconf's regular database as normal, same as any other package's debconf answers - with one
+exception: the InfluxDB user/organisation answer is cleared like the secrets are, since for a v1
+install it's the InfluxDB username, which is treated as a credential everywhere else. If every required
 field for a source was answered *and* your InfluxDB connection details resolved successfully, it's
 automatically added to `sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is
 created for you where possible - a source with everything else filled in still won't be enabled if
@@ -313,7 +315,10 @@ Run `send-to-influx-set-credential --list` to see the full set of available cred
 `echo -n "$TOKEN" | sudo send-to-influx-set-credential influx-token`) and replaces the plaintext value
 in `settings.yaml` with a note that it's now managed elsewhere - the file stays readable for the rest
 of its content, but that field is never used from it again. Use
-`send-to-influx-set-credential <name> --remove` to revert a credential back to plaintext.
+`send-to-influx-set-credential <name> --remove` to remove a credential from systemd-creds again -
+note this resets the `settings.yaml` field to its placeholder rather than restoring the secret (the
+encrypted value is destroyed, not decrypted back into the file), so re-enter the value by hand
+afterwards if you still need it.
 
 This is entirely optional and per-field - you can mix systemd-creds and plaintext values freely, and
 the source-checkout/screen-session path is unaffected either way, since systemd-creds only applies

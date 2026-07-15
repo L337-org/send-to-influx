@@ -92,7 +92,10 @@ else
     [ -n "${GITHUB_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
     old_url=$(curl -fsSL "${auth[@]}" https://api.github.com/repos/GavinLucas/send-to-influx/releases/latest 2>/dev/null \
         | grep -o 'https://[^"]*_all\.deb' | head -1) || true
-    if [ -n "$old_url" ] && curl -fsSL "${auth[@]}" -o /tmp/released.deb "$old_url"; then
+    # No auth on the asset download: the token is only needed for API rate
+    # limits, and the download redirects cross-host (older curl would forward
+    # the Authorization header there, which the object store rejects).
+    if [ -n "$old_url" ] && curl -fsSL -o /tmp/released.deb "$old_url"; then
         OLD_DEB=/tmp/released.deb
     fi
     if [ -z "$OLD_DEB" ]; then
@@ -200,6 +203,17 @@ EOF
     echo "$out" | grep -qi "not provided - skipping" && { echo "$out"; fail "stored influx-token did not satisfy the blank secret"; }
     grep -q "http://influx-changed.example.com:8086" "$SETTINGS" || fail "changed influx URL not applied alongside a stored token"
     pass "reconfigure: stored influx-token satisfied the blank secret and the changed URL was applied"
+
+    # Rotation: a new secret with the identity left blank must re-encrypt the
+    # stored credential (the common "new token, same org" case), not be
+    # silently dropped.
+    sum_cred=$(md5sum < "$CREDSTORE/influx-token.cred")
+    debconf-set-selections <<'EOF'
+send-to-influx send-to-influx/influx-secret password ci-rotated-token
+EOF
+    out=$(dpkg-reconfigure -fnoninteractive send-to-influx 2>&1) || { echo "$out"; fail "token-rotation reconfigure failed"; }
+    [ "$(md5sum < "$CREDSTORE/influx-token.cred")" != "$sum_cred" ] || fail "secret entered with blank identity did not rotate the stored token"
+    pass "reconfigure: a new secret alone rotates the stored influx-token"
 fi
 
 # --- Scenario: per-source questions are visible at debconf's default priority
@@ -216,10 +230,12 @@ pass "per-source questions appear at priority high"
 echo "=== scenario: purge ==="
 dpkg -P send-to-influx >/dev/null 2>&1 || dpkg -P send-to-influx
 [ ! -e /etc/send-to-influx ] || fail "/etc/send-to-influx survived purge"
+[ ! -e /etc/systemd/system/send-to-influx.service.d ] || fail "systemd drop-in directory survived purge"
+getent passwd send-to-influx >/dev/null 2>&1 && fail "service user survived purge"
 if [ "$HAVE_SYSTEMD" = 1 ]; then
     systemctl is-active --quiet send-to-influx 2>/dev/null && fail "service still active after purge"
 fi
 debconf-show send-to-influx 2>/dev/null | grep -q . && fail "debconf answers survived purge"
-pass "purge: config, credentials, and debconf answers all removed"
+pass "purge: config, credentials, drop-in, user, and debconf answers all removed"
 
 echo "ALL PACKAGING SCENARIOS PASSED"

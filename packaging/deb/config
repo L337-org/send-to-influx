@@ -95,7 +95,7 @@ case "$SOURCES" in
         # redisplayed *without* resetting their seen flag, so an unguarded
         # db_set here would silently clobber a user's previous choice with
         # a freshly-recomputed locale guess on every reconfigure.
-        db_fget send-to-influx/hue-temperature-units seen
+        db_fget send-to-influx/hue-temperature-units seen || RET=""
         if [ "$RET" = "false" ]; then
             loc="${LC_ALL:-${LANG:-}}"
             case "$loc" in

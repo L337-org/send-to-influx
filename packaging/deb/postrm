@@ -24,6 +24,12 @@ if [ "$1" = "purge" ]; then
     if getent passwd send-to-influx >/dev/null 2>&1; then
         deluser --system send-to-influx || true
     fi
+    # deluser removes only the user; the group that adduser --group created
+    # needs its own removal (whether deluser also drops an empty group varies
+    # by adduser version - hence the guard and the || true).
+    if getent group send-to-influx >/dev/null 2>&1; then
+        delgroup --system send-to-influx || true
+    fi
 fi
 
 if [ -d /run/systemd/system ]; then

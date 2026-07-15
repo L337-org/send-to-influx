@@ -24,6 +24,7 @@ Description: InfluxDB user (v1) or organisation (v2)
  InfluxDB v2 (token authentication) enter the organisation name. Which one
  applies is detected automatically once the server is reachable - you don't
  need to know your InfluxDB version to answer this.
+ When reconfiguring, leaving this blank keeps the currently configured value.
 
 Template: send-to-influx/influx-secret
 Type: password

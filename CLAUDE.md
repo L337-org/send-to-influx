@@ -315,7 +315,9 @@ from `postinst`, once package files are unpacked and everything's been answered.
   (`debconf-devel(7)`) advises clearing a password value out of it "as soon as is possible" once
   consumed, so `postinst` does: immediately after each `db_get` on a password-type template
   (`influx-secret`, `hue-user`, `myenergi-apikey`, `octopus-api-key`), it clears the stored answer
-  with `db_set <question> ""`,
+  with `db_set <question> ""` (plus `influx-identity`, string-typed but a v1 *username*, and a final
+  unconditional sweep of all of them so a preseed for an unselected source can't leave a secret in
+  `passwords.dat`),
   regardless of whether the subsequent `systemd-creds` migration for that value goes on to succeed or
   fail. (An earlier version used `db_unregister`, which cleared the value equally well but deleted
   the question's `seen` flag with it - the question was recreated fresh/unseen from the templates

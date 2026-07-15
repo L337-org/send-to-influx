@@ -94,7 +94,7 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     set_secret() {
         if ! printf '%s' "$2" | "$CLI" "$1" >/dev/null; then
             CLI_FAILED=1
-            echo "send-to-influx: could not store credential '$1' - run 'sudo $CLI $1' by hand to finish." >&2
+            echo "send-to-influx: could not store credential '$1' - run 'sudo $CLI $1' by hand to finish, or (e.g. on systemd < 250, where systemd-creds is unavailable) put the value in /etc/send-to-influx/settings.yaml instead." >&2
         fi
     }
 
@@ -137,6 +137,13 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     # Cleared here, right after reading, regardless of what happens with the
     # value from here on.
     db_set send-to-influx/influx-secret "" || true
+    # influx-identity is cleared too, even though it's Type: string: for a v1
+    # install it's the InfluxDB *username*, which everywhere else is treated
+    # as a credential (encrypted into systemd-creds as influx-user) - leaving
+    # it in debconf's regular, more widely readable database indefinitely
+    # would be internally inconsistent. Like the secrets, it's re-collected
+    # fresh on a reconfigure, where blank means "keep what's configured".
+    db_set send-to-influx/influx-identity "" || true
 
     INFLUX_OK=0
     if [ -n "$INFLUX_IDENTITY" ] && [ -n "$INFLUX_SECRET" ]; then
@@ -163,9 +170,16 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
                 INFLUX_OK=1
             fi
         elif [ "$INFLUX_VERSION" = "v1" ]; then
+            # Same defence as the v2 branch above: only migrate the secrets
+            # into systemd-creds if the settings.yaml write succeeded first,
+            # so a hand-mangled settings.yaml can't end up with credentials
+            # encrypted (and the drop-in referencing them) while the file has
+            # no influx block pointing back at them.
             set_field influx.url "$INFLUX_URL"
-            set_secret influx-user "$INFLUX_IDENTITY"
-            set_secret influx-password "$INFLUX_SECRET"
+            if [ "$CLI_FAILED" = 0 ]; then
+                set_secret influx-user "$INFLUX_IDENTITY"
+                set_secret influx-password "$INFLUX_SECRET"
+            fi
             if [ "$CLI_FAILED" = 0 ]; then
                 INFLUX_OK=1
             fi
@@ -198,6 +212,16 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
                 set_field influx.org "$INFLUX_IDENTITY"
             else
                 set_secret influx-user "$INFLUX_IDENTITY"
+            fi
+        fi
+        # A secret typed with the identity left blank is a rotation of the
+        # stored credential (the common "new token, same org" case) - route
+        # it the same way instead of silently dropping it.
+        if [ -n "$INFLUX_SECRET" ]; then
+            if [ -e "$CREDSTORE/influx-token.cred" ]; then
+                set_secret influx-token "$INFLUX_SECRET"
+            else
+                set_secret influx-password "$INFLUX_SECRET"
             fi
         fi
         if [ "$CLI_FAILED" = 0 ]; then
@@ -370,6 +394,16 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     case "$SOURCES" in *" carbonintensity "*) CARBONINTENSITY_OK=1 ;; esac
     SPEEDTEST_OK=0
     case "$SOURCES" in *" speedtest "*) SPEEDTEST_OK=1 ;; esac
+
+    # Belt-and-braces: clear every password-type answer, selected source or
+    # not. The per-source blocks above only read-and-clear a secret when its
+    # source was actually selected - but a preseed (debconf-set-selections)
+    # can supply e.g. hue-user without ticking hue, and that answer would
+    # otherwise sit in passwords.dat indefinitely. Re-clearing the already-
+    # cleared ones is harmless.
+    for q in influx-secret influx-identity hue-user myenergi-apikey octopus-api-key; do
+        db_set "send-to-influx/$q" "" || true
+    done
 
     # --- Auto-enable: only sources that were selected AND had every required
     # field supplied AND a working InfluxDB block get their database/bucket
