@@ -34,13 +34,15 @@ being deliberate about are credential storage and TLS verification:
   answer database, and restricted to `chmod 600`). Debian's own developers' guide
   (`debconf-devel(7)`) advises clearing a password value out of that store "as soon as is possible"
   once consumed, so `postinst` does exactly that: right after each `db_get` on a password-type
-  template, it calls `db_unregister` on that question, which removes it - and its stored answer -
-  from debconf's database entirely. This doesn't change the already-separate UI convention that
+  template, it sets the stored answer back to the empty string (`db_set <question> ""`), removing
+  the leftover copy in `passwords.dat` (a final sweep also clears every password-type answer whether
+  or not its source was selected, so an inconsistent preseed can't leave one behind; the InfluxDB
+  user/organisation answer is cleared too, since for a v1 install it's the InfluxDB username). This doesn't change the already-separate UI convention that
   password answers are never redisplayed on a later `dpkg-reconfigure` (secret prompts always come
-  back blank regardless); it removes the actual leftover copy in `passwords.dat`, not just the
-  redisplay behaviour. The template itself is unaffected - it's re-registered fresh from
-  `send-to-influx.templates` on the next `config`/`postinst` run, so `dpkg-reconfigure` still works
-  normally.
+  back blank regardless); it removes the actual stored value, not just the redisplay behaviour.
+  (An earlier version used `db_unregister` instead - that cleared the value equally well, but
+  deleting the question deletes its `seen` flag too, and the recreated, unseen question was then
+  re-asked, blank and contextless, on every subsequent package upgrade.)
 - **`enforce_permissions` (settings.yaml key)**: if `settings.yaml` is readable by group/other *and*
   actually contains a real credential (not just placeholder or systemd-creds-sentinel text),
   `send-to-influx` always logs a warning. Setting `enforce_permissions: true` additionally refuses to
@@ -51,7 +53,8 @@ being deliberate about are credential storage and TLS verification:
   `settings.yaml` never contains a real secret (only placeholder text, or once systemd-creds is used, a
   cosmetic sentinel) unless you hand-edit one in, which is exactly the case this check catches
   regardless of file mode. An upgrade never resets permissions/ownership you've since changed
-  yourself - only a genuinely fresh install sets them.
+  yourself - they're only set when `postinst` creates the file in the first place (a genuinely
+  fresh install, or a `settings.yaml` that's been deleted since).
 - **TLS verification defaults differ by source, deliberately**: the `influx` block defaults to
   verifying TLS certificates (`insecure: true` is an explicit opt-out); the `hue` block defaults
   the other way (`insecure: true`, i.e. verification skipped), since Hue bridges are commonly

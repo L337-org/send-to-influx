@@ -3,10 +3,32 @@
 set -e
 
 if [ "$1" = "purge" ]; then
+    # Clear this package's questions and stored answers out of debconf's
+    # database - the same snippet debhelper's dh_installdebconf would inject
+    # for a debhelper-built package. Without it, non-password answers (the
+    # InfluxDB URL and user/org, the selected sources, device serials, an
+    # Octopus MPAN) survive a purge and silently pre-fill a later reinstall.
+    # Guarded on confmodule existing: debconf itself may already be gone by
+    # the time this runs (purge order isn't guaranteed), and a purge must
+    # still succeed then.
+    if [ -e /usr/share/debconf/confmodule ]; then
+        . /usr/share/debconf/confmodule
+        # || true: this whole script runs under set -e, and a debconf database
+        # hiccup must never abort the purge itself; db_stop releases the
+        # frontend cleanly once we're done with it.
+        db_purge || true
+        db_stop || true
+    fi
     rm -rf /etc/send-to-influx
     rm -rf /etc/systemd/system/send-to-influx.service.d
     if getent passwd send-to-influx >/dev/null 2>&1; then
         deluser --system send-to-influx || true
+    fi
+    # deluser removes only the user; the group that adduser --group created
+    # needs its own removal (whether deluser also drops an empty group varies
+    # by adduser version - hence the guard and the || true).
+    if getent group send-to-influx >/dev/null 2>&1; then
+        delgroup --system send-to-influx || true
     fi
 fi
 

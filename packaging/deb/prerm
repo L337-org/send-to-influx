@@ -2,7 +2,9 @@
 # prerm for send-to-influx.deb
 set -e
 
-if [ -d /run/systemd/system ] && { [ "$1" = "remove" ] || [ "$1" = "purge" ]; }; then
+# prerm is only ever invoked as remove/upgrade/deconfigure/failed-upgrade -
+# there is no prerm "purge" action (purge-time cleanup lives in postrm).
+if [ -d /run/systemd/system ] && [ "$1" = "remove" ]; then
     systemctl stop send-to-influx || true
     systemctl disable send-to-influx || true
 fi

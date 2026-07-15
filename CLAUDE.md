@@ -26,7 +26,8 @@ python -m venv .venv
 ```
 
 CI runs `pytest` (with coverage, matrixed across Python 3.10-3.14), `flake8`, `mypy`, and `arm64-verify`
-(builds and smoke-tests the `.deb` on a real `ubuntu-24.04-arm` runner, see "Packaging" below) in
+(builds the `.deb` on a real `ubuntu-24.04-arm` runner and runs the `packaging/deb/test-packaging.sh`
+scenario suite against it - install/upgrade/reconfigure/purge lifecycle, see "Packaging" below) in
 parallel on every push to `main` and every PR (`.github/workflows/premerge.yaml`) - all are required
 status checks on `main`'s ruleset, so a failure blocks merging rather than only being noticed
 afterward. Dependency and GitHub Actions updates are managed by Dependabot
@@ -106,7 +107,8 @@ Speedtest's `get_data()` additionally rejects an implausible `ping` (>= 5000 ms)
 
 - `pyproject.toml` is the single source of truth for the package version (`[project].version`) and runtime dependencies (dynamically read from `requirements.txt`). Bump the version there, not in `sendtoinflux.py`.
 - `sendtoinflux.py`'s `__version__` is read from installed package metadata (`importlib.metadata.version("send-to-influx")`), falling back to `"0.0.0-dev"` when run from a source checkout without the package installed. `requirements-dev.txt` includes `-e .` so dev/test environments have it installed and see the real version.
-- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/postinst`/`prerm`/`postrm`). Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead symlinks every minor from 3.10 through 3.30's `lib/pythonX.Y` to the one actually populated (both bounds come from one `PYTHON_MAX_SUPPORTED_MINOR` variable, so `Depends:` and the symlink range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds and smoke-tests the same script on an `ubuntu-24.04-arm` runner on every push/PR (a required status check), to catch a future dependency change that makes a compiled extension load-bearing rather than optional before it can merge. See the README's "Running as a systemd service" section.
+- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/postinst`/`prerm`/`postrm`). `/etc/send-to-influx/settings.yaml` is deliberately *not* a dpkg conffile: `postinst` and `send-to-influx-set-credential` write debconf answers/sentinels into it, and dpkg's conffile machinery treats any maintainer-script write as a local modification (Debian Policy 10.7.3 forbids the combination) - guaranteeing a "modified (by you or by a script)" prompt on every upgrade that ships a changed example, with a one-keypress path to replacing a configured file with the pristine example. Instead the example ships at `/usr/share/send-to-influx/example_settings.yaml` and `postinst` copies it into place only if `/etc/send-to-influx/settings.yaml` doesn't exist (the Policy 10.7.3 "configuration files handled by maintainer scripts" pattern; `postrm` removes it on purge, as that pattern requires) - so upgrades never touch the live file at all. On upgrade (and after a `dpkg-reconfigure` that rewrote configuration), `postinst` restarts the service if - and only if - it's currently running, so unattended upgrades don't leave the replaced code running until the next reboot; a stopped service is never started. Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead symlinks every minor from 3.10 through 3.30's `lib/pythonX.Y` to the one actually populated (both bounds come from one `PYTHON_MAX_SUPPORTED_MINOR` variable, so `Depends:` and the symlink range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds the same script's output on an `ubuntu-24.04-arm` runner on every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - catching both a future dependency change that makes a compiled extension load-bearing rather than optional, and any regression in the maintainer-script behaviour below, before it can merge. See the README's "Running as a systemd service" section.
+- `packaging/deb/test-packaging.sh` is the scenario suite for the maintainer scripts - shell behaviour pytest can't reach. Against a built `.deb` it asserts, in order: upgrade over the *latest published release* (obsolete-conffile handover, no re-prompt of the old `db_unregister`-era secret, config/credentials preserved; skipped gracefully offline or via `SKIP_RELEASE_UPGRADE=1`); a fresh debconf-seeded install (fields applied, credential migrated, plaintext secret absent from both `settings.yaml` and debconf's own database, ownership/modes, no conffiles, `/opt` root-owned); plain-upgrade silence with an *interactive* frontend over a hand-edited config (no prompts, no warnings, file byte-identical); restart-on-upgrade of a running service (real `MainPID` change - the example config's placeholder values pass validation, workers just retry, so the service stays active without a real InfluxDB; skipped where systemd isn't running, e.g. containers); `dpkg-reconfigure` semantics (answers re-applied, a stored systemd-creds credential satisfies the blank secret prompt, running service restarted); per-source question visibility at debconf's *default* priority (`high`, via the teletype frontend); and purge (config, credentials, debconf answers, service all gone). It is deliberately destructive - CI runners or throwaway containers only, requires root. Every assertion maps to something that regressed, or nearly regressed, during PR #48.
 - `.github/workflows/release.yaml`: pushing a bare `MAJOR.MINOR` tag (e.g. `3.0` - matching this project's existing tags/releases, no `v` prefix) runs the test suite, verifies the tag matches `pyproject.toml`'s version exactly, builds the `.deb`, and attaches it to a GitHub Release. A second job publishes it to a flat APT repo on the `gh-pages` branch (served via GitHub Pages) - it prunes to the last `KEEP_LAST_N` (currently 5) `.deb` files, full history stays in Releases.
   - The APT repo job needs a one-time setup and is skipped (not failed) until it exists: generate a GPG key (`gpg --batch --gen-key`), add the private key as the `APT_GPG_PRIVATE_KEY` repo secret (`gpg --export-secret-keys --armor <key-id> | base64`), and the public key ends up published as `send-to-influx.gpg` in the repo automatically on first successful run.
   - `gh-pages`'s ruleset requires signed commits (see "Branch protection" below), so the job also imports a *second*, separate `CI_COMMIT_SIGNING_KEY` and signs the publish commit with it - kept apart from `APT_GPG_PRIVATE_KEY` since the two have different trust domains (end users trust the APT key to verify packages; GitHub verifies this one against the maintainer's account) and different rotation needs. The commit is authored with the maintainer's real email (not the usual `github-actions[bot]` noreply address), since GitHub's "verified" signature check requires the commit email to match a verified email on the account the key is registered to.
@@ -221,33 +223,70 @@ convention, so `dpkg-reconfigure`/backing out of an install never leaves partial
 never touches the filesystem and never calls into `credential_cli.py` - that only happens later,
 from `postinst`, once package files are unpacked and everything's been answered.
 
-- `send-to-influx/sources-to-configure` (`Type: multiselect`, priority `high`) is asked first and
-  gates everything else - if nothing's selected, `config` exits immediately, and per-source blocks
-  are only shown (via `db_input` called conditionally, not declaratively in the template file) for
-  sources actually picked, so choosing one or two sources doesn't walk through prompts for the other
-  six. Tuning fields (`interval`, `timeout`, `fields` lists, `stagger_seconds`/`default_source`) are
-  never prompted for - see the "Template structure" reasoning in the original plan for why (`fields`
-  particularly can't be validated against a source's real field names at install time). The one
-  deliberate exception is `hue-temperature-units`, which gets a *computed* default (checks
-  `$LC_ALL`/`$LANG` for a `_US` territory code, defaulting to Celsius otherwise) via `db_set` before
-  the first `db_input`, rather than a silent guess - getting temperature units wrong is immediately
-  visible to the user in a way the other tuning fields aren't.
-- InfluxDB's `influx-url`/`influx-identity`/`influx-secret` are asked unconditionally (every selected
-  source needs a working InfluxDB connection) - `identity`/`secret` are generic (org+token for v2,
-  user+password for v1), asked without knowing which version applies yet. Version detection
-  deliberately does **not** happen in `config`: `config` runs *before* the package is unpacked on a
-  first install, so it can't rely on the app's own venv/`requests`, and more fundamentally, gating
-  *what gets asked* on being able to reach an arbitrary, possibly-remote, possibly-not-yet-provisioned
-  URL at the exact moment of package install would defeat the point of the URL being configurable.
-  Detection happens later, in `postinst`, via `send-to-influx-set-credential --detect-influx-version`.
-  This always skips TLS verification, unconditionally - unlike `--ensure-influx-storage` (which
-  respects `influx.insecure`), it never transmits a credential (both `/health` and `/ping` are
-  unauthenticated probes) and its result only picks which prompt fields get routed to, not a trust
-  decision a MITM'd response could meaningfully downgrade; `influx.insecure` also isn't necessarily
-  known yet at this point, since debconf never asks for it (only ever hand-edited into settings.yaml
-  afterwards).
-- `postinst` (gated on `sources-to-configure` being non-empty, so a plain non-interactive install
-  behaves exactly like the non-debconf flow above): resolves the InfluxDB block first via
+- **Install/upgrade/reconfigure gating**: both scripts run their debconf flow only on a genuinely
+  fresh install or an explicit `dpkg-reconfigure` - a plain package upgrade neither asks questions
+  nor applies answers. `config` is invoked as `configure <previously-configured-version>` by
+  `dpkg-preconfigure` (`$2` empty only on a fresh install) and as `reconfigure <version>` by
+  `dpkg-reconfigure`, so it early-exits when `$1 != reconfigure && $2` is non-empty. `postinst` is
+  invoked as `configure <version>` in both the upgrade and reconfigure cases, so it can't use its
+  arguments alone - it checks `DEBCONF_RECONFIGURE=1`, which `dpkg-reconfigure` exports precisely so
+  postinsts can tell the two apart (its source calls this "a hack to let postinsts know when they're
+  being reconfigured"). Without this gate, debconf's database - a UI cache that persists every
+  non-password answer indefinitely, not a change log - was effectively treated as a signal that
+  configuration had happened *this* run: every upgrade re-prompted for `influx-secret` (blank,
+  contextless - see the `db_set ""` note below), re-warned "not fully configured - not enabling it"
+  for every previously-selected source whose password answers had (deliberately) been cleared, and
+  re-wrote Open-Meteo's latitude/longitude into `settings.yaml` from the original install's answers,
+  reverting any hand edits made since.
+- InfluxDB's `influx-url`/`influx-identity`/`influx-secret` are asked *first*, unconditionally -
+  deliberately **not** gated on any source being selected. An earlier version of this design asked
+  them only after `sources-to-configure` and only if at least one source was picked, exiting `config`
+  immediately otherwise - this made InfluxDB unreachable both interactively (an admin who only wants
+  to migrate an already-configured InfluxDB credential into systemd-creds, without touching source
+  config at all, had no way to get there) and via `dpkg-reconfigure` on a later run. That's a real,
+  common case: an admin upgrading an already-working install has no reason to re-answer per-source
+  questions for sources that already work, but commonly does want the new systemd-creds option for
+  the credential they already have. `identity`/`secret` are generic (org+token for v2, user+password
+  for v1), asked without knowing which version applies yet. Version detection deliberately does
+  **not** happen in `config`: `config` runs *before* the package is unpacked on a first install, so it
+  can't rely on the app's own venv/`requests`, and more fundamentally, gating *what gets asked* on
+  being able to reach an arbitrary, possibly-remote, possibly-not-yet-provisioned URL at the exact
+  moment of package install would defeat the point of the URL being configurable. Detection happens
+  later, in `postinst`, via `send-to-influx-set-credential --detect-influx-version`. This always skips
+  TLS verification, unconditionally - unlike `--ensure-influx-storage` (which respects
+  `influx.insecure`), it never transmits a credential (both `/health` and `/ping` are unauthenticated
+  probes) and its result only picks which prompt fields get routed to, not a trust decision a MITM'd
+  response could meaningfully downgrade; `influx.insecure` also isn't necessarily known yet at this
+  point, since debconf never asks for it (only ever hand-edited into settings.yaml afterwards).
+- `send-to-influx/sources-to-configure` (`Type: multiselect`, priority `high` - matching InfluxDB's
+  questions above, so a debconf priority threshold can't show one but silently hide the other) is
+  asked next. Per-source blocks are only shown (via `db_input` called conditionally, not declaratively
+  in the template file) for sources actually picked, so choosing one or two sources doesn't walk
+  through prompts for the other six. Those conditional per-source questions are also priority `high`,
+  not `medium` - debconf's default threshold is `high` (`debconf/priority` defaults to `high`), so a
+  `medium` follow-up would be silently skipped on a normal install: the user ticks a source in the
+  checklist, is never asked for the fields it needs, and postinst then reports it "not fully
+  configured" (only `dpkg-reconfigure`, which shows low-priority questions regardless of the
+  threshold, ever revealed them - which is why this wasn't caught by reconfigure-based testing).
+  There's no prompt-spam risk in `high` here, since each question is only asked at all when its
+  source was explicitly selected. Tuning fields (`interval`, `timeout`, `fields` lists,
+  `stagger_seconds`/`default_source`) are never prompted for - see the "Template structure" reasoning
+  in the original plan for why (`fields` particularly can't be validated against a source's real field
+  names at install time). The one deliberate exception is `hue-temperature-units`, which gets a
+  *computed* default (checks `$LC_ALL`/`$LANG` for a `_US` territory code, defaulting to Celsius
+  otherwise) via `db_set` before the first `db_input`, rather than a silent guess - getting temperature
+  units wrong is immediately visible to the user in a way the other tuning fields aren't.
+- `postinst` (inside the fresh-install-or-reconfigure gate above): `sources-to-configure` is read
+  first (`$SOURCES`, purely to know whether *anything* was
+  selected - no processing happens from it yet), then InfluxDB is processed unconditionally,
+  independent of that selection - a run where every question was
+  left blank (e.g. non-interactive) is still a no-op for all of it, since each per-source block below
+  self-gates on
+  `$SOURCES` containing that source's name; nothing here requires the outer "was anything selected"
+  gate the earlier design used. The one place `$SOURCES` matters this early: the "InfluxDB not
+  provided" warning only fires if the admin engaged with the prompts this run (selected a source, or
+  entered a secret without the matching identity) - a fully-blank run stays silent. Resolves the
+  InfluxDB block via
   `--detect-influx-version` and routes `identity`/`secret` accordingly - v2 writes `identity` to the
   plain (non-secret) `influx.org` field via `--set-field` and `secret` to the `influx-token` credential;
   v1 routes both `identity` and `secret` to the `influx-user`/`influx-password` credentials - if
@@ -261,18 +300,29 @@ from `postinst`, once package files are unpacked and everything's been answered.
   since `sendtoinflux.py` only falls back to it when `sources:` is absent entirely, which is never true
   once `example_settings.yaml` has shipped it non-empty) if *every* required field for it (and the
   InfluxDB block) actually resolved - not just "was it ticked" - with `--ensure-influx-storage`
-  attempted first (best-effort database/bucket creation, logged-not-raised on failure).
+  attempted first (best-effort database/bucket creation, logged-not-raised on failure). A secret
+  field also counts as resolved when its credential is already stored in systemd-creds (`.cred`
+  file present in the credstore) - secret prompts always come back blank on a reconfigure ("blank
+  keeps the stored value"), so an already-configured install revisiting the prompts (e.g. to add
+  one new source) isn't wrongly reported "not fully configured", and `--ensure-influx-storage`
+  resolves stored credentials itself, so InfluxDB counting as configured this way still lets
+  newly-added sources auto-enable. (A credential kept in plaintext `settings.yaml` and never
+  migrated doesn't get this treatment - postinst can't cheaply distinguish it from a placeholder -
+  so that setup re-enters secrets on reconfigure or hand-edits `sources:`.)
 - `Type: password` answers *are* written to disk by debconf - contrary to an earlier version of this
   note - into a dedicated `passwords.dat` store kept separate from its general-purpose, more widely
   readable answer database, and restricted to `chmod 600`. Debian's own developers' guide
   (`debconf-devel(7)`) advises clearing a password value out of it "as soon as is possible" once
   consumed, so `postinst` does: immediately after each `db_get` on a password-type template
-  (`influx-secret`, `hue-user`, `myenergi-apikey`, `octopus-api-key`), it calls `db_unregister` on
-  that question - this removes the question, and its stored answer, from debconf's database entirely,
+  (`influx-secret`, `hue-user`, `myenergi-apikey`, `octopus-api-key`), it clears the stored answer
+  with `db_set <question> ""` (plus `influx-identity`, string-typed but a v1 *username*, and a final
+  unconditional sweep of all of them so a preseed for an unselected source can't leave a secret in
+  `passwords.dat`),
   regardless of whether the subsequent `systemd-creds` migration for that value goes on to succeed or
-  fail. The template definition itself lives in `send-to-influx.templates`, not in the database entry
-  that got removed, so it's re-registered fresh the next time `config`/`postinst` run -
-  `dpkg-reconfigure` is unaffected. Separately, and unrelated to whether the value is unregistered,
+  fail. (An earlier version used `db_unregister`, which cleared the value equally well but deleted
+  the question's `seen` flag with it - the question was recreated fresh/unseen from the templates
+  file on the next run, so debconf re-asked it, blank, on every upgrade; `db_set ""` empties the
+  value while leaving the question registered and seen.) Separately, and unrelated to the clearing,
   debconf *never* redisplays/pre-fills a previous password answer in the prompt on a later
   invocation - a UI convention for this template type. So a reconfigure always shows secret prompts
   blank, with no way for `postinst` to distinguish "leave it as-is" from "clear it" from that alone -

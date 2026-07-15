@@ -15,6 +15,59 @@ set -e
 
 . /usr/share/debconf/confmodule
 
+# Only ask questions on a genuinely fresh install or an explicit
+# dpkg-reconfigure - never on a plain upgrade. config is invoked as
+# "configure <previously-configured-version>" by dpkg-preconfigure (and by
+# the frontend when postinst sources confmodule), with $2 empty only on a
+# fresh install, and as "reconfigure <version>" by dpkg-reconfigure. Without
+# this gate, every upgrade walked the questions again: most were skipped as
+# already seen, but the password questions - whose stored values postinst
+# deliberately clears after use - popped up again, blank and contextless
+# (postinst has the matching gate on the applying side; see there for what
+# re-applying stale answers used to do). An upgrade is not a configuration
+# event: answers are (re)collected when the admin explicitly asks, via
+# dpkg-reconfigure, and only then.
+if [ "$1" != "reconfigure" ] && [ -n "${2:-}" ]; then
+    # Release the frontend cleanly rather than just exiting mid-session -
+    # confmodule has already been sourced by this point.
+    db_stop || true
+    exit 0
+fi
+
+# InfluxDB connection - asked first, unconditionally, regardless of which (if
+# any) sources get selected below. This is deliberate: an admin upgrading an
+# already-configured system commonly wants to migrate just their existing
+# InfluxDB credential into systemd-creds without touching source
+# configuration at all - gating this behind "at least one source selected"
+# (an earlier version of this script did) made that unreachable, both here
+# and via a later `dpkg-reconfigure`. influx-identity/influx-secret are
+# generic (org+token for v2, user+password for v1) and always asked
+# together, regardless of whether influx-url was left blank - leaving the
+# URL blank only changes its *default* (defaults to a local instance), it
+# doesn't mean "skip InfluxDB auth". Which of v1/v2 applies is detected
+# later in postinst (see --detect-influx-version), once the app's own
+# venv/requests is available and the URL can actually be probed - not here,
+# since config runs before the package is even unpacked on a first install,
+# and gating what's asked on being able to reach an arbitrary,
+# possibly-remote, possibly-not-yet-provisioned URL at this exact moment
+# would be the wrong place to depend on that reachability at all. Priority
+# high, matching sources-to-configure below - keeping both at the same
+# priority avoids a debconf priority threshold showing one but silently
+# hiding the other. Every conditional per-source question below is high for
+# the same reason: debconf's default threshold *is* high (debconf/priority
+# defaults to "high"), so anything lower is silently skipped on a normal
+# install - the user would tick a source in the checklist and then never be
+# asked for the fields it needs (only dpkg-reconfigure, which shows
+# low-priority questions regardless, ever revealed them). "high" is also the
+# semantically correct priority per debconf(7) ("questions that don't have a
+# reasonable default" - a Hue bridge address or API key has none), and
+# there's no prompt-spam risk: each one is only asked at all if the user
+# explicitly selected that source.
+db_input high send-to-influx/influx-url || true
+db_input high send-to-influx/influx-identity || true
+db_input high send-to-influx/influx-secret || true
+db_go || true
+
 db_input high send-to-influx/sources-to-configure || true
 db_go || true
 
@@ -24,34 +77,10 @@ db_get send-to-influx/sources-to-configure
 # simple `case ... *" name "*` substring match works reliably either way.
 SOURCES=" $(echo "$RET" | tr ',' ' ') "
 
-# Nothing selected - don't bother asking about InfluxDB or anything else.
-# A plain non-interactive install with nothing answered ends up here too,
-# and postinst's own gating (on this same template) then behaves exactly
-# like a source-checkout-style manual settings.yaml edit - no regression.
-if [ "$SOURCES" = "  " ]; then
-    exit 0
-fi
-
-# InfluxDB connection - always asked, since every selected source needs it.
-# influx-identity/influx-secret are generic (org+token for v2, user+password
-# for v1) and always asked together, regardless of whether influx-url was
-# left blank - leaving the URL blank only changes its *default* (defaults to
-# a local instance), it doesn't mean "skip InfluxDB auth". Which of v1/v2
-# applies is detected later in postinst (see --detect-influx-version), once
-# the app's own venv/requests is available and the URL can actually be
-# probed - not here, since config runs before the package is even unpacked
-# on a first install, and gating what's asked on being able to reach an
-# arbitrary, possibly-remote, possibly-not-yet-provisioned URL at this exact
-# moment would be the wrong place to depend on that reachability at all.
-db_input medium send-to-influx/influx-url || true
-db_input medium send-to-influx/influx-identity || true
-db_input medium send-to-influx/influx-secret || true
-db_go || true
-
 case "$SOURCES" in
     *" hue "*)
-        db_input medium send-to-influx/hue-host || true
-        db_input medium send-to-influx/hue-user || true
+        db_input high send-to-influx/hue-host || true
+        db_input high send-to-influx/hue-user || true
         # Computed default, not a static one - db_set before the first
         # db_input makes it the pre-filled, fully user-editable default,
         # not a silent unreviewable guess. locale -k LC_MEASUREMENT was
@@ -66,7 +95,7 @@ case "$SOURCES" in
         # redisplayed *without* resetting their seen flag, so an unguarded
         # db_set here would silently clobber a user's previous choice with
         # a freshly-recomputed locale guess on every reconfigure.
-        db_fget send-to-influx/hue-temperature-units seen
+        db_fget send-to-influx/hue-temperature-units seen || RET=""
         if [ "$RET" = "false" ]; then
             loc="${LC_ALL:-${LANG:-}}"
             case "$loc" in
@@ -75,54 +104,58 @@ case "$SOURCES" in
             esac
             db_set send-to-influx/hue-temperature-units "$default_unit"
         fi
-        db_input medium send-to-influx/hue-temperature-units || true
+        db_input high send-to-influx/hue-temperature-units || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" zappi "*|*" harvi "*|*" eddi "*)
-        db_input medium send-to-influx/myenergi-apikey || true
+        db_input high send-to-influx/myenergi-apikey || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" zappi "*)
-        db_input medium send-to-influx/zappi-serial || true
+        db_input high send-to-influx/zappi-serial || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" harvi "*)
-        db_input medium send-to-influx/harvi-serial || true
+        db_input high send-to-influx/harvi-serial || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" eddi "*)
-        db_input medium send-to-influx/eddi-serial || true
+        db_input high send-to-influx/eddi-serial || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" octopus "*)
-        db_input medium send-to-influx/octopus-api-key || true
-        db_input medium send-to-influx/octopus-mpan || true
-        db_input medium send-to-influx/octopus-meter-serial || true
+        db_input high send-to-influx/octopus-api-key || true
+        db_input high send-to-influx/octopus-mpan || true
+        db_input high send-to-influx/octopus-meter-serial || true
         db_go || true
         ;;
 esac
 
 case "$SOURCES" in
     *" openmeteo "*)
-        db_input medium send-to-influx/openmeteo-latitude || true
-        db_input medium send-to-influx/openmeteo-longitude || true
+        db_input high send-to-influx/openmeteo-latitude || true
+        db_input high send-to-influx/openmeteo-longitude || true
         db_go || true
         ;;
 esac
+
+# Release the frontend cleanly at the end of the conversation, matching the
+# upgrade early-exit path above.
+db_stop || true
 
 exit 0

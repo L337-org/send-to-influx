@@ -226,10 +226,13 @@ The package is architecture-independent (`all`) - the app and its dependencies a
 and any optional compiled accelerators (e.g. PyYAML's) are stripped from the bundled venv at build
 time in favour of their pure-Python fallbacks - so it can be built on any Debian/Ubuntu machine
 (the script requires `/usr/bin/python3` and `dpkg-deb`) and installed on any Debian/Ubuntu
-architecture, including arm64 (e.g. Raspberry Pi). CI builds and smoke-tests the
-same script on an arm64 runner on every push/PR (a required status check), to catch a future
-dependency change that would make a compiled extension load-bearing rather than optional before
-it can merge.
+architecture, including arm64 (e.g. Raspberry Pi). CI builds the package on an arm64 runner on
+every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - a
+scenario suite covering upgrade over the latest published release, a fresh debconf-seeded install,
+plain-upgrade silence over a hand-edited config, restart-on-upgrade of a running service,
+`dpkg-reconfigure` semantics, question visibility at debconf's default priority, and purge - as
+well as catching a future dependency change that would make a compiled extension load-bearing
+rather than optional before it can merge.
 
 A venv's `site-packages` normally lives under `lib/pythonX.Y/`, named after the exact major.minor
 of the interpreter that created it - which would otherwise tie an installable target to whatever
@@ -247,26 +250,48 @@ ever gets close to 3.30).
 Either way, the package installs (but does not start) the service, since it needs configuration
 first:
 
-- Edit `/etc/send-to-influx/settings.yaml` (copied from `example_settings.yaml` on install; dpkg
-  preserves your edits across upgrades).
+- Edit `/etc/send-to-influx/settings.yaml` (created from `example_settings.yaml` the first time the
+  package is installed, and never touched by upgrades - only a fresh install or your own edits, or
+  the debconf/`send-to-influx-set-credential` flows described below, ever write to it).
 - Then enable and start it: `systemctl enable --now send-to-influx`
+
+On upgrades, a *running* service is automatically restarted so it actually picks up the new
+version - upgrades are often unattended (cron/apt timers), where a "please restart" hint in the
+package output would never be seen, and the old code would otherwise keep running until the next
+reboot. A stopped service is left stopped; an upgrade never starts anything.
 
 Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as
 stdout above.
 
 ### Configuring during install (debconf)
 
-Installing (or upgrading to) the `.deb` interactively presents a debconf prompt: a checklist of
-which data sources you want to configure now, then - only for the ones you pick - the fields
-needed to actually reach that source's API (credentials plus things like a Hue bridge hostname or
-an Octopus meter number; tuning settings like intervals keep their shipped defaults and can be
-adjusted in `settings.yaml` afterwards). Secrets you enter are moved into `systemd-creds` (see below)
+A fresh interactive install of the `.deb` presents a debconf prompt: your InfluxDB
+connection details first (asked unconditionally, regardless of what else you answer - useful on
+its own if you just want to move an existing InfluxDB
+credential into `systemd-creds` without touching anything else), then a checklist of which data
+sources you want to configure now, then - only for the ones you pick - the fields needed to
+actually reach that source's API (credentials plus things like a Hue bridge hostname or an Octopus
+meter number; tuning settings like intervals keep their shipped defaults and can be adjusted in
+`settings.yaml` afterwards). A plain package *upgrade* never prompts and never applies debconf
+answers: your `settings.yaml` and credentials are only ever written by a fresh install's prompts or
+by an explicit `sudo dpkg-reconfigure send-to-influx`, which re-runs the same flow at any time.
+Secrets you enter are moved into `systemd-creds` (see below)
 and never written into `settings.yaml` in plaintext. Debconf itself briefly holds what you type in
-its own separate, `chmod 600` password store while `postinst` runs, then actively unregisters each
-question once it's been read and migrated - see SECURITY.md if you want the detail. If every required
-field for a source was answered, it's automatically added to
-`sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is created for you where
-possible.
+its own separate, `chmod 600` password store while `postinst` runs, then clears each
+password-type answer back to the empty string immediately after reading it - regardless of whether
+the subsequent migration
+into `systemd-creds` goes on to succeed - see SECURITY.md if you want the detail. Non-secret answers
+(a Hue bridge hostname, an Octopus meter number, and so on) aren't password-type and stay in
+debconf's regular database as normal, same as any other package's debconf answers - with one
+exception: the InfluxDB user/organisation answer is cleared like the secrets are, since for a v1
+install it's the InfluxDB username, which is treated as a credential everywhere else. If every required
+field for a source was answered *and* your InfluxDB connection details resolved successfully, it's
+automatically added to `sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is
+created for you where possible - a source with everything else filled in still won't be enabled if
+InfluxDB itself couldn't be reached or authenticated. When you revisit the prompts with
+`dpkg-reconfigure`, a secret left blank counts as provided if it's already stored in
+`systemd-creds`, so adding a new source never requires re-entering credentials that are already
+migrated.
 
 You can leave every question blank and configure `settings.yaml` by hand instead - nothing here is
 required. Re-run `sudo dpkg-reconfigure send-to-influx` at any time to change your answers; secret
@@ -290,7 +315,10 @@ Run `send-to-influx-set-credential --list` to see the full set of available cred
 `echo -n "$TOKEN" | sudo send-to-influx-set-credential influx-token`) and replaces the plaintext value
 in `settings.yaml` with a note that it's now managed elsewhere - the file stays readable for the rest
 of its content, but that field is never used from it again. Use
-`send-to-influx-set-credential <name> --remove` to revert a credential back to plaintext.
+`send-to-influx-set-credential <name> --remove` to remove a credential from systemd-creds again -
+note this resets the `settings.yaml` field to its placeholder rather than restoring the secret (the
+encrypted value is destroyed, not decrypted back into the file), so re-enter the value by hand
+afterwards if you still need it.
 
 This is entirely optional and per-field - you can mix systemd-creds and plaintext values freely, and
 the source-checkout/screen-session path is unaffected either way, since systemd-creds only applies
