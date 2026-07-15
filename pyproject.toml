@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 dynamic = ["dependencies"]
 
 [project.urls]
-Homepage = "https://github.com/GavinLucas/send-to-influx"
+Homepage = "https://github.com/L337-org/send-to-influx"
 
 [project.scripts]
 send-to-influx = "sendtoinflux:main"

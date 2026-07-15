@@ -27,4 +27,4 @@ be sensitive, keep `settings.yaml` and your InfluxDB instance appropriately secu
 ## Contact
 
 Questions about this policy: open an issue at
-<https://github.com/GavinLucas/send-to-influx/issues>.
+<https://github.com/L337-org/send-to-influx/issues>.

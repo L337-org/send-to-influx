@@ -145,6 +145,6 @@ implementation.
 ## Reporting issues
 
 Bug reports and feature requests have templates that you can choose when you
-[create an issue](https://github.com/GavinLucas/send-to-influx/issues/new/choose). Please select
+[create an issue](https://github.com/L337-org/send-to-influx/issues/new/choose). Please select
 the correct issue type and follow the template. For security issues, see
 [SECURITY.md](SECURITY.md) instead of filing a public issue.

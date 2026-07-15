@@ -90,7 +90,7 @@ else
     OLD_DEB=""
     auth=()
     [ -n "${GITHUB_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
-    old_url=$(curl -fsSL "${auth[@]}" https://api.github.com/repos/GavinLucas/send-to-influx/releases/latest 2>/dev/null \
+    old_url=$(curl -fsSL "${auth[@]}" https://api.github.com/repos/L337-org/send-to-influx/releases/latest 2>/dev/null \
         | grep -o 'https://[^"]*_all\.deb' | head -1) || true
     # No auth on the asset download: the token is only needed for API rate
     # limits, and the download redirects cross-host (older curl would forward
