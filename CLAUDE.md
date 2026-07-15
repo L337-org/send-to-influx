@@ -359,6 +359,10 @@ CI check names:
   does *not* require PRs, since that would need a carefully-configured bypass for the workflow's
   direct push and getting that wrong silently breaks every release.
 
-All four use a `RepositoryRole` bypass actor for the repo admin, though `main`'s bypass actor predates the other
-three and is scoped to `bypass_mode: "pull_request"` (bypasses the PR requirement only) rather than
-`"always"` (bypasses every rule) used on the newer three - not yet reconciled.
+All four use the same pair of bypass actors: `OrganizationAdmin` and the repo-admin `RepositoryRole`
+(id 5), both `bypass_mode: "always"`. These were re-added by hand on 2026-07-15 - the repo transfer
+to `L337-org` silently stripped `bypass_actors` from every ruleset (the rules themselves survived),
+which showed up as feature-branch pushes being rejected with "required status checks expected".
+The pre-transfer setup had `main` scoped to `bypass_mode: "pull_request"` while the newer three used
+`"always"`; the re-add reconciled them all to `"always"`. If a ruleset ever rejects a push that used
+to say "Bypassed rule violations", check `bypass_actors` hasn't been emptied again.
