@@ -232,7 +232,9 @@ scenario suite covering upgrade over the latest published release, a fresh debco
 plain-upgrade silence over a hand-edited config, restart-on-upgrade of a running service,
 `dpkg-reconfigure` semantics, question visibility at debconf's default priority, and purge - as
 well as catching a future dependency change that would make a compiled extension load-bearing
-rather than optional before it can merge.
+rather than optional before it can merge. The same suite also runs in a Debian 12 container
+(systemd 252, matching Raspberry Pi OS bookworm), so behaviour differences in older systemd-creds
+tooling are covered too - the runners' own newer systemd once masked exactly such a difference.
 
 A venv's `site-packages` normally lives under `lib/pythonX.Y/`, named after the exact major.minor
 of the interpreter that created it - which would otherwise tie an installable target to whatever
