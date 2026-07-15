@@ -256,7 +256,18 @@ def _decrypt_credential(name, credstore_dir=None):
     if not os.path.isfile(cred_path):
         raise CredentialCliError(f"No stored credential for '{name}' at {cred_path}.")
     try:
-        result = subprocess.run(["systemd-creds", "decrypt", cred_path, "-"], check=True, capture_output=True)
+        # --name= must be passed explicitly, mirroring _encrypt_credential():
+        # without it, systemd-creds derives the expected name from the *input
+        # filename* and validates the embedded name against that - and only
+        # systemd >= 254 strips the ".cred" suffix when deriving. On 252/253
+        # (e.g. Debian/Raspberry Pi OS bookworm) the derived name is
+        # "influx-user.cred", the embedded name is "influx-user", and decrypt
+        # refuses with "Embedded credential name ... does not match filename".
+        # The systemd service itself was never affected (LoadCredentialEncrypted=
+        # NAME:PATH supplies the name) - only this CLI-side decrypt path.
+        result = subprocess.run(
+            ["systemd-creds", "decrypt", f"--name={name}", cred_path, "-"], check=True, capture_output=True
+        )
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode(errors="replace") if exc.stderr else str(exc)
         raise CredentialCliError(f"systemd-creds decrypt failed for '{name}': {stderr}") from exc

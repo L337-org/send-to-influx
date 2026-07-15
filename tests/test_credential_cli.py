@@ -214,6 +214,28 @@ class TestDecryptCredential:
         with pytest.raises(CredentialCliError, match="No stored credential"):
             _decrypt_credential("influx-token", credstore_dir=str(credstore))
 
+    def test_passes_name_explicitly(self, tmp_path):
+        """decrypt must pass --name=<name> explicitly, mirroring encrypt.
+        Without it, systemd-creds derives the expected name from the input
+        filename, and only systemd >= 254 strips the ".cred" suffix while
+        doing so - on 252/253 (Debian/Raspberry Pi OS bookworm) the derived
+        "influx-token.cred" mismatches the embedded "influx-token" and decrypt
+        refuses. Regression test for a real-world dpkg-reconfigure failure on
+        a bookworm Raspberry Pi."""
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+
+        with patch("subprocess.run", return_value=MagicMock(stdout=b"secret")) as run:
+            _decrypt_credential("influx-token", credstore_dir=str(credstore))
+        assert run.call_args[0][0] == [
+            "systemd-creds",
+            "decrypt",
+            "--name=influx-token",
+            str(credstore / "influx-token.cred"),
+            "-",
+        ]
+
     def test_non_utf8_output_raises_credential_cli_error_not_unicode_error(self, tmp_path):
         """systemd-creds decrypt's stdout must surface a decode failure as
         CredentialCliError - the type main()'s exception handler actually
@@ -905,9 +927,9 @@ class TestEnsureInfluxStorage:
 
         def fake_run(cmd, **kwargs):
             if cmd[:2] == ["systemd-creds", "decrypt"]:
-                if cmd[2] == str(credstore / "influx-user.cred"):
+                if cmd[2:4] == ["--name=influx-user", str(credstore / "influx-user.cred")]:
                     return MagicMock(stdout=b"real-admin\n")
-                if cmd[2] == str(credstore / "influx-password.cred"):
+                if cmd[2:4] == ["--name=influx-password", str(credstore / "influx-password.cred")]:
                     return MagicMock(stdout=b"real-password\n")
             raise AssertionError(f"unexpected subprocess call: {cmd}")
 
