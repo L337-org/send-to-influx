@@ -1,7 +1,7 @@
 send-to-influx
 ===========
 
-https://github.com/GavinLucas/send-to-influx
+https://github.com/L337-org/send-to-influx
 -----------------------------------------
 
 Script to take data from various APIs and post it to InfluxDB in order to view the data in Grafana.
@@ -208,13 +208,13 @@ Instead of a screen session, you can install send-to-influx as a systemd-managed
 
 ### Installing from the APT repo
 
-    curl -fsSL https://gavinlucas.github.io/send-to-influx/send-to-influx.gpg | sudo tee /usr/share/keyrings/send-to-influx.gpg >/dev/null
-    echo "deb [signed-by=/usr/share/keyrings/send-to-influx.gpg] https://gavinlucas.github.io/send-to-influx/ ./" | sudo tee /etc/apt/sources.list.d/send-to-influx.list
+    curl -fsSL https://apt.l337.org/send-to-influx.gpg | sudo tee /usr/share/keyrings/send-to-influx.gpg >/dev/null
+    echo "deb [signed-by=/usr/share/keyrings/send-to-influx.gpg] https://apt.l337.org/ ./" | sudo tee /etc/apt/sources.list.d/send-to-influx.list
     sudo apt update
     sudo apt install send-to-influx
 
 The repo only keeps the last few releases' `.deb` files (older versions remain available on the
-[Releases page](https://github.com/GavinLucas/send-to-influx/releases)), and is published by the
+[Releases page](https://github.com/L337-org/send-to-influx/releases)), and is published by the
 `apt-repo` job in `.github/workflows/release.yaml` on every tagged release.
 
 ### Building it yourself
