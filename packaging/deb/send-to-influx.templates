@@ -15,6 +15,9 @@ Default:
 Description: InfluxDB URL (leave blank for a local instance)
  The base URL of your InfluxDB server, e.g. https://influx.example.com:8086.
  Leave this blank to default to http://localhost:8086.
+ When reconfiguring an install whose InfluxDB credentials are already stored
+ in systemd-creds, a blank URL keeps the currently configured one - enter
+ http://localhost:8086 explicitly to point it back at a local instance.
 
 Template: send-to-influx/influx-identity
 Type: string
