@@ -214,8 +214,9 @@ Instead of a screen session, you can install send-to-influx as a systemd-managed
     sudo apt install send-to-influx
 
 The repo only keeps the last few releases' `.deb` files (older versions remain available on the
-[Releases page](https://github.com/L337-org/send-to-influx/releases)), and is published by the
-`apt-repo` job in `.github/workflows/release.yaml` on every tagged release.
+[Releases page](https://github.com/L337-org/send-to-influx/releases)), and is maintained by
+[L337-org/apt](https://github.com/L337-org/apt), which aggregates `.deb` release assets from
+L337-org projects' GitHub Releases (new releases appear there within the hour).
 
 ### Building it yourself
 
