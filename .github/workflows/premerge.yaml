@@ -148,3 +148,45 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: sudo -E bash packaging/deb/test-packaging.sh send-to-influx_*_all.deb
+
+  bookworm-verify:
+    # Same packaging scenario suite as arm64-verify, but inside a debian:12
+    # container - systemd 252, the oldest systemd-creds this package supports
+    # in practice (Raspberry Pi OS / Debian bookworm). The arm64 runner ships
+    # systemd 255+, which silently masks older-systemd behaviour differences:
+    # a real 4.1 regression (systemd-creds decrypt refusing un-named
+    # credentials, because only >= 254 strips the ".cred" suffix when deriving
+    # a name from the filename) passed CI and was only caught in the field on
+    # a bookworm Pi. No systemd is *running* in the container, so the
+    # restart-on-upgrade scenario self-skips - arm64-verify covers that; this
+    # job exists for the systemd-creds *tooling* version coverage.
+    runs-on: [ubuntu-latest]
+    name: Verify .deb on Debian 12 (systemd 252)
+    steps:
+      - name: Check out source repository
+        uses: actions/checkout@v7
+
+      - name: Generate a random test secret for the Hue credential
+        # Same reasoning as arm64-verify's copy of this step.
+        run: |
+          secret="ci-test-$(openssl rand -hex 16)"
+          echo "::add-mask::$secret"
+          echo "HUE_TEST_SECRET=$secret" >> "$GITHUB_ENV"
+
+      - name: Build the .deb and run the packaging scenario tests in a debian:12 container
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src:ro" \
+            -e HUE_TEST_SECRET \
+            -e GITHUB_TOKEN \
+            debian:12 bash -ec '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -q >/dev/null
+              apt-get install -yq python3 python3-venv python3-pip systemd adduser curl >/dev/null
+              systemd-creds --version | head -1
+              cp -r /src /build && cd /build
+              bash packaging/deb/build-deb.sh /tmp/test.deb >/dev/null
+              bash packaging/deb/test-packaging.sh /tmp/test.deb
+            '

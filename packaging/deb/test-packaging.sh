@@ -201,6 +201,14 @@ send-to-influx send-to-influx/influx-url string http://influx-changed.example.co
 EOF
     out=$(dpkg-reconfigure -fnoninteractive send-to-influx 2>&1) || { echo "$out"; fail "reconfigure with stored token failed"; }
     echo "$out" | grep -qi "not provided - skipping" && { echo "$out"; fail "stored influx-token did not satisfy the blank secret"; }
+    # --ensure-influx-storage is expected to fail here (the URL points at
+    # nothing) - but it must fail on the *connection*, never on decrypting
+    # its own stored credential. On systemd 250-253 (e.g. Raspberry Pi OS
+    # bookworm, 252) an un-named `systemd-creds decrypt` derives the expected
+    # credential name from the input filename WITHOUT stripping ".cred"
+    # (only >= 254 strips it) and refuses the mismatch - a real-world 4.1
+    # regression this assertion pins down on any such host.
+    echo "$out" | grep -qi "decrypt failed" && { echo "$out"; fail "stored credential could not be decrypted by the CLI"; }
     grep -q "http://influx-changed.example.com:8086" "$SETTINGS" || fail "changed influx URL not applied alongside a stored token"
     pass "reconfigure: stored influx-token satisfied the blank secret and the changed URL was applied"
 
