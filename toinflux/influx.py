@@ -16,7 +16,21 @@ from toinflux.exceptions import ConfigError
 
 
 class InfluxWriteError(Exception):
-    """Raised when a write to InfluxDB fails."""
+    """
+    Raised when a write to InfluxDB fails.
+
+    :cvar bufferable: whether this specific failure is worth buffering/retrying. A
+        transient problem (network error, 5xx, no response at all) plausibly succeeds
+        later, so it's bufferable (the default). A 400 means InfluxDB rejected this
+        exact point as malformed - retrying the identical payload would fail
+        identically forever, so it's not: buffering it would permanently block
+        flushing every point behind it. Set as an instance attribute after
+        construction (see _post_line) rather than via a custom __init__, so the
+        exception's args/str() stay a plain single message.
+    :vartype bufferable: bool
+    """
+
+    bufferable = True
 
 
 # Bound on how many failed points each source buffers in memory before the oldest is
@@ -132,18 +146,61 @@ class DataHandler:
         buffer = self._write_buffers.setdefault(self.source, deque(maxlen=MAX_BUFFERED_POINTS))
 
         try:
-            while buffer:
-                self._post_line(buffer[0], url, post_kwargs, insecure)
-                buffer.popleft()
+            self._flush_buffer(buffer, url, post_kwargs, insecure)
         except InfluxWriteError:
             self._buffer_point(buffer, data_to_send)
             raise
 
         try:
             self._post_line(data_to_send, url, post_kwargs, insecure)
-        except InfluxWriteError:
-            self._buffer_point(buffer, data_to_send)
+        except InfluxWriteError as exc:
+            if exc.bufferable:
+                self._buffer_point(buffer, data_to_send)
+            else:
+                logging.warning(
+                    "Not buffering point for source '%s' - InfluxDB rejected it and it "
+                    "would never succeed on retry: %s",
+                    self.source,
+                    exc,
+                )
             raise
+
+    def _flush_buffer(self, buffer, url, kwargs, insecure):
+        """
+        Flush a source's buffered points, oldest first.
+
+        A bufferable (transient) failure stops the flush and re-raises, leaving the
+        point that failed - and everything behind it - in the buffer to retry later.
+        A non-bufferable (permanent) failure drops just that one point and continues
+        flushing the rest, since the failure says nothing about whether InfluxDB
+        itself is reachable - only that this particular point is bad.
+
+        :param buffer: the source's buffer (from ``_write_buffers``)
+        :type buffer: collections.deque
+        :param url: destination InfluxDB write URL
+        :type url: str
+        :param kwargs: extra requests.Session.post() kwargs (auth/headers/verify/timeout)
+        :type kwargs: dict
+        :param insecure: whether to suppress the urllib3 InsecureRequestWarning for this call
+        :type insecure: bool
+        :return: None
+        :raises InfluxWriteError: on the first bufferable (transient) failure
+        """
+        while buffer:
+            try:
+                self._post_line(buffer[0], url, kwargs, insecure)
+            except InfluxWriteError as exc:
+                if exc.bufferable:
+                    raise
+                logging.warning(
+                    "Dropping buffered point for source '%s' - InfluxDB rejected it and it "
+                    "would never succeed on retry: %s",
+                    self.source,
+                    exc,
+                )
+                buffer.popleft()
+                continue
+            buffer.popleft()
 
     def _build_write_request(self, influx_settings):
         """
@@ -199,7 +256,10 @@ class DataHandler:
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logging.error("Error sending data to InfluxDB - %s", e)
-            raise InfluxWriteError(str(e)) from e
+            status_code = getattr(e.response, "status_code", None)
+            exc = InfluxWriteError(str(e))
+            exc.bufferable = status_code != 400
+            raise exc from e
 
     def _buffer_point(self, buffer, line):
         """

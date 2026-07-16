@@ -392,6 +392,82 @@ class TestSendDataBuffering:
             assert len(DataHandler._write_buffers["hue"]) == 1
             assert "zappi" not in DataHandler._write_buffers or len(DataHandler._write_buffers["zappi"]) == 0
 
+    @staticmethod
+    def _http_error(status_code):
+        """Build an HTTPError carrying a mock response with the given status code, matching
+        what response.raise_for_status() actually attaches in requests."""
+        error = requests.exceptions.HTTPError(f"{status_code} error")
+        error.response = MagicMock(status_code=status_code)
+        return error
+
+    def test_400_response_is_not_buffered(self, sample_settings):
+        """A 400 (malformed point) is not buffered - retrying the identical payload would
+        fail identically forever, so buffering it would poison the queue for every point
+        behind it."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.return_value.raise_for_status.side_effect = self._http_error(400)
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000000)
+            assert "hue" not in DataHandler._write_buffers or len(DataHandler._write_buffers["hue"]) == 0
+
+    def test_500_response_is_still_buffered(self, sample_settings):
+        """A 500 (server-side/transient) is buffered like a network error would be."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.return_value.raise_for_status.side_effect = self._http_error(500)
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000000)
+            assert len(DataHandler._write_buffers["hue"]) == 1
+
+    def test_flush_drops_a_permanently_bad_buffered_point_and_continues(self, sample_settings):
+        """If a buffered point now fails with a 400, the flush drops just that point and
+        keeps going - the failure says nothing about whether InfluxDB itself is reachable."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+
+            # Buffer a point behind a transient (500) failure - stays bufferable.
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.return_value.raise_for_status.side_effect = self._http_error(500)
+                h.data = {"x": 1}
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000000)
+            assert len(DataHandler._write_buffers["hue"]) == 1
+
+            # Next send: the buffered point now comes back 400 (e.g. InfluxDB rejects it for
+            # some other reason) and gets dropped; the new point sends normally.
+            with patch.object(h.session, "post") as mock_post:
+
+                def post_side_effect(*_args, **_kwargs):
+                    if mock_post.call_count == 1:
+                        response = MagicMock()
+                        response.raise_for_status.side_effect = self._http_error(400)
+                        return response
+                    response = MagicMock()
+                    response.raise_for_status = MagicMock()
+                    return response
+
+                mock_post.side_effect = post_side_effect
+                h.data = {"x": 2}
+                h.send_data(timestamp=1700000100)
+                assert mock_post.call_count == 2
+
+            assert len(DataHandler._write_buffers["hue"]) == 0
+
+    def test_influx_write_error_defaults_to_bufferable(self):
+        """InfluxWriteError defaults bufferable=True when constructed without the kwarg."""
+        assert InfluxWriteError("boom").bufferable is True
+
 
 class TestFormatFieldValue:
     """Tests for the _format_field_value line protocol helper."""
