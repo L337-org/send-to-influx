@@ -494,6 +494,26 @@ class TestSendDataBuffering:
             assert len(buffer) == 1
             assert buffer[0][1] == 0  # rejection count untouched by connection failures
 
+    def test_429_rate_limits_never_age_points_out(self, sample_settings):
+        """429 (and 408) are transient conditions, not verdicts on the point - they must
+        not count towards the rejection cap, or a rate-limit burst would drop valid data."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.return_value.raise_for_status.side_effect = self._http_error(429)
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000000)
+                for _ in range(20):  # far more cycles than MAX_POINT_REJECTIONS
+                    h.data = None
+                    with pytest.raises(InfluxWriteError):
+                        h.send_data()
+            buffer = DataHandler._write_buffers["hue"]
+            assert len(buffer) == 1
+            assert buffer[0][1] == 0  # rejection count untouched by rate limiting
+
     def test_500_responses_also_never_age_points_out(self, sample_settings):
         """5xx responses are the server's problem, not the point's - they don't count
         towards the rejection cap either."""

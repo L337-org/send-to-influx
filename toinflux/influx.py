@@ -33,14 +33,20 @@ class InfluxWriteError(Exception):
 # dropped to make room for new ones - see DataHandler._write_buffers.
 MAX_BUFFERED_POINTS = 500
 
-# How many times a buffered point may be *rejected* by the server (any 4xx - the server
-# received it and said no) before it's dropped as unsendable. Connection failures and
-# 5xx responses never count towards this, so an ordinary outage - however long - can't
-# age points out; only a point the server itself keeps refusing (malformed, outside the
-# retention window, oversized, or a misbehaving middlebox answering for InfluxDB) is
-# given up on, and even then only after this many separate attempts, so one transient
-# 4xx (e.g. a proxy hiccup) doesn't discard data InfluxDB never saw.
+# How many times a buffered point may be *rejected* by the server (a non-transient 4xx -
+# the server received it and said no) before it's dropped as unsendable. Connection
+# failures, 5xx responses, and the transient 4xxs below never count towards this, so an
+# ordinary outage - however long - can't age points out; only a point the server itself
+# keeps refusing (malformed, outside the retention window, oversized, or a misbehaving
+# middlebox answering for InfluxDB) is given up on, and even then only after this many
+# separate attempts, so one transient 4xx (e.g. a proxy hiccup) doesn't discard data
+# InfluxDB never saw.
 MAX_POINT_REJECTIONS = 5
+
+# 4xx statuses that describe a transient server/connection condition, not a verdict on
+# the submitted payload: 408 Request Timeout, 429 Too Many Requests. Counting these as
+# point rejections would age valid points out of the buffer during rate limiting.
+TRANSIENT_CLIENT_ERRORS = frozenset({408, 429})
 
 # How many buffered points are flushed per HTTP request. InfluxDB's write endpoints
 # natively accept multiple newline-separated points per body, so recovering from a long
@@ -49,10 +55,12 @@ MAX_POINT_REJECTIONS = 5
 FLUSH_CHUNK_SIZE = 100
 
 
-def _is_client_error(status_code):
-    """True when an HTTP status code is a 4xx - the server received and rejected the
-    request - as opposed to a connection failure (None) or a server-side error (5xx)."""
-    return status_code is not None and 400 <= status_code < 500
+def _is_point_rejection(status_code):
+    """True when an HTTP status code means the server received and rejected the submitted
+    *payload* (a 4xx other than the transient 408/429) - as opposed to a connection
+    failure (None), a server-side error (5xx), or a rate-limit/timeout condition that
+    says nothing about the point's validity."""
+    return status_code is not None and 400 <= status_code < 500 and status_code not in TRANSIENT_CLIENT_ERRORS
 
 
 def _format_field_value(value):
@@ -224,7 +232,7 @@ class DataHandler:
             try:
                 self._post_line("\n".join(entry[0] for entry in chunk), url, kwargs)
             except InfluxWriteError as exc:
-                if not _is_client_error(exc.status_code):
+                if not _is_point_rejection(exc.status_code):
                     logging.warning(
                         "Flushing %d buffered point(s) for source '%s' failed; will retry next cycle",
                         len(buffer),
@@ -258,7 +266,7 @@ class DataHandler:
         try:
             self._post_line(entry[0], url, kwargs)
         except InfluxWriteError as exc:
-            if _is_client_error(exc.status_code):
+            if _is_point_rejection(exc.status_code):
                 entry[1] += 1
                 if entry[1] >= MAX_POINT_REJECTIONS:
                     logging.warning(
