@@ -3,7 +3,13 @@
 from unittest.mock import MagicMock, patch
 import requests
 import pytest
-from toinflux.influx import DataHandler, InfluxWriteError, _escape_key_or_tag_value, _format_field_value
+from toinflux.influx import (
+    MAX_POINT_REJECTIONS,
+    DataHandler,
+    InfluxWriteError,
+    _escape_key_or_tag_value,
+    _format_field_value,
+)
 from toinflux.exceptions import ConfigError
 
 
@@ -298,7 +304,7 @@ class TestSendDataBuffering:
                     h.send_data(timestamp=1700000000)
             buffer = DataHandler._write_buffers["hue"]
             assert len(buffer) == 1
-            assert buffer[0] == "hue x=1 1700000000"
+            assert buffer[0][0] == "hue x=1 1700000000"
 
     def test_flushes_buffered_point_before_sending_new_one(self, sample_settings):
         """A previously-buffered point is sent (oldest first) once InfluxDB is reachable
@@ -325,6 +331,30 @@ class TestSendDataBuffering:
                 assert second_body == "hue x=2 1700000100"
             assert len(DataHandler._write_buffers["hue"]) == 0
 
+    def test_backlog_flushes_as_newline_batched_body(self, sample_settings):
+        """A multi-point backlog is flushed as one newline-joined POST body, not one
+        request per point."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("down")
+                for value in (1, 2, 3):
+                    h.data = {"x": value}
+                    with pytest.raises(InfluxWriteError):
+                        h.send_data(timestamp=1700000000 + value)
+            assert len(DataHandler._write_buffers["hue"]) == 3
+
+            h.data = {"x": 4}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data(timestamp=1700000004)
+                assert mock_post.call_count == 2  # one batched flush + the new point
+                flush_body = mock_post.call_args_list[0][1]["data"]
+                assert flush_body == "hue x=1 1700000001\nhue x=2 1700000002\nhue x=3 1700000003"
+            assert len(DataHandler._write_buffers["hue"]) == 0
+
     def test_keeps_buffered_points_when_flush_still_fails(self, sample_settings):
         """If InfluxDB is still unreachable, a failed flush leaves already-buffered points
         in place (not dropped) and also buffers the new point, oldest first."""
@@ -344,8 +374,8 @@ class TestSendDataBuffering:
 
             buffer = DataHandler._write_buffers["hue"]
             assert len(buffer) == 2
-            assert buffer[0] == "hue x=1 1700000000"
-            assert buffer[1] == "hue x=2 1700000100"
+            assert buffer[0][0] == "hue x=1 1700000000"
+            assert buffer[1][0] == "hue x=2 1700000100"
 
     def test_buffer_evicts_oldest_point_once_full(self, sample_settings):
         """A source's write buffer drops its oldest point once MAX_BUFFERED_POINTS is exceeded."""
@@ -365,8 +395,8 @@ class TestSendDataBuffering:
 
             buffer = DataHandler._write_buffers["hue"]
             assert len(buffer) == 2
-            assert "x=2" in buffer[0]
-            assert "x=3" in buffer[1]
+            assert "x=2" in buffer[0][0]
+            assert "x=3" in buffer[1][0]
 
     def test_different_sources_have_independent_buffers(self, sample_settings):
         """Buffered points for one source don't leak into another source's buffer/flush."""
@@ -400,10 +430,10 @@ class TestSendDataBuffering:
         error.response = MagicMock(status_code=status_code)
         return error
 
-    def test_400_response_is_not_buffered(self, sample_settings):
-        """A 400 (malformed point) is not buffered - retrying the identical payload would
-        fail identically forever, so buffering it would poison the queue for every point
-        behind it."""
+    def test_4xx_rejected_new_point_is_still_buffered(self, sample_settings):
+        """A 4xx on the new point buffers it like any other failure - a single 4xx might
+        be a middlebox answering for a down InfluxDB, so the point isn't trusted-dropped;
+        it's given MAX_POINT_REJECTIONS flush attempts before being given up on."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             h = DataHandler(source="hue")
@@ -413,10 +443,60 @@ class TestSendDataBuffering:
                 mock_post.return_value.raise_for_status.side_effect = self._http_error(400)
                 with pytest.raises(InfluxWriteError):
                     h.send_data(timestamp=1700000000)
-            assert "hue" not in DataHandler._write_buffers or len(DataHandler._write_buffers["hue"]) == 0
+            assert len(DataHandler._write_buffers["hue"]) == 1
 
-    def test_500_response_is_still_buffered(self, sample_settings):
-        """A 500 (server-side/transient) is buffered like a network error would be."""
+    def test_rejected_point_dropped_after_max_rejections(self, sample_settings):
+        """A buffered point the server keeps rejecting (4xx) is dropped once its
+        rejection count reaches MAX_POINT_REJECTIONS, unjamming the queue behind it."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.return_value.raise_for_status.side_effect = self._http_error(422)
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000000)
+                # Each retry cycle's flush attempt earns the head point one more rejection.
+                for _ in range(MAX_POINT_REJECTIONS - 1):
+                    h.data = None  # empty-data cycles still flush the backlog
+                    with pytest.raises(InfluxWriteError):
+                        h.send_data()
+                # The cap-reaching rejection drops the point, so this flush completes
+                # cleanly and the cycle does not raise.
+                h.data = None
+                h.send_data()
+            # Rejection cap reached: the poison point is gone and a healthy send works.
+            assert len(DataHandler._write_buffers["hue"]) == 0
+            h.data = {"x": 2}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data(timestamp=1700000100)
+                assert mock_post.call_count == 1
+
+    def test_connection_failures_never_age_points_out(self, sample_settings):
+        """Connection-level failures (no response) don't count towards a point's
+        rejection cap - an arbitrarily long outage can't age points out of the buffer."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("down")
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000000)
+                for _ in range(20):  # far more cycles than MAX_POINT_REJECTIONS
+                    h.data = None
+                    with pytest.raises(InfluxWriteError):
+                        h.send_data()
+            buffer = DataHandler._write_buffers["hue"]
+            assert len(buffer) == 1
+            assert buffer[0][1] == 0  # rejection count untouched by connection failures
+
+    def test_500_responses_also_never_age_points_out(self, sample_settings):
+        """5xx responses are the server's problem, not the point's - they don't count
+        towards the rejection cap either."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             h = DataHandler(source="hue")
@@ -426,47 +506,132 @@ class TestSendDataBuffering:
                 mock_post.return_value.raise_for_status.side_effect = self._http_error(500)
                 with pytest.raises(InfluxWriteError):
                     h.send_data(timestamp=1700000000)
-            assert len(DataHandler._write_buffers["hue"]) == 1
+                for _ in range(20):
+                    h.data = None
+                    with pytest.raises(InfluxWriteError):
+                        h.send_data()
+            buffer = DataHandler._write_buffers["hue"]
+            assert len(buffer) == 1
+            assert buffer[0][1] == 0
 
-    def test_flush_drops_a_permanently_bad_buffered_point_and_continues(self, sample_settings):
-        """If a buffered point now fails with a 400, the flush drops just that point and
-        keeps going - the failure says nothing about whether InfluxDB itself is reachable."""
+    def test_rejected_chunk_falls_back_to_per_point_isolation(self, sample_settings):
+        """When a batched flush is rejected with a 4xx, the offending point is isolated
+        per-point (and eventually dropped) while the healthy points still get delivered."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             h = DataHandler(source="hue")
             h.influx_header = "hue "
-
-            # Buffer a point behind a transient (500) failure - stays bufferable.
+            # Buffer two points behind a connection failure.
             with patch.object(h.session, "post") as mock_post:
-                mock_post.return_value.raise_for_status.side_effect = self._http_error(500)
-                h.data = {"x": 1}
+                mock_post.side_effect = requests.exceptions.RequestException("down")
+                for value in (1, 2):
+                    h.data = {"x": value}
+                    with pytest.raises(InfluxWriteError):
+                        h.send_data(timestamp=1700000000 + value)
+            # Pre-poison the first point to one rejection short of the cap, so the next
+            # 4xx on it drops it.
+            DataHandler._write_buffers["hue"][0][1] = MAX_POINT_REJECTIONS - 1
+
+            # Next send: batch POST 400s; per-point pass 400s the first point (dropping
+            # it at the cap) and delivers the second point and the new one.
+            with patch.object(h.session, "post") as mock_post:
+                bodies = []
+
+                def post_side_effect(*_args, **kwargs):
+                    bodies.append(kwargs["data"])
+                    response = MagicMock()
+                    if "x=1" in kwargs["data"]:
+                        response.raise_for_status.side_effect = self._http_error(400)
+                    else:
+                        response.raise_for_status = MagicMock()
+                    return response
+
+                mock_post.side_effect = post_side_effect
+                h.data = {"x": 3}
+                h.send_data(timestamp=1700000003)
+
+            assert len(DataHandler._write_buffers["hue"]) == 0
+            # The second buffered point and the new point were both delivered.
+            assert any(body == "hue x=2 1700000002" for body in bodies)
+            assert any(body == "hue x=3 1700000003" for body in bodies)
+
+    def test_influx_write_error_status_code_defaults_to_none(self):
+        """InfluxWriteError.status_code defaults to None (connection failure, no response)."""
+        assert InfluxWriteError("boom").status_code is None
+
+    def test_use_buffer_false_neither_flushes_nor_buffers(self, sample_settings):
+        """use_buffer=False (the heartbeat path) posts only its own line: no backlog
+        flush first, and no buffering of its line on failure."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            # Seed a backlog.
+            h.data = {"x": 1}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("down")
                 with pytest.raises(InfluxWriteError):
                     h.send_data(timestamp=1700000000)
             assert len(DataHandler._write_buffers["hue"]) == 1
 
-            # Next send: the buffered point now comes back 400 (e.g. InfluxDB rejects it for
-            # some other reason) and gets dropped; the new point sends normally.
+            # A failing use_buffer=False write: exactly one POST (no flush attempt),
+            # and the buffer is unchanged (heartbeat line not appended).
             with patch.object(h.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("still down")
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(data={"ok": 0}, timestamp=1700000100, use_buffer=False)
+                assert mock_post.call_count == 1
+            buffer = DataHandler._write_buffers["hue"]
+            assert len(buffer) == 1
+            assert buffer[0][0] == "hue x=1 1700000000"
 
-                def post_side_effect(*_args, **_kwargs):
-                    if mock_post.call_count == 1:
-                        response = MagicMock()
-                        response.raise_for_status.side_effect = self._http_error(400)
-                        return response
-                    response = MagicMock()
-                    response.raise_for_status = MagicMock()
-                    return response
+    def test_empty_data_still_flushes_backlog(self, sample_settings):
+        """A cycle with no data of its own still flushes the backlog, so recovery isn't
+        gated on the source's next non-empty reading (or on the heartbeat path)."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("down")
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000000)
+            assert len(DataHandler._write_buffers["hue"]) == 1
 
-                mock_post.side_effect = post_side_effect
-                h.data = {"x": 2}
-                h.send_data(timestamp=1700000100)
-                assert mock_post.call_count == 2
-
+            h.data = {}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data()
+                assert mock_post.call_count == 1
+                assert mock_post.call_args[1]["data"] == "hue x=1 1700000000"
             assert len(DataHandler._write_buffers["hue"]) == 0
 
-    def test_influx_write_error_defaults_to_bufferable(self):
-        """InfluxWriteError defaults bufferable=True when constructed without the kwarg."""
-        assert InfluxWriteError("boom").bufferable is True
+    def test_empty_data_with_empty_buffer_makes_no_request(self, sample_settings):
+        """The original early-return behaviour is preserved when there's no backlog."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {}
+            with patch.object(h.session, "post") as mock_post:
+                h.send_data()
+                mock_post.assert_not_called()
+
+    def test_identical_line_is_not_buffered_twice(self, sample_settings):
+        """Re-collecting the same reading (same fields, same timestamp - e.g. Octopus)
+        during an outage doesn't stack duplicate copies in the buffer."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("down")
+                for _ in range(3):
+                    h.data = {"x": 1}
+                    with pytest.raises(InfluxWriteError):
+                        h.send_data(timestamp=1700000000)
+            assert len(DataHandler._write_buffers["hue"]) == 1
 
 
 class TestFormatFieldValue:

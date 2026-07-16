@@ -73,7 +73,11 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
     something other than the current time for their own writes, which send_data()
     would otherwise fall back to, making the heartbeat reflect a stale time rather
     than when the collector was actually last checked. A heartbeat write failure
-    is logged and swallowed rather than counted as a source failure.
+    is logged and swallowed rather than counted as a source failure. Passes
+    ``use_buffer=False``: a heartbeat is a live signal with no replay value, so a
+    failed one is dropped rather than buffered - otherwise every failed cycle
+    during an InfluxDB outage would consume a buffer slot per heartbeat, evicting
+    real measurement points, and recovery would backfill stale ok=0 status lines.
 
     :param data_handler: the source's DataHandler instance, or None if it hasn't
         been constructed yet (e.g. a config error) - in which case there's no
@@ -95,6 +99,7 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
         data_handler.send_data(
             data={"ok": 1 if ok else 0, "consecutive_failures": consecutive_failures},
             timestamp=int(time.time()),
+            use_buffer=False,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logging.warning("Failed to write heartbeat for source '%s': %s", source, exc)
