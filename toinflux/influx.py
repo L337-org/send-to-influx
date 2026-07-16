@@ -9,6 +9,7 @@ import time
 import logging
 import warnings
 from collections import deque
+from itertools import islice
 import urllib3
 import requests
 from toinflux.general import load_settings
@@ -169,10 +170,8 @@ class DataHandler:
 
         if not data or not isinstance(data, dict):
             data_to_send = None
-            if not (use_buffer and self._write_buffers.get(self.source)):
-                logging.warning("No data to send to InfluxDB")
+            if not self._log_missing_data(data, use_buffer):
                 return
-            logging.debug("No new data for source '%s'; flushing the buffered backlog only", self.source)
         else:
             if timestamp is None:
                 timestamp = self.timestamp if self.timestamp is not None else int(time.time())
@@ -199,6 +198,32 @@ class DataHandler:
             if data_to_send is not None:
                 self._buffer_point(buffer, data_to_send)
             raise
+
+    def _log_missing_data(self, data, use_buffer):
+        """
+        Log appropriately for a send_data() call with no usable data of its own.
+
+        A truthy non-dict isn't an empty reading, it's a handler bug - it gets its own
+        explicit warning rather than hiding behind the no-data messages. An empty
+        reading only warrants a warning when there's also no backlog to flush; a cycle
+        that exists purely to drain the backlog logs at DEBUG.
+
+        :param data: whatever the caller supplied (or self.data resolved to)
+        :param use_buffer: the send_data() call's use_buffer flag
+        :type use_buffer: bool
+        :return: True when a backlog flush should still proceed, False when there is
+            nothing at all for this call to do
+        :rtype: bool
+        """
+        has_backlog = bool(use_buffer and self._write_buffers.get(self.source))
+        if data and not isinstance(data, dict):
+            logging.warning("Ignoring non-dict data (%s) from source '%s'", type(data).__name__, self.source)
+        elif not has_backlog:
+            logging.warning("No data to send to InfluxDB")
+        if not has_backlog:
+            return False
+        logging.debug("No new data for source '%s'; flushing the buffered backlog only", self.source)
+        return True
 
     def _flush_buffer(self, buffer, url, kwargs):
         """
@@ -227,7 +252,9 @@ class DataHandler:
             point that hasn't yet reached MAX_POINT_REJECTIONS
         """
         while buffer:
-            chunk = [buffer[i] for i in range(min(len(buffer), FLUSH_CHUNK_SIZE))]
+            # islice iterates the deque linearly - indexing a deque is O(n) per access,
+            # which would make building the chunk O(k^2).
+            chunk = list(islice(buffer, FLUSH_CHUNK_SIZE))
             if len(chunk) == 1:
                 self._flush_head(buffer, url, kwargs)
                 continue

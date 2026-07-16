@@ -627,6 +627,28 @@ class TestSendDataBuffering:
                 assert mock_post.call_args[1]["data"] == "hue x=1 1700000000"
             assert len(DataHandler._write_buffers["hue"]) == 0
 
+    def test_non_dict_data_warns_explicitly_but_still_flushes_backlog(self, sample_settings, caplog):
+        """A truthy non-dict from a handler is a bug worth its own warning - and it must
+        not block the backlog flush that an empty-reading cycle would perform."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("down")
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000000)
+
+            h.data = ["not", "a", "dict"]
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                with caplog.at_level("WARNING"):
+                    h.send_data()
+                assert "non-dict data (list)" in caplog.text
+                assert mock_post.call_count == 1  # the backlog flush still happened
+            assert len(DataHandler._write_buffers["hue"]) == 0
+
     def test_empty_data_with_empty_buffer_makes_no_request(self, sample_settings):
         """The original early-return behaviour is preserved when there's no backlog."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
