@@ -19,10 +19,11 @@ class InfluxWriteError(Exception):
     """
     Raised when a write to InfluxDB fails.
 
-    :cvar status_code: the HTTP status code of the failed write, or None when no
-        response was received at all (connection error/timeout). Set as an instance
-        attribute after construction (see _post_line) rather than via a custom
-        __init__, so the exception's args/str() stay a plain single message.
+    :ivar status_code: the HTTP status code of the failed write, or None when no
+        response was received at all (connection error/timeout). Defaults to None via
+        a class-level fallback and is set as an instance attribute after construction
+        (see _post_line) rather than via a custom __init__, so the exception's
+        args/str() stay a plain single message.
     :vartype status_code: int or None
     """
 
@@ -167,10 +168,11 @@ class DataHandler:
             data = self.data
 
         if not data or not isinstance(data, dict):
-            logging.warning("No data to send to InfluxDB")
             data_to_send = None
             if not (use_buffer and self._write_buffers.get(self.source)):
+                logging.warning("No data to send to InfluxDB")
                 return
+            logging.debug("No new data for source '%s'; flushing the buffered backlog only", self.source)
         else:
             if timestamp is None:
                 timestamp = self.timestamp if self.timestamp is not None else int(time.time())
