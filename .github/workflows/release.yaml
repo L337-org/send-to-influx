@@ -1,27 +1,26 @@
 name: 'Release'
-run-name: Release ${{ github.ref_name }}
+run-name: Release ${{ github.event.release.tag_name }}
 permissions:
   contents: write
 
-# Triggers
+# Runs when a GitHub Release is *published* - drafting and publishing in the UI is
+# this repo's release process (hand-written notes are always added on top of the
+# generated ones there). Triggering on the release event rather than the tag push
+# means: tags can be created for purposes other than releases without triggering a
+# build, and the release this job uploads to is guaranteed to already exist - its
+# id arrives in the event payload, so no release lookup (by tag or otherwise) is
+# ever needed. That matters: during the 4.3 release, GitHub's releases/tags/{tag}
+# lookup endpoint served 503s for an extended period, which `gh release upload
+# <tag>` rendered as a bogus "release not found", failing the run.
 on:
-  push:
-    tags:
-      # Match every tag rather than trying to be precise about version-number shape -
-      # GitHub's tag-filter glob syntax doesn't clearly document whether `+`/character
-      # classes work as quantifiers or literals, so relying on that got this wrong twice.
-      # The "Verify tag matches pyproject.toml version" step below is the real gate;
-      # this trigger only needs to not silently exclude this project's actual tags
-      # (bare MAJOR.MINOR, e.g. 3.0 - no "v" prefix, unlike the previous 'v*' pattern).
-      - '*'
+  release:
+    types: [published]
 
 jobs:
 
   build-and-release:
     runs-on: [ubuntu-latest]
-    name: Build .deb and create GitHub release
-    outputs:
-      deb_name: ${{ steps.build.outputs.deb_name }}
+    name: Build .deb and attach it to the release
     steps:
       - name: Check out source repository
         uses: actions/checkout@v7
@@ -42,20 +41,18 @@ jobs:
       - name: Run flake8
         run: flake8
 
-      - name: Verify tag matches pyproject.toml version
+      - name: Verify release tag matches pyproject.toml version
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
           pkg_version="$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')"
-          if [ "$GITHUB_REF_NAME" != "$pkg_version" ]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match pyproject.toml version ${pkg_version}"
+          if [ "$TAG_NAME" != "$pkg_version" ]; then
+            echo "Release tag ${TAG_NAME} does not match pyproject.toml version ${pkg_version}"
             exit 1
           fi
 
       - name: Build .deb package
-        id: build
-        run: |
-          packaging/deb/build-deb.sh
-          deb_name="$(basename send-to-influx_*.deb)"
-          echo "deb_name=${deb_name}" >> "$GITHUB_OUTPUT"
+        run: packaging/deb/build-deb.sh
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v7
@@ -63,22 +60,35 @@ jobs:
           name: send-to-influx-deb
           path: send-to-influx_*.deb
 
-      - name: Create or update GitHub release
+      - name: Attach .deb to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ github.event.release.id }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
-          # A release for this tag may already exist - e.g. GitHub's "Draft a new
-          # release" UI creates the tag and the release together when you publish,
-          # so by the time this runs (triggered by that same tag push) the release
-          # is already there. Try creating first; if that fails for any reason
-          # (already exists, including the race where it's created in the window
-          # between a separate check and this create), fall back to uploading the
-          # .deb to whatever release now exists for this tag instead of failing.
-          if ! gh release create "$GITHUB_REF_NAME" send-to-influx_*.deb --title "$GITHUB_REF_NAME" --generate-notes; then
-            gh release upload "$GITHUB_REF_NAME" send-to-influx_*.deb --clobber
-          fi
+          # The upload goes straight to the release-id endpoints using the id from
+          # the event payload. A same-named asset (left by a previously-failed or
+          # partial attempt) is replaced first. No retries by design: if this
+          # fails (e.g. a GitHub outage), the error below reports it plainly and
+          # the fix is to re-run the failed job once GitHub recovers - nothing is
+          # ever half-created, and the .deb is also saved as a workflow artifact
+          # by the step above, so it can be attached by hand in a pinch (as was
+          # done for 4.3).
+          for deb in send-to-influx_*.deb; do
+            name="$(basename "$deb")"
+            asset_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
+              --jq "[.[] | select(.name == \"$name\")][0].id // empty")"
+            if [ -n "$asset_id" ]; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+            fi
+            gh api --method POST -H "Content-Type: application/vnd.debian.binary-package" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name" \
+              --input "$deb" >/dev/null \
+              || { echo "Failed to attach $name to release $TAG_NAME (id $RELEASE_ID) - re-run this job to retry"; exit 1; }
+            echo "Attached $name to release $TAG_NAME (id $RELEASE_ID)"
+          done
 
   # APT publishing note: the flat APT repo at https://apt.l337.org/ is no longer
   # published from this workflow. It's owned by https://github.com/L337-org/apt,
   # whose hourly aggregator pulls the .deb assets straight from this repo's GitHub
-  # Releases - so creating the release above is all this workflow needs to do.
+  # Releases - so attaching the .deb above is all this workflow needs to do.
