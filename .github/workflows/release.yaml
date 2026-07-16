@@ -70,13 +70,69 @@ jobs:
           # A release for this tag may already exist - e.g. GitHub's "Draft a new
           # release" UI creates the tag and the release together when you publish,
           # so by the time this runs (triggered by that same tag push) the release
-          # is already there. Try creating first; if that fails for any reason
-          # (already exists, including the race where it's created in the window
-          # between a separate check and this create), fall back to uploading the
-          # .deb to whatever release now exists for this tag instead of failing.
-          if ! gh release create "$GITHUB_REF_NAME" send-to-influx_*.deb --title "$GITHUB_REF_NAME" --generate-notes; then
-            gh release upload "$GITHUB_REF_NAME" send-to-influx_*.deb --clobber
+          # is already there.
+          #
+          # Hardened after the 4.3 release (2026-07-16): GitHub's release-by-tag
+          # lookup endpoint (releases/tags/{tag}) served 503s for an extended period
+          # while the list endpoint (releases) kept working, and `gh release upload
+          # <tag>` (which uses the by-tag lookup) rendered that 503 as "release not
+          # found" and failed the run. So this step decides whether the release
+          # exists from the LIST endpoint - a pre-check that tells us what *should*
+          # succeed - and then does everything by release id, never touching the
+          # by-tag endpoint at all. Each network call is retried, since a failure
+          # that contradicts the pre-check is by definition transient.
+          set -euo pipefail
+
+          retry() {  # retry CMD...: up to 5 attempts, 30s apart
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if "$@"; then return 0; fi
+              [ "$attempt" -lt 5 ] && sleep 30
+            done
+            echo "retry: giving up after 5 attempts: $*" >&2
+            return 1
+          }
+
+          find_release_id() {
+            # "// empty" so a missing release yields an empty string, never "null".
+            gh api "repos/$GITHUB_REPOSITORY/releases" \
+              --jq "[.[] | select(.tag_name == \"$GITHUB_REF_NAME\")][0].id // empty"
+          }
+
+          release_id="$(retry find_release_id || true)"
+
+          if [ -z "$release_id" ]; then
+            # No release yet: create it without assets - assets always go up by id
+            # below, so a create that half-succeeds can never strand the upload on
+            # the by-tag path. Tolerate create failing outright (e.g. the UI created
+            # the release in the race window); only the re-check's verdict matters.
+            retry gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || true
+            release_id="$(retry find_release_id)"
           fi
+          if [ -z "$release_id" ]; then
+            echo "No release exists for $GITHUB_REF_NAME and creating one failed" >&2
+            exit 1
+          fi
+
+          upload_asset() {
+            local deb="$1" name asset_id
+            name="$(basename "$deb")"
+            # Replace any same-named asset first (including a partial one left by an
+            # interrupted earlier attempt) - what `--clobber` did, done by id.
+            asset_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" \
+              --jq "[.[] | select(.name == \"$name\")][0].id // empty")" || asset_id=""
+            if [ -n "$asset_id" ]; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+            fi
+            gh api --method POST -H "Content-Type: application/vnd.debian.binary-package" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets?name=$name" \
+              --input "$deb" >/dev/null
+          }
+
+          for deb in send-to-influx_*.deb; do
+            retry upload_asset "$deb"
+          done
+          echo "Release $GITHUB_REF_NAME (id $release_id) has its .deb asset(s) attached"
 
   # APT publishing note: the flat APT repo at https://apt.l337.org/ is no longer
   # published from this workflow. It's owned by https://github.com/L337-org/apt,
