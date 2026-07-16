@@ -282,6 +282,117 @@ class TestDataHandler:
                 assert r"Living\ Room\,\ Main\=Sensor=1" in body
 
 
+class TestSendDataBuffering:
+    """Tests for send_data()'s in-memory buffering of failed InfluxDB writes."""
+
+    def test_buffers_point_on_failure_instead_of_dropping_it(self, sample_settings):
+        """A failed write is appended to the source's buffer rather than being lost."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("down")
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000000)
+            buffer = DataHandler._write_buffers["hue"]
+            assert len(buffer) == 1
+            assert buffer[0] == "hue x=1 1700000000"
+
+    def test_flushes_buffered_point_before_sending_new_one(self, sample_settings):
+        """A previously-buffered point is sent (oldest first) once InfluxDB is reachable
+        again, before the new point, and the buffer ends up empty."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            h.data = {"x": 1}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("down")
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000000)
+            assert len(DataHandler._write_buffers["hue"]) == 1
+
+            h.data = {"x": 2}
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                h.send_data(timestamp=1700000100)
+                assert mock_post.call_count == 2
+                first_body = mock_post.call_args_list[0][1]["data"]
+                second_body = mock_post.call_args_list[1][1]["data"]
+                assert first_body == "hue x=1 1700000000"
+                assert second_body == "hue x=2 1700000100"
+            assert len(DataHandler._write_buffers["hue"]) == 0
+
+    def test_keeps_buffered_points_when_flush_still_fails(self, sample_settings):
+        """If InfluxDB is still unreachable, a failed flush leaves already-buffered points
+        in place (not dropped) and also buffers the new point, oldest first."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("down")
+                h.data = {"x": 1}
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000000)
+                h.data = {"x": 2}
+                with pytest.raises(InfluxWriteError):
+                    h.send_data(timestamp=1700000100)
+                assert mock_post.call_count == 2
+
+            buffer = DataHandler._write_buffers["hue"]
+            assert len(buffer) == 2
+            assert buffer[0] == "hue x=1 1700000000"
+            assert buffer[1] == "hue x=2 1700000100"
+
+    def test_buffer_evicts_oldest_point_once_full(self, sample_settings):
+        """A source's write buffer drops its oldest point once MAX_BUFFERED_POINTS is exceeded."""
+        with (
+            patch("toinflux.influx.load_settings") as mock_load_settings,
+            patch("toinflux.influx.MAX_BUFFERED_POINTS", 2),
+        ):
+            mock_load_settings.return_value = sample_settings
+            h = DataHandler(source="hue")
+            h.influx_header = "hue "
+            with patch.object(h.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("down")
+                for value in (1, 2, 3):
+                    h.data = {"x": value}
+                    with pytest.raises(InfluxWriteError):
+                        h.send_data(timestamp=1700000000 + value)
+
+            buffer = DataHandler._write_buffers["hue"]
+            assert len(buffer) == 2
+            assert "x=2" in buffer[0]
+            assert "x=3" in buffer[1]
+
+    def test_different_sources_have_independent_buffers(self, sample_settings):
+        """Buffered points for one source don't leak into another source's buffer/flush."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            hue = DataHandler(source="hue")
+            hue.influx_header = "hue "
+            zappi = DataHandler(source="zappi")
+            zappi.influx_header = "zappi "
+
+            with patch.object(hue.session, "post") as mock_post:
+                mock_post.side_effect = requests.exceptions.RequestException("down")
+                hue.data = {"x": 1}
+                with pytest.raises(InfluxWriteError):
+                    hue.send_data(timestamp=1700000000)
+
+            with patch.object(zappi.session, "post") as mock_post:
+                mock_post.return_value.raise_for_status = MagicMock()
+                zappi.data = {"y": 1}
+                zappi.send_data(timestamp=1700000000)
+                assert mock_post.call_count == 1  # only zappi's own point, no hue backlog
+
+            assert len(DataHandler._write_buffers["hue"]) == 1
+            assert "zappi" not in DataHandler._write_buffers or len(DataHandler._write_buffers["zappi"]) == 0
+
+
 class TestFormatFieldValue:
     """Tests for the _format_field_value line protocol helper."""
 

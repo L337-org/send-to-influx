@@ -8,6 +8,7 @@ __version__ = "1.0"
 import time
 import logging
 import warnings
+from collections import deque
 import urllib3
 import requests
 from toinflux.general import load_settings
@@ -16,6 +17,11 @@ from toinflux.exceptions import ConfigError
 
 class InfluxWriteError(Exception):
     """Raised when a write to InfluxDB fails."""
+
+
+# Bound on how many failed points each source buffers in memory before the oldest is
+# dropped to make room for new ones - see DataHandler._write_buffers.
+MAX_BUFFERED_POINTS = 500
 
 
 def _format_field_value(value):
@@ -60,6 +66,15 @@ def _escape_key_or_tag_value(value):
 class DataHandler:
     """Class to send data to InfluxDB"""
 
+    # Bounded per-source buffer of line-protocol points that failed to write, flushed on
+    # the next successful send. Class-level (shared across instances/subclasses, keyed by
+    # source name) rather than an instance attribute: the worker loop in sendtoinflux.py
+    # discards and reconstructs the DataHandler instance after every failure, so only a
+    # buffer that outlives the instance survives to be flushed later. deque(maxlen=...)
+    # evicts the oldest buffered point once a source's buffer is full, so a very long
+    # outage degrades gracefully instead of growing memory without bound.
+    _write_buffers: dict = {}
+
     def __init__(self, source=None, settings_file=None):
         self.settings = load_settings(settings_file)
         self.source = source
@@ -75,7 +90,14 @@ class DataHandler:
 
     def send_data(self, data=None, timestamp=None):
         """
-        Sends data to influxDB
+        Sends data to influxDB.
+
+        Before sending the new point, first tries to flush any points buffered from
+        earlier failed writes to this source (oldest first) - see ``_write_buffers``.
+        If the new point (or a buffered one) fails to send, it's appended to the buffer
+        instead of being dropped, so a brief InfluxDB outage delays data rather than
+        losing it. Either way, a failure still raises ``InfluxWriteError`` so the
+        existing worker backoff/retry behaviour is unaffected.
 
         :param data: data to send to InfluxDB
         :type data: dict
@@ -105,8 +127,36 @@ class DataHandler:
             + f" {timestamp}"
         )
 
-        # send to InfluxDB
         influx_settings = self.settings["influx"]
+        url, post_kwargs, insecure = self._build_write_request(influx_settings)
+        buffer = self._write_buffers.setdefault(self.source, deque(maxlen=MAX_BUFFERED_POINTS))
+
+        try:
+            while buffer:
+                self._post_line(buffer[0], url, post_kwargs, insecure)
+                buffer.popleft()
+        except InfluxWriteError:
+            self._buffer_point(buffer, data_to_send)
+            raise
+
+        try:
+            self._post_line(data_to_send, url, post_kwargs, insecure)
+        except InfluxWriteError:
+            self._buffer_point(buffer, data_to_send)
+            raise
+
+    def _build_write_request(self, influx_settings):
+        """
+        Build the URL/kwargs used to POST a line-protocol body to this source's InfluxDB
+        target. Independent of any one point's content, so it's computed once per
+        ``send_data()`` call and reused for every line posted during that call (any
+        flushed backlog plus the new point).
+
+        :param influx_settings: the ``influx`` settings block
+        :type influx_settings: dict
+        :return: (url, kwargs for requests.Session.post(), whether TLS verification is disabled)
+        :rtype: tuple
+        """
         timeout = influx_settings.get("timeout", 5)
         if influx_settings.get("token"):
             url = (
@@ -123,13 +173,49 @@ class DataHandler:
 
         insecure = influx_settings.get("insecure", False)
         kwargs["verify"] = not insecure
+        kwargs["timeout"] = timeout
+        return url, kwargs, insecure
 
+    def _post_line(self, line, url, kwargs, insecure):
+        """
+        POST a single line-protocol line to InfluxDB.
+
+        :param line: line-protocol point to send
+        :type line: str
+        :param url: destination InfluxDB write URL
+        :type url: str
+        :param kwargs: extra requests.Session.post() kwargs (auth/headers/verify/timeout)
+        :type kwargs: dict
+        :param insecure: whether to suppress the urllib3 InsecureRequestWarning for this call
+        :type insecure: bool
+        :return: None
+        :raises InfluxWriteError: if the write to InfluxDB fails
+        """
         try:
             with warnings.catch_warnings():
                 if insecure:
                     warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
-                response = self.session.post(url, data=data_to_send, timeout=timeout, **kwargs)
+                response = self.session.post(url, data=line, **kwargs)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             logging.error("Error sending data to InfluxDB - %s", e)
             raise InfluxWriteError(str(e)) from e
+
+    def _buffer_point(self, buffer, line):
+        """
+        Append a failed point to a source's write buffer, warning if this evicts the
+        oldest buffered point because the buffer was already full.
+
+        :param buffer: the source's buffer (from ``_write_buffers``)
+        :type buffer: collections.deque
+        :param line: line-protocol point that failed to send
+        :type line: str
+        :return: None
+        """
+        if len(buffer) >= buffer.maxlen:
+            logging.warning(
+                "InfluxDB write buffer for source '%s' is full (%d points); dropping the oldest buffered point",
+                self.source,
+                buffer.maxlen,
+            )
+        buffer.append(line)

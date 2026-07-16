@@ -182,6 +182,8 @@ Worker start times are slightly staggered to avoid all collectors firing at exac
 
 If a source hits a transient failure (e.g. a network error talking to its API or to InfluxDB) — whether running in single-source or multi-source mode — it is automatically restarted with exponential backoff (base 5 s, max 300 s) to avoid tight failure loops. In multi-source mode, only the failed source is retried; other sources keep running. A configuration problem (e.g. a source missing its settings section) is not retried: in single-source mode the process exits with code 1; in multi-source mode that source's worker stops permanently and a critical line is logged, while other sources keep running.
 
+If InfluxDB itself is briefly unreachable, a point that fails to write is buffered in memory (per source, up to a few hundred points) rather than dropped, and sent automatically once InfluxDB is reachable again — so a short outage delays data rather than losing it. This buffer is in-memory only and does not survive a process restart.
+
 After every collection cycle (success or failure), a `collector_status,source=<name>` heartbeat point is written to InfluxDB alongside the source's own data, with fields `ok` (`1`/`0`) and `consecutive_failures`. A dead collector would otherwise only show up as a silent gap in Grafana; this gives you a positive signal to alert on (e.g. `ok == 0` or a stale `collector_status` point). Heartbeats are not written in `--print` mode, since that mode never sends anything to InfluxDB.
 
 There are a few options that can be passed to the script and a couple of these can help you to debug and also to help you understand your data:

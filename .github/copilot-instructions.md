@@ -35,7 +35,7 @@ The project uses a plugin-like architecture where each data source is implemente
 
 #### Base Classes
 - **`toinflux/general.py`**: `load_settings(settings_file=None)` (loads YAML configuration and returns a dictionary; raises `ConfigError` on missing/invalid YAML; defaults to `settings.yaml` in the project root, overridable via the `--settings` CLI flag), `get_class(source, settings_file=None)` (case-insensitive factory function to instantiate data source classes dynamically; raises `ConfigError` for an unknown source, including `DataHandler` itself, since it's the abstract base, not a selectable source), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped stdout logging with an optional rotating file handler; raises `ConfigError` - not a raw `OSError` - if `logfile` can't be opened for writing)
-- **`toinflux/influx.py`**: `DataHandler` (base class for all data sources)
+- **`toinflux/influx.py`**: `DataHandler` (base class for all data sources). `send_data()` buffers a point in memory (`DataHandler._write_buffers`, a per-source `deque(maxlen=MAX_BUFFERED_POINTS)`) instead of dropping it if the InfluxDB write fails, flushing the backlog (oldest first) on the next successful send; still raises `InfluxWriteError` either way, so worker backoff/retry is unaffected. The buffer is class-level (not per-instance) because the worker loop discards and reconstructs the `DataHandler` on every failure, and is not persisted across a process restart.
 - **`toinflux/exceptions.py`**: `ConfigError` (fatal, not retried) and `SourceConnectionError` (transient, retried with backoff)
 
 #### Current Data Sources

@@ -3,6 +3,22 @@
 import copy
 from unittest.mock import MagicMock, patch
 import pytest
+from toinflux.influx import DataHandler
+
+
+@pytest.fixture(autouse=True)
+def _reset_influx_write_buffers():
+    """Clear DataHandler's class-level per-source write buffers before and after every test.
+
+    The buffer is intentionally class-level (see toinflux/influx.py) so it survives the
+    DataHandler instance being discarded/recreated on failure - but that also means it
+    persists across tests unless reset, since every test in this session shares the same
+    class object.
+    """
+    DataHandler._write_buffers.clear()
+    yield
+    DataHandler._write_buffers.clear()
+
 
 _BASE_SAMPLE_SETTINGS = {
     "sources": ["hue", "zappi", "speedtest"],
