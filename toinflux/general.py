@@ -199,6 +199,13 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
     errors = _validate_influx_block(influx)
     is_v2 = bool(influx.get("token"))
     sources = settings.get("sources") or [settings.get("default_source")]
+    duplicates = sorted({str(src) for src in sources if sources.count(src) > 1})
+    if duplicates:
+        # A duplicated entry would spawn two worker threads sharing one source name -
+        # and, since the write buffer is keyed by source name, sharing one buffer
+        # without a lock. There's never a reason to list a source twice (both entries
+        # would read the same settings block), so fail fast rather than race.
+        errors.append(f"sources contains duplicate entries: {', '.join(duplicates)}")
     if source and source not in sources:
         sources = [*sources, source]
     for src in sources:

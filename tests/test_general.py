@@ -155,6 +155,13 @@ class TestValidateSettings:
         with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
+    def test_duplicate_sources_raise_config_error(self, sample_settings):
+        """validate_settings raises ConfigError when the sources list repeats an entry -
+        two workers for one source name would share (and race on) one write buffer."""
+        sample_settings["sources"] = ["hue", "hue", "zappi"]
+        with pytest.raises(ConfigError, match="duplicate"):
+            validate_settings(sample_settings)
+
     def test_missing_source_section_raises_config_error(self, sample_settings):
         """validate_settings raises ConfigError when a configured source has no settings section."""
         sample_settings["sources"] = ["hue", "nosuchsource"]

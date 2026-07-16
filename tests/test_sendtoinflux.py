@@ -430,7 +430,9 @@ class TestSendHeartbeat:
         handler.influx_header = "hue,host=test "
         with patch("sendtoinflux.time.time", return_value=1700000000.0):
             sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
-        handler.send_data.assert_called_once_with(data={"ok": 1, "consecutive_failures": 0}, timestamp=1700000000)
+        handler.send_data.assert_called_once_with(
+            data={"ok": 1, "consecutive_failures": 0}, timestamp=1700000000, use_buffer=False
+        )
         assert handler.influx_header == "hue,host=test "
 
     def test_sends_failure_status_with_count(self):
@@ -439,14 +441,18 @@ class TestSendHeartbeat:
         handler.influx_header = "hue "
         with patch("sendtoinflux.time.time", return_value=1700000000.0):
             sendtoinflux.send_heartbeat(handler, "hue", ok=False, consecutive_failures=3)
-        handler.send_data.assert_called_once_with(data={"ok": 0, "consecutive_failures": 3}, timestamp=1700000000)
+        handler.send_data.assert_called_once_with(
+            data={"ok": 0, "consecutive_failures": 3}, timestamp=1700000000, use_buffer=False
+        )
 
     def test_uses_collector_status_measurement_while_sending(self):
         """send_heartbeat temporarily swaps in the collector_status header for the write."""
         handler = MagicMock()
         handler.influx_header = "hue "
         captured = {}
-        handler.send_data.side_effect = lambda data=None, timestamp=None: captured.update(header=handler.influx_header)
+        handler.send_data.side_effect = lambda data=None, timestamp=None, use_buffer=True: captured.update(
+            header=handler.influx_header
+        )
 
         sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
 
