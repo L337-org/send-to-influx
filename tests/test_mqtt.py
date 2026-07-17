@@ -147,6 +147,18 @@ class TestMqttDataHandler:
             handler.collect_mqtt_messages("nuki/+/+", WINDOW)
             mock_client.connect.assert_called_once_with("mqtt.example.com", 1883)
 
+    def test_no_connack_within_window_raises_source_connection_error(self, sample_settings):
+        """TCP connect succeeding but the MQTT handshake never completing (stalled
+        network, hung broker) must raise, not return an empty list that masquerades as
+        a healthy broker with nothing retained."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.loop.return_value = 0  # network loop runs, but no CONNACK ever arrives
+            with pytest.raises(SourceConnectionError, match="handshake"):
+                handler.collect_mqtt_messages("nuki/+/+", WINDOW)
+            mock_client.disconnect.assert_called_once()
+
     def test_missing_mqtt_block_raises_config_error(self, sample_settings):
         """No top-level mqtt block is a config-shape problem - fatal ConfigError, not a
         retryable failure, matching how a missing source block behaves."""

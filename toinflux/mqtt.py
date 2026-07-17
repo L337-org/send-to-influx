@@ -61,8 +61,9 @@ class MqttDataHandler(DataHandler):
         :raises ConfigError: if the shared ``mqtt`` settings block (or its
             ``broker_host``) is missing - a config-shape problem, fatal like a missing
             source block, not something the worker loop should retry
-        :raises SourceConnectionError: if the broker is unreachable or refuses the
-            connection (including bad credentials via the CONNACK reason code)
+        :raises SourceConnectionError: if the broker is unreachable, refuses the
+            connection (including bad credentials via the CONNACK reason code), or
+            accepts TCP but never completes the MQTT handshake within the window
         """
         mqtt_settings = self.settings.get("mqtt")
         if not mqtt_settings or not mqtt_settings.get("broker_host"):
@@ -71,11 +72,13 @@ class MqttDataHandler(DataHandler):
         port = mqtt_settings.get("broker_port", 1883)
         messages = []
         connack_failure = []
+        connected = []
 
         def on_connect(client, userdata, connect_flags, reason_code, properties):
             if reason_code.is_failure:
                 connack_failure.append(str(reason_code))
             else:
+                connected.append(True)
                 client.subscribe(topic_filter)
 
         def on_message(client, userdata, message):
@@ -89,15 +92,43 @@ class MqttDataHandler(DataHandler):
         try:
             client.connect(host, port)
             deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline and not connack_failure:
-                client.loop(timeout=LOOP_INTERVAL)
+            remaining = timeout
+            while remaining > 0 and not connack_failure:
+                client.loop(timeout=min(LOOP_INTERVAL, remaining))
+                remaining = deadline - time.monotonic()
         except (OSError, ValueError) as e:
             logging.error("Error connecting to MQTT broker %s:%s - %s", host, port, e)
             raise SourceConnectionError(str(e)) from e
         finally:
             client.disconnect()
+        self._raise_for_failed_connection(host, port, timeout, connack_failure, connected)
+        return messages
+
+    @staticmethod
+    def _raise_for_failed_connection(host, port, timeout, connack_failure, connected):
+        """
+        Raise SourceConnectionError if the collection window ended without a usable
+        connection - either the broker refused the CONNACK (e.g. bad credentials), or
+        it accepted TCP but never completed the MQTT handshake at all (stalled
+        network, hung broker). Without the latter check an unfinished handshake would
+        return an empty message list, indistinguishable from a healthy broker with
+        nothing retained - silently masking a connection failure as "no data".
+
+        :param host: broker host (for the error message)
+        :param port: broker port (for the error message)
+        :param timeout: the collection window length (for the error message)
+        :param connack_failure: CONNACK failure reasons recorded by on_connect
+        :type connack_failure: list
+        :param connected: truthy entries recorded by on_connect on success
+        :type connected: list
+        :return: None
+        :raises SourceConnectionError: as described above; no-op on a healthy outcome
+        """
         if connack_failure:
             error = f"MQTT broker {host}:{port} refused the connection - {connack_failure[0]}"
-            logging.error(error)
-            raise SourceConnectionError(error)
-        return messages
+        elif not connected:
+            error = f"MQTT broker {host}:{port} did not complete the MQTT handshake within {timeout}s"
+        else:
+            return
+        logging.error(error)
+        raise SourceConnectionError(error)
