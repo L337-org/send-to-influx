@@ -392,11 +392,11 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     # --- Nuki (shared MQTT broker block) ---
     # The second shared-infrastructure block after InfluxDB, but conditional:
     # only processed when an MQTT-based source was selected, mirroring config's
-    # gating on the asking side. Semantics follow the InfluxDB stored-credential
-    # branch: an mqtt-password already in systemd-creds satisfies the secret
-    # requirement (blank keeps it), and any *non-secret* field actually provided
-    # this run is still applied - a changed broker host on a reconfigure must
-    # not be dropped just because the secret prompt was (correctly) left blank.
+    # gating on the asking side. Secret semantics follow the InfluxDB
+    # stored-credential branch: an mqtt-password already in systemd-creds
+    # satisfies the secret requirement (blank keeps it), and a username
+    # provided alongside a blank secret is still applied. The broker host is
+    # the exception - required like hue-host, see below.
     NUKI_OK=0
     case "$SOURCES" in
         *" nuki "*)
@@ -411,11 +411,19 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
             # half of a credential pair.
             db_set send-to-influx/mqtt-password "" || true
             db_set send-to-influx/mqtt-username "" || true
-            if [ -e "$CREDSTORE/mqtt-password.cred" ] || { [ -n "$MQTT_HOST" ] && [ -n "$MQTT_PASS" ]; }; then
+            # A non-empty broker host is required even when the password is
+            # already stored (mirroring Hue's required-host behaviour, not the
+            # InfluxDB blank-URL-keeps path): debconf *string* answers persist
+            # across reconfigures, so any install configured through these
+            # prompts always has a non-blank host here - a blank one means the
+            # host was only ever hand-edited (or never set), and auto-enabling
+            # on top of that would be speculative, possibly enabling nuki
+            # against the shipped placeholder host. Same precedent as
+            # plaintext-settings credentials: don't auto-enable what postinst
+            # can't verify - the admin hand-edits sources: instead.
+            if [ -n "$MQTT_HOST" ] && { [ -n "$MQTT_PASS" ] || [ -e "$CREDSTORE/mqtt-password.cred" ]; }; then
                 CLI_FAILED=0
-                if [ -n "$MQTT_HOST" ]; then
-                    set_field mqtt.broker_host "$MQTT_HOST"
-                fi
+                set_field mqtt.broker_host "$MQTT_HOST"
                 if [ -n "$MQTT_USER" ]; then
                     set_field mqtt.username "$MQTT_USER"
                 fi

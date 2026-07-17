@@ -134,7 +134,7 @@ project's first source-specific dependency beyond `requests`, pure Python so the
      fields (`interval`, `db`, `timeout`, `fields` lists) are **never** prompted for.
    - (c) Secrets are `Type: password` templates; `postinst` migrates them via
      `send-to-influx-set-credential` (stdin pipe, best-effort via the `set_secret` helper) and
-     clears the stored answer with `db_set "" ` immediately after `db_get` — never
+     clears the stored answer with `db_set ""` immediately after `db_get` — never
      `db_unregister` (it deletes the seen flag, causing blank re-prompts on every upgrade). Add
      every credential-bearing answer to the final unconditional sweep loop too.
    - (d) If the source uses a *shared* infrastructure block (like `mqtt:`), its questions are
@@ -344,7 +344,12 @@ from `postinst`, once package files are unpacked and everything's been answered.
   but only MQTT sources have a broker, so a non-MQTT install must never be prompted for one.
   Its stored-credential semantics mirror InfluxDB's: a blank `mqtt-password` on reconfigure is
   satisfied by an existing `mqtt-password.cred`, and non-secret fields provided alongside a blank
-  secret are still applied. `mqtt-username` is cleared from debconf's database after use like
+  secret are still applied - except `mqtt-broker-host`, which is *required* like `hue-host` (not
+  blank-keeps like `influx-url`): debconf string answers persist across reconfigures, so any
+  install configured through the prompts always has a non-blank host anyway, and a blank one
+  means hand-configured - where auto-enable would be speculative (possibly against the shipped
+  placeholder host), so those installs hand-edit `sources:` instead, same precedent as
+  plaintext-settings credentials. `mqtt-username` is cleared from debconf's database after use like
   `influx-identity` (the other half of a credential pair), and both are in the final sweep.
 - `postinst` (inside the fresh-install-or-reconfigure gate above): `sources-to-configure` is read
   first (`$SOURCES`, purely to know whether *anything* was
