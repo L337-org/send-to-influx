@@ -52,7 +52,10 @@ assert_secret_absent() {
     local secret
     for secret in "$HUE_TEST_SECRET" "$MQTT_TEST_SECRET"; do
         set +e
-        grep -rq "$secret" "$1"
+        # -F --: the secret is a literal string, not a regex - a CI-provided
+        # value containing metacharacters (or starting with a dash) must not
+        # change what this asserts.
+        grep -rqF -- "$secret" "$1"
         local status=$?
         set -e
         [ "$status" -eq 1 ] || fail "expected no match (exit 1) for a secret in $1, got exit $status"
