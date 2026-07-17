@@ -445,10 +445,11 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     SPEEDTEST_OK=0
     case "$SOURCES" in *" speedtest "*) SPEEDTEST_OK=1 ;; esac
 
-    # Belt-and-braces: clear every credential-bearing answer - the four
-    # password-type questions plus influx-identity (string-typed, but a
-    # possible v1 username: see the note where it's first cleared above) -
-    # whether or not its source was selected. The per-source blocks above
+    # Belt-and-braces: clear every credential-bearing answer - the five
+    # password-type questions plus the two string-typed identity halves
+    # (influx-identity, a possible v1 username, and mqtt-username - see the
+    # notes where each is first cleared above) - whether or not its source
+    # was selected. The per-source blocks above
     # only read-and-clear a secret when its source was actually selected -
     # but a preseed (debconf-set-selections) can supply e.g. hue-user without
     # ticking hue, and that answer would otherwise sit in passwords.dat
