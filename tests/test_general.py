@@ -374,3 +374,10 @@ class TestFlattenDict:
         sample_settings["sources"] = ["hue", {"oops": "mapping"}]
         with pytest.raises(ConfigError, match="must be strings"):
             validate_settings(sample_settings)
+
+    def test_non_mapping_mqtt_block_raises_config_error(self, sample_settings):
+        """mqtt configured as a bare scalar reports a ConfigError, not AttributeError."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = "mqtt.example.com"
+        with pytest.raises(ConfigError, match="mqtt must be a mapping"):
+            validate_settings(sample_settings, source="nuki")
