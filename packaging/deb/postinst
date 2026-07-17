@@ -389,21 +389,72 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
             ;;
     esac
 
+    # --- Nuki (shared MQTT broker block) ---
+    # The second shared-infrastructure block after InfluxDB, but conditional:
+    # only processed when an MQTT-based source was selected, mirroring config's
+    # gating on the asking side. Secret semantics follow the InfluxDB
+    # stored-credential branch: an mqtt-password already in systemd-creds
+    # satisfies the secret requirement (blank keeps it), and a username
+    # provided alongside a blank secret is still applied. The broker host is
+    # the exception - required like hue-host, see below.
+    NUKI_OK=0
+    case "$SOURCES" in
+        *" nuki "*)
+            db_get send-to-influx/mqtt-broker-host
+            MQTT_HOST="$RET"
+            db_get send-to-influx/mqtt-username
+            MQTT_USER="$RET"
+            db_get send-to-influx/mqtt-password
+            MQTT_PASS="$RET"
+            # Clear the consumed password (see influx-secret above); the
+            # username is cleared too, like influx-identity - it's the other
+            # half of a credential pair.
+            db_set send-to-influx/mqtt-password "" || true
+            db_set send-to-influx/mqtt-username "" || true
+            # A non-empty broker host is required even when the password is
+            # already stored (mirroring Hue's required-host behaviour, not the
+            # InfluxDB blank-URL-keeps path): debconf *string* answers persist
+            # across reconfigures, so any install configured through these
+            # prompts always has a non-blank host here - a blank one means the
+            # host was only ever hand-edited (or never set), and auto-enabling
+            # on top of that would be speculative, possibly enabling nuki
+            # against the shipped placeholder host. Same precedent as
+            # plaintext-settings credentials: don't auto-enable what postinst
+            # can't verify - the admin hand-edits sources: instead.
+            if [ -n "$MQTT_HOST" ] && { [ -n "$MQTT_PASS" ] || [ -e "$CREDSTORE/mqtt-password.cred" ]; }; then
+                CLI_FAILED=0
+                set_field mqtt.broker_host "$MQTT_HOST"
+                if [ -n "$MQTT_USER" ]; then
+                    set_field mqtt.username "$MQTT_USER"
+                fi
+                if [ -n "$MQTT_PASS" ]; then
+                    set_secret mqtt-password "$MQTT_PASS"
+                fi
+                if [ "$CLI_FAILED" = 0 ]; then
+                    NUKI_OK=1
+                fi
+            else
+                echo "send-to-influx: Nuki not fully configured (MQTT broker host/password missing) - not enabling it." >&2
+            fi
+            ;;
+    esac
+
     # --- CarbonIntensity / Speedtest: nothing beyond selection is required ---
     CARBONINTENSITY_OK=0
     case "$SOURCES" in *" carbonintensity "*) CARBONINTENSITY_OK=1 ;; esac
     SPEEDTEST_OK=0
     case "$SOURCES" in *" speedtest "*) SPEEDTEST_OK=1 ;; esac
 
-    # Belt-and-braces: clear every credential-bearing answer - the four
-    # password-type questions plus influx-identity (string-typed, but a
-    # possible v1 username: see the note where it's first cleared above) -
-    # whether or not its source was selected. The per-source blocks above
+    # Belt-and-braces: clear every credential-bearing answer - the five
+    # password-type questions plus the two string-typed identity halves
+    # (influx-identity, a possible v1 username, and mqtt-username - see the
+    # notes where each is first cleared above) - whether or not its source
+    # was selected. The per-source blocks above
     # only read-and-clear a secret when its source was actually selected -
     # but a preseed (debconf-set-selections) can supply e.g. hue-user without
     # ticking hue, and that answer would otherwise sit in passwords.dat
     # indefinitely. Re-clearing the already-cleared ones is harmless.
-    for q in influx-secret influx-identity hue-user myenergi-apikey octopus-api-key; do
+    for q in influx-secret influx-identity hue-user myenergi-apikey octopus-api-key mqtt-password mqtt-username; do
         db_set "send-to-influx/$q" "" || true
     done
 
@@ -444,6 +495,10 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
         if [ "$SPEEDTEST_OK" = 1 ]; then
             "$CLI" --ensure-influx-storage speedtest_db || true
             "$CLI" --enable-source speedtest || true
+        fi
+        if [ "$NUKI_OK" = 1 ]; then
+            "$CLI" --ensure-influx-storage nuki_db || true
+            "$CLI" --enable-source nuki || true
         fi
     fi
 

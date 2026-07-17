@@ -113,10 +113,43 @@ project's first source-specific dependency beyond `requests`, pure Python so the
 ### Adding a new data source
 
 1. Create `toinflux/newsource.py` — class inheriting `DataHandler`, implement `get_data()`.
+   (For an MQTT-based source, inherit `MqttDataHandler` instead and also add the source's name
+   to `MQTT_SOURCES` in `toinflux/general.py`, so `--check-config` validates the shared `mqtt`
+   block for it.)
 2. Register it in `get_class()` in `toinflux/general.py` and add it to `toinflux/__init__.py`.
-3. Add a section to `example_settings.yaml`.
+3. Add a section to `example_settings.yaml`. Any credential field also gets an entry in
+   `CREDENTIAL_FIELDS`/`PLACEHOLDER_VALUES` (`toinflux/credentials.py`) — that alone makes
+   `send-to-influx-set-credential <name>` work, the machinery is fully table-driven.
 4. Add tests in `tests/test_newsource.py`, reusing fixtures from `tests/conftest.py`.
-5. Update README.md, CLAUDE.md, and `.github/copilot-instructions.md`.
+5. Update README.md, UNITS.md, CLAUDE.md, and `.github/copilot-instructions.md`.
+6. Wire the source into the debconf install flow — a mechanical checklist, not a judgment call
+   (every rule below is an existing, tested convention; the scenario suite enforces most of them):
+   - (a) Add the source's name to the `sources-to-configure` multiselect `Choices` in
+     `packaging/deb/send-to-influx.templates`, **appending at the end** — the question-visibility
+     scenario in `test-packaging.sh` selects existing sources by position number, so inserting
+     mid-list silently retargets those tests.
+   - (b) Credential/identity/connection fields get conditional questions (templates + a
+     `case "$SOURCES"` block in `packaging/deb/config`), all priority `high` — debconf's default
+     threshold is `high`, so anything lower is silently skipped on a normal install. Tuning
+     fields (`interval`, `db`, `timeout`, `fields` lists) are **never** prompted for.
+   - (c) Secrets are `Type: password` templates; `postinst` migrates them via
+     `send-to-influx-set-credential` (stdin pipe, best-effort via the `set_secret` helper) and
+     clears the stored answer with `db_set ""` immediately after `db_get` — never
+     `db_unregister` (it deletes the seen flag, causing blank re-prompts on every upgrade). Add
+     every credential-bearing answer to the final unconditional sweep loop too.
+   - (d) If the source uses a *shared* infrastructure block (like `mqtt:`), its questions are
+     asked once, gated on any source needing that block being selected — not per-source, and
+     not unconditionally (that's InfluxDB's special status only, since every install needs it).
+     A credential already stored in systemd-creds satisfies a blank secret prompt on
+     reconfigure, and non-secret fields provided alongside a blank secret are still applied.
+   - (e) Auto-enable (`--enable-source`) only when every required field actually resolved (and
+     `INFLUX_OK=1`) — "was it ticked" is not enough; otherwise print a specific
+     "not fully configured" warning and leave it opt-in.
+   - (f) Extend `packaging/deb/test-packaging.sh`: seed the new source's answers in the
+     seeded-install scenario (assert fields land in settings.yaml, credentials in the credstore,
+     plaintext absent from settings.yaml *and* debconf's database), and extend the
+     question-visibility scenario (questions appear when the source is selected, and for
+     conditional shared blocks, do **not** appear when it isn't).
 
 ### Testing conventions
 
@@ -304,6 +337,20 @@ from `postinst`, once package files are unpacked and everything's been answered.
   *computed* default (checks `$LC_ALL`/`$LANG` for a `_US` territory code, defaulting to Celsius
   otherwise) via `db_set` before the first `db_input`, rather than a silent guess - getting temperature
   units wrong is immediately visible to the user in a way the other tuning fields aren't.
+- The shared MQTT broker block (`mqtt-broker-host`/`mqtt-username`/`mqtt-password`) is the second
+  shared-infrastructure question group after InfluxDB, but *conditional* where InfluxDB's is
+  unconditional: it's only asked (and only processed by `postinst`) when an MQTT-based source
+  (currently `nuki`) is in the `sources-to-configure` selection - every install needs InfluxDB,
+  but only MQTT sources have a broker, so a non-MQTT install must never be prompted for one.
+  Its stored-credential semantics mirror InfluxDB's: a blank `mqtt-password` on reconfigure is
+  satisfied by an existing `mqtt-password.cred`, and non-secret fields provided alongside a blank
+  secret are still applied - except `mqtt-broker-host`, which is *required* like `hue-host` (not
+  blank-keeps like `influx-url`): debconf string answers persist across reconfigures, so any
+  install configured through the prompts always has a non-blank host anyway, and a blank one
+  means hand-configured - where auto-enable would be speculative (possibly against the shipped
+  placeholder host), so those installs hand-edit `sources:` instead, same precedent as
+  plaintext-settings credentials. `mqtt-username` is cleared from debconf's database after use like
+  `influx-identity` (the other half of a credential pair), and both are in the final sweep.
 - `postinst` (inside the fresh-install-or-reconfigure gate above): `sources-to-configure` is read
   first (`$SOURCES`, purely to know whether *anything* was
   selected - no processing happens from it yet), then InfluxDB is processed unconditionally,
