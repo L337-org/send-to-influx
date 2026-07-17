@@ -79,6 +79,22 @@ page for the default unit of each one.
 | `gas_consumption` | kWh or m³ | Unit depends on meter type (kWh for SMETS1 Secure, m³ for SMETS2); sent unconverted |
 | `unit_rate_p_per_kwh` | pence/kWh (inc. VAT) | Only collected if `product_code`/`tariff_code` are configured |
 
+## Nuki Smart Lock (`nuki`)
+
+Field keys are prefixed with the lock's own name from the Nuki app (spaces replaced with
+underscores), e.g. `Front_Door_stateName`; every lock provisioned to the broker is reported.
+
+| Field | Unit | Notes |
+|---|---|---|
+| `stateName` | - | Lock state label (`locked`, `unlocked`, `unlatched`, ...); an unrecognised numeric code is written unchanged as `state` instead |
+| `doorsensorStateName` | - | Door sensor label (`door closed`, `door opened`, ...); unrecognised codes written unchanged as `doorsensorState` |
+| `batteryChargeState` | % | Battery charge level |
+| `batteryCritical`, `batteryCharging`, `keypadBatteryCritical`, `doorsensorBatteryCritical` | bool | Battery status flags (keypad/door-sensor flags only present when those accessories are paired) |
+| `mode`, `deviceType`, `firmware` | - | Device metadata |
+| `connected` | bool | Broker-maintained liveness flag (MQTT Last Will) - `false` when the lock has dropped off the network, making stale state detectable |
+| `serverConnected` | bool | Whether the lock currently has a connection to Nuki's cloud |
+| `timestamp` | - | ISO8601 time of the lock's last state update (string) |
+
 ## Speedtest (`speedtest`)
 
 | Field | Unit | Notes |

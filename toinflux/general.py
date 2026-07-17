@@ -115,6 +115,7 @@ def get_class(source, settings_file=None):
     """
     from toinflux.carbonintensity import CarbonIntensity
     from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
+    from toinflux.nuki import Nuki
     from toinflux.octopus import Octopus
     from toinflux.openmeteo import OpenMeteo
     from toinflux.philipshue import Hue
@@ -126,6 +127,7 @@ def get_class(source, settings_file=None):
         "Harvi": Harvi,
         "Hue": Hue,
         "MyEnergi": MyEnergi,
+        "Nuki": Nuki,
         "Octopus": Octopus,
         "OpenMeteo": OpenMeteo,
         "Speedtest": Speedtest,

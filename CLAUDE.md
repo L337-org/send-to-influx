@@ -50,6 +50,8 @@ DataHandler      (toinflux/influx.py)          — base; owns send_data() → In
 ├── OpenMeteo      (toinflux/openmeteo.py)
 ├── Octopus        (toinflux/octopus.py)
 ├── Speedtest      (toinflux/speedtest.py)
+├── MqttDataHandler(toinflux/mqtt.py)        — intermediate parent for MQTT transport
+│   └── Nuki       (toinflux/nuki.py)
 └── MyEnergi       (toinflux/myenergi.py)     — intermediate parent for MyEnergi API auth
     ├── Zappi      (toinflux/myenergi.py)
     ├── Eddi       (toinflux/myenergi.py)
@@ -63,6 +65,24 @@ If a write to InfluxDB fails, `send_data()` buffers the point in memory instead 
 Failure classification is deliberately **not** trusted per-status-code as a verdict: `InfluxWriteError.status_code` carries the HTTP status (or `None` for a connection failure), and `_flush_buffer()`/`_flush_head()` count how many times the server has *rejected* (a non-transient 4xx - 408/429 are excluded via `TRANSIENT_CLIENT_ERRORS`, since rate-limiting/timeouts say nothing about the point) each specific point, dropping it with a warning only after `MAX_POINT_REJECTIONS` separate rejections. Connection failures, 5xx, 408, and 429 never count, so an arbitrarily long outage or rate-limit burst can't age points out - only a point the server itself keeps refusing (malformed → 400, outside the retention window → 422 on InfluxDB v2, oversized → 413) is given up on, and a middlebox transiently answering 4xx for a down InfluxDB can't mass-discard the backlog (each point survives `MAX_POINT_REJECTIONS` attempts). When a batched chunk is rejected, the flush falls back to per-point posting for that chunk to isolate the offender(s). Heartbeat writes pass `use_buffer=False` - a heartbeat is a live signal with no replay value, so it neither consumes buffer capacity nor triggers a redundant second flush per failed cycle. `validate_settings()` rejects duplicate entries in `sources:` (`ConfigError`) - two workers for one source name would share (and race on) one buffer.
 
 Speedtest's `get_data()` additionally rejects an implausible `ping` (>= 5000 ms) as a `SourceConnectionError` rather than writing it. speedtest-cli's `get_best_server()` times each of the 3 latency probes it makes per candidate server with a hardcoded 10-second connection timeout (baked into `SpeedtestHTTPConnection`/`SpeedtestHTTPSConnection`'s constructor default - never overridden by `get_best_server()`, so it applies regardless of the `timeout` passed to `speedtest.Speedtest()`); a probe that doesn't complete within that raises `socket.timeout`, which is caught alongside every other connection failure and penalised with a hardcoded `3600` (seconds) instead of a real sample. The 3 per-server samples (real or penalty) are summed, divided by a fixed 6, and converted to milliseconds - so a real (non-penalised) probe can never contribute more than 10s to that sum, making `(3 * 10 / 6) * 1000 = 5000` ms the true ceiling for a genuine measurement. If every probe to a server fails (observed in practice during a transient network blip), the reported `ping` comes out around 1,800,000 ms instead of triggering an error, and would otherwise be written to InfluxDB as if it were real.
+
+Nuki is the first MQTT-based source: `MqttDataHandler` (`toinflux/mqtt.py`) owns the generic
+transport (connect, subscribe from inside `on_connect` - a subscription issued before the CONNACK
+completes can be silently lost - collect for a fixed window, disconnect), reading broker config from
+the shared top-level `mqtt:` settings block (mirroring `influx:` - the broker and its `mqtt-password`
+credential are per-install infrastructure, not per-source). The polling-per-interval architecture
+works over MQTT only because Nuki publishes every state topic with the retain flag set, so a short
+subscribe window receives the full last-known state of every provisioned lock - equivalent to an HTTP
+GET. Failure mapping is deliberately strict: bad credentials arrive asynchronously as a failed CONNACK
+(never as an exception from `connect()`), and a broker that accepts TCP but never completes the MQTT
+handshake raises `SourceConnectionError` rather than returning an empty result - either would
+otherwise masquerade as "no data". `Nuki` (`toinflux/nuki.py`) holds only vendor logic: filtering to
+known state topics (command/event topics are ignored), grouping by device ID, prefixing field keys
+with each lock's own Nuki-app name, and resolving the numeric `state`/`doorsensorState` codes to
+labels via hardcoded tables from the MQTT API spec (unlike the Bridge HTTP API, MQTT publishes no
+`stateName` strings; an unrecognised code is written through as its raw number). `paho-mqtt` (the
+project's first source-specific dependency beyond `requests`, pure Python so the `.deb`'s
+`Architecture: all` design holds) is imported only in `toinflux/mqtt.py`.
 
 ### Entry point (`sendtoinflux.py`)
 
@@ -164,8 +184,8 @@ the source-checkout/screen-session path, where `systemd-creds` doesn't apply at 
 
 - `toinflux/credentials.py`: `CREDENTIAL_FIELDS` is the single source of truth mapping a systemd-creds
   credential name (e.g. `influx-token`) to the `(top-level key, field)` it overlays in the parsed
-  settings dict (e.g. `("influx", "token")`) - 6 credentials across `influx` (`token`, `user`,
-  `password`), `hue` (`user`), `myenergi` (`apikey`), `octopus` (`api_key`). `PLACEHOLDER_VALUES`
+  settings dict (e.g. `("influx", "token")`) - 7 credentials across `influx` (`token`, `user`,
+  `password`), `hue` (`user`), `mqtt` (`password`), `myenergi` (`apikey`), `octopus` (`api_key`). `PLACEHOLDER_VALUES`
   matches `example_settings.yaml`'s literal placeholder text per field; `sentinel_for(name)` returns
   the cosmetic string written into `settings.yaml` once a field is migrated (never read back for real
   use - purely informational for a human reading the file). `apply_credential_substitution(settings)`

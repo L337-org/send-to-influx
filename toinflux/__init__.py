@@ -17,6 +17,7 @@ from .general import (
 from .influx import DataHandler
 from .mqtt import MqttDataHandler
 from .myenergi import MyEnergi, Zappi, Eddi, Harvi
+from .nuki import Nuki
 from .octopus import Octopus
 from .openmeteo import OpenMeteo
 from .philipshue import Hue
