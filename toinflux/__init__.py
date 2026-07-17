@@ -15,6 +15,7 @@ from .general import (
     DEFAULT_LOG_BACKUP_COUNT,
 )
 from .influx import DataHandler
+from .mqtt import MqttDataHandler
 from .myenergi import MyEnergi, Zappi, Eddi, Harvi
 from .octopus import Octopus
 from .openmeteo import OpenMeteo
