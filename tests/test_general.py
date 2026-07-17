@@ -381,3 +381,8 @@ class TestFlattenDict:
         sample_settings["mqtt"] = "mqtt.example.com"
         with pytest.raises(ConfigError, match="mqtt must be a mapping"):
             validate_settings(sample_settings, source="nuki")
+        # A falsy non-mapping (e.g. an empty list) must hit the same type error, not
+        # be collapsed to {} and misreported as a missing broker_host
+        sample_settings["mqtt"] = []
+        with pytest.raises(ConfigError, match="mqtt must be a mapping"):
+            validate_settings(sample_settings, source="nuki")

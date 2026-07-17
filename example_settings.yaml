@@ -59,7 +59,8 @@ influx:
 
 # Shared MQTT broker settings, used by every MQTT-based source (currently: nuki).
 # Like the influx block above, this is per-install infrastructure rather than
-# per-source config - one broker connection is shared by all MQTT sources. See the
+# per-source config - one broker *configuration* shared by all MQTT sources (each collector
+# connects briefly per collection cycle rather than holding a persistent connection). See the
 # README's "Nuki Smart Lock (MQTT)" section for first-time Mosquitto setup.
 mqtt:
   # The hostname or IP address of the MQTT broker

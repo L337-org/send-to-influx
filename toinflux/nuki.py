@@ -109,7 +109,9 @@ class Nuki(MqttDataHandler):
             devices.setdefault(parts[1], {})[parts[2]] = payload
         data = {}
         for device_id, fields in devices.items():
-            prefix = fields.pop("name", device_id).replace(" ", "_")
+            # A blank/whitespace name gets the same device-ID fallback as an absent one -
+            # an empty prefix would produce keys like "_stateName" and collide across devices.
+            prefix = (fields.pop("name", "").strip() or device_id).replace(" ", "_")
             for field, raw in fields.items():
                 key, value = self._decode_field(field, raw)
                 if f"{prefix}_{key}" in data:

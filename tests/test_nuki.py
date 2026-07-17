@@ -110,6 +110,13 @@ class TestNuki:
         nuki = _nuki(_nuki_settings(sample_settings), messages)
         assert nuki.get_data() == {"2BB28570_stateName": "locked"}
 
+    def test_blank_name_payload_falls_back_to_hex_id(self, sample_settings):
+        """A blank/whitespace name payload gets the ID fallback too - an empty prefix
+        would produce keys like _stateName and collide across devices."""
+        messages = [("nuki/2BB28570/name", "   "), ("nuki/2BB28570/state", "1")]
+        nuki = _nuki(_nuki_settings(sample_settings), messages)
+        assert nuki.get_data() == {"2BB28570_stateName": "locked"}
+
     def test_duplicate_device_names_warn_and_last_wins(self, sample_settings, caplog):
         """Two devices with the same Nuki-app name collide - later value wins, loudly."""
         messages = [

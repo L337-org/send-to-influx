@@ -156,7 +156,9 @@ def _validate_mqtt_block(settings, sources):
     mqtt_sources = sorted(str(src) for src in sources if src in MQTT_SOURCES)
     if not mqtt_sources:
         return []
-    mqtt = settings.get("mqtt") or {}
+    mqtt = settings.get("mqtt")
+    if mqtt is None:
+        mqtt = {}
     if not isinstance(mqtt, dict):
         return [f"mqtt must be a mapping of broker settings (got {type(mqtt).__name__})"]
     errors = []
