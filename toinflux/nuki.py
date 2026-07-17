@@ -121,7 +121,9 @@ class Nuki(MqttDataHandler):
                     )
                 data[f"{prefix}_{key}"] = value
         if not data:
-            logging.warning("No Nuki device state received from the MQTT broker")
+            # DEBUG, not WARNING: send_data()'s central _log_missing_data path already
+            # warns once per empty cycle - a second warning here would just duplicate it.
+            logging.debug("No Nuki device state received from the MQTT broker")
         return data
 
     @staticmethod

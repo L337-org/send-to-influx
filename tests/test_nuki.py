@@ -124,12 +124,14 @@ class TestNuki:
         assert result["Door_stateName"] in ("locked", "unlocked")
         assert any("Duplicate Nuki device name" in record.message for record in caplog.records)
 
-    def test_empty_window_returns_empty_dict_with_warning(self, sample_settings, caplog):
-        """A connected broker with nothing retained is no data, not an error."""
+    def test_empty_window_returns_empty_dict_with_debug_log(self, sample_settings, caplog):
+        """A connected broker with nothing retained is no data, not an error - logged at
+        DEBUG only, since send_data()'s central missing-data path warns once already."""
         nuki = _nuki(_nuki_settings(sample_settings), [])
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("DEBUG"):
             assert nuki.get_data() == {}
-        assert any("No Nuki device state" in record.message for record in caplog.records)
+        records = [r for r in caplog.records if "No Nuki device state" in r.message]
+        assert records and all(r.levelname == "DEBUG" for r in records)
 
     def test_unrecognised_state_code_kept_as_raw_number(self, sample_settings):
         """An unknown numeric code (e.g. a future firmware addition) keeps the original

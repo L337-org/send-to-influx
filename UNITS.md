@@ -93,6 +93,7 @@ underscores), e.g. `Front_Door_stateName`; every lock provisioned to the broker 
 | `mode`, `deviceType`, `firmware` | - | Device metadata |
 | `connected` | bool | Broker-maintained liveness flag (MQTT Last Will) - `false` when the lock has dropped off the network, making stale state detectable |
 | `serverConnected` | bool | Whether the lock currently has a connection to Nuki's cloud |
+| `ringactionTimestamp` | - | ISO8601 time of the last ring action (string; Nuki Opener only - not published by locks) |
 | `timestamp` | - | ISO8601 time of the lock's last state update (string) |
 
 ## Speedtest (`speedtest`)
