@@ -154,6 +154,22 @@ case "$SOURCES" in
         ;;
 esac
 
+# Shared MQTT broker block - the second shared-infrastructure question group
+# after InfluxDB, but deliberately conditional where InfluxDB's is
+# unconditional: every install needs InfluxDB, while the broker only exists
+# for MQTT-based sources (currently nuki), so a non-MQTT install must never
+# be prompted for a broker it doesn't have. Asked once, not per-source - if a
+# second MQTT source ever lands, add it to this case pattern (and see the
+# debconf checklist in CLAUDE.md's "Adding a new data source" section).
+case "$SOURCES" in
+    *" nuki "*)
+        db_input high send-to-influx/mqtt-broker-host || true
+        db_input high send-to-influx/mqtt-username || true
+        db_input high send-to-influx/mqtt-password || true
+        db_go || true
+        ;;
+esac
+
 # Release the frontend cleanly at the end of the conversation, matching the
 # upgrade early-exit path above.
 db_stop || true

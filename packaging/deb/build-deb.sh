@@ -157,11 +157,16 @@ Section: utils
 Priority: optional
 Architecture: all
 Depends: debconf (>= 0.5), python3 (>= 3.10), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
+Suggests: mosquitto, mosquitto-clients
 Maintainer: Gavin Lucas
 Description: Collects data from smart home / energy devices and writes it to InfluxDB
  send-to-influx polls Hue, MyEnergi, Octopus, Open-Meteo, National Grid Carbon
- Intensity and Speedtest sources and writes the results to InfluxDB using the
- line protocol, for visualisation in Grafana.
+ Intensity, Nuki smart locks (via MQTT) and Speedtest sources and writes the
+ results to InfluxDB using the line protocol, for visualisation in Grafana.
+ .
+ The Nuki source needs an MQTT broker on the local network - mosquitto (and
+ mosquitto-clients, for verifying the setup) are suggested rather than
+ depended on, since the broker may equally run on a different host.
 CONTROL
 
 OUT_FILE="${1:-${REPO_ROOT}/${PKG_NAME}_${VERSION}_all.deb}"

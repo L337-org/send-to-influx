@@ -24,6 +24,7 @@ DEB="$(cd "$(dirname "$DEB")" && pwd)/$(basename "$DEB")"
 SETTINGS=/etc/send-to-influx/settings.yaml
 CREDSTORE=/etc/send-to-influx/credstore.encrypted
 HUE_TEST_SECRET="${HUE_TEST_SECRET:-test-hue-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
+MQTT_TEST_SECRET="${MQTT_TEST_SECRET:-test-mqtt-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 export DEBIAN_FRONTEND=noninteractive
 
 [ "$(id -u)" = 0 ] || { echo "must run as root (on a DISPOSABLE system)" >&2; exit 1; }
@@ -48,13 +49,21 @@ fi
 # error (unreadable path) - a bare `! grep` would silently pass on an error
 # without having checked anything. Assert the exact exit code instead.
 assert_secret_absent() {
-    set +e
-    grep -rq "$HUE_TEST_SECRET" "$1"
-    local status=$?
-    set -e
-    [ "$status" -eq 1 ] || fail "expected no match (exit 1) for the secret in $1, got exit $status"
+    local secret
+    for secret in "$HUE_TEST_SECRET" "$MQTT_TEST_SECRET"; do
+        set +e
+        grep -rq "$secret" "$1"
+        local status=$?
+        set -e
+        [ "$status" -eq 1 ] || fail "expected no match (exit 1) for a secret in $1, got exit $status"
+    done
 }
 
+# Hue-only seeding - used against the *released* package, whose templates
+# predate the nuki choice and the mqtt-* questions: preseeding answers for
+# templates the old package doesn't ship (or a multiselect value outside its
+# Choices) is undefined-behaviour territory, so the release-upgrade scenario
+# sticks to what that package understands.
 seed_answers() {
     debconf-set-selections <<EOF
 send-to-influx send-to-influx/sources-to-configure multiselect hue
@@ -64,6 +73,19 @@ send-to-influx send-to-influx/influx-secret password
 send-to-influx send-to-influx/hue-host string ci-test-bridge.example.com
 send-to-influx send-to-influx/hue-user password ${HUE_TEST_SECRET}
 send-to-influx send-to-influx/hue-temperature-units select C
+EOF
+}
+
+# Full seeding for the package under test: hue plus nuki, exercising the
+# conditional shared-MQTT-block flow (broker fields applied, password migrated
+# to systemd-creds) alongside the established hue path.
+seed_answers_nuki() {
+    seed_answers
+    debconf-set-selections <<EOF
+send-to-influx send-to-influx/sources-to-configure multiselect hue, nuki
+send-to-influx send-to-influx/mqtt-broker-host string ci-mqtt-broker.example.com
+send-to-influx send-to-influx/mqtt-username string ci-mqtt-reader
+send-to-influx send-to-influx/mqtt-password password ${MQTT_TEST_SECRET}
 EOF
 }
 
@@ -119,7 +141,7 @@ fi
 
 # --- Scenario: fresh seeded install ------------------------------------------
 echo "=== scenario: fresh seeded install ==="
-seed_answers
+seed_answers_nuki
 dpkg -i "$DEB" >/dev/null 2>&1 || dpkg -i "$DEB"
 /opt/send-to-influx/venv/bin/send-to-influx --version >/dev/null || fail "--version smoke test failed"
 cp /usr/share/send-to-influx/example_settings.yaml /tmp/ci-settings.yaml
@@ -134,16 +156,19 @@ dpkg-deb -f "$DEB" Depends | grep -qw systemd && fail "package Depends on system
 /opt/send-to-influx/venv/bin/python3 - <<PYEOF
 import yaml
 with open("$SETTINGS", encoding="utf8") as f:
-    hue = yaml.safe_load(f)["hue"]
-assert hue["host"] == "ci-test-bridge.example.com", hue["host"]
+    data = yaml.safe_load(f)
+assert data["hue"]["host"] == "ci-test-bridge.example.com", data["hue"]["host"]
+assert data["mqtt"]["broker_host"] == "ci-mqtt-broker.example.com", data["mqtt"]["broker_host"]
+assert data["mqtt"]["username"] == "ci-mqtt-reader", data["mqtt"]["username"]
 PYEOF
 if [ "$CREDS_WORK" = 1 ]; then
     [ -e "$CREDSTORE/hue-user.cred" ] || fail "hue-user credential not migrated"
+    [ -e "$CREDSTORE/mqtt-password.cred" ] || fail "mqtt-password credential not migrated"
     grep -q "stored in systemd-creds" "$SETTINGS" || fail "hue.user not rewritten to the sentinel"
 fi
 assert_secret_absent "$SETTINGS"
 assert_secret_absent /var/cache/debconf/
-pass "fresh install: fields applied, credential migrated, secret cleared everywhere"
+pass "fresh install: fields applied (incl. shared mqtt block), credentials migrated, secrets cleared everywhere"
 
 # --- Scenario: plain upgrade is silent and touches nothing -------------------
 echo "=== scenario: plain upgrade (interactive frontend, hand-edited config) ==="
@@ -179,6 +204,9 @@ echo "=== scenario: dpkg-reconfigure ==="
 out=$(dpkg-reconfigure -fnoninteractive send-to-influx 2>&1) || { echo "$out"; fail "reconfigure failed"; }
 if [ "$CREDS_WORK" = 1 ]; then
     echo "$out" | grep -qi "Hue not fully configured" && { echo "$out"; fail "reconfigure warned despite stored hue-user credential"; }
+    # The blank mqtt-password prompt must likewise be satisfied by the stored
+    # credential (the shared-block analogue of the hue assertion above).
+    echo "$out" | grep -qi "Nuki not fully configured" && { echo "$out"; fail "reconfigure warned despite stored mqtt-password credential"; }
 fi
 echo "$out" | grep -qi "InfluxDB user/org or password/token not provided" \
     || { echo "$out"; fail "expected the engaged-but-incomplete InfluxDB warning on reconfigure"; }
@@ -232,7 +260,19 @@ out=$(printf '\n\n\n1\n\n\n\n\n\n' | DEBIAN_FRONTEND=teletype dpkg-reconfigure -
 echo "$out" | grep -q "Hue bridge hostname" || { echo "$out"; fail "hue-host not shown at priority high"; }
 echo "$out" | grep -q "Hue bridge username" || fail "hue-user not shown at priority high"
 echo "$out" | grep -q "Temperature units" || fail "hue-temperature-units not shown at priority high"
-pass "per-source questions appear at priority high"
+# The conditional shared-MQTT-block questions must NOT appear when no
+# MQTT-based source is selected - the regression guard for the conditional
+# gating (a non-MQTT install being prompted for a broker it doesn't have).
+echo "$out" | grep -q "MQTT broker" && { echo "$out"; fail "mqtt questions shown without an MQTT source selected"; }
+pass "per-source questions appear at priority high; mqtt questions correctly absent"
+
+# Same frontend/priority, selecting nuki (choice 9) instead: the three
+# shared-MQTT-block questions must now all be shown.
+out=$(printf '\n\n\n9\n\n\n\n\n\n' | DEBIAN_FRONTEND=teletype dpkg-reconfigure -p high send-to-influx 2>&1) || true
+echo "$out" | grep -q "MQTT broker hostname" || { echo "$out"; fail "mqtt-broker-host not shown at priority high with nuki selected"; }
+echo "$out" | grep -q "MQTT broker username" || fail "mqtt-username not shown at priority high with nuki selected"
+echo "$out" | grep -q "MQTT broker password" || fail "mqtt-password not shown at priority high with nuki selected"
+pass "shared mqtt questions appear at priority high when an MQTT source is selected"
 
 # --- Scenario: purge -----------------------------------------------------------
 echo "=== scenario: purge ==="

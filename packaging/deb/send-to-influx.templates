@@ -1,6 +1,6 @@
 Template: send-to-influx/sources-to-configure
 Type: multiselect
-Choices: hue, zappi, harvi, eddi, octopus, openmeteo, carbonintensity, speedtest
+Choices: hue, zappi, harvi, eddi, octopus, openmeteo, carbonintensity, speedtest, nuki
 Default:
 Description: Which data sources do you want to configure now?
  You can leave this empty and edit /etc/send-to-influx/settings.yaml by hand
@@ -33,6 +33,32 @@ Template: send-to-influx/influx-secret
 Type: password
 Description: InfluxDB password (v1) or API token (v2)
  For InfluxDB v1 enter the password. For InfluxDB v2 enter the API token.
+ When reconfiguring, leaving this blank keeps the credential already stored
+ in systemd-creds, if any (a secret kept in plaintext in settings.yaml is
+ not read back here).
+
+Template: send-to-influx/mqtt-broker-host
+Type: string
+Default:
+Description: MQTT broker hostname or IP address
+ Needed by MQTT-based sources (currently Nuki). The broker (e.g. Mosquitto)
+ must be on your LAN - see the README's "Nuki Smart Lock (MQTT)" section for
+ first-time broker setup, including provisioning the lock itself.
+ When reconfiguring, leaving this blank keeps the currently configured value.
+
+Template: send-to-influx/mqtt-username
+Type: string
+Default:
+Description: MQTT broker username for send-to-influx
+ send-to-influx's own (read-only) broker login - use a separate account from
+ the one the lock itself publishes with, so either can be rotated or revoked
+ independently.
+ When reconfiguring, leaving this blank keeps the currently configured value.
+
+Template: send-to-influx/mqtt-password
+Type: password
+Description: MQTT broker password for send-to-influx
+ The password for the broker username above.
  When reconfiguring, leaving this blank keeps the credential already stored
  in systemd-creds, if any (a secret kept in plaintext in settings.yaml is
  not read back here).
