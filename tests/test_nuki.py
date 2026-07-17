@@ -118,18 +118,21 @@ class TestNuki:
         assert nuki.get_data() == {"2BB28570_stateName": "locked"}
 
     def test_duplicate_device_names_warn_and_last_wins(self, sample_settings, caplog):
-        """Two devices with the same Nuki-app name collide - later value wins, loudly."""
+        """Two devices with the same Nuki-app name collide - highest device ID wins
+        deterministically (by sorted ID, not fragile MQTT arrival order), loudly."""
+        # Deliberately deliver BBBB0002's messages *first*, to prove the outcome is
+        # fixed by device-ID sort order, not by arrival order.
         messages = [
-            ("nuki/AAAA0001/name", "Door"),
-            ("nuki/AAAA0001/state", "1"),
             ("nuki/BBBB0002/name", "Door"),
             ("nuki/BBBB0002/state", "3"),
+            ("nuki/AAAA0001/name", "Door"),
+            ("nuki/AAAA0001/state", "1"),
         ]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
         with caplog.at_level("WARNING"):
             result = nuki.get_data()
-        # Devices are processed in message order (insertion-ordered dict), so the
-        # later device (BBBB0002, state 3 = unlocked) deterministically wins.
+        # BBBB0002 sorts after AAAA0001, so it wins (state 3 = unlocked) regardless of
+        # the reversed arrival order above.
         assert result["Door_stateName"] == "unlocked"
         assert any("Duplicate Nuki device name" in record.message for record in caplog.records)
 

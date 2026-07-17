@@ -108,7 +108,11 @@ class Nuki(MqttDataHandler):
                 continue
             devices.setdefault(parts[1], {})[parts[2]] = payload
         data = {}
-        for device_id, fields in devices.items():
+        # Iterate by device ID, not MQTT arrival order: brokers don't guarantee a
+        # stable retained-message delivery order, so on a same-name collision this
+        # keeps "last wins" deterministic (highest device ID) across cycles rather
+        # than letting fields flap between devices.
+        for device_id, fields in sorted(devices.items()):
             # A blank/whitespace name gets the same device-ID fallback as an absent one -
             # an empty prefix would produce keys like "_stateName" and collide across devices.
             prefix = (fields.pop("name", "").strip() or device_id).replace(" ", "_")
