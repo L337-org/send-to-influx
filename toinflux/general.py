@@ -143,6 +143,25 @@ def get_class(source, settings_file=None):
     return my_class
 
 
+# Sources that collect over MQTT and therefore need the shared top-level mqtt block.
+# When adding a new MQTT-based source (a MqttDataHandler child), add its name here so
+# validate_settings()/--check-config can catch a missing broker config up front rather
+# than letting the collector fail at runtime.
+MQTT_SOURCES = frozenset({"nuki"})
+
+
+def _validate_mqtt_block(settings, sources):
+    """Return a list of error strings for the shared mqtt block, which is required
+    if (and only if) an MQTT-based source is among the sources being validated."""
+    mqtt_sources = sorted(str(src) for src in sources if src in MQTT_SOURCES)
+    if not mqtt_sources:
+        return []
+    mqtt = settings.get("mqtt") or {}
+    if not mqtt.get("broker_host"):
+        return [f"mqtt.broker_host is required for MQTT-based sources ({', '.join(mqtt_sources)})"]
+    return []
+
+
 def _validate_influx_block(influx):
     """Return a list of error strings for the influx configuration block."""
     errors = []
@@ -212,6 +231,7 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
         sources = [*sources, source]
     for src in sources:
         errors.extend(_validate_source_block(src, settings, is_v2))
+    errors.extend(_validate_mqtt_block(settings, sources))
     if errors:
         for error in errors:
             logging.critical("%s: %s", settings_path, error)

@@ -222,6 +222,23 @@ class TestValidateSettings:
         # cause it to be validated (and thus reported) twice.
         validate_settings(sample_settings, source="hue")
 
+    def test_mqtt_source_requires_mqtt_block(self, sample_settings):
+        """An enabled MQTT-based source without the shared mqtt block fails --check-config
+        up front, instead of reporting OK and letting the collector ConfigError at runtime."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        with pytest.raises(ConfigError, match="mqtt.broker_host"):
+            validate_settings(sample_settings, source="nuki")
+
+    def test_mqtt_source_passes_with_broker_host_configured(self, sample_settings):
+        """The same config validates once mqtt.broker_host is present."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = {"broker_host": "mqtt.example.com"}
+        validate_settings(sample_settings, source="nuki")
+
+    def test_mqtt_block_not_required_without_mqtt_sources(self, sample_settings):
+        """Installs with no MQTT-based source configured don't need an mqtt block at all."""
+        validate_settings(sample_settings)  # sample_settings has no nuki and no mqtt block
+
     def test_error_log_uses_given_settings_path_not_hardcoded_settings_yaml(self, sample_settings, caplog):
         """validate_settings labels log messages with settings_path, not a hard-coded 'settings.yaml'.
 
