@@ -229,7 +229,13 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
     # must be too - otherwise --check-config --source Hue fails while --source Hue
     # runs fine. Also makes the duplicate check catch case variants (['Hue', 'hue']).
     sources = settings.get("sources") or [settings.get("default_source")]
-    sources = [src.lower() if isinstance(src, str) else src for src in sources]
+    # A non-string entry (e.g. a YAML mapping from a malformed sources list) would
+    # raise a raw TypeError from the dict/set membership tests below - report it as
+    # the ConfigError it really is, and validate the remaining string entries.
+    invalid = [src for src in sources if src is not None and not isinstance(src, str)]
+    if invalid:
+        errors.append("sources entries must be strings (got: " + ", ".join(repr(s) for s in invalid) + ")")
+    sources = [src.lower() for src in sources if isinstance(src, str)]
     if source:
         source = source.lower()
     duplicates = sorted({str(src) for src in sources if sources.count(src) > 1})

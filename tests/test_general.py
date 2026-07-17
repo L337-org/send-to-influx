@@ -367,3 +367,10 @@ class TestFlattenDict:
         sample_settings["mqtt"]["broker_port"] = 70000
         with pytest.raises(ConfigError, match="broker_port"):
             validate_settings(sample_settings, source="nuki")
+
+    def test_non_string_sources_entry_raises_config_error_not_typeerror(self, sample_settings):
+        """A malformed sources list (e.g. a YAML mapping entry) reports a clear
+        ConfigError instead of raising a raw TypeError from membership tests."""
+        sample_settings["sources"] = ["hue", {"oops": "mapping"}]
+        with pytest.raises(ConfigError, match="must be strings"):
+            validate_settings(sample_settings)
