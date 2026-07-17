@@ -219,7 +219,14 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
     influx = settings.get("influx", {})
     errors = _validate_influx_block(influx)
     is_v2 = bool(influx.get("token"))
+    # Normalise case to match the runtime path: get_class()/--source are explicitly
+    # case-insensitive (source_name is lowercased before instantiation), so validation
+    # must be too - otherwise --check-config --source Hue fails while --source Hue
+    # runs fine. Also makes the duplicate check catch case variants (['Hue', 'hue']).
     sources = settings.get("sources") or [settings.get("default_source")]
+    sources = [src.lower() if isinstance(src, str) else src for src in sources]
+    if source:
+        source = source.lower()
     duplicates = sorted({str(src) for src in sources if sources.count(src) > 1})
     if duplicates:
         # A duplicated entry would spawn two worker threads sharing one source name -

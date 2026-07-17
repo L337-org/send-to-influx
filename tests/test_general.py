@@ -222,6 +222,17 @@ class TestValidateSettings:
         # cause it to be validated (and thus reported) twice.
         validate_settings(sample_settings, source="hue")
 
+    def test_explicit_source_validated_case_insensitively(self, sample_settings):
+        """validate_settings(source=...) matches the runtime path's case-insensitivity:
+        --check-config --source Hue must not fail while --source Hue runs fine."""
+        validate_settings(sample_settings, source="Hue")
+
+    def test_duplicate_sources_detected_across_case_variants(self, sample_settings):
+        """['Hue', 'hue'] is the same source twice - the duplicate check must see it."""
+        sample_settings["sources"] = ["Hue", "hue"]
+        with pytest.raises(ConfigError, match="duplicate"):
+            validate_settings(sample_settings)
+
     def test_mqtt_source_requires_mqtt_block(self, sample_settings):
         """An enabled MQTT-based source without the shared mqtt block fails --check-config
         up front, instead of reporting OK and letting the collector ConfigError at runtime."""
