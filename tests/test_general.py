@@ -174,6 +174,19 @@ class TestValidateSettings:
         with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
+    def test_scalar_sources_raises_config_error(self, sample_settings):
+        """A scalar sources value (sources: hue) reports a clear ConfigError instead of
+        being iterated character-by-character."""
+        sample_settings["sources"] = "hue"
+        with pytest.raises(ConfigError, match="sources must be a list"):
+            validate_settings(sample_settings)
+
+    def test_mapping_sources_raises_config_error(self, sample_settings):
+        """A mapping sources value (sources: {hue: true}) is likewise a clear ConfigError."""
+        sample_settings["sources"] = {"hue": True}
+        with pytest.raises(ConfigError, match="sources must be a list"):
+            validate_settings(sample_settings)
+
     def test_missing_db_and_bucket_raises_config_error(self, sample_settings):
         """validate_settings raises ConfigError when a source has neither db nor bucket."""
         del sample_settings["hue"]["db"]

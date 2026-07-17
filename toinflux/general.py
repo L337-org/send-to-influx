@@ -232,7 +232,14 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
     # case-insensitive (source_name is lowercased before instantiation), so validation
     # must be too - otherwise --check-config --source Hue fails while --source Hue
     # runs fine. Also makes the duplicate check catch case variants (['Hue', 'hue']).
-    sources = settings.get("sources") or [settings.get("default_source")]
+    raw_sources = settings.get("sources")
+    if raw_sources is not None and not isinstance(raw_sources, list):
+        # A scalar (sources: hue) or mapping would otherwise be iterated by
+        # character/key below - report it as the ConfigError it is, then fall back to
+        # default_source so the rest of validation still runs sensibly.
+        errors.append(f"sources must be a list (got {type(raw_sources).__name__})")
+        raw_sources = None
+    sources = raw_sources or [settings.get("default_source")]
     # A non-string entry (e.g. a YAML mapping from a malformed sources list) would
     # raise a raw TypeError from the dict/set membership tests below - report it as
     # the ConfigError it really is, and validate the remaining string entries.
