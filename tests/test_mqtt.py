@@ -5,7 +5,7 @@ import pytest
 
 from paho.mqtt import client as mqtt_client
 from toinflux.mqtt import MqttDataHandler
-from toinflux.exceptions import SourceConnectionError
+from toinflux.exceptions import ConfigError, SourceConnectionError
 
 # Short collection window so the fixed-window loop doesn't slow the test run down.
 WINDOW = 0.05
@@ -146,6 +146,25 @@ class TestMqttDataHandler:
             _drive_callbacks(mock_client, [])
             handler.collect_mqtt_messages("nuki/+/+", WINDOW)
             mock_client.connect.assert_called_once_with("mqtt.example.com", 1883)
+
+    def test_missing_mqtt_block_raises_config_error(self, sample_settings):
+        """No top-level mqtt block is a config-shape problem - fatal ConfigError, not a
+        retryable failure, matching how a missing source block behaves."""
+        settings = _mqtt_settings(sample_settings)
+        del settings["mqtt"]
+        handler = _handler(settings)
+        with patch("toinflux.mqtt.mqtt_client.Client"):
+            with pytest.raises(ConfigError, match="mqtt"):
+                handler.collect_mqtt_messages("nuki/+/+", WINDOW)
+
+    def test_missing_broker_host_raises_config_error(self, sample_settings):
+        """An mqtt block without broker_host is equally fatal, with a specific message."""
+        settings = _mqtt_settings(sample_settings)
+        del settings["mqtt"]["broker_host"]
+        handler = _handler(settings)
+        with patch("toinflux.mqtt.mqtt_client.Client"):
+            with pytest.raises(ConfigError, match="broker_host"):
+                handler.collect_mqtt_messages("nuki/+/+", WINDOW)
 
     def test_undecodable_payload_bytes_are_replaced_not_fatal(self, sample_settings):
         """A payload that isn't valid UTF-8 is decoded with replacement characters

@@ -9,7 +9,7 @@ import logging
 import time
 from paho.mqtt import client as mqtt_client
 from toinflux.influx import DataHandler
-from toinflux.exceptions import SourceConnectionError
+from toinflux.exceptions import ConfigError, SourceConnectionError
 
 # How long each call into paho's network loop blocks waiting for traffic. Small enough
 # that the collection window's deadline (and a failed-CONNACK abort) is honoured
@@ -58,10 +58,15 @@ class MqttDataHandler(DataHandler):
         :type timeout: float
         :return: (topic, payload) pairs in arrival order, payloads decoded as UTF-8
         :rtype: list
+        :raises ConfigError: if the shared ``mqtt`` settings block (or its
+            ``broker_host``) is missing - a config-shape problem, fatal like a missing
+            source block, not something the worker loop should retry
         :raises SourceConnectionError: if the broker is unreachable or refuses the
             connection (including bad credentials via the CONNACK reason code)
         """
-        mqtt_settings = self.settings["mqtt"]
+        mqtt_settings = self.settings.get("mqtt")
+        if not mqtt_settings or not mqtt_settings.get("broker_host"):
+            raise ConfigError("MQTT sources need a top-level 'mqtt' settings block with 'broker_host' set")
         host = mqtt_settings["broker_host"]
         port = mqtt_settings.get("broker_port", 1883)
         messages = []
