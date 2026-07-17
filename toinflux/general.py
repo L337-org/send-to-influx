@@ -115,6 +115,7 @@ def get_class(source, settings_file=None):
     """
     from toinflux.carbonintensity import CarbonIntensity
     from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
+    from toinflux.nuki import Nuki
     from toinflux.octopus import Octopus
     from toinflux.openmeteo import OpenMeteo
     from toinflux.philipshue import Hue
@@ -126,6 +127,7 @@ def get_class(source, settings_file=None):
         "Harvi": Harvi,
         "Hue": Hue,
         "MyEnergi": MyEnergi,
+        "Nuki": Nuki,
         "Octopus": Octopus,
         "OpenMeteo": OpenMeteo,
         "Speedtest": Speedtest,
@@ -139,6 +141,34 @@ def get_class(source, settings_file=None):
     except KeyError:
         raise ConfigError(f"Source {class_name} not found") from None
     return my_class
+
+
+# Sources that collect over MQTT and therefore need the shared top-level mqtt block.
+# When adding a new MQTT-based source (a MqttDataHandler child), add its name here so
+# validate_settings()/--check-config can catch a missing broker config up front rather
+# than letting the collector fail at runtime.
+MQTT_SOURCES = frozenset({"nuki"})
+
+
+def _validate_mqtt_block(settings, sources):
+    """Return a list of error strings for the shared mqtt block, which is required
+    if (and only if) an MQTT-based source is among the sources being validated."""
+    mqtt_sources = sorted(str(src) for src in sources if src in MQTT_SOURCES)
+    if not mqtt_sources:
+        return []
+    mqtt = settings.get("mqtt")
+    if mqtt is None:
+        mqtt = {}
+    if not isinstance(mqtt, dict):
+        return [f"mqtt must be a mapping of broker settings (got {type(mqtt).__name__})"]
+    errors = []
+    if not mqtt.get("broker_host"):
+        errors.append(f"mqtt.broker_host is required for MQTT-based sources ({', '.join(mqtt_sources)})")
+    port = mqtt.get("broker_port", 1883)
+    # bool is an int subclass, so broker_port: true would otherwise pass as 1
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        errors.append(f"mqtt.broker_port must be an integer between 1 and 65535 (got {port!r})")
+    return errors
 
 
 def _validate_influx_block(influx):
@@ -198,7 +228,27 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
     influx = settings.get("influx", {})
     errors = _validate_influx_block(influx)
     is_v2 = bool(influx.get("token"))
-    sources = settings.get("sources") or [settings.get("default_source")]
+    # Normalise case to match the runtime path: get_class()/--source are explicitly
+    # case-insensitive (source_name is lowercased before instantiation), so validation
+    # must be too - otherwise --check-config --source Hue fails while --source Hue
+    # runs fine. Also makes the duplicate check catch case variants (['Hue', 'hue']).
+    raw_sources = settings.get("sources")
+    if raw_sources is not None and not isinstance(raw_sources, list):
+        # A scalar (sources: hue) or mapping would otherwise be iterated by
+        # character/key below - report it as the ConfigError it is, then fall back to
+        # default_source so the rest of validation still runs sensibly.
+        errors.append(f"sources must be a list (got {type(raw_sources).__name__})")
+        raw_sources = None
+    sources = raw_sources or [settings.get("default_source")]
+    # A non-string entry (e.g. a YAML mapping from a malformed sources list) would
+    # raise a raw TypeError from the dict/set membership tests below - report it as
+    # the ConfigError it really is, and validate the remaining string entries.
+    invalid = [src for src in sources if src is not None and not isinstance(src, str)]
+    if invalid:
+        errors.append("sources entries must be strings (got: " + ", ".join(repr(s) for s in invalid) + ")")
+    sources = [src.lower() for src in sources if isinstance(src, str)]
+    if source:
+        source = source.lower()
     duplicates = sorted({str(src) for src in sources if sources.count(src) > 1})
     if duplicates:
         # A duplicated entry would spawn two worker threads sharing one source name -
@@ -210,6 +260,7 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
         sources = [*sources, source]
     for src in sources:
         errors.extend(_validate_source_block(src, settings, is_v2))
+    errors.extend(_validate_mqtt_block(settings, sources))
     if errors:
         for error in errors:
             logging.critical("%s: %s", settings_path, error)

@@ -174,6 +174,19 @@ class TestValidateSettings:
         with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
+    def test_scalar_sources_raises_config_error(self, sample_settings):
+        """A scalar sources value (sources: hue) reports a clear ConfigError instead of
+        being iterated character-by-character."""
+        sample_settings["sources"] = "hue"
+        with pytest.raises(ConfigError, match="sources must be a list"):
+            validate_settings(sample_settings)
+
+    def test_mapping_sources_raises_config_error(self, sample_settings):
+        """A mapping sources value (sources: {hue: true}) is likewise a clear ConfigError."""
+        sample_settings["sources"] = {"hue": True}
+        with pytest.raises(ConfigError, match="sources must be a list"):
+            validate_settings(sample_settings)
+
     def test_missing_db_and_bucket_raises_config_error(self, sample_settings):
         """validate_settings raises ConfigError when a source has neither db nor bucket."""
         del sample_settings["hue"]["db"]
@@ -221,6 +234,34 @@ class TestValidateSettings:
         # default_source is "hue" per sample_settings; passing it explicitly shouldn't
         # cause it to be validated (and thus reported) twice.
         validate_settings(sample_settings, source="hue")
+
+    def test_explicit_source_validated_case_insensitively(self, sample_settings):
+        """validate_settings(source=...) matches the runtime path's case-insensitivity:
+        --check-config --source Hue must not fail while --source Hue runs fine."""
+        validate_settings(sample_settings, source="Hue")
+
+    def test_duplicate_sources_detected_across_case_variants(self, sample_settings):
+        """['Hue', 'hue'] is the same source twice - the duplicate check must see it."""
+        sample_settings["sources"] = ["Hue", "hue"]
+        with pytest.raises(ConfigError, match="duplicate"):
+            validate_settings(sample_settings)
+
+    def test_mqtt_source_requires_mqtt_block(self, sample_settings):
+        """An enabled MQTT-based source without the shared mqtt block fails --check-config
+        up front, instead of reporting OK and letting the collector ConfigError at runtime."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        with pytest.raises(ConfigError, match="mqtt.broker_host"):
+            validate_settings(sample_settings, source="nuki")
+
+    def test_mqtt_source_passes_with_broker_host_configured(self, sample_settings):
+        """The same config validates once mqtt.broker_host is present."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = {"broker_host": "mqtt.example.com"}
+        validate_settings(sample_settings, source="nuki")
+
+    def test_mqtt_block_not_required_without_mqtt_sources(self, sample_settings):
+        """Installs with no MQTT-based source configured don't need an mqtt block at all."""
+        validate_settings(sample_settings)  # sample_settings has no nuki and no mqtt block
 
     def test_error_log_uses_given_settings_path_not_hardcoded_settings_yaml(self, sample_settings, caplog):
         """validate_settings labels log messages with settings_path, not a hard-coded 'settings.yaml'.
@@ -329,3 +370,32 @@ class TestFlattenDict:
     def test_empty_dict_returns_empty_dict(self):
         """flatten_dict returns empty dict for empty input."""
         assert not flatten_dict({})
+
+    def test_invalid_mqtt_broker_port_raises_config_error(self, sample_settings):
+        """A non-integer or out-of-range broker_port fails --check-config up front."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = {"broker_host": "mqtt.example.com", "broker_port": "1883"}
+        with pytest.raises(ConfigError, match="broker_port"):
+            validate_settings(sample_settings, source="nuki")
+        sample_settings["mqtt"]["broker_port"] = 70000
+        with pytest.raises(ConfigError, match="broker_port"):
+            validate_settings(sample_settings, source="nuki")
+
+    def test_non_string_sources_entry_raises_config_error_not_typeerror(self, sample_settings):
+        """A malformed sources list (e.g. a YAML mapping entry) reports a clear
+        ConfigError instead of raising a raw TypeError from membership tests."""
+        sample_settings["sources"] = ["hue", {"oops": "mapping"}]
+        with pytest.raises(ConfigError, match="must be strings"):
+            validate_settings(sample_settings)
+
+    def test_non_mapping_mqtt_block_raises_config_error(self, sample_settings):
+        """mqtt configured as a bare scalar reports a ConfigError, not AttributeError."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = "mqtt.example.com"
+        with pytest.raises(ConfigError, match="mqtt must be a mapping"):
+            validate_settings(sample_settings, source="nuki")
+        # A falsy non-mapping (e.g. an empty list) must hit the same type error, not
+        # be collapsed to {} and misreported as a missing broker_host
+        sample_settings["mqtt"] = []
+        with pytest.raises(ConfigError, match="mqtt must be a mapping"):
+            validate_settings(sample_settings, source="nuki")

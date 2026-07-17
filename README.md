@@ -6,7 +6,7 @@ https://github.com/L337-org/send-to-influx
 
 Script to take data from various APIs and post it to InfluxDB in order to view the data in Grafana.
 
-It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid Carbon Intensity, Octopus Energy, and Speedtest network performance data sources.
+It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data sources.
 
 It can be installed as a .deb package on supported platforms, or run directly from the source code in a Python virtual environment.
 
@@ -21,6 +21,7 @@ Contents
   - [UK National Grid Carbon Intensity](#uk-national-grid-carbon-intensity)
   - [Open-Meteo](#open-meteo)
   - [Octopus Energy](#octopus-energy)
+  - [Nuki Smart Lock (MQTT)](#nuki-smart-lock-mqtt)
   - [Speedtest](#speedtest)
 - [InfluxDB setup](#influxdb)
 - [Running the script](#running-the-script)
@@ -86,6 +87,62 @@ If you are on a time-of-use tariff (e.g. Agile Octopus), you can also configure 
 
 Note: smart meter readings are typically delayed by up to 24 hours, so consumption data always
 represents a recent-past reading rather than real-time usage.
+
+Nuki Smart Lock (MQTT)
+----------------------
+
+Collects lock state and door-sensor state (plus battery and connectivity fields) from WiFi-connected
+Nuki smart locks via Nuki's local MQTT API (supported by the Smart Lock 3.0 Pro on firmware 3.5.12+
+and all newer WiFi models). Nuki devices publish every state topic with the MQTT retain flag set, so
+each collection cycle simply subscribes briefly and receives the last-known state of every lock
+provisioned to the broker - locks need no per-device configuration in `settings.yaml`, and each
+lock's fields are prefixed with its own name from the Nuki app (give each lock a distinct name).
+
+This needs an MQTT broker on your LAN, e.g. Mosquitto. Note that Nuki devices only support plain,
+unencrypted MQTT (port 1883) to a private-range LAN address - only use this on a network you trust.
+
+Setting up Mosquitto on Debian/Ubuntu:
+
+1. `sudo apt install mosquitto mosquitto-clients` - the client tools (used below to verify the
+   setup) are a separate package from the broker, not bundled with it.
+2. Create `/etc/mosquitto/conf.d/local.conf` (the filename must end in `.conf` or it is silently
+   ignored):
+
+       listener 1883 0.0.0.0
+       allow_anonymous false
+       password_file /etc/mosquitto/passwd
+
+3. Create two separate broker credentials - one for the lock (publisher) and one for
+   send-to-influx (subscriber). Don't reuse one login for both; separate credentials mean either
+   can be rotated or revoked independently:
+
+       sudo mosquitto_passwd -c /etc/mosquitto/passwd nuki-lock
+       sudo mosquitto_passwd /etc/mosquitto/passwd sendtoinflux
+
+   Create the password file *before* restarting Mosquitto - it refuses to start if the configured
+   `password_file` doesn't exist yet.
+4. The file is created owned `root:root` mode 600, which the `mosquitto` service user can't read,
+   so fix the group and mode:
+
+       sudo chgrp mosquitto /etc/mosquitto/passwd
+       sudo chmod 640 /etc/mosquitto/passwd
+
+   `mosquitto_passwd` will warn about this ownership on later runs ("group is not root ...") -
+   that's a known upstream rough edge; do *not* follow its suggested `chown root`/`chmod 0700`
+   fix, which stops the broker being able to read the file at all.
+5. Restart Mosquitto (`sudo systemctl restart mosquitto`).
+6. In the Nuki app: Device Administration > MQTT - enter the broker's address, the `nuki-lock`
+   credentials, and turn **"Allow locking" off** so the lock only publishes state and never
+   subscribes to command topics (this integration is read-only regardless).
+7. Verify end-to-end with the `sendtoinflux` credential (the one that goes in `settings.yaml`):
+
+       mosquitto_sub -h <broker-host> -u sendtoinflux -P <password> -t 'nuki/#' -v
+
+   This should immediately print every retained state topic for the lock.
+
+Then fill in the shared `mqtt:` block in `settings.yaml` with the `sendtoinflux` credential and add
+`nuki` to `sources:`. On the packaged install the broker password can be moved into `systemd-creds`
+with `send-to-influx-set-credential mqtt-password`, like any other credential.
 
 Speedtest
 ---------
