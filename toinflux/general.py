@@ -157,9 +157,14 @@ def _validate_mqtt_block(settings, sources):
     if not mqtt_sources:
         return []
     mqtt = settings.get("mqtt") or {}
+    errors = []
     if not mqtt.get("broker_host"):
-        return [f"mqtt.broker_host is required for MQTT-based sources ({', '.join(mqtt_sources)})"]
-    return []
+        errors.append(f"mqtt.broker_host is required for MQTT-based sources ({', '.join(mqtt_sources)})")
+    port = mqtt.get("broker_port", 1883)
+    # bool is an int subclass, so broker_port: true would otherwise pass as 1
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        errors.append(f"mqtt.broker_port must be an integer between 1 and 65535 (got {port!r})")
+    return errors
 
 
 def _validate_influx_block(influx):

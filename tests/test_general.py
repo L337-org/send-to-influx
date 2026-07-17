@@ -357,3 +357,13 @@ class TestFlattenDict:
     def test_empty_dict_returns_empty_dict(self):
         """flatten_dict returns empty dict for empty input."""
         assert not flatten_dict({})
+
+    def test_invalid_mqtt_broker_port_raises_config_error(self, sample_settings):
+        """A non-integer or out-of-range broker_port fails --check-config up front."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = {"broker_host": "mqtt.example.com", "broker_port": "1883"}
+        with pytest.raises(ConfigError, match="broker_port"):
+            validate_settings(sample_settings, source="nuki")
+        sample_settings["mqtt"]["broker_port"] = 70000
+        with pytest.raises(ConfigError, match="broker_port"):
+            validate_settings(sample_settings, source="nuki")

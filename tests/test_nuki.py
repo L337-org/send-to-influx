@@ -121,7 +121,9 @@ class TestNuki:
         nuki = _nuki(_nuki_settings(sample_settings), messages)
         with caplog.at_level("WARNING"):
             result = nuki.get_data()
-        assert result["Door_stateName"] in ("locked", "unlocked")
+        # Devices are processed in message order (insertion-ordered dict), so the
+        # later device (BBBB0002, state 3 = unlocked) deterministically wins.
+        assert result["Door_stateName"] == "unlocked"
         assert any("Duplicate Nuki device name" in record.message for record in caplog.records)
 
     def test_empty_window_returns_empty_dict_with_debug_log(self, sample_settings, caplog):
