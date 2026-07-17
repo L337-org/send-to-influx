@@ -80,8 +80,8 @@ otherwise masquerade as "no data". `Nuki` (`toinflux/nuki.py`) holds only vendor
 known state topics (command/event topics are ignored), grouping by device ID, prefixing field keys
 with each lock's own Nuki-app name, and resolving the numeric `state`/`doorsensorState` codes to
 labels via hardcoded tables from the MQTT API spec (unlike the Bridge HTTP API, MQTT publishes no
-`stateName` strings; an unrecognised code is written through as its raw number). `paho-mqtt` (the
-project's first source-specific dependency beyond `requests`, pure Python so the `.deb`'s
+`stateName` strings; an unrecognised code is written through as its raw number). `paho-mqtt` (a
+source-specific runtime dependency like `speedtest-cli`, pure Python so the `.deb`'s
 `Architecture: all` design holds) is imported only in `toinflux/mqtt.py`.
 
 ### Entry point (`sendtoinflux.py`)

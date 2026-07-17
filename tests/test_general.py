@@ -276,6 +276,35 @@ class TestValidateSettings:
         assert any("/etc/send-to-influx/settings.yaml: influx.url is required" in r.message for r in caplog.records)
         assert not any("settings.yaml: influx.url is required" == r.message for r in caplog.records)
 
+    def test_invalid_mqtt_broker_port_raises_config_error(self, sample_settings):
+        """A non-integer or out-of-range broker_port fails --check-config up front."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = {"broker_host": "mqtt.example.com", "broker_port": "1883"}
+        with pytest.raises(ConfigError, match="broker_port"):
+            validate_settings(sample_settings, source="nuki")
+        sample_settings["mqtt"]["broker_port"] = 70000
+        with pytest.raises(ConfigError, match="broker_port"):
+            validate_settings(sample_settings, source="nuki")
+
+    def test_non_string_sources_entry_raises_config_error_not_typeerror(self, sample_settings):
+        """A malformed sources list (e.g. a YAML mapping entry) reports a clear
+        ConfigError instead of raising a raw TypeError from membership tests."""
+        sample_settings["sources"] = ["hue", {"oops": "mapping"}]
+        with pytest.raises(ConfigError, match="must be strings"):
+            validate_settings(sample_settings)
+
+    def test_non_mapping_mqtt_block_raises_config_error(self, sample_settings):
+        """mqtt configured as a bare scalar reports a ConfigError, not AttributeError."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = "mqtt.example.com"
+        with pytest.raises(ConfigError, match="mqtt must be a mapping"):
+            validate_settings(sample_settings, source="nuki")
+        # A falsy non-mapping (e.g. an empty list) must hit the same type error, not
+        # be collapsed to {} and misreported as a missing broker_host
+        sample_settings["mqtt"] = []
+        with pytest.raises(ConfigError, match="mqtt must be a mapping"):
+            validate_settings(sample_settings, source="nuki")
+
 
 class TestGetClass:
     """Tests for get_class function."""
@@ -325,6 +354,15 @@ class TestGetClass:
                 mock_speedtest.assert_called_once_with("speedtest", settings_file=None)
                 assert result is mock_speedtest.return_value
 
+    def test_get_class_returns_nuki_for_lowercase(self, sample_settings):
+        """get_class('nuki') returns Nuki instance with source 'nuki'."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            with patch("toinflux.nuki.Nuki") as mock_nuki:
+                result = get_class("nuki")
+                mock_nuki.assert_called_once_with("nuki", settings_file=None)
+                assert result is mock_nuki.return_value
+
     def test_get_class_unknown_source_raises_config_error(self):
         """get_class with unknown source raises ConfigError."""
         with pytest.raises(ConfigError):
@@ -370,32 +408,3 @@ class TestFlattenDict:
     def test_empty_dict_returns_empty_dict(self):
         """flatten_dict returns empty dict for empty input."""
         assert not flatten_dict({})
-
-    def test_invalid_mqtt_broker_port_raises_config_error(self, sample_settings):
-        """A non-integer or out-of-range broker_port fails --check-config up front."""
-        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
-        sample_settings["mqtt"] = {"broker_host": "mqtt.example.com", "broker_port": "1883"}
-        with pytest.raises(ConfigError, match="broker_port"):
-            validate_settings(sample_settings, source="nuki")
-        sample_settings["mqtt"]["broker_port"] = 70000
-        with pytest.raises(ConfigError, match="broker_port"):
-            validate_settings(sample_settings, source="nuki")
-
-    def test_non_string_sources_entry_raises_config_error_not_typeerror(self, sample_settings):
-        """A malformed sources list (e.g. a YAML mapping entry) reports a clear
-        ConfigError instead of raising a raw TypeError from membership tests."""
-        sample_settings["sources"] = ["hue", {"oops": "mapping"}]
-        with pytest.raises(ConfigError, match="must be strings"):
-            validate_settings(sample_settings)
-
-    def test_non_mapping_mqtt_block_raises_config_error(self, sample_settings):
-        """mqtt configured as a bare scalar reports a ConfigError, not AttributeError."""
-        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
-        sample_settings["mqtt"] = "mqtt.example.com"
-        with pytest.raises(ConfigError, match="mqtt must be a mapping"):
-            validate_settings(sample_settings, source="nuki")
-        # A falsy non-mapping (e.g. an empty list) must hit the same type error, not
-        # be collapsed to {} and misreported as a missing broker_host
-        sample_settings["mqtt"] = []
-        with pytest.raises(ConfigError, match="mqtt must be a mapping"):
-            validate_settings(sample_settings, source="nuki")
