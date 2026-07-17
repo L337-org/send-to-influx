@@ -56,7 +56,7 @@ class TestNuki:
         """Happy path: one device, fields prefixed by its name, labels resolved."""
         nuki = _nuki(_nuki_settings(sample_settings), FRONT_DOOR)
         result = nuki.get_data()
-        assert nuki.influx_header == "nuki "
+        assert nuki.influx_header == "nuki,host=mqtt.example.com "
         assert nuki.data == result
         assert result["Front_Door_stateName"] == "locked"
         assert result["Front_Door_doorsensorStateName"] == "door closed"

@@ -86,8 +86,8 @@ underscores), e.g. `Front_Door_stateName`; every lock provisioned to the broker 
 
 | Field | Unit | Notes |
 |---|---|---|
-| `stateName` | - | Lock state label (`locked`, `unlocked`, `unlatched`, ...); an unrecognised numeric code is written unchanged as `state` instead |
-| `doorsensorStateName` | - | Door sensor label (`door closed`, `door opened`, ...); unrecognised codes written unchanged as `doorsensorState` |
+| `stateName` | - | Lock state label (`locked`, `unlocked`, `unlatched`, ...); an unrecognised numeric code is written unchanged as `state` (under the same lock-name prefix, e.g. `Front_Door_state`) instead |
+| `doorsensorStateName` | - | Door sensor label (`door closed`, `door opened`, ...); unrecognised codes written unchanged as `doorsensorState` (same prefix rule) |
 | `batteryChargeState` | % | Battery charge level |
 | `batteryCritical`, `batteryCharging`, `keypadBatteryCritical`, `doorsensorBatteryCritical` | bool | Battery status flags (keypad/door-sensor flags only present when those accessories are paired) |
 | `mode`, `deviceType`, `firmware` | - | Device metadata |

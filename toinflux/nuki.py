@@ -80,8 +80,10 @@ class Nuki(MqttDataHandler):
         :return: data
         :rtype: dict
         """
-        self.influx_header = "nuki "
+        # Parse first: collect_mqtt_messages raises ConfigError for a missing mqtt
+        # block/broker_host before the header would need to read it.
         self.data = self.parse_nuki_data()
+        self.influx_header = f"nuki,host={self.settings['mqtt']['broker_host']} "
         return self.data
 
     def parse_nuki_data(self):
