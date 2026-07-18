@@ -16,6 +16,26 @@ if [ "$1" != "configure" ]; then
     exit 0
 fi
 
+# Point every supported Python minor at the venv's single real site-packages
+# directory. Created here rather than shipped in the package - see build-deb.sh for
+# why (it is what keeps dpkg from printing ~166 spurious "unable to delete old
+# directory" warnings on upgrade). Must happen before anything below runs the venv.
+# Idempotent: -n replaces nothing that already exists correctly, and a stale entry
+# from an older layout is removed first.
+# The bounds are substituted by build-deb.sh from PYTHON_MIN/MAX_SUPPORTED_MINOR,
+# which also drive the Depends: range - one source of truth, so a future version bump
+# cannot leave a supported interpreter without its symlink (or create one outside the
+# declared range). build-deb.sh fails the build if these placeholders survive.
+if [ -d /opt/send-to-influx/venv/lib/python3 ]; then
+    minor=@PYTHON_MIN_SUPPORTED_MINOR@
+    while [ "$minor" -le @PYTHON_MAX_SUPPORTED_MINOR@ ]; do
+        link="/opt/send-to-influx/venv/lib/python3.${minor}"
+        [ -L "$link" ] || rm -rf "$link"
+        ln -sfn python3 "$link"
+        minor=$((minor + 1))
+    done
+fi
+
 if ! getent passwd send-to-influx >/dev/null 2>&1; then
     adduser --system --group --no-create-home --shell /usr/sbin/nologin send-to-influx
 fi
@@ -95,6 +115,21 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
         if ! printf '%s' "$2" | "$CLI" "$1" >/dev/null; then
             CLI_FAILED=1
             echo "send-to-influx: could not store credential '$1' - run 'sudo $CLI $1' by hand to finish, or (e.g. on systemd < 250, where systemd-creds is unavailable) put the value in /etc/send-to-influx/settings.yaml instead." >&2
+        fi
+    }
+
+    # $1 = section name. Back-fills a top-level settings.yaml section from the
+    # shipped example when it's missing. Needed because settings.yaml is written
+    # once at install time and never rewritten by an upgrade (deliberate - see
+    # build-deb.sh), so any section added by a LATER release is absent for exactly
+    # the installs that have been running longest. Without this, --set-field fails
+    # ("no 'mqtt:' section found") and, worse, enabling a source whose block is new
+    # makes load_settings() raise a fatal ConfigError - which stops the whole
+    # service, taking every already-working source down with it.
+    ensure_section() {
+        if ! "$CLI" --ensure-section "$1" >/dev/null; then
+            CLI_FAILED=1
+            echo "send-to-influx: could not add the '$1:' section to /etc/send-to-influx/settings.yaml - copy it from /usr/share/send-to-influx/example_settings.yaml by hand." >&2
         fi
     }
 
@@ -389,21 +424,83 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
             ;;
     esac
 
+    # --- Nuki (shared MQTT broker block) ---
+    # The second shared-infrastructure block after InfluxDB, but conditional:
+    # only processed when an MQTT-based source was selected, mirroring config's
+    # gating on the asking side. Only the broker host is required (see
+    # below); username/password are optional - blank means anonymous broker
+    # access, a completely valid configuration. Whatever auth *was* provided
+    # is applied, and a blank password with an mqtt-password already in
+    # systemd-creds keeps that stored credential (see influx-secret).
+    NUKI_OK=0
+    case "$SOURCES" in
+        *" nuki "*)
+            db_get send-to-influx/mqtt-broker-host
+            MQTT_HOST="$RET"
+            db_get send-to-influx/mqtt-username
+            MQTT_USER="$RET"
+            db_get send-to-influx/mqtt-password
+            MQTT_PASS="$RET"
+            # Clear the consumed password (see influx-secret above); the
+            # username is cleared too, like influx-identity - it's the other
+            # half of a credential pair.
+            db_set send-to-influx/mqtt-password "" || true
+            db_set send-to-influx/mqtt-username "" || true
+            # A non-empty broker host is required (hue-host style, not
+            # blank-keeps: debconf *string* answers persist across
+            # reconfigures, so any install configured through these prompts
+            # always has a non-blank host here - a blank one means the host
+            # was only ever hand-edited or never set, where auto-enabling
+            # would be speculative, possibly against the shipped placeholder).
+            # Auth is optional but must be coherent: both blank means
+            # anonymous access, both supplied means authenticated - a username
+            # with no password material is neither (see the elif).
+            if [ -z "$MQTT_HOST" ]; then
+                echo "send-to-influx: Nuki not fully configured (MQTT broker host missing) - not enabling it." >&2
+            elif [ -n "$MQTT_USER" ] && [ -z "$MQTT_PASS" ] && [ ! -e "$CREDSTORE/mqtt-password.cred" ]; then
+                # Incoherent auth: a username with no password material would
+                # auto-enable straight into an authenticated connect with an
+                # empty password - a guaranteed rejection retry loop. Both for
+                # authenticated access, neither for anonymous.
+                echo "send-to-influx: Nuki not fully configured (username given without a password - provide both for authenticated access, or neither for anonymous) - not enabling it." >&2
+            else
+                CLI_FAILED=0
+                # Both sections may be absent on an install that predates them.
+                # nuki's own block matters as much as mqtt's: --enable-source below
+                # would otherwise add nuki to sources: with no nuki: section for it,
+                # which fails validation fatally at next start.
+                ensure_section mqtt
+                ensure_section nuki
+                set_field mqtt.broker_host "$MQTT_HOST"
+                if [ -n "$MQTT_USER" ]; then
+                    set_field mqtt.username "$MQTT_USER"
+                fi
+                if [ -n "$MQTT_PASS" ]; then
+                    set_secret mqtt-password "$MQTT_PASS"
+                fi
+                if [ "$CLI_FAILED" = 0 ]; then
+                    NUKI_OK=1
+                fi
+            fi
+            ;;
+    esac
+
     # --- CarbonIntensity / Speedtest: nothing beyond selection is required ---
     CARBONINTENSITY_OK=0
     case "$SOURCES" in *" carbonintensity "*) CARBONINTENSITY_OK=1 ;; esac
     SPEEDTEST_OK=0
     case "$SOURCES" in *" speedtest "*) SPEEDTEST_OK=1 ;; esac
 
-    # Belt-and-braces: clear every credential-bearing answer - the four
-    # password-type questions plus influx-identity (string-typed, but a
-    # possible v1 username: see the note where it's first cleared above) -
-    # whether or not its source was selected. The per-source blocks above
+    # Belt-and-braces: clear every credential-bearing answer - the five
+    # password-type questions plus the two string-typed identity halves
+    # (influx-identity, a possible v1 username, and mqtt-username - see the
+    # notes where each is first cleared above) - whether or not its source
+    # was selected. The per-source blocks above
     # only read-and-clear a secret when its source was actually selected -
     # but a preseed (debconf-set-selections) can supply e.g. hue-user without
     # ticking hue, and that answer would otherwise sit in passwords.dat
     # indefinitely. Re-clearing the already-cleared ones is harmless.
-    for q in influx-secret influx-identity hue-user myenergi-apikey octopus-api-key; do
+    for q in influx-secret influx-identity hue-user myenergi-apikey octopus-api-key mqtt-password mqtt-username; do
         db_set "send-to-influx/$q" "" || true
     done
 
@@ -444,6 +541,10 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
         if [ "$SPEEDTEST_OK" = 1 ]; then
             "$CLI" --ensure-influx-storage speedtest_db || true
             "$CLI" --enable-source speedtest || true
+        fi
+        if [ "$NUKI_OK" = 1 ]; then
+            "$CLI" --ensure-influx-storage nuki_db || true
+            "$CLI" --enable-source nuki || true
         fi
     fi
 

@@ -44,6 +44,7 @@ The project uses a plugin-like architecture where each data source is implemente
 - **`toinflux/carbonintensity.py`**: National Grid carbon intensity and generation fuel mix (no API key)
 - **`toinflux/openmeteo.py`**: Open-Meteo weather data (no API key, lat/lon configuration)
 - **`toinflux/octopus.py`**: Octopus Energy electricity/gas consumption and unit rates (API key auth)
+- **`toinflux/nuki.py`**: Nuki smart lock + door sensor state via the local Nuki MQTT API (retained-topic collection through the shared `toinflux/mqtt.py` transport; read-only, never publishes)
 - **`toinflux/speedtest.py`**: Speedtest network performance integration; rejects an implausible `ping` (>= 5000 ms - the ceiling imposed by speedtest-cli's own hardcoded 10s per-probe connection timeout, `(3 * 10 / 6) * 1000`) as a connection error instead of writing it
 
 ### Configuration (`settings.yaml`)
@@ -64,6 +65,8 @@ YAML-based configuration supporting multiple data sources:
 - **OpenMeteo**: Latitude, longitude, field list (see open-meteo.com/en/docs)
 - **Octopus**: API key, MPAN, meter serial; optional `gas_mprn`+`gas_meter_serial` for gas consumption, and optional product/tariff codes for unit rate collection
 - **Speedtest**: Field selection, collection intervals
+- **MQTT**: shared broker connection (`broker_host`/`broker_port`/`username`/`password`) used by all MQTT-based sources, like the InfluxDB block; blank username/password = anonymous access
+- **Nuki**: `db`, `interval`, and `timeout` (retained-message collection window) only - locks need no per-device config
 - **InfluxDB**: Connection details, database/bucket settings; supports v1 (user/password/db) and v2 (token/org/bucket)
 
 ## Code Style & Standards
@@ -164,6 +167,13 @@ except requests.exceptions.RequestException as e:
 - **Note**: gas consumption unit depends on meter type (kWh for SMETS1 Secure, m3 for SMETS2) and is sent unconverted as `gas_consumption`
 - **InfluxDB measurement**: `octopus,source=octopus_energy`
 
+### Nuki Smart Lock (`toinflux/nuki.py`)
+- **Collects**: lock state and door-sensor state labels, battery/keypad/door-sensor battery flags, connectivity flags, per provisioned lock
+- **Transport**: local MQTT broker (shared `mqtt:` settings block) via `MqttDataHandler` (`toinflux/mqtt.py`); all Nuki state topics are retained, so a short subscribe window per cycle gets the full last-known state
+- **Configuration**: `db`, `interval`, `timeout` (collection window); field keys are prefixed with each lock's Nuki-app name
+- **Note**: read-only - command/event topics are filtered out and never published to; numeric state codes are resolved to labels from hardcoded spec tables (unrecognised codes pass through as raw numbers)
+- **InfluxDB measurement**: `nuki`
+
 ## Dependencies
 
 ### Core Dependencies
@@ -171,6 +181,7 @@ except requests.exceptions.RequestException as e:
 - `urllib3`: HTTP client library; `InsecureRequestWarning` is suppressed only when the relevant `insecure` setting is true - for the Hue bridge request (`toinflux/philipshue.py`, defaults to insecure) and for InfluxDB writes (`toinflux/influx.py`, defaults to secure)
 - `pyyaml`: YAML configuration file parsing
 - `speedtest-cli`: Speedtest library for collecting network perf data
+- `paho-mqtt`: MQTT client for MQTT-based sources (Nuki); imported only in `toinflux/mqtt.py`, v2 callback API
 
 ### Development Dependencies
 - `black`: Code formatting

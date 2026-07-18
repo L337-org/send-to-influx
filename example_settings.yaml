@@ -16,6 +16,7 @@ sources:
   # - "harvi"
   # - "eddi"
   # - "octopus"
+  # - "nuki"
 
 # Optional stagger delay (seconds) between source starts
 # This avoids collectors with equal intervals running at exactly the same time
@@ -55,6 +56,25 @@ influx:
   timeout: 5
   # Uncomment the line below to skip TLS certificate verification (e.g. self-signed/internal certs)
   # insecure: true
+
+# Shared MQTT broker settings, used by every MQTT-based source (currently: nuki).
+# Like the influx block above, this is per-install infrastructure rather than
+# per-source config - one broker *configuration* shared by all MQTT sources (each collector
+# connects briefly per collection cycle rather than holding a persistent connection). See the
+# README's "Nuki Smart Lock (MQTT)" section for first-time Mosquitto setup.
+mqtt:
+  # The hostname or IP address of the MQTT broker
+  broker_host: "mqtt.example.com"
+  # The broker port (1883 is the MQTT standard; Nuki devices only ever connect to 1883)
+  broker_port: 1883
+  # send-to-influx's OWN broker credential. If your broker requires authentication,
+  # use a separate login from the one the device itself publishes with (e.g. the
+  # account entered in the Nuki app), so either can be rotated or revoked
+  # independently. Leave both blank for anonymous access, if your broker allows it.
+  # (Shipped as real, empty keys - like influx.token/org above - so the packaged
+  # install's debconf flow has YAML keys to write into.)
+  username: ""
+  password: ""
 
 # Hue bridge settings
 hue:
@@ -227,3 +247,19 @@ octopus:
   # Useful for time-of-use tariffs such as Agile Octopus
   # product_code: "AGILE-FLEX-22-11-25"
   # tariff_code: "E-1R-AGILE-FLEX-22-11-25-C"
+
+# Nuki smart lock settings (lock + door sensor state, via the shared MQTT broker above)
+nuki:
+  # The database to use
+  db: "nuki_db"
+  # How many seconds to wait for retained MQTT messages after subscribing - this is a
+  # collection window, not an HTTP request timeout. Nuki devices publish every state
+  # topic with the retain flag set, so the broker delivers the full last-known state
+  # of every provisioned lock immediately on subscribing; a few seconds is plenty.
+  timeout: 3
+  # Interval in seconds between data collection
+  interval: 300
+  # No per-lock configuration is needed: every lock provisioned to the broker
+  # publishes under its own topic namespace and is reported automatically, with
+  # fields prefixed by the lock's own name from the Nuki app - give each lock a
+  # distinct name there to keep the fields apart.

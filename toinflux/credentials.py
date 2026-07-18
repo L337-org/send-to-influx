@@ -18,6 +18,7 @@ CREDENTIAL_FIELDS = {
     "influx-user": ("influx", "user"),
     "influx-password": ("influx", "password"),
     "hue-user": ("hue", "user"),
+    "mqtt-password": ("mqtt", "password"),
     "myenergi-apikey": ("myenergi", "apikey"),
     "octopus-api-key": ("octopus", "api_key"),
 }
@@ -28,6 +29,7 @@ PLACEHOLDER_VALUES = {
     "influx-user": "your_influx_user",
     "influx-password": "your_influx_password",
     "hue-user": "your_hue_user",
+    "mqtt-password": "your_mqtt_password",
     "myenergi-apikey": "your_api_key",
     "octopus-api-key": "your_octopus_api_key",
 }

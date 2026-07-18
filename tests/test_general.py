@@ -6,7 +6,14 @@ from pathlib import Path
 from unittest.mock import patch
 import pytest
 import yaml
-from toinflux.general import flatten_dict, load_settings, get_class, validate_settings
+from toinflux.general import (
+    DEFAULT_SOURCE,
+    flatten_dict,
+    get_class,
+    load_settings,
+    resolve_default_source,
+    validate_settings,
+)
 from toinflux.exceptions import ConfigError
 
 
@@ -174,6 +181,19 @@ class TestValidateSettings:
         with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
+    def test_scalar_sources_raises_config_error(self, sample_settings):
+        """A scalar sources value (sources: hue) reports a clear ConfigError instead of
+        being iterated character-by-character."""
+        sample_settings["sources"] = "hue"
+        with pytest.raises(ConfigError, match="sources must be a list"):
+            validate_settings(sample_settings)
+
+    def test_mapping_sources_raises_config_error(self, sample_settings):
+        """A mapping sources value (sources: {hue: true}) is likewise a clear ConfigError."""
+        sample_settings["sources"] = {"hue": True}
+        with pytest.raises(ConfigError, match="sources must be a list"):
+            validate_settings(sample_settings)
+
     def test_missing_db_and_bucket_raises_config_error(self, sample_settings):
         """validate_settings raises ConfigError when a source has neither db nor bucket."""
         del sample_settings["hue"]["db"]
@@ -222,6 +242,34 @@ class TestValidateSettings:
         # cause it to be validated (and thus reported) twice.
         validate_settings(sample_settings, source="hue")
 
+    def test_explicit_source_validated_case_insensitively(self, sample_settings):
+        """validate_settings(source=...) matches the runtime path's case-insensitivity:
+        --check-config --source Hue must not fail while --source Hue runs fine."""
+        validate_settings(sample_settings, source="Hue")
+
+    def test_duplicate_sources_detected_across_case_variants(self, sample_settings):
+        """['Hue', 'hue'] is the same source twice - the duplicate check must see it."""
+        sample_settings["sources"] = ["Hue", "hue"]
+        with pytest.raises(ConfigError, match="duplicate"):
+            validate_settings(sample_settings)
+
+    def test_mqtt_source_requires_mqtt_block(self, sample_settings):
+        """An enabled MQTT-based source without the shared mqtt block fails --check-config
+        up front, instead of reporting OK and letting the collector ConfigError at runtime."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        with pytest.raises(ConfigError, match="mqtt.broker_host"):
+            validate_settings(sample_settings, source="nuki")
+
+    def test_mqtt_source_passes_with_broker_host_configured(self, sample_settings):
+        """The same config validates once mqtt.broker_host is present."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = {"broker_host": "mqtt.example.com"}
+        validate_settings(sample_settings, source="nuki")
+
+    def test_mqtt_block_not_required_without_mqtt_sources(self, sample_settings):
+        """Installs with no MQTT-based source configured don't need an mqtt block at all."""
+        validate_settings(sample_settings)  # sample_settings has no nuki and no mqtt block
+
     def test_error_log_uses_given_settings_path_not_hardcoded_settings_yaml(self, sample_settings, caplog):
         """validate_settings labels log messages with settings_path, not a hard-coded 'settings.yaml'.
 
@@ -234,6 +282,95 @@ class TestValidateSettings:
                 validate_settings(sample_settings, settings_path="/etc/send-to-influx/settings.yaml")
         assert any("/etc/send-to-influx/settings.yaml: influx.url is required" in r.message for r in caplog.records)
         assert not any("settings.yaml: influx.url is required" == r.message for r in caplog.records)
+
+    def test_invalid_mqtt_broker_port_raises_config_error(self, sample_settings):
+        """A non-integer or out-of-range broker_port fails --check-config up front."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = {"broker_host": "mqtt.example.com", "broker_port": "1883"}
+        with pytest.raises(ConfigError, match="broker_port"):
+            validate_settings(sample_settings, source="nuki")
+        sample_settings["mqtt"]["broker_port"] = 70000
+        with pytest.raises(ConfigError, match="broker_port"):
+            validate_settings(sample_settings, source="nuki")
+
+    def test_non_string_sources_entry_raises_config_error_not_typeerror(self, sample_settings):
+        """A malformed sources list (e.g. a YAML mapping entry) reports a clear
+        ConfigError instead of raising a raw TypeError from membership tests."""
+        sample_settings["sources"] = ["hue", {"oops": "mapping"}]
+        with pytest.raises(ConfigError, match="must be strings"):
+            validate_settings(sample_settings)
+
+    def test_non_mapping_mqtt_block_raises_config_error(self, sample_settings):
+        """mqtt configured as a bare scalar reports a ConfigError, not AttributeError."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = "mqtt.example.com"
+        with pytest.raises(ConfigError, match="mqtt must be a mapping"):
+            validate_settings(sample_settings, source="nuki")
+        # A falsy non-mapping (e.g. an empty list) must hit the same type error, not
+        # be collapsed to {} and misreported as a missing broker_host
+        sample_settings["mqtt"] = []
+        with pytest.raises(ConfigError, match="mqtt must be a mapping"):
+            validate_settings(sample_settings, source="nuki")
+
+    def test_non_string_mqtt_host_or_credentials_raise_config_error(self, sample_settings):
+        """YAML coerces `broker_host: 10.0` to a float and `yes` to a bool; a non-string
+        host or credential reaches paho as an uncatchable TypeError, so it must fail
+        validation instead."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = {"broker_host": 10.0}
+        with pytest.raises(ConfigError, match="broker_host must be a string"):
+            validate_settings(sample_settings, source="nuki")
+        sample_settings["mqtt"] = {"broker_host": "mqtt.example.com", "username": 12345}
+        with pytest.raises(ConfigError, match="username must be a string"):
+            validate_settings(sample_settings, source="nuki")
+
+    def test_falsy_non_string_mqtt_host_reports_type_not_missing(self, sample_settings):
+        """`broker_host: no` is False in YAML and `broker_host: 0` is an int - the user
+        did write something, so the message must say what's wrong with it rather than
+        claiming the field is missing. A blank string still counts as missing."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        for falsy in (False, 0):
+            sample_settings["mqtt"] = {"broker_host": falsy}
+            with pytest.raises(ConfigError, match="broker_host must be a string"):
+                validate_settings(sample_settings, source="nuki")
+        sample_settings["mqtt"] = {"broker_host": "   "}
+        with pytest.raises(ConfigError, match="broker_host is required"):
+            validate_settings(sample_settings, source="nuki")
+
+    def test_falls_back_to_the_same_default_source_as_the_runtime(self, sample_settings):
+        """With neither sources: nor default_source:, sendtoinflux.py runs
+        DEFAULT_SOURCE - so validation must check that source's block, or a config
+        whose effective source has no settings section passes --check-config and then
+        dies at startup."""
+        del sample_settings["sources"]
+        del sample_settings["default_source"]
+        validate_settings(sample_settings)  # hue block present, matches what runs
+        del sample_settings[DEFAULT_SOURCE]
+        with pytest.raises(ConfigError, match=f"no configuration section found for source '{DEFAULT_SOURCE}'"):
+            validate_settings(sample_settings)
+
+    def test_non_string_default_source_is_reported_not_silently_replaced(self, sample_settings):
+        """YAML turns `default_source: no` into False. Treating any falsy value as
+        "unset" would silently run DEFAULT_SOURCE instead of what the admin wrote;
+        it must be reported as the malformed value it is."""
+        del sample_settings["sources"]
+        sample_settings["default_source"] = False
+        with pytest.raises(ConfigError, match="must be strings"):
+            validate_settings(sample_settings)
+
+    def test_blank_default_source_falls_back(self, sample_settings):
+        """An absent or blank default_source legitimately means "unset"."""
+        del sample_settings["sources"]
+        sample_settings["default_source"] = "   "
+        assert resolve_default_source(sample_settings) == DEFAULT_SOURCE
+        validate_settings(sample_settings)
+
+    def test_explicit_null_entry_in_sources_is_rejected(self, sample_settings):
+        """A null entry is a malformed list entry, not an absent default - it must be
+        reported rather than silently skipped."""
+        sample_settings["sources"] = ["hue", None]
+        with pytest.raises(ConfigError, match="must be strings"):
+            validate_settings(sample_settings)
 
 
 class TestGetClass:
@@ -283,6 +420,21 @@ class TestGetClass:
                 result = get_class("Speedtest")
                 mock_speedtest.assert_called_once_with("speedtest", settings_file=None)
                 assert result is mock_speedtest.return_value
+
+    def test_get_class_returns_nuki_for_lowercase(self, sample_settings):
+        """get_class('nuki') returns Nuki instance with source 'nuki'."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            with patch("toinflux.nuki.Nuki") as mock_nuki:
+                result = get_class("nuki")
+                mock_nuki.assert_called_once_with("nuki", settings_file=None)
+                assert result is mock_nuki.return_value
+
+    def test_get_class_mqtt_data_handler_is_not_selectable(self):
+        """MqttDataHandler is an intermediate transport parent, not a source - it is
+        exported for reuse but must never resolve via --source, same as DataHandler."""
+        with pytest.raises(ConfigError):
+            get_class("MqttDataHandler")
 
     def test_get_class_unknown_source_raises_config_error(self):
         """get_class with unknown source raises ConfigError."""

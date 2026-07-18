@@ -50,6 +50,8 @@ DataHandler      (toinflux/influx.py)          — base; owns send_data() → In
 ├── OpenMeteo      (toinflux/openmeteo.py)
 ├── Octopus        (toinflux/octopus.py)
 ├── Speedtest      (toinflux/speedtest.py)
+├── MqttDataHandler(toinflux/mqtt.py)        — intermediate parent for MQTT transport
+│   └── Nuki       (toinflux/nuki.py)
 └── MyEnergi       (toinflux/myenergi.py)     — intermediate parent for MyEnergi API auth
     ├── Zappi      (toinflux/myenergi.py)
     ├── Eddi       (toinflux/myenergi.py)
@@ -63,6 +65,24 @@ If a write to InfluxDB fails, `send_data()` buffers the point in memory instead 
 Failure classification is deliberately **not** trusted per-status-code as a verdict: `InfluxWriteError.status_code` carries the HTTP status (or `None` for a connection failure), and `_flush_buffer()`/`_flush_head()` count how many times the server has *rejected* (a non-transient 4xx - 408/429 are excluded via `TRANSIENT_CLIENT_ERRORS`, since rate-limiting/timeouts say nothing about the point) each specific point, dropping it with a warning only after `MAX_POINT_REJECTIONS` separate rejections. Connection failures, 5xx, 408, and 429 never count, so an arbitrarily long outage or rate-limit burst can't age points out - only a point the server itself keeps refusing (malformed → 400, outside the retention window → 422 on InfluxDB v2, oversized → 413) is given up on, and a middlebox transiently answering 4xx for a down InfluxDB can't mass-discard the backlog (each point survives `MAX_POINT_REJECTIONS` attempts). When a batched chunk is rejected, the flush falls back to per-point posting for that chunk to isolate the offender(s). Heartbeat writes pass `use_buffer=False` - a heartbeat is a live signal with no replay value, so it neither consumes buffer capacity nor triggers a redundant second flush per failed cycle. `validate_settings()` rejects duplicate entries in `sources:` (`ConfigError`) - two workers for one source name would share (and race on) one buffer.
 
 Speedtest's `get_data()` additionally rejects an implausible `ping` (>= 5000 ms) as a `SourceConnectionError` rather than writing it. speedtest-cli's `get_best_server()` times each of the 3 latency probes it makes per candidate server with a hardcoded 10-second connection timeout (baked into `SpeedtestHTTPConnection`/`SpeedtestHTTPSConnection`'s constructor default - never overridden by `get_best_server()`, so it applies regardless of the `timeout` passed to `speedtest.Speedtest()`); a probe that doesn't complete within that raises `socket.timeout`, which is caught alongside every other connection failure and penalised with a hardcoded `3600` (seconds) instead of a real sample. The 3 per-server samples (real or penalty) are summed, divided by a fixed 6, and converted to milliseconds - so a real (non-penalised) probe can never contribute more than 10s to that sum, making `(3 * 10 / 6) * 1000 = 5000` ms the true ceiling for a genuine measurement. If every probe to a server fails (observed in practice during a transient network blip), the reported `ping` comes out around 1,800,000 ms instead of triggering an error, and would otherwise be written to InfluxDB as if it were real.
+
+Nuki is the first MQTT-based source: `MqttDataHandler` (`toinflux/mqtt.py`) owns the generic
+transport (connect, subscribe from inside `on_connect` - a subscription issued before the CONNACK
+completes can be silently lost - collect for a fixed window, disconnect), reading broker config from
+the shared top-level `mqtt:` settings block (mirroring `influx:` - the broker and its `mqtt-password`
+credential are per-install infrastructure, not per-source). The polling-per-interval architecture
+works over MQTT only because Nuki publishes every state topic with the retain flag set, so a short
+subscribe window receives the full last-known state of every provisioned lock - equivalent to an HTTP
+GET. Failure mapping is deliberately strict: bad credentials arrive asynchronously as a failed CONNACK
+(never as an exception from `connect()`), and a broker that accepts TCP but never completes the MQTT
+handshake raises `SourceConnectionError` rather than returning an empty result - either would
+otherwise masquerade as "no data". `Nuki` (`toinflux/nuki.py`) holds only vendor logic: filtering to
+known state topics (command/event topics are ignored), grouping by device ID, prefixing field keys
+with each lock's own Nuki-app name, and resolving the numeric `state`/`doorsensorState` codes to
+labels via hardcoded tables from the MQTT API spec (unlike the Bridge HTTP API, MQTT publishes no
+`stateName` strings; an unrecognised code is written through as its raw number). `paho-mqtt` (a
+source-specific runtime dependency like `speedtest-cli`, pure Python so the `.deb`'s
+`Architecture: all` design holds) is imported only in `toinflux/mqtt.py`.
 
 ### Entry point (`sendtoinflux.py`)
 
@@ -93,10 +113,50 @@ Speedtest's `get_data()` additionally rejects an implausible `ping` (>= 5000 ms)
 ### Adding a new data source
 
 1. Create `toinflux/newsource.py` — class inheriting `DataHandler`, implement `get_data()`.
+   (For an MQTT-based source, inherit `MqttDataHandler` instead and also add the source's name
+   to `MQTT_SOURCES` in `toinflux/general.py`, so `--check-config` validates the shared `mqtt`
+   block for it.)
 2. Register it in `get_class()` in `toinflux/general.py` and add it to `toinflux/__init__.py`.
-3. Add a section to `example_settings.yaml`.
+3. Add a section to `example_settings.yaml`. Any credential field also gets an entry in
+   `CREDENTIAL_FIELDS`/`PLACEHOLDER_VALUES` (`toinflux/credentials.py`) — that alone makes
+   `send-to-influx-set-credential <name>` work, the machinery is fully table-driven.
 4. Add tests in `tests/test_newsource.py`, reusing fixtures from `tests/conftest.py`.
-5. Update README.md, CLAUDE.md, and `.github/copilot-instructions.md`.
+5. Update README.md, UNITS.md, CLAUDE.md, and `.github/copilot-instructions.md`.
+6. Wire the source into the debconf install flow — a mechanical checklist, not a judgment call
+   (every rule below is an existing, tested convention; the scenario suite enforces most of them):
+   - (a) Add the source's name to the `sources-to-configure` multiselect `Choices` in
+     `packaging/deb/send-to-influx.templates`, **appending at the end** — the question-visibility
+     scenario in `test-packaging.sh` selects existing sources by position number, so inserting
+     mid-list silently retargets those tests.
+   - (b) Credential/identity/connection fields get conditional questions (templates + a
+     `case "$SOURCES"` block in `packaging/deb/config`), all priority `high` — debconf's default
+     threshold is `high`, so anything lower is silently skipped on a normal install. Tuning
+     fields (`interval`, `db`, `timeout`, `fields` lists) are **never** prompted for.
+   - (c) Secrets are `Type: password` templates; `postinst` migrates them via
+     `send-to-influx-set-credential` (stdin pipe, best-effort via the `set_secret` helper) and
+     clears the stored answer with `db_set ""` immediately after `db_get` — never
+     `db_unregister` (it deletes the seen flag, causing blank re-prompts on every upgrade). Add
+     every credential-bearing answer to the final unconditional sweep loop too.
+   - (d) If the source uses a *shared* infrastructure block (like `mqtt:`), its questions are
+     asked once, gated on any source needing that block being selected — not per-source, and
+     not unconditionally (that's InfluxDB's special status only, since every install needs it).
+     A credential already stored in systemd-creds satisfies a blank secret prompt on
+     reconfigure, and non-secret fields provided alongside a blank secret are still applied.
+   - (e) Auto-enable (`--enable-source`) only when every required field actually resolved (and
+     `INFLUX_OK=1`) — "was it ticked" is not enough; otherwise print a specific
+     "not fully configured" warning and leave it opt-in.
+   - (e2) If the source introduces a **new settings section** (its own block, or shared
+     infrastructure like `mqtt:`), `postinst` must `--ensure-section` it before writing fields or
+     enabling the source. `settings.yaml` is written once at install time and never rewritten by an
+     upgrade, so a section added by a later release simply doesn't exist on existing installs:
+     `--set-field` fails, and `--enable-source` then writes the source into `sources:` with no block
+     behind it, which makes `load_settings()` raise a fatal `ConfigError` and stops the **whole
+     service**, taking every already-working source down with it.
+   - (f) Extend `packaging/deb/test-packaging.sh`: seed the new source's answers in the
+     seeded-install scenario (assert fields land in settings.yaml, credentials in the credstore,
+     plaintext absent from settings.yaml *and* debconf's database), and extend the
+     question-visibility scenario (questions appear when the source is selected, and for
+     conditional shared blocks, do **not** appear when it isn't).
 
 ### Testing conventions
 
@@ -115,8 +175,33 @@ Speedtest's `get_data()` additionally rejects an implausible `ping` (>= 5000 ms)
 
 - `pyproject.toml` is the single source of truth for the package version (`[project].version`) and runtime dependencies (dynamically read from `requirements.txt`). Bump the version there, not in `sendtoinflux.py`.
 - `sendtoinflux.py`'s `__version__` is read from installed package metadata (`importlib.metadata.version("send-to-influx")`), falling back to `"0.0.0-dev"` when run from a source checkout without the package installed. `requirements-dev.txt` includes `-e .` so dev/test environments have it installed and see the real version.
-- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/postinst`/`prerm`/`postrm`). `/etc/send-to-influx/settings.yaml` is deliberately *not* a dpkg conffile: `postinst` and `send-to-influx-set-credential` write debconf answers/sentinels into it, and dpkg's conffile machinery treats any maintainer-script write as a local modification (Debian Policy 10.7.3 forbids the combination) - guaranteeing a "modified (by you or by a script)" prompt on every upgrade that ships a changed example, with a one-keypress path to replacing a configured file with the pristine example. Instead the example ships at `/usr/share/send-to-influx/example_settings.yaml` and `postinst` copies it into place only if `/etc/send-to-influx/settings.yaml` doesn't exist (the Policy 10.7.3 "configuration files handled by maintainer scripts" pattern; `postrm` removes it on purge, as that pattern requires) - so upgrades never touch the live file at all. On upgrade (and after a `dpkg-reconfigure` that rewrote configuration), `postinst` restarts the service if - and only if - it's currently running, so unattended upgrades don't leave the replaced code running until the next reboot; a stopped service is never started. Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead symlinks every minor from 3.10 through 3.30's `lib/pythonX.Y` to the one actually populated (both bounds come from one `PYTHON_MAX_SUPPORTED_MINOR` variable, so `Depends:` and the symlink range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds the same script's output on an `ubuntu-24.04-arm` runner on every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - catching both a future dependency change that makes a compiled extension load-bearing rather than optional, and any regression in the maintainer-script behaviour below, before it can merge; `bookworm-verify` re-runs the same suite in a `debian:12` container for systemd-252 coverage (the restart scenario self-skips there - no running systemd - but the systemd-creds *tooling* is the real 252 binaries, which is what caught out 4.1). See the README's "Running as a systemd service" section.
-- `packaging/deb/test-packaging.sh` is the scenario suite for the maintainer scripts - shell behaviour pytest can't reach. Against a built `.deb` it asserts, in order: upgrade over the *latest published release* (obsolete-conffile handover, no re-prompt of the old `db_unregister`-era secret, config/credentials preserved; skipped gracefully offline or via `SKIP_RELEASE_UPGRADE=1`); a fresh debconf-seeded install (fields applied, credential migrated, plaintext secret absent from both `settings.yaml` and debconf's own database, ownership/modes, no conffiles, `/opt` root-owned); plain-upgrade silence with an *interactive* frontend over a hand-edited config (no prompts, no warnings, file byte-identical); restart-on-upgrade of a running service (real `MainPID` change - the example config's placeholder values pass validation, workers just retry, so the service stays active without a real InfluxDB; skipped where systemd isn't running, e.g. containers); `dpkg-reconfigure` semantics (answers re-applied, a stored systemd-creds credential satisfies the blank secret prompt, running service restarted); per-source question visibility at debconf's *default* priority (`high`, via the teletype frontend); and purge (config, credentials, debconf answers, service all gone). It is deliberately destructive - CI runners or throwaway containers only, requires root. Every assertion maps to something that regressed, or nearly regressed, during PR #48.
+- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/preinst`/`postinst`/`prerm`/`postrm`). `/etc/send-to-influx/settings.yaml` is deliberately *not* a dpkg conffile: `postinst` and `send-to-influx-set-credential` write debconf answers/sentinels into it, and dpkg's conffile machinery treats any maintainer-script write as a local modification (Debian Policy 10.7.3 forbids the combination) - guaranteeing a "modified (by you or by a script)" prompt on every upgrade that ships a changed example, with a one-keypress path to replacing a configured file with the pristine example. Instead the example ships at `/usr/share/send-to-influx/example_settings.yaml` and `postinst` copies it into place only if `/etc/send-to-influx/settings.yaml` doesn't exist (the Policy 10.7.3 "configuration files handled by maintainer scripts" pattern; `postrm` removes it on purge, as that pattern requires) - so upgrades never touch the live file at all. On upgrade (and after a `dpkg-reconfigure` that rewrote configuration), `postinst` restarts the service if - and only if - it's currently running, so unattended upgrades don't leave the replaced code running until the next reboot; a stopped service is never started. Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead renames it to the version-independent `lib/python3` and `postinst` symlinks every supported minor to it (see the `preinst`/layout bullet below for why the symlinks are created there rather than shipped; both bounds come from `PYTHON_MIN_SUPPORTED_MINOR`/`PYTHON_MAX_SUPPORTED_MINOR`, which also drive `Depends:` and are substituted into `postinst`, so the range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds the same script's output on an `ubuntu-24.04-arm` runner on every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - catching both a future dependency change that makes a compiled extension load-bearing rather than optional, and any regression in the maintainer-script behaviour below, before it can merge; `bookworm-verify` re-runs the same suite in a `debian:12` container for systemd-252 coverage (the restart scenario self-skips there - no running systemd - but the systemd-creds *tooling* is the real 252 binaries, which is what caught out 4.1). See the README's "Running as a systemd service" section.
+- `packaging/deb/preinst` deletes the whole bundled venv (`/opt/send-to-influx/venv`) so the
+  unpack that follows lays down a pristine one. The venv is entirely package-owned and recreated by
+  every install - no configuration (that's `/etc/send-to-influx`), no credentials (the credstore),
+  nothing user-editable - and wiping it removes several failure modes at once: stale modules being
+  imported in preference to new ones (a locally-built 4.4 once logged its 4.4 banner while running
+  pre-4.3 library code, failing with "unexpected keyword argument 'use_buffer'" and "Source nuki not
+  found"), leftover `lib/python<major.minor>/` trees from a package built against a different
+  interpreter, and runtime-generated `__pycache__` files that dpkg doesn't own and won't clean up.
+  **The safety guard is the `DEBCONF_RECONFIGURE=1` early exit at the top**, and it is essential:
+  `dpkg-reconfigure` also runs `preinst`, as `upgrade <version>` - indistinguishable from a real
+  upgrade by its arguments alone - but with *no unpack following it*, so anything deleted on that
+  path is gone permanently. An earlier version without that guard destroyed the installation on
+  every reconfigure. `DEBCONF_RECONFIGURE` is the same flag `postinst` uses to tell the two apart,
+  and is verified to be visible in `preinst`.
+- Relatedly, `build-deb.sh` names the venv's real site-packages directory `lib/python3` (version
+  *independent*), and `postinst` - not the package - creates the `lib/python3.X -> python3` symlinks
+  across the supported range, removed again by `postrm`. Both details exist to keep dpkg quiet and
+  correct: a version-named real directory would need to swap places with a symlink whenever the
+  build interpreter differed from the installed one (which dpkg cannot reliably do), and shipping
+  the symlinks in the package would leave them in place during dpkg's post-unpack cleanup, so old
+  `lib/python3.<minor>/...` paths would resolve through them into the freshly-unpacked tree and fail
+  to `rmdir` - ~166 "unable to delete old directory" warnings on an upgrade where nothing was
+  actually wrong. The supported range lives once, as `PYTHON_MIN/MAX_SUPPORTED_MINOR` in
+  `build-deb.sh`, which drives `Depends:` and is substituted into `postinst` at build time (the
+  build fails if a placeholder survives).
+- `packaging/deb/test-packaging.sh` is the scenario suite for the maintainer scripts - shell behaviour pytest can't reach. Against a built `.deb` it asserts, in order: upgrade over the *latest published release* (obsolete-conffile handover, no re-prompt of the old `db_unregister`-era secret, config/credentials preserved; skipped gracefully offline or via `SKIP_RELEASE_UPGRADE=1`); a fresh debconf-seeded install (fields applied, credential migrated, plaintext secret absent from both `settings.yaml` and debconf's own database, ownership/modes, no conffiles, `/opt` root-owned); plain-upgrade silence with an *interactive* frontend over a hand-edited config (no prompts, no warnings, file byte-identical); restart-on-upgrade of a running service (real `MainPID` change - the example config's placeholder values pass validation, workers just retry, so the service stays active without a real InfluxDB; skipped where systemd isn't running, e.g. containers); `dpkg-reconfigure` semantics (answers re-applied, a stored systemd-creds credential satisfies the blank secret prompt, running service restarted); post-upgrade `dpkg-reconfigure` against a release-era `settings.yaml` (the `mqtt:`/`nuki:` sections back-filled by `--ensure-section`, the venv surviving - `preinst` also runs on that path - and the result still passing `--check-config`); incoherent MQTT auth (a username with no password material warns instead of auto-enabling); per-source question visibility at debconf's *default* priority (`high`, via the teletype frontend), including that the conditional `mqtt-*` questions are absent when no MQTT source is selected; and purge (config, credentials, debconf answers, service, and the postinst-created venv symlinks all gone). It is deliberately destructive - CI runners or throwaway containers only, requires root. Every assertion maps to something that regressed, or nearly regressed, during PR #48.
 - `.github/workflows/release.yaml`: triggered by a GitHub Release being **published** (`on: release: types: [published]`), *not* by tag pushes - so tags can be created for other purposes without triggering a build. The release process is: draft the release in the UI (tag = bare `MAJOR.MINOR` matching `pyproject.toml`, no `v` prefix; hand-written notes on top of the generated ones) and publish; the workflow then runs the test suite, verifies the release tag matches `pyproject.toml`'s version exactly, builds the `.deb`, and attaches it to the release. Uploads go by **release id straight from the event payload** - the `releases/tags/{tag}` lookup endpoint is never called, after it served 503s for an extended period during the 4.3 release, which `gh release upload <tag>` rendered as a bogus "release not found" that failed the run (the 4.3 `.deb` was rescued by hand-uploading the run's saved artifact via the release-id endpoint - the same path the workflow now uses; the artifact upload exists precisely so that manual rescue is always possible). No in-job retries by design: a failure is reported plainly and the remedy is re-running the failed job. APT publishing moved out on 2026-07-15.
   - The flat APT repo at `https://apt.l337.org/` is owned by [L337-org/apt](https://github.com/L337-org/apt) - an hourly single-writer aggregator that pulls `.deb` assets from L337-org projects' GitHub Releases (this repo is listed in its `repos.yaml`), regenerates and signs the index (`APT_GPG_PRIVATE_KEY`/`CI_COMMIT_SIGNING_KEY` live *there* now, not here), and pushes to its own `gh-pages`. A new release here appears in the APT repo within the hour (or immediately via that repo's *Run workflow* button). This repo's own `gh-pages` branch and publishing secrets are vestigial once this lands and are removed as a post-merge follow-up.
   - `https://gavinlucas.github.io/send-to-influx/` (the pre-org-move URL) serves a frozen 4.2 snapshot from a placeholder repo at the old name, so pre-move installs keep working; the repo has lived in the `L337-org` org since 2026-07-15.
@@ -164,8 +249,8 @@ the source-checkout/screen-session path, where `systemd-creds` doesn't apply at 
 
 - `toinflux/credentials.py`: `CREDENTIAL_FIELDS` is the single source of truth mapping a systemd-creds
   credential name (e.g. `influx-token`) to the `(top-level key, field)` it overlays in the parsed
-  settings dict (e.g. `("influx", "token")`) - 6 credentials across `influx` (`token`, `user`,
-  `password`), `hue` (`user`), `myenergi` (`apikey`), `octopus` (`api_key`). `PLACEHOLDER_VALUES`
+  settings dict (e.g. `("influx", "token")`) - 7 credentials across `influx` (`token`, `user`,
+  `password`), `hue` (`user`), `mqtt` (`password`), `myenergi` (`apikey`), `octopus` (`api_key`). `PLACEHOLDER_VALUES`
   matches `example_settings.yaml`'s literal placeholder text per field; `sentinel_for(name)` returns
   the cosmetic string written into `settings.yaml` once a field is migrated (never read back for real
   use - purely informational for a human reading the file). `apply_credential_substitution(settings)`
@@ -284,6 +369,27 @@ from `postinst`, once package files are unpacked and everything's been answered.
   *computed* default (checks `$LC_ALL`/`$LANG` for a `_US` territory code, defaulting to Celsius
   otherwise) via `db_set` before the first `db_input`, rather than a silent guess - getting temperature
   units wrong is immediately visible to the user in a way the other tuning fields aren't.
+- The shared MQTT broker block (`mqtt-broker-host`/`mqtt-username`/`mqtt-password`) is the second
+  shared-infrastructure question group after InfluxDB, but *conditional* where InfluxDB's is
+  unconditional: it's only asked (and only processed by `postinst`) when an MQTT-based source
+  (currently `nuki`) is in the `sources-to-configure` selection - every install needs InfluxDB,
+  but only MQTT sources have a broker, so a non-MQTT install must never be prompted for one.
+  Its stored-credential semantics mirror InfluxDB's: a blank `mqtt-password` on reconfigure is
+  satisfied by an existing `mqtt-password.cred`, and non-secret fields provided alongside a blank
+  secret are still applied - except `mqtt-broker-host`, which is *required* like `hue-host` (not
+  blank-keeps like `influx-url`): debconf string answers persist across reconfigures, so any
+  install configured through the prompts always has a non-blank host anyway, and a blank one
+  means hand-configured - where auto-enable would be speculative (possibly against the shipped
+  placeholder host), so those installs hand-edit `sources:` instead, same precedent as
+  plaintext-settings credentials. Blank username *and* password mean anonymous broker access - a
+  valid configuration, not an incomplete one. Auth must be *coherent* to auto-enable though: a
+  username with no password material (neither typed nor stored) warns instead of enabling a
+  guaranteed auth-rejection retry loop. And switching an existing authenticated install to
+  anonymous is not expressible through the prompts (blank means keep, per the standing
+  no-clearing-via-debconf convention) - it's done by blanking `mqtt.username` in settings.yaml
+  plus `send-to-influx-set-credential mqtt-password --remove`.
+  `mqtt-username` is cleared from debconf's database after use like
+  `influx-identity` (the other half of a credential pair), and both are in the final sweep.
 - `postinst` (inside the fresh-install-or-reconfigure gate above): `sources-to-configure` is read
   first (`$SOURCES`, purely to know whether *anything* was
   selected - no processing happens from it yet), then InfluxDB is processed unconditionally,

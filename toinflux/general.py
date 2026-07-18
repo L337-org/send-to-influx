@@ -16,6 +16,13 @@ import yaml
 from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, SENTINEL_PREFIX, apply_credential_substitution
 from toinflux.exceptions import ConfigError
 
+# The source sendtoinflux.py runs when neither sources: nor default_source: is
+# configured. Defined here so validate_settings() checks exactly what the runtime
+# will actually run - the two previously disagreed (the runtime fell back to "hue"
+# while validation checked nothing), so --check-config could report OK on a config
+# whose effective source had no settings block at all.
+DEFAULT_SOURCE = "hue"
+
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_LOG_BACKUP_COUNT = 3
 
@@ -115,6 +122,7 @@ def get_class(source, settings_file=None):
     """
     from toinflux.carbonintensity import CarbonIntensity
     from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
+    from toinflux.nuki import Nuki
     from toinflux.octopus import Octopus
     from toinflux.openmeteo import OpenMeteo
     from toinflux.philipshue import Hue
@@ -126,6 +134,7 @@ def get_class(source, settings_file=None):
         "Harvi": Harvi,
         "Hue": Hue,
         "MyEnergi": MyEnergi,
+        "Nuki": Nuki,
         "Octopus": Octopus,
         "OpenMeteo": OpenMeteo,
         "Speedtest": Speedtest,
@@ -139,6 +148,100 @@ def get_class(source, settings_file=None):
     except KeyError:
         raise ConfigError(f"Source {class_name} not found") from None
     return my_class
+
+
+# Sources that collect over MQTT and therefore need the shared top-level mqtt block.
+# When adding a new MQTT-based source (a MqttDataHandler child), add its name here so
+# validate_settings()/--check-config can catch a missing broker config up front rather
+# than letting the collector fail at runtime.
+MQTT_SOURCES = frozenset({"nuki"})
+
+
+def resolve_default_source(settings):
+    """
+    Return the source to run when no ``sources:`` list is configured.
+
+    Used by both ``validate_settings()`` and ``sendtoinflux.py`` so the two cannot
+    disagree about what actually runs - they previously did, and the result was
+    ``--check-config`` reporting OK on a config whose effective source had no
+    settings block at all.
+
+    Only an absent or blank ``default_source`` counts as unset. A non-string (YAML
+    turns ``default_source: no`` into ``False``) is returned unchanged rather than
+    silently replaced, so ``validate_settings()`` reports it as the malformed value
+    it is instead of quietly running something the admin never asked for.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: the configured default source, or DEFAULT_SOURCE when unset
+    """
+    value = settings.get("default_source")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return DEFAULT_SOURCE
+    return value
+
+
+def mqtt_block_errors(settings, context=""):
+    """
+    Return a list of error strings for the shared ``mqtt`` settings block itself -
+    its own type, ``broker_host`` presence and type, ``username``/``password`` types,
+    and ``broker_port`` type and range - independent of which sources happen to need
+    it. The type checks matter because YAML coerces silently (``broker_host: 10.0``
+    is a float, ``broker_host: yes`` is a bool) and a non-string reaches paho as a
+    raw TypeError that the transport's connection-error handling can't catch.
+
+    Shared by ``validate_settings()`` (config-check time) and
+    ``MqttDataHandler.collect_mqtt_messages()`` (runtime), deliberately: those are two
+    genuinely different entry points, since ``load_settings()`` only validates the
+    *configured* sources - a one-off ``--source nuki`` on an install where nuki isn't
+    in ``sources:`` reaches the transport without this block ever having been checked.
+    Keeping one copy of the rules means the two can't drift.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :param context: optional suffix for the broker_host message (e.g. which sources
+        required the block), used by validate_settings()
+    :type context: str
+    :return: error strings, empty when the block is usable
+    :rtype: list
+    """
+    mqtt = settings.get("mqtt")
+    if mqtt is None:
+        mqtt = {}
+    if not isinstance(mqtt, dict):
+        return [f"mqtt must be a mapping of broker settings (got {type(mqtt).__name__})"]
+    errors = []
+    host = mqtt.get("broker_host")
+    # "Absent" is None or a blank string only - a falsy *non*-string (broker_host: no
+    # is False in YAML, broker_host: 0 is an int) is something the user did write, and
+    # deserves the type error rather than being misreported as missing.
+    if host is None or (isinstance(host, str) and not host.strip()):
+        errors.append(f"mqtt.broker_host is required for MQTT-based sources{context}")
+    elif not isinstance(host, str):
+        # YAML coerces more than you'd expect - `broker_host: 10.0` is a float and
+        # `broker_host: yes` is a bool - and a non-string reaches paho as a raw
+        # TypeError the transport's OSError/ValueError handling doesn't catch.
+        errors.append(f"mqtt.broker_host must be a string (got {host!r})")
+    for field in ("username", "password"):
+        value = mqtt.get(field)
+        if value is not None and not isinstance(value, str):
+            # Same coercion trap: a numeric-looking broker username is plausible,
+            # and paho would fail on .encode() rather than anything catchable.
+            errors.append(f"mqtt.{field} must be a string (got {value!r})")
+    port = mqtt.get("broker_port", 1883)
+    # bool is an int subclass, so broker_port: true would otherwise pass as 1
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        errors.append(f"mqtt.broker_port must be an integer between 1 and 65535 (got {port!r})")
+    return errors
+
+
+def _validate_mqtt_block(settings, sources):
+    """Return a list of error strings for the shared mqtt block, which is required
+    if (and only if) an MQTT-based source is among the sources being validated."""
+    mqtt_sources = sorted(str(src) for src in sources if src in MQTT_SOURCES)
+    if not mqtt_sources:
+        return []
+    return mqtt_block_errors(settings, f" ({', '.join(mqtt_sources)})")
 
 
 def _validate_influx_block(influx):
@@ -198,7 +301,32 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
     influx = settings.get("influx", {})
     errors = _validate_influx_block(influx)
     is_v2 = bool(influx.get("token"))
-    sources = settings.get("sources") or [settings.get("default_source")]
+    # Normalise case to match the runtime path: get_class()/--source are explicitly
+    # case-insensitive (source_name is lowercased before instantiation), so validation
+    # must be too - otherwise --check-config --source Hue fails while --source Hue
+    # runs fine. Also makes the duplicate check catch case variants (['Hue', 'hue']).
+    raw_sources = settings.get("sources")
+    if raw_sources is not None and not isinstance(raw_sources, list):
+        # A scalar (sources: hue) or mapping would otherwise be iterated by
+        # character/key below - report it as the ConfigError it is, then fall back to
+        # default_source so the rest of validation still runs sensibly.
+        errors.append(f"sources must be a list (got {type(raw_sources).__name__})")
+        raw_sources = None
+    # An absent or empty sources list means the runtime falls back to
+    # default_source, and to DEFAULT_SOURCE if that is absent too - validate exactly
+    # what will actually run, or a config whose effective source has no settings
+    # block would pass --check-config and then fail at startup.
+    sources = raw_sources or [resolve_default_source(settings)]
+    # A non-string entry (e.g. a YAML mapping, or an explicit null, from a malformed
+    # sources list) would raise a raw TypeError from the dict/set membership tests
+    # below - report it as the ConfigError it really is, and validate the remaining
+    # string entries.
+    invalid = [src for src in sources if not isinstance(src, str)]
+    if invalid:
+        errors.append("sources entries must be strings (got: " + ", ".join(repr(s) for s in invalid) + ")")
+    sources = [src.lower() for src in sources if isinstance(src, str)]
+    if source:
+        source = source.lower()
     duplicates = sorted({str(src) for src in sources if sources.count(src) > 1})
     if duplicates:
         # A duplicated entry would spawn two worker threads sharing one source name -
@@ -210,6 +338,7 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
         sources = [*sources, source]
     for src in sources:
         errors.extend(_validate_source_block(src, settings, is_v2))
+    errors.extend(_validate_mqtt_block(settings, sources))
     if errors:
         for error in errors:
             logging.critical("%s: %s", settings_path, error)

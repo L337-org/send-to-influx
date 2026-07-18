@@ -17,6 +17,30 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Refuse to build from a tree containing a stale build/ directory. `pip install
+# "$REPO_ROOT"` runs setuptools' build_py, which copies package sources into
+# build/lib and SKIPS any file already there that looks newer - so a leftover
+# build/ silently ships the code it holds instead of the code in the tree. Not
+# hypothetical: a locally-built package shipped pre-Nuki library code under a 4.4
+# version banner, producing "Source nuki not found" and "send_data() got an
+# unexpected keyword argument use_buffer" at runtime while every file in the
+# working tree was correct. Aborting beats deleting it: the directory is the
+# developer's, and silently shipping the wrong code is far worse than one clear
+# message.
+#
+# Deliberately NOT checking *.egg-info: it holds only metadata (PKG-INFO,
+# entry_points.txt, ...) and no source copies, so it cannot shadow anything - and
+# it legitimately exists in CI, where the test job's `pip install -e .` creates it
+# in the same workspace the .deb is then built from.
+if [ -e "$REPO_ROOT/build" ] && [ "${ALLOW_STALE_BUILD_DIR:-0}" != "1" ]; then
+    echo "error: stale Python build directory: $REPO_ROOT/build" >&2
+    echo "(set ALLOW_STALE_BUILD_DIR=1 to override, e.g. if a future toolchain" >&2
+    echo "legitimately creates it during the build itself.)" >&2
+    echo "setuptools would copy code from there in preference to the current sources," >&2
+    echo "shipping the wrong code. Remove it and re-run:  rm -rf '$REPO_ROOT/build'" >&2
+    exit 1
+fi
 PKG_NAME="send-to-influx"
 BUILD_DIR="$(mktemp -d)"
 PKG_ROOT="$BUILD_DIR/pkg"
@@ -107,17 +131,53 @@ find "$PKG_ROOT/opt/send-to-influx/venv/lib" -type f \( -name "*.so" -o -name "*
 # site-packages failure this change exists to prevent, just at a higher version number.
 PYTHON_MAJOR_MINOR="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
     'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+PYTHON_MIN_SUPPORTED_MINOR=10
 PYTHON_MAX_SUPPORTED_MINOR=30
 VENV_LIB_DIR="$PKG_ROOT/opt/send-to-influx/venv/lib"
-for minor in $(seq 10 "$PYTHON_MAX_SUPPORTED_MINOR"); do
-    candidate="python3.${minor}"
-    if [ "$candidate" != "python${PYTHON_MAJOR_MINOR}" ] && [ ! -e "$VENV_LIB_DIR/$candidate" ]; then
-        ln -s "python${PYTHON_MAJOR_MINOR}" "$VENV_LIB_DIR/$candidate"
-    fi
-done
-
-VERSION="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
+# Read the version from the venv while its site-packages is still at the path the
+# interpreter computes (lib/python<major.minor>/) - after the rename below it is not
+# on sys.path at all. Run it from a neutral cwd too: `python -c` puts the current
+# directory on sys.path, and pip regenerates a *.egg-info in the source tree during
+# the install above, so running from the repo root would read the version out of
+# that source-tree artefact instead of out of what was actually installed into the
+# package. That masked this exact ordering bug (the lookup appeared to work while
+# silently consulting the wrong thing) and is the same failure class as building
+# from a stale build/ directory.
+VERSION="$(cd / && "$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
     "from importlib.metadata import version; print(version('${PKG_NAME}'))")"
+
+# Give the real site-packages directory a version-INDEPENDENT name and point every
+# supported minor at it as a symlink, rather than leaving the real directory named
+# after whichever interpreter happened to build the package.
+#
+# The reason is dpkg, not Python: with a version-named real directory, a package
+# built against a different Python minor than the installed one needs the real
+# directory and one of the symlinks to swap places, and dpkg cannot reliably
+# replace a directory with a symlink or vice versa. In practice it emits a long
+# list of "unable to delete old directory ... Directory not empty" warnings and can
+# leave the OLD directory shadowing the new one. With this layout the topology is
+# byte-identical no matter which interpreter built the package - lib/python3 is
+# always the real directory, every lib/python3.X is always a symlink - so there is
+# never a swap to perform. (preinst still clears the venv on upgrade, which is what
+# gets installs created under the old scheme onto this one.)
+mv "$VENV_LIB_DIR/python${PYTHON_MAJOR_MINOR}" "$VENV_LIB_DIR/python3"
+# The per-minor python3.X -> python3 symlinks are deliberately NOT shipped in the
+# package; postinst creates them (and postrm removes them). If they were shipped,
+# they would exist during dpkg's post-unpack cleanup of the previous version's
+# files, so every old lib/python3.<built-minor>/... path would resolve through the
+# new symlink into the freshly-unpacked tree - which is populated, so each rmdir
+# fails and dpkg prints "unable to delete old directory ... Directory not empty".
+# That is ~166 alarming warnings on an upgrade that is in fact completely fine (no
+# file is lost - verified by diffing the package contents against disk afterwards).
+# Creating them after the unpack sidesteps it entirely: at cleanup time the paths
+# simply do not exist, so there is nothing to warn about.
+
+# Optional override for locally-built dev packages (scripts/dev-build-deb.sh),
+# which stamp a "~dev<timestamp>.g<sha>" version so an installed dev build is
+# distinguishable from the release. "~" sorts BEFORE the bare version in Debian
+# ordering, so the real 4.4 release still upgrades cleanly over a 4.4~dev build.
+# Never set by CI or release.yaml - those always ship the pyproject version.
+VERSION="${DEB_VERSION_OVERRIDE:-$VERSION}"
 
 # The example settings ship under /usr/share; postinst copies them to
 # /etc/send-to-influx/settings.yaml only if that file doesn't exist yet.
@@ -136,12 +196,25 @@ cp "$REPO_ROOT/example_settings.yaml" "$PKG_ROOT/usr/share/send-to-influx/exampl
 
 # systemd unit (format-agnostic, stays at the top of packaging/) and .deb-specific maintainer scripts
 cp "$REPO_ROOT/packaging/send-to-influx.service" "$PKG_ROOT/lib/systemd/system/send-to-influx.service"
+cp "$REPO_ROOT/packaging/deb/preinst" "$PKG_ROOT/DEBIAN/preinst"
 cp "$REPO_ROOT/packaging/deb/postinst" "$PKG_ROOT/DEBIAN/postinst"
+# postinst creates the venv's python3.X -> python3 symlinks (see above), and needs
+# the same supported range this script uses for Depends: - substituted here rather
+# than duplicated as literals there.
+sed -i.bak \
+    -e "s/@PYTHON_MIN_SUPPORTED_MINOR@/${PYTHON_MIN_SUPPORTED_MINOR}/g" \
+    -e "s/@PYTHON_MAX_SUPPORTED_MINOR@/${PYTHON_MAX_SUPPORTED_MINOR}/g" \
+    "$PKG_ROOT/DEBIAN/postinst"
+rm -f "$PKG_ROOT/DEBIAN/postinst.bak"
+if grep -q "@PYTHON_M.._SUPPORTED_MINOR@" "$PKG_ROOT/DEBIAN/postinst"; then
+    echo "error: unsubstituted placeholder left in postinst" >&2
+    exit 1
+fi
 cp "$REPO_ROOT/packaging/deb/prerm" "$PKG_ROOT/DEBIAN/prerm"
 cp "$REPO_ROOT/packaging/deb/postrm" "$PKG_ROOT/DEBIAN/postrm"
 cp "$REPO_ROOT/packaging/deb/config" "$PKG_ROOT/DEBIAN/config"
 cp "$REPO_ROOT/packaging/deb/send-to-influx.templates" "$PKG_ROOT/DEBIAN/templates"
-chmod 755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm" "$PKG_ROOT/DEBIAN/config"
+chmod 755 "$PKG_ROOT/DEBIAN/preinst" "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm" "$PKG_ROOT/DEBIAN/config"
 
 # No hard Depends: on systemd - shipping a unit file doesn't require it
 # (Debian packages with units conventionally don't depend on an init), every
@@ -156,12 +229,17 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: all
-Depends: debconf (>= 0.5), python3 (>= 3.10), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
+Depends: debconf (>= 0.5), python3 (>= 3.${PYTHON_MIN_SUPPORTED_MINOR}), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
+Suggests: mosquitto, mosquitto-clients
 Maintainer: Gavin Lucas
 Description: Collects data from smart home / energy devices and writes it to InfluxDB
  send-to-influx polls Hue, MyEnergi, Octopus, Open-Meteo, National Grid Carbon
- Intensity and Speedtest sources and writes the results to InfluxDB using the
- line protocol, for visualisation in Grafana.
+ Intensity, Nuki smart locks (via MQTT) and Speedtest sources and writes the
+ results to InfluxDB using the line protocol, for visualisation in Grafana.
+ .
+ The Nuki source needs an MQTT broker on the local network - mosquitto (and
+ mosquitto-clients, for verifying the setup) are suggested rather than
+ depended on, since the broker may equally run on a different host.
 CONTROL
 
 OUT_FILE="${1:-${REPO_ROOT}/${PKG_NAME}_${VERSION}_all.deb}"
