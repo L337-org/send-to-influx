@@ -118,6 +118,12 @@ done
 
 VERSION="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
     "from importlib.metadata import version; print(version('${PKG_NAME}'))")"
+# Optional override for locally-built dev packages (scripts/dev-build-deb.sh),
+# which stamp a "~dev<timestamp>.g<sha>" version so an installed dev build is
+# distinguishable from the release. "~" sorts BEFORE the bare version in Debian
+# ordering, so the real 4.4 release still upgrades cleanly over a 4.4~dev build.
+# Never set by CI or release.yaml - those always ship the pyproject version.
+VERSION="${DEB_VERSION_OVERRIDE:-$VERSION}"
 
 # The example settings ship under /usr/share; postinst copies them to
 # /etc/send-to-influx/settings.yaml only if that file doesn't exist yet.

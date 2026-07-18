@@ -6,13 +6,22 @@
 # release.yaml) invokes packaging/deb/build-deb.sh directly and must keep
 # doing so; nothing here may become load-bearing for an automated build.
 #
-# Usage: scripts/dev-build-deb.sh [--container|--native]
+# Builds are version-stamped so an installed dev build is never mistaken for
+# the release: 4.4 becomes 4.4~dev<UTC timestamp>.g<short sha> (plus .dirty if
+# the work tree has uncommitted changes). "~" sorts BEFORE the bare version in
+# Debian ordering, so installing the real 4.4 over a 4.4~dev build is a normal
+# upgrade. `send-to-influx --version` reports the equivalent PEP 440 form
+# (4.4.dev<timestamp>+g<sha>), since pip rejects "~".
+#
+# Usage: scripts/dev-build-deb.sh [--container|--native] [--release]
 #
 #   (default)    build natively if dpkg-deb is available, otherwise fall back
 #                to a container automatically - so this just works on macOS
 #   --container  always build in a container, even on a Debian host (useful
 #                for reproducing a clean bookworm build)
 #   --native     never use a container; fail if dpkg-deb is missing
+#   --release    skip dev version stamping, producing the exact version in
+#                pyproject.toml - for reproducing the release artifact locally
 #
 # Environment:
 #   BUILD_IMAGE       container image (default: debian:12, matching CI's
@@ -23,19 +32,37 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_IMAGE="${BUILD_IMAGE:-debian:12}"
 MODE=auto
+STAMP=1
 
 for arg in "$@"; do
     case "$arg" in
         --container) MODE=container ;;
         --native) MODE=native ;;
+        --release) STAMP=0 ;;
         -h|--help) sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         *) echo "error: unknown option '$arg' (try --help)" >&2; exit 1 ;;
     esac
 done
 
-VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO_ROOT/pyproject.toml")"
-[ -n "$VERSION" ] || { echo "error: could not read version from pyproject.toml" >&2; exit 1; }
-OUT_NAME="send-to-influx_${VERSION}_all.deb"
+BASE_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO_ROOT/pyproject.toml")"
+[ -n "$BASE_VERSION" ] || { echo "error: could not read version from pyproject.toml" >&2; exit 1; }
+
+if [ "$STAMP" = 1 ]; then
+    TS="$(date -u +%Y%m%d%H%M%S)"
+    SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    DIRTY=""
+    git -C "$REPO_ROOT" diff --quiet HEAD 2>/dev/null || DIRTY=".dirty"
+    # Two spellings of the same thing: Debian sorts "~" before the bare version
+    # (so the release upgrades over a dev build), while pip requires PEP 440,
+    # where ".devN" means the same "pre-release of 4.4" and "+local" carries
+    # the sha. Keeping both in step is why they're derived together here.
+    DEB_VERSION="${BASE_VERSION}~dev${TS}.g${SHA}${DIRTY}"
+    PY_VERSION="${BASE_VERSION}.dev${TS}+g${SHA}${DIRTY}"
+else
+    DEB_VERSION="$BASE_VERSION"
+    PY_VERSION="$BASE_VERSION"
+fi
+OUT_NAME="send-to-influx_${DEB_VERSION}_all.deb"
 
 find_engine() {
     if [ -n "${CONTAINER_ENGINE:-}" ]; then
@@ -64,21 +91,30 @@ fi
 
 mkdir -p "$REPO_ROOT/dist"
 
+# Always build from a copy with pyproject.toml's version rewritten, never from
+# the work tree itself: build-deb.sh pip-installs the source and then reads the
+# version back out of the installed metadata, so patching the copy is what makes
+# `send-to-influx --version` agree with the package version - and doing it in a
+# copy means the work tree is never modified, even transiently.
+PATCH_PYPROJECT="import re,sys;p=sys.argv[1];s=open(p).read();open(p,'w').write(re.sub(r'^version = \".*\"',
+'version = \"'+sys.argv[2]+'\"',s,count=1,flags=re.M))"
+
 if [ "$MODE" = container ]; then
     ENGINE="$(find_engine)" || { echo "error: no container engine (docker/podman) found" >&2; exit 1; }
     echo "Building $OUT_NAME in a $BUILD_IMAGE container via $ENGINE..."
-    # The source is mounted read-only and copied inside, mirroring CI's
-    # bookworm-verify job: the build writes only to its own mktemp dir, and
-    # copying keeps a stray root-owned artifact from ever landing in the work
-    # tree. Only dist/ is mounted writable, and the finished package is
-    # chown'ed back to the invoking user so it isn't left root-owned.
+    # Source mounted read-only and copied inside, mirroring CI's bookworm-verify
+    # job; only dist/ is writable, and the finished package is chown'ed back to
+    # the invoking user so it isn't left root-owned.
     #
-    # shellcheck disable=SC2016  # single quotes are deliberate: $OUT_NAME and
-    # $HOST_UID/$HOST_GID must expand inside the container, from -e, not here.
+    # shellcheck disable=SC2016  # single quotes are deliberate: these expand
+    # inside the container, from -e, not here.
     "$ENGINE" run --rm \
         -v "$REPO_ROOT:/src:ro" \
         -v "$REPO_ROOT/dist:/out" \
         -e "OUT_NAME=$OUT_NAME" \
+        -e "PY_VERSION=$PY_VERSION" \
+        -e "DEB_VERSION_OVERRIDE=$DEB_VERSION" \
+        -e "PATCH_PYPROJECT=$PATCH_PYPROJECT" \
         -e "HOST_UID=$(id -u)" \
         -e "HOST_GID=$(id -g)" \
         "$BUILD_IMAGE" bash -ec \
@@ -87,6 +123,7 @@ if [ "$MODE" = container ]; then
             apt-get update -q >/dev/null
             apt-get install -yq python3 python3-venv python3-pip >/dev/null
             cp -r /src /build && cd /build
+            python3 -c "$PATCH_PYPROJECT" pyproject.toml "$PY_VERSION"
             bash packaging/deb/build-deb.sh "/out/$OUT_NAME"
             chown "$HOST_UID:$HOST_GID" "/out/$OUT_NAME"
         '
@@ -96,11 +133,18 @@ else
         echo "Drop --native (or pass --container) to build in a container instead." >&2
         exit 1
     fi
-    "$REPO_ROOT/packaging/deb/build-deb.sh" "$REPO_ROOT/dist/$OUT_NAME"
+    echo "Building $OUT_NAME..."
+    BUILD_COPY="$(mktemp -d)"
+    trap 'rm -rf "$BUILD_COPY"' EXIT
+    # -a to preserve the executable bits the maintainer scripts rely on.
+    cp -a "$REPO_ROOT/." "$BUILD_COPY/"
+    python3 -c "$PATCH_PYPROJECT" "$BUILD_COPY/pyproject.toml" "$PY_VERSION"
+    DEB_VERSION_OVERRIDE="$DEB_VERSION" "$BUILD_COPY/packaging/deb/build-deb.sh" "$REPO_ROOT/dist/$OUT_NAME"
 fi
 
 echo
 echo "Built: dist/$OUT_NAME"
+[ "$STAMP" = 1 ] && echo "  (dev build - 'send-to-influx --version' reports $PY_VERSION)"
 echo "Install for manual testing (on a DISPOSABLE machine/container):"
 echo "  sudo dpkg -i dist/$OUT_NAME"
 echo "Or run the destructive scenario suite against it (throwaway container/CI only):"
