@@ -33,8 +33,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # entry_points.txt, ...) and no source copies, so it cannot shadow anything - and
 # it legitimately exists in CI, where the test job's `pip install -e .` creates it
 # in the same workspace the .deb is then built from.
-if [ -e "$REPO_ROOT/build" ]; then
+if [ -e "$REPO_ROOT/build" ] && [ "${ALLOW_STALE_BUILD_DIR:-0}" != "1" ]; then
     echo "error: stale Python build directory: $REPO_ROOT/build" >&2
+    echo "(set ALLOW_STALE_BUILD_DIR=1 to override, e.g. if a future toolchain" >&2
+    echo "legitimately creates it during the build itself.)" >&2
     echo "setuptools would copy code from there in preference to the current sources," >&2
     echo "shipping the wrong code. Remove it and re-run:  rm -rf '$REPO_ROOT/build'" >&2
     exit 1

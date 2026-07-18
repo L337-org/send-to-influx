@@ -756,7 +756,10 @@ def _extract_section(text, name):
     # Walk back over the section's own comment block (contiguous comment lines
     # immediately above it), so the copied section keeps its explanatory header.
     first = start
-    while first > 0 and lines[first - 1].lstrip().startswith("#"):
+    # Not lstrip()'ed deliberately: a top-level section's own comment block starts
+    # in column 0, whereas an indented comment belongs to the *previous* section's
+    # body and must not be dragged along with this one.
+    while first > 0 and lines[first - 1].startswith("#"):
         first -= 1
     # A top-level section ends at the next line that starts in column 0 and isn't
     # blank - i.e. the next section or its comment block.

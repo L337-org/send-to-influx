@@ -175,3 +175,24 @@ class TestNuki:
         messages = [("nuki/oddness", "x"), ("nuki/2BB28570/state/extra", "1")] + FRONT_DOOR
         nuki = _nuki(_nuki_settings(sample_settings), messages)
         assert nuki.get_data()["Front_Door_stateName"] == "locked"
+
+    def test_decodes_float_and_non_numeric_payloads(self, sample_settings):
+        """_decode_scalar's float and string-fallback branches: MQTT payloads are bare
+        strings, so anything not bool/int must still land as a usable field value."""
+        messages = [
+            ("nuki/2BB28570/batteryChargeState", "85.5"),
+            ("nuki/2BB28570/mode", "door mode"),
+        ]
+        nuki = _nuki(_nuki_settings(sample_settings), messages)
+        result = nuki.get_data()
+        assert result["2BB28570_batteryChargeState"] == 85.5
+        assert result["2BB28570_mode"] == "door mode"
+
+    def test_bool_payload_never_resolves_to_a_state_label(self, sample_settings):
+        """bool is an int subclass and True == 1, so a state topic carrying "true"
+        must not silently become stateName="locked"."""
+        messages = [("nuki/2BB28570/state", "true")]
+        nuki = _nuki(_nuki_settings(sample_settings), messages)
+        result = nuki.get_data()
+        assert result["2BB28570_state"] is True
+        assert "2BB28570_stateName" not in result

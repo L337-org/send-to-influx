@@ -160,6 +160,11 @@ class Nuki(MqttDataHandler):
         if field in STRING_FIELDS:
             return field, raw
         value = Nuki._decode_scalar(raw)
+        # bool is an int subclass and False/True equal 0/1, so a state topic carrying
+        # "true" would otherwise resolve to a lock-state label - a silently wrong
+        # value rather than an obviously odd one.
+        if isinstance(value, bool):
+            return field, value
         if field == "state" and value in LOCK_STATE_NAMES:
             return "stateName", LOCK_STATE_NAMES[value]
         if field == "doorsensorState" and value in DOORSENSOR_STATE_NAMES:

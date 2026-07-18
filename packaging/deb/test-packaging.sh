@@ -349,6 +349,10 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
     systemctl is-active --quiet send-to-influx 2>/dev/null && fail "service still active after purge"
 fi
 debconf-show send-to-influx 2>/dev/null | grep -q . && fail "debconf answers survived purge"
+# postinst creates the venv's python3.X symlinks itself, so dpkg does not own them
+# and will not remove them - without postrm's cleanup /opt/send-to-influx survives a
+# purge as a directory of dangling symlinks.
+[ ! -e /opt/send-to-influx ] || fail "/opt/send-to-influx survived purge: $(ls -R /opt/send-to-influx | head -5)"
 pass "purge: config, credentials, drop-in, user, and debconf answers all removed"
 
 echo "ALL PACKAGING SCENARIOS PASSED"

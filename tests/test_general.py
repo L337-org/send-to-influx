@@ -407,6 +407,12 @@ class TestGetClass:
                 mock_nuki.assert_called_once_with("nuki", settings_file=None)
                 assert result is mock_nuki.return_value
 
+    def test_get_class_mqtt_data_handler_is_not_selectable(self):
+        """MqttDataHandler is an intermediate transport parent, not a source - it is
+        exported for reuse but must never resolve via --source, same as DataHandler."""
+        with pytest.raises(ConfigError):
+            get_class("MqttDataHandler")
+
     def test_get_class_unknown_source_raises_config_error(self):
         """get_class with unknown source raises ConfigError."""
         with pytest.raises(ConfigError):
