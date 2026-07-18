@@ -150,25 +150,64 @@ def get_class(source, settings_file=None):
 MQTT_SOURCES = frozenset({"nuki"})
 
 
-def _validate_mqtt_block(settings, sources):
-    """Return a list of error strings for the shared mqtt block, which is required
-    if (and only if) an MQTT-based source is among the sources being validated."""
-    mqtt_sources = sorted(str(src) for src in sources if src in MQTT_SOURCES)
-    if not mqtt_sources:
-        return []
+def mqtt_block_errors(settings, context=""):
+    """
+    Return a list of error strings for the shared ``mqtt`` settings block itself -
+    its own type, ``broker_host`` presence and type, ``username``/``password`` types,
+    and ``broker_port`` type and range - independent of which sources happen to need
+    it. The type checks matter because YAML coerces silently (``broker_host: 10.0``
+    is a float, ``broker_host: yes`` is a bool) and a non-string reaches paho as a
+    raw TypeError that the transport's connection-error handling can't catch.
+
+    Shared by ``validate_settings()`` (config-check time) and
+    ``MqttDataHandler.collect_mqtt_messages()`` (runtime), deliberately: those are two
+    genuinely different entry points, since ``load_settings()`` only validates the
+    *configured* sources - a one-off ``--source nuki`` on an install where nuki isn't
+    in ``sources:`` reaches the transport without this block ever having been checked.
+    Keeping one copy of the rules means the two can't drift.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :param context: optional suffix for the broker_host message (e.g. which sources
+        required the block), used by validate_settings()
+    :type context: str
+    :return: error strings, empty when the block is usable
+    :rtype: list
+    """
     mqtt = settings.get("mqtt")
     if mqtt is None:
         mqtt = {}
     if not isinstance(mqtt, dict):
         return [f"mqtt must be a mapping of broker settings (got {type(mqtt).__name__})"]
     errors = []
-    if not mqtt.get("broker_host"):
-        errors.append(f"mqtt.broker_host is required for MQTT-based sources ({', '.join(mqtt_sources)})")
+    host = mqtt.get("broker_host")
+    if not host:
+        errors.append(f"mqtt.broker_host is required for MQTT-based sources{context}")
+    elif not isinstance(host, str):
+        # YAML coerces more than you'd expect - `broker_host: 10.0` is a float and
+        # `broker_host: yes` is a bool - and a non-string reaches paho as a raw
+        # TypeError the transport's OSError/ValueError handling doesn't catch.
+        errors.append(f"mqtt.broker_host must be a string (got {host!r})")
+    for field in ("username", "password"):
+        value = mqtt.get(field)
+        if value is not None and not isinstance(value, str):
+            # Same coercion trap: a numeric-looking broker username is plausible,
+            # and paho would fail on .encode() rather than anything catchable.
+            errors.append(f"mqtt.{field} must be a string (got {value!r})")
     port = mqtt.get("broker_port", 1883)
     # bool is an int subclass, so broker_port: true would otherwise pass as 1
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         errors.append(f"mqtt.broker_port must be an integer between 1 and 65535 (got {port!r})")
     return errors
+
+
+def _validate_mqtt_block(settings, sources):
+    """Return a list of error strings for the shared mqtt block, which is required
+    if (and only if) an MQTT-based source is among the sources being validated."""
+    mqtt_sources = sorted(str(src) for src in sources if src in MQTT_SOURCES)
+    if not mqtt_sources:
+        return []
+    return mqtt_block_errors(settings, f" ({', '.join(mqtt_sources)})")
 
 
 def _validate_influx_block(influx):

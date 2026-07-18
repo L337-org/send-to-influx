@@ -9,6 +9,7 @@ import logging
 import time
 from paho.mqtt import client as mqtt_client
 from toinflux.influx import DataHandler
+from toinflux.general import mqtt_block_errors
 from toinflux.exceptions import ConfigError, SourceConnectionError
 
 # How long each call into paho's network loop blocks waiting for traffic. Small enough
@@ -58,16 +59,21 @@ class MqttDataHandler(DataHandler):
         :type timeout: float
         :return: (topic, payload) pairs in arrival order, payloads decoded as UTF-8
         :rtype: list
-        :raises ConfigError: if the shared ``mqtt`` settings block (or its
-            ``broker_host``) is missing - a config-shape problem, fatal like a missing
-            source block, not something the worker loop should retry
+        :raises ConfigError: if the shared ``mqtt`` settings block is missing,
+            malformed, or has an out-of-range ``broker_port`` - a config-shape
+            problem, fatal like a missing source block, not something the worker loop
+            should retry. Checked here as well as in ``validate_settings()`` because
+            that only covers the *configured* sources: a one-off ``--source nuki`` on
+            an install where nuki isn't in ``sources:`` would otherwise reach this
+            code unvalidated and fail with a raw AttributeError/TypeError.
         :raises SourceConnectionError: if the broker is unreachable, refuses the
             connection (including bad credentials via the CONNACK reason code), or
             accepts TCP but never completes the MQTT handshake within the window
         """
-        mqtt_settings = self.settings.get("mqtt")
-        if not mqtt_settings or not mqtt_settings.get("broker_host"):
-            raise ConfigError("MQTT sources need a top-level 'mqtt' settings block with 'broker_host' set")
+        errors = mqtt_block_errors(self.settings)
+        if errors:
+            raise ConfigError("; ".join(errors))
+        mqtt_settings = self.settings["mqtt"]
         host = mqtt_settings["broker_host"]
         port = mqtt_settings.get("broker_port", 1883)
         messages = []

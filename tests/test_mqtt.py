@@ -194,6 +194,27 @@ class TestMqttDataHandler:
             with pytest.raises(ConfigError, match="mqtt"):
                 handler.collect_mqtt_messages("nuki/+/+", WINDOW)
 
+    def test_malformed_mqtt_block_raises_config_error_at_runtime(self, sample_settings):
+        """The transport re-checks the block rather than trusting validate_settings():
+        load_settings() only validates *configured* sources, so a one-off
+        `--source nuki` on an install without nuki in sources: arrives here
+        unvalidated - a scalar mqtt block must be a ConfigError, not AttributeError."""
+        settings = _mqtt_settings(sample_settings)
+        settings["mqtt"] = "just-a-hostname-string"
+        handler = _handler(settings)
+        with patch("toinflux.mqtt.mqtt_client.Client"):
+            with pytest.raises(ConfigError, match="mqtt must be a mapping"):
+                handler.collect_mqtt_messages("nuki/+/+", WINDOW)
+
+    def test_invalid_broker_port_raises_config_error_at_runtime(self, sample_settings):
+        """Same for a non-integer/out-of-range port, which would otherwise surface as
+        a TypeError from deep inside the client."""
+        settings = _mqtt_settings(sample_settings, broker_port="1883")
+        handler = _handler(settings)
+        with patch("toinflux.mqtt.mqtt_client.Client"):
+            with pytest.raises(ConfigError, match="broker_port"):
+                handler.collect_mqtt_messages("nuki/+/+", WINDOW)
+
     def test_missing_broker_host_raises_config_error(self, sample_settings):
         """An mqtt block without broker_host is equally fatal, with a specific message."""
         settings = _mqtt_settings(sample_settings)
