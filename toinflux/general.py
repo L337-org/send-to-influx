@@ -181,7 +181,10 @@ def mqtt_block_errors(settings, context=""):
         return [f"mqtt must be a mapping of broker settings (got {type(mqtt).__name__})"]
     errors = []
     host = mqtt.get("broker_host")
-    if not host:
+    # "Absent" is None or a blank string only - a falsy *non*-string (broker_host: no
+    # is False in YAML, broker_host: 0 is an int) is something the user did write, and
+    # deserves the type error rather than being misreported as missing.
+    if host is None or (isinstance(host, str) and not host.strip()):
         errors.append(f"mqtt.broker_host is required for MQTT-based sources{context}")
     elif not isinstance(host, str):
         # YAML coerces more than you'd expect - `broker_host: 10.0` is a float and

@@ -317,6 +317,19 @@ class TestValidateSettings:
         with pytest.raises(ConfigError, match="username must be a string"):
             validate_settings(sample_settings, source="nuki")
 
+    def test_falsy_non_string_mqtt_host_reports_type_not_missing(self, sample_settings):
+        """`broker_host: no` is False in YAML and `broker_host: 0` is an int - the user
+        did write something, so the message must say what's wrong with it rather than
+        claiming the field is missing. A blank string still counts as missing."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        for falsy in (False, 0):
+            sample_settings["mqtt"] = {"broker_host": falsy}
+            with pytest.raises(ConfigError, match="broker_host must be a string"):
+                validate_settings(sample_settings, source="nuki")
+        sample_settings["mqtt"] = {"broker_host": "   "}
+        with pytest.raises(ConfigError, match="broker_host is required"):
+            validate_settings(sample_settings, source="nuki")
+
 
 class TestGetClass:
     """Tests for get_class function."""
