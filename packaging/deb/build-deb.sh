@@ -109,11 +109,23 @@ PYTHON_MAJOR_MINOR="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
     'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 PYTHON_MAX_SUPPORTED_MINOR=30
 VENV_LIB_DIR="$PKG_ROOT/opt/send-to-influx/venv/lib"
+# Give the real site-packages directory a version-INDEPENDENT name and point every
+# supported minor at it as a symlink, rather than leaving the real directory named
+# after whichever interpreter happened to build the package.
+#
+# The reason is dpkg, not Python: with a version-named real directory, a package
+# built against a different Python minor than the installed one needs the real
+# directory and one of the symlinks to swap places, and dpkg cannot reliably
+# replace a directory with a symlink or vice versa. In practice it emits a long
+# list of "unable to delete old directory ... Directory not empty" warnings and can
+# leave the OLD directory shadowing the new one. With this layout the topology is
+# byte-identical no matter which interpreter built the package - lib/python3 is
+# always the real directory, every lib/python3.X is always a symlink - so there is
+# never a swap to perform. (preinst still clears the venv on upgrade, which is what
+# gets installs created under the old scheme onto this one.)
+mv "$VENV_LIB_DIR/python${PYTHON_MAJOR_MINOR}" "$VENV_LIB_DIR/python3"
 for minor in $(seq 10 "$PYTHON_MAX_SUPPORTED_MINOR"); do
-    candidate="python3.${minor}"
-    if [ "$candidate" != "python${PYTHON_MAJOR_MINOR}" ] && [ ! -e "$VENV_LIB_DIR/$candidate" ]; then
-        ln -s "python${PYTHON_MAJOR_MINOR}" "$VENV_LIB_DIR/$candidate"
-    fi
+    ln -s python3 "$VENV_LIB_DIR/python3.${minor}"
 done
 
 VERSION="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
@@ -142,12 +154,13 @@ cp "$REPO_ROOT/example_settings.yaml" "$PKG_ROOT/usr/share/send-to-influx/exampl
 
 # systemd unit (format-agnostic, stays at the top of packaging/) and .deb-specific maintainer scripts
 cp "$REPO_ROOT/packaging/send-to-influx.service" "$PKG_ROOT/lib/systemd/system/send-to-influx.service"
+cp "$REPO_ROOT/packaging/deb/preinst" "$PKG_ROOT/DEBIAN/preinst"
 cp "$REPO_ROOT/packaging/deb/postinst" "$PKG_ROOT/DEBIAN/postinst"
 cp "$REPO_ROOT/packaging/deb/prerm" "$PKG_ROOT/DEBIAN/prerm"
 cp "$REPO_ROOT/packaging/deb/postrm" "$PKG_ROOT/DEBIAN/postrm"
 cp "$REPO_ROOT/packaging/deb/config" "$PKG_ROOT/DEBIAN/config"
 cp "$REPO_ROOT/packaging/deb/send-to-influx.templates" "$PKG_ROOT/DEBIAN/templates"
-chmod 755 "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm" "$PKG_ROOT/DEBIAN/config"
+chmod 755 "$PKG_ROOT/DEBIAN/preinst" "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm" "$PKG_ROOT/DEBIAN/config"
 
 # No hard Depends: on systemd - shipping a unit file doesn't require it
 # (Debian packages with units conventionally don't depend on an init), every

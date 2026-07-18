@@ -1232,3 +1232,63 @@ class TestMain:
             code = main(["--ensure-influx-storage", "hue_db"])
         assert code == 1
         run.assert_not_called()
+
+
+class TestEnsureSection:
+    """Tests for --ensure-section, which back-fills a settings.yaml section from the
+    shipped example. Needed because settings.yaml is written once at install time and
+    never rewritten by an upgrade, so a section added by a later release is missing on
+    exactly the installs that have been running longest."""
+
+    def _example(self, tmp_path):
+        example = tmp_path / "example.yaml"
+        example.write_text(
+            "# InfluxDB settings\ninflux:\n  url: 'http://x'\n\n"
+            "# Shared MQTT broker settings\n# second comment line\n"
+            'mqtt:\n  broker_host: "mqtt.example.com"\n  username: ""\n\n'
+            "# Nuki settings\nnuki:\n  db: 'nuki_db'\n  interval: 300\n",
+            encoding="utf8",
+        )
+        return str(example)
+
+    def test_adds_missing_section_with_its_comments(self, tmp_path):
+        """The section is copied verbatim, including the comment block above it - the
+        comments are the documentation the user needs to edit it."""
+        settings = tmp_path / "settings.yaml"
+        settings.write_text("# InfluxDB settings\ninflux:\n  url: 'http://x'\n", encoding="utf8")
+        assert credential_cli._ensure_section(str(settings), "mqtt", self._example(tmp_path)) is True
+        text = settings.read_text(encoding="utf8")
+        assert "# Shared MQTT broker settings" in text
+        assert "# second comment line" in text
+        assert yaml.safe_load(text)["mqtt"]["broker_host"] == "mqtt.example.com"
+
+    def test_preserves_existing_content_including_hand_edits(self, tmp_path):
+        """Appending must not disturb a single existing byte - users hand-edit this file."""
+        settings = tmp_path / "settings.yaml"
+        original = "# InfluxDB settings\ninflux:\n  url: 'http://mine'  # hand-edited\n"
+        settings.write_text(original, encoding="utf8")
+        credential_cli._ensure_section(str(settings), "nuki", self._example(tmp_path))
+        assert settings.read_text(encoding="utf8").startswith(original)
+
+    def test_is_a_no_op_when_the_section_already_exists(self, tmp_path):
+        """Idempotent: re-running (e.g. every dpkg-reconfigure) must not duplicate it."""
+        settings = tmp_path / "settings.yaml"
+        settings.write_text('mqtt:\n  broker_host: "already.here"\n', encoding="utf8")
+        assert credential_cli._ensure_section(str(settings), "mqtt", self._example(tmp_path)) is False
+        assert settings.read_text(encoding="utf8").count("mqtt:") == 1
+
+    def test_set_field_works_on_a_freshly_added_section(self, tmp_path):
+        """The whole point: --set-field previously failed with "no 'mqtt:' section
+        found" on an upgraded install; after ensuring the section it must succeed."""
+        settings = tmp_path / "settings.yaml"
+        settings.write_text("influx:\n  url: 'http://x'\n", encoding="utf8")
+        credential_cli._ensure_section(str(settings), "mqtt", self._example(tmp_path))
+        credential_cli._rewrite_settings_field(str(settings), "mqtt", "broker_host", "mqtt.gavin.lan")
+        assert yaml.safe_load(settings.read_text(encoding="utf8"))["mqtt"]["broker_host"] == "mqtt.gavin.lan"
+
+    def test_unknown_section_raises(self, tmp_path):
+        """A section the example doesn't have is an error, not a silent no-op."""
+        settings = tmp_path / "settings.yaml"
+        settings.write_text("influx:\n  url: 'http://x'\n", encoding="utf8")
+        with pytest.raises(credential_cli.CredentialCliError, match="no 'nosuch:' section"):
+            credential_cli._ensure_section(str(settings), "nosuch", self._example(tmp_path))

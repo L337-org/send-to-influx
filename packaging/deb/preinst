@@ -1,0 +1,37 @@
+#!/bin/sh
+# preinst for send-to-influx.deb
+set -e
+
+# Only "upgrade" (and "install" over a still-configured leftover) matter here;
+# a genuinely fresh install has nothing to clean up.
+case "$1" in
+    upgrade|install) ;;
+    *) exit 0 ;;
+esac
+
+# Remove any *version-named* site-packages directory left by a package built under
+# the old venv layout, so dpkg can lay down the current one cleanly.
+#
+# Background: the venv's site-packages used to live in lib/python<major.minor>/,
+# named after whichever interpreter built the package, with the other supported
+# minors symlinked to it. A package built against a different Python minor than the
+# installed one therefore needed a directory and a symlink to swap places, which
+# dpkg cannot reliably do: it emits a long list of "unable to delete old directory
+# ... Directory not empty" warnings (runtime-generated __pycache__ files, which dpkg
+# does not own, hold the directories open) and can leave the OLD directory shadowing
+# the new one. build-deb.sh now always names the real directory lib/python3 and
+# makes every lib/python3.X a symlink to it, so the topology never changes between
+# builds - but installs created before that change still need this one-time cleanup.
+#
+# Deliberately surgical rather than "rm -rf venv": preinst also runs (as
+# "upgrade <version>", indistinguishable from a real upgrade) during
+# dpkg-reconfigure, where NO unpack follows - so anything removed here would be
+# gone for good and would break the installation. -type d matches only real
+# directories, never the symlinks used by the current layout, which makes this a
+# no-op on an already-migrated install and therefore safe to re-run at any time.
+if [ -d /opt/send-to-influx/venv/lib ]; then
+    find /opt/send-to-influx/venv/lib -maxdepth 1 -type d -name "python3.*" \
+        -exec rm -rf {} + 2>/dev/null || true
+fi
+
+exit 0

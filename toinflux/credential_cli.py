@@ -30,6 +30,10 @@ import yaml
 from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, SENTINEL_PREFIX, sentinel_for
 
 DEFAULT_SETTINGS_PATH = "/etc/send-to-influx/settings.yaml"
+# The pristine example the package ships; postinst copies it into place on a fresh
+# install and --ensure-section below back-fills individual sections from it on an
+# upgrade (settings.yaml itself is never rewritten wholesale - see build-deb.sh).
+DEFAULT_EXAMPLE_PATH = "/usr/share/send-to-influx/example_settings.yaml"
 CREDSTORE_DIR = "/etc/send-to-influx/credstore.encrypted"
 DROPIN_DIR = "/etc/systemd/system/send-to-influx.service.d"
 DROPIN_PATH = os.path.join(DROPIN_DIR, "50-credentials.conf")
@@ -731,6 +735,94 @@ def _cmd_list(credstore_dir=None):
         print(f"{name}: {status}")
 
 
+def _extract_section(text, name):
+    """
+    Return the source lines of top-level section ``name`` from a settings file,
+    including the comment block immediately above it and any trailing blank line,
+    or None if the section isn't there.
+
+    Deliberately textual rather than a YAML round trip: the point is to copy the
+    shipped example's *documentation* (its comments explain every field) into the
+    user's file verbatim, which a load+dump would discard.
+    """
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(rf"^{re.escape(name)}\s*:", line):
+            start = i
+            break
+    if start is None:
+        return None
+    # Walk back over the section's own comment block (contiguous comment lines
+    # immediately above it), so the copied section keeps its explanatory header.
+    first = start
+    while first > 0 and lines[first - 1].lstrip().startswith("#"):
+        first -= 1
+    # A top-level section ends at the next line that starts in column 0 and isn't
+    # blank - i.e. the next section or its comment block.
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        if line.strip() and not line[0].isspace():
+            break
+        end += 1
+    # Trim trailing blank lines; the caller re-adds a single separator.
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    return "".join(lines[first:end])
+
+
+def _ensure_section(settings_path, name, example_path):
+    """
+    Append top-level section ``name`` to settings.yaml, copied from the shipped
+    example, if the file doesn't already have it. Returns True if it was added.
+
+    This exists because settings.yaml is created once at install time and then
+    never rewritten by an upgrade (a deliberate Debian-policy choice - see
+    build-deb.sh). Any section introduced by a *later* release therefore doesn't
+    exist for already-installed users, so anything that assumes it does -
+    --set-field, and enabling a source whose block is new - fails on exactly the
+    installs that have been running longest. Appending is safe in a way that
+    rewriting is not: every existing byte is preserved.
+
+    :raises CredentialCliError: if either file can't be read/written, or the
+        example doesn't contain the requested section
+    """
+    try:
+        with open(settings_path, encoding="utf8") as f:
+            current = f.read()
+    except OSError as exc:
+        raise CredentialCliError(f"could not read {settings_path}: {exc}") from exc
+
+    try:
+        root = yaml.compose(current)
+    except yaml.YAMLError as exc:
+        raise CredentialCliError(f"{settings_path}: could not parse YAML: {exc}") from exc
+    if root is not None and _find_mapping_value(root, name) is not None:
+        return False
+
+    try:
+        with open(example_path, encoding="utf8") as f:
+            example = f.read()
+    except OSError as exc:
+        raise CredentialCliError(f"could not read {example_path}: {exc}") from exc
+
+    section = _extract_section(example, name)
+    if section is None:
+        raise CredentialCliError(f"{example_path}: no '{name}:' section to copy from")
+
+    separator = "" if current.endswith("\n\n") else ("\n" if current.endswith("\n") else "\n\n")
+    _atomic_write(settings_path, current + separator + section)
+    return True
+
+
+def _cmd_ensure_section(name, settings_path, example_path):
+    if _ensure_section(settings_path, name, example_path):
+        print(f"Added the '{name}:' section to {settings_path} from {example_path}.")
+    else:
+        print(f"'{name}:' already present in {settings_path} - nothing to do.")
+
+
 def _cmd_set_field(dotted_path, value, settings_path):
     top_key, _, field = dotted_path.partition(".")
     if not field:
@@ -783,6 +875,14 @@ def _build_parser():
     group.add_argument("--detect-influx-version", metavar="URL", help="probe URL and print v1/v2/unknown")
     group.add_argument("--ensure-influx-storage", metavar="NAME", help="best-effort create a v1 database/v2 bucket")
     group.add_argument("--enable-source", metavar="NAME", help="add NAME to settings.yaml's sources: list")
+    group.add_argument(
+        "--ensure-section",
+        metavar="NAME",
+        help="append top-level section NAME from the shipped example if settings.yaml lacks it",
+    )
+    parser.add_argument(
+        "--example", default=DEFAULT_EXAMPLE_PATH, help="example settings to copy sections from (default: %(default)s)"
+    )
     parser.add_argument("--remove", action="store_true", help="remove the named credential instead of setting it")
     return parser
 
@@ -819,6 +919,9 @@ def main(argv=None):
             return 0
         if args.ensure_influx_storage is not None:
             _cmd_ensure_influx_storage(args.ensure_influx_storage, args.settings)
+            return 0
+        if args.ensure_section is not None:
+            _cmd_ensure_section(args.ensure_section, args.settings, args.example)
             return 0
         if args.enable_source is not None:
             _cmd_enable_source(args.enable_source, args.settings)

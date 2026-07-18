@@ -98,6 +98,21 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
         fi
     }
 
+    # $1 = section name. Back-fills a top-level settings.yaml section from the
+    # shipped example when it's missing. Needed because settings.yaml is written
+    # once at install time and never rewritten by an upgrade (deliberate - see
+    # build-deb.sh), so any section added by a LATER release is absent for exactly
+    # the installs that have been running longest. Without this, --set-field fails
+    # ("no 'mqtt:' section found") and, worse, enabling a source whose block is new
+    # makes load_settings() raise a fatal ConfigError - which stops the whole
+    # service, taking every already-working source down with it.
+    ensure_section() {
+        if ! "$CLI" --ensure-section "$1" >/dev/null; then
+            CLI_FAILED=1
+            echo "send-to-influx: could not add the '$1:' section to /etc/send-to-influx/settings.yaml - copy it from /usr/share/send-to-influx/example_settings.yaml by hand." >&2
+        fi
+    }
+
     # $1 = dotted.path, $2 = value. Same best-effort contract as set_secret.
     set_field() {
         if ! "$CLI" --set-field "$1" "$2" >/dev/null; then
@@ -430,6 +445,12 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
                 echo "send-to-influx: Nuki not fully configured (username given without a password - provide both for authenticated access, or neither for anonymous) - not enabling it." >&2
             else
                 CLI_FAILED=0
+                # Both sections may be absent on an install that predates them.
+                # nuki's own block matters as much as mqtt's: --enable-source below
+                # would otherwise add nuki to sources: with no nuki: section for it,
+                # which fails validation fatally at next start.
+                ensure_section mqtt
+                ensure_section nuki
                 set_field mqtt.broker_host "$MQTT_HOST"
                 if [ -n "$MQTT_USER" ]; then
                     set_field mqtt.username "$MQTT_USER"

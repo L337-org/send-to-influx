@@ -137,6 +137,33 @@ else
             [ -e "$CREDSTORE/hue-user.cred" ] || fail "stored credential lost across release upgrade"
         fi
         pass "release upgrade: silent, settings.yaml and credential preserved"
+
+        # The released package predates the mqtt:/nuki: sections, so an install
+        # upgraded from it has a settings.yaml without them. Reconfiguring and
+        # selecting nuki must back-fill both from the shipped example - otherwise
+        # --set-field fails ("no 'mqtt:' section found") and, worse, enabling the
+        # source writes it into sources: with no nuki: block behind it, which makes
+        # load_settings() raise a fatal ConfigError and stops the WHOLE service,
+        # taking every already-working source down with it. Both were live bugs.
+        grep -q "^mqtt:" "$SETTINGS" && fail "released package unexpectedly has an mqtt: section"
+        debconf-set-selections <<EOF
+send-to-influx send-to-influx/sources-to-configure multiselect nuki
+send-to-influx send-to-influx/mqtt-broker-host string ci-mqtt-broker.example.com
+send-to-influx send-to-influx/mqtt-username string ci-mqtt-reader
+send-to-influx send-to-influx/mqtt-password password ${MQTT_TEST_SECRET}
+EOF
+        out=$(dpkg-reconfigure -fnoninteractive send-to-influx 2>&1) || { echo "$out"; fail "post-upgrade reconfigure failed"; }
+        grep -q "^mqtt:" "$SETTINGS" || { echo "$out"; fail "mqtt: section not back-filled after upgrade"; }
+        grep -q "^nuki:" "$SETTINGS" || { echo "$out"; fail "nuki: section not back-filled after upgrade"; }
+        grep -q "ci-mqtt-broker.example.com" "$SETTINGS" || fail "mqtt.broker_host not written after back-fill"
+        # dpkg-reconfigure runs preinst as "upgrade <version>" with no unpack
+        # following it, so anything preinst deletes is gone for good - an earlier
+        # version of it removed the whole venv here and permanently broke the install.
+        [ -x /usr/sbin/send-to-influx-set-credential ] || fail "reconfigure destroyed the venv"
+        /opt/send-to-influx/venv/bin/send-to-influx --settings "$SETTINGS" --check-config >/dev/null \
+            || fail "settings.yaml no longer valid after post-upgrade reconfigure"
+        pass "post-upgrade reconfigure: sections back-filled, venv intact, config still valid"
+
         dpkg -P send-to-influx >/dev/null 2>&1
         pass "released-then-upgraded install purged cleanly"
     fi
