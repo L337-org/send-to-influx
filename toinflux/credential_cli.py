@@ -775,6 +775,31 @@ def _extract_section(text, name):
     return "".join(lines[first:end])
 
 
+def _require_mapping_document(root, settings_path):
+    """
+    Refuse a settings file whose top-level YAML document isn't a mapping.
+
+    An empty file (``root is None``) is fine to append to - the appended section
+    simply becomes the whole document. Anything else must already be a mapping:
+    appending ``name:\n  ...`` to a scalar or a list produces a file that is not
+    valid YAML at all, turning a settings file that was merely wrong into one the
+    service cannot load. Refusing leaves the damage where the admin left it.
+
+    :param root: composed YAML root node, or None for an empty document
+    :param settings_path: path, for the error message
+    :type settings_path: str
+    :return: None
+    :raises CredentialCliError: if the document exists and isn't a mapping
+    """
+    if root is None or isinstance(root, yaml.MappingNode):
+        return
+    kind = type(root).__name__.replace("Node", "").lower()
+    raise CredentialCliError(
+        f"{settings_path}: the top-level YAML document is a {kind}, not a mapping of "
+        "settings sections - fix the file by hand before adding sections to it"
+    )
+
+
 def _ensure_section(settings_path, name, example_path):
     """
     Append top-level section ``name`` to settings.yaml, copied from the shipped
@@ -801,6 +826,7 @@ def _ensure_section(settings_path, name, example_path):
         root = yaml.compose(current)
     except yaml.YAMLError as exc:
         raise CredentialCliError(f"{settings_path}: could not parse YAML: {exc}") from exc
+    _require_mapping_document(root, settings_path)
     if root is not None and _find_mapping_value(root, name) is not None:
         return False
 

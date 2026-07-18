@@ -1286,6 +1286,25 @@ class TestEnsureSection:
         credential_cli._rewrite_settings_field(str(settings), "mqtt", "broker_host", "mqtt.gavin.lan")
         assert yaml.safe_load(settings.read_text(encoding="utf8"))["mqtt"]["broker_host"] == "mqtt.gavin.lan"
 
+    def test_non_mapping_settings_file_is_refused(self, tmp_path):
+        """Appending a section to a scalar or list document produces a file that is
+        not valid YAML at all - turning a merely-wrong settings file into one the
+        service cannot load. Refuse instead, leaving the damage where it was."""
+        for content in ("just a string\n", "- a\n- b\n"):
+            settings = tmp_path / "settings.yaml"
+            settings.write_text(content, encoding="utf8")
+            with pytest.raises(credential_cli.CredentialCliError, match="not a mapping"):
+                credential_cli._ensure_section(str(settings), "mqtt", self._example(tmp_path))
+            assert settings.read_text(encoding="utf8") == content  # untouched
+
+    def test_empty_settings_file_still_accepts_a_section(self, tmp_path):
+        """The empty-document case must keep working - the appended section simply
+        becomes the whole file."""
+        settings = tmp_path / "settings.yaml"
+        settings.write_text("", encoding="utf8")
+        assert credential_cli._ensure_section(str(settings), "mqtt", self._example(tmp_path)) is True
+        assert yaml.safe_load(settings.read_text(encoding="utf8"))["mqtt"]["broker_host"] == "mqtt.example.com"
+
     def test_unknown_section_raises(self, tmp_path):
         """A section the example doesn't have is an error, not a silent no-op."""
         settings = tmp_path / "settings.yaml"
