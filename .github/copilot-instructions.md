@@ -65,7 +65,7 @@ YAML-based configuration supporting multiple data sources:
 - **OpenMeteo**: Latitude, longitude, field list (see open-meteo.com/en/docs)
 - **Octopus**: API key, MPAN, meter serial; optional `gas_mprn`+`gas_meter_serial` for gas consumption, and optional product/tariff codes for unit rate collection
 - **Speedtest**: Field selection, collection intervals
-- **MQTT**: shared broker connection (`broker_host`/`broker_port`/`username`/`password`) used by all MQTT-based sources, like the InfluxDB block
+- **MQTT**: shared broker connection (`broker_host`/`broker_port`/`username`/`password`) used by all MQTT-based sources, like the InfluxDB block; blank username/password = anonymous access
 - **Nuki**: `db`, `interval`, and `timeout` (retained-message collection window) only - locks need no per-device config
 - **InfluxDB**: Connection details, database/bucket settings; supports v1 (user/password/db) and v2 (token/org/bucket)
 

@@ -54,12 +54,14 @@ Description: MQTT broker username for send-to-influx
  send-to-influx's own (read-only) broker login - use a separate account from
  the one the lock itself publishes with, so either can be rotated or revoked
  independently.
- When reconfiguring, leaving this blank keeps the currently configured value.
+ Leave blank (with the password also blank) if your broker allows anonymous
+ access - that is a valid configuration, not an incomplete one.
 
 Template: send-to-influx/mqtt-password
 Type: password
 Description: MQTT broker password for send-to-influx
- The password for the broker username above.
+ The password for the broker username above. Leave blank (with the username
+ also blank) for anonymous access, if your broker allows it.
  When reconfiguring, leaving this blank keeps the credential already stored
  in systemd-creds, if any (a secret kept in plaintext in settings.yaml is
  not read back here).

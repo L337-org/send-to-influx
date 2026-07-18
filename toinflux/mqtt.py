@@ -94,7 +94,14 @@ class MqttDataHandler(DataHandler):
             deadline = time.monotonic() + timeout
             remaining = timeout
             while remaining > 0 and not connack_failure:
-                client.loop(timeout=min(LOOP_INTERVAL, remaining))
+                if client.loop(timeout=min(LOOP_INTERVAL, remaining)) != 0:
+                    # The connection died mid-window (paho returns a nonzero
+                    # error code once the socket is gone) - stop collecting
+                    # instead of busy-spinning out the rest of the window.
+                    # Whatever retained state already arrived is still valid
+                    # last-known data, so this is an early finish, not an
+                    # error (a pre-CONNACK death is still caught below).
+                    break
                 remaining = deadline - time.monotonic()
         except (OSError, ValueError) as e:
             logging.error("Error connecting to MQTT broker %s:%s - %s", host, port, e)

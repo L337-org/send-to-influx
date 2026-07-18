@@ -141,7 +141,9 @@ Setting up Mosquitto on Debian/Ubuntu:
    This should immediately print every retained state topic for the lock.
 
 Then fill in the shared `mqtt:` block in `settings.yaml` with the `sendtoinflux` credential and add
-`nuki` to `sources:`. On the packaged install the broker password can be moved into `systemd-creds`
+`nuki` to `sources:`. (If your broker permits anonymous access you can instead leave
+`username`/`password` blank - the two-credential setup above is the recommended default, not a
+requirement.) On the packaged install the broker password can be moved into `systemd-creds`
 with `send-to-influx-set-credential mqtt-password`, like any other credential.
 
 Speedtest

@@ -67,11 +67,14 @@ mqtt:
   broker_host: "mqtt.example.com"
   # The broker port (1883 is the MQTT standard; Nuki devices only ever connect to 1883)
   broker_port: 1883
-  # send-to-influx's OWN read-only broker credential - a separate login from whatever
-  # username/password was entered into the device's own app (e.g. the Nuki app) for
-  # the device's publishing connection. Do not reuse the same account for both.
-  username: "sendtoinflux"
-  password: "your_mqtt_password"
+  # send-to-influx's OWN broker credential. If your broker requires authentication,
+  # use a separate login from the one the device itself publishes with (e.g. the
+  # account entered in the Nuki app), so either can be rotated or revoked
+  # independently. Leave both blank for anonymous access, if your broker allows it.
+  # (Shipped as real, empty keys - like influx.token/org above - so the packaged
+  # install's debconf flow has YAML keys to write into.)
+  username: ""
+  password: ""
 
 # Hue bridge settings
 hue:

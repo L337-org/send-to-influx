@@ -127,8 +127,8 @@ class TestMqttDataHandler:
     def test_anonymous_when_no_username_configured(self, sample_settings):
         """Without mqtt.username the connection is anonymous - username_pw_set untouched."""
         settings = _mqtt_settings(sample_settings)
-        del settings["mqtt"]["username"]
-        del settings["mqtt"]["password"]
+        settings["mqtt"]["username"] = ""  # the shipped example's anonymous shape
+        settings["mqtt"]["password"] = ""
         handler = _handler(settings)
         with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
@@ -157,6 +157,31 @@ class TestMqttDataHandler:
             mock_client.loop.return_value = 0  # network loop runs, but no CONNACK ever arrives
             with pytest.raises(SourceConnectionError, match="handshake"):
                 handler.collect_mqtt_messages("nuki/+/+", WINDOW)
+            mock_client.disconnect.assert_called_once()
+
+    def test_mid_window_disconnect_stops_collecting_and_returns_partial(self, sample_settings):
+        """A connection that dies after the CONNACK stops the collection early (no
+        busy-spin through the rest of the window) and returns what already arrived -
+        retained state that was delivered is still valid last-known data."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            state = {"calls": 0}
+
+            def fake_loop(timeout=1.0):
+                state["calls"] += 1
+                if state["calls"] == 1:
+                    mock_client.on_connect(mock_client, None, None, _FakeReasonCode(False), None)
+                    mock_client.on_message(mock_client, None, MagicMock(topic="nuki/A/state", payload=b"1"))
+                    return 0
+                return 7  # e.g. MQTT_ERR_CONN_LOST
+
+            mock_client.loop.side_effect = fake_loop
+            # A deliberately long window: without the early break this would spin
+            # for the full 5 seconds instead of stopping at the second loop call.
+            result = handler.collect_mqtt_messages("nuki/+/+", 5)
+            assert result == [("nuki/A/state", "1")]
+            assert state["calls"] == 2
             mock_client.disconnect.assert_called_once()
 
     def test_missing_mqtt_block_raises_config_error(self, sample_settings):

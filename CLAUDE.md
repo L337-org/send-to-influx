@@ -349,7 +349,9 @@ from `postinst`, once package files are unpacked and everything's been answered.
   install configured through the prompts always has a non-blank host anyway, and a blank one
   means hand-configured - where auto-enable would be speculative (possibly against the shipped
   placeholder host), so those installs hand-edit `sources:` instead, same precedent as
-  plaintext-settings credentials. `mqtt-username` is cleared from debconf's database after use like
+  plaintext-settings credentials. Blank username *and* password mean anonymous broker access - a
+  valid configuration, not an incomplete one - so only the host gates auto-enable.
+  `mqtt-username` is cleared from debconf's database after use like
   `influx-identity` (the other half of a credential pair), and both are in the final sweep.
 - `postinst` (inside the fresh-install-or-reconfigure gate above): `sources-to-configure` is read
   first (`$SOURCES`, purely to know whether *anything* was
