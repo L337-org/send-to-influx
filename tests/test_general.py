@@ -305,6 +305,18 @@ class TestValidateSettings:
         with pytest.raises(ConfigError, match="mqtt must be a mapping"):
             validate_settings(sample_settings, source="nuki")
 
+    def test_non_string_mqtt_host_or_credentials_raise_config_error(self, sample_settings):
+        """YAML coerces `broker_host: 10.0` to a float and `yes` to a bool; a non-string
+        host or credential reaches paho as an uncatchable TypeError, so it must fail
+        validation instead."""
+        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
+        sample_settings["mqtt"] = {"broker_host": 10.0}
+        with pytest.raises(ConfigError, match="broker_host must be a string"):
+            validate_settings(sample_settings, source="nuki")
+        sample_settings["mqtt"] = {"broker_host": "mqtt.example.com", "username": 12345}
+        with pytest.raises(ConfigError, match="username must be a string"):
+            validate_settings(sample_settings, source="nuki")
+
 
 class TestGetClass:
     """Tests for get_class function."""
@@ -408,15 +420,3 @@ class TestFlattenDict:
     def test_empty_dict_returns_empty_dict(self):
         """flatten_dict returns empty dict for empty input."""
         assert not flatten_dict({})
-
-    def test_non_string_mqtt_host_or_credentials_raise_config_error(self, sample_settings):
-        """YAML coerces `broker_host: 10.0` to a float and `yes` to a bool; a non-string
-        host or credential reaches paho as an uncatchable TypeError, so it must fail
-        validation instead."""
-        sample_settings["nuki"] = {"db": "nuki_db", "interval": 300}
-        sample_settings["mqtt"] = {"broker_host": 10.0}
-        with pytest.raises(ConfigError, match="broker_host must be a string"):
-            validate_settings(sample_settings, source="nuki")
-        sample_settings["mqtt"] = {"broker_host": "mqtt.example.com", "username": 12345}
-        with pytest.raises(ConfigError, match="username must be a string"):
-            validate_settings(sample_settings, source="nuki")
