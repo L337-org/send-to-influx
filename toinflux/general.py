@@ -177,8 +177,20 @@ def mqtt_block_errors(settings, context=""):
     if not isinstance(mqtt, dict):
         return [f"mqtt must be a mapping of broker settings (got {type(mqtt).__name__})"]
     errors = []
-    if not mqtt.get("broker_host"):
+    host = mqtt.get("broker_host")
+    if not host:
         errors.append(f"mqtt.broker_host is required for MQTT-based sources{context}")
+    elif not isinstance(host, str):
+        # YAML coerces more than you'd expect - `broker_host: 10.0` is a float and
+        # `broker_host: yes` is a bool - and a non-string reaches paho as a raw
+        # TypeError the transport's OSError/ValueError handling doesn't catch.
+        errors.append(f"mqtt.broker_host must be a string (got {host!r})")
+    for field in ("username", "password"):
+        value = mqtt.get(field)
+        if value is not None and not isinstance(value, str):
+            # Same coercion trap: a numeric-looking broker username is plausible,
+            # and paho would fail on .encode() rather than anything catchable.
+            errors.append(f"mqtt.{field} must be a string (got {value!r})")
     port = mqtt.get("broker_port", 1883)
     # bool is an int subclass, so broker_port: true would otherwise pass as 1
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
