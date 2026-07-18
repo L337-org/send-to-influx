@@ -59,7 +59,8 @@ class MqttDataHandler(DataHandler):
         :type timeout: float
         :return: (topic, payload) pairs in arrival order, payloads decoded as UTF-8
         :rtype: list
-        :raises ConfigError: if the shared ``mqtt`` settings block is missing,
+        :raises ConfigError: if ``timeout`` isn't a positive number, or if the
+            shared ``mqtt`` settings block is missing,
             malformed, or has an out-of-range ``broker_port`` - a config-shape
             problem, fatal like a missing source block, not something the worker loop
             should retry. Checked here as well as in ``validate_settings()`` because
@@ -73,6 +74,14 @@ class MqttDataHandler(DataHandler):
         errors = mqtt_block_errors(self.settings)
         if errors:
             raise ConfigError("; ".join(errors))
+        # YAML coerces silently, so `timeout: "3"` is a string and would blow up in
+        # the deadline arithmetic below as a raw TypeError. That matters beyond
+        # tidiness: the worker loop catches broad exceptions and retries with
+        # backoff, so a permanent configuration mistake would be retried forever
+        # instead of failing fast as the ConfigError it is. bool is excluded because
+        # it is an int subclass (`timeout: yes` is True, i.e. 1 second).
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ConfigError(f"the MQTT collection window must be a positive number of seconds (got {timeout!r})")
         mqtt_settings = self.settings["mqtt"]
         host = mqtt_settings["broker_host"]
         port = mqtt_settings.get("broker_port", 1883)

@@ -198,6 +198,17 @@ class TestMqttDataHandler:
             assert state["calls"] == 2
             mock_client.disconnect.assert_called_once()
 
+    def test_non_numeric_timeout_raises_config_error(self, sample_settings):
+        """`timeout: "3"` in YAML is a string and would otherwise raise a raw
+        TypeError from the deadline arithmetic - which the worker loop would catch
+        and retry with backoff forever, instead of failing fast on what is a
+        permanent configuration mistake."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client"):
+            for bad in ("3", None, True, 0, -1):
+                with pytest.raises(ConfigError, match="positive number of seconds"):
+                    handler.collect_mqtt_messages("nuki/+/+", bad)
+
     def test_missing_mqtt_block_raises_config_error(self, sample_settings):
         """No top-level mqtt block is a config-shape problem - fatal ConfigError, not a
         retryable failure, matching how a missing source block behaves."""
