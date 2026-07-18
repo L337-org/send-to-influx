@@ -6,7 +6,14 @@ from pathlib import Path
 from unittest.mock import patch
 import pytest
 import yaml
-from toinflux.general import DEFAULT_SOURCE, flatten_dict, load_settings, get_class, validate_settings
+from toinflux.general import (
+    DEFAULT_SOURCE,
+    flatten_dict,
+    get_class,
+    load_settings,
+    resolve_default_source,
+    validate_settings,
+)
 from toinflux.exceptions import ConfigError
 
 
@@ -341,6 +348,22 @@ class TestValidateSettings:
         del sample_settings[DEFAULT_SOURCE]
         with pytest.raises(ConfigError, match=f"no configuration section found for source '{DEFAULT_SOURCE}'"):
             validate_settings(sample_settings)
+
+    def test_non_string_default_source_is_reported_not_silently_replaced(self, sample_settings):
+        """YAML turns `default_source: no` into False. Treating any falsy value as
+        "unset" would silently run DEFAULT_SOURCE instead of what the admin wrote;
+        it must be reported as the malformed value it is."""
+        del sample_settings["sources"]
+        sample_settings["default_source"] = False
+        with pytest.raises(ConfigError, match="must be strings"):
+            validate_settings(sample_settings)
+
+    def test_blank_default_source_falls_back(self, sample_settings):
+        """An absent or blank default_source legitimately means "unset"."""
+        del sample_settings["sources"]
+        sample_settings["default_source"] = "   "
+        assert resolve_default_source(sample_settings) == DEFAULT_SOURCE
+        validate_settings(sample_settings)
 
     def test_explicit_null_entry_in_sources_is_rejected(self, sample_settings):
         """A null entry is a malformed list entry, not an absent default - it must be

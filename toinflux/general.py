@@ -157,6 +157,30 @@ def get_class(source, settings_file=None):
 MQTT_SOURCES = frozenset({"nuki"})
 
 
+def resolve_default_source(settings):
+    """
+    Return the source to run when no ``sources:`` list is configured.
+
+    Used by both ``validate_settings()`` and ``sendtoinflux.py`` so the two cannot
+    disagree about what actually runs - they previously did, and the result was
+    ``--check-config`` reporting OK on a config whose effective source had no
+    settings block at all.
+
+    Only an absent or blank ``default_source`` counts as unset. A non-string (YAML
+    turns ``default_source: no`` into ``False``) is returned unchanged rather than
+    silently replaced, so ``validate_settings()`` reports it as the malformed value
+    it is instead of quietly running something the admin never asked for.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: the configured default source, or DEFAULT_SOURCE when unset
+    """
+    value = settings.get("default_source")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return DEFAULT_SOURCE
+    return value
+
+
 def mqtt_block_errors(settings, context=""):
     """
     Return a list of error strings for the shared ``mqtt`` settings block itself -
@@ -292,7 +316,7 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
     # default_source, and to DEFAULT_SOURCE if that is absent too - validate exactly
     # what will actually run, or a config whose effective source has no settings
     # block would pass --check-config and then fail at startup.
-    sources = raw_sources or [settings.get("default_source") or DEFAULT_SOURCE]
+    sources = raw_sources or [resolve_default_source(settings)]
     # A non-string entry (e.g. a YAML mapping, or an explicit null, from a malformed
     # sources list) would raise a raw TypeError from the dict/set membership tests
     # below - report it as the ConfigError it really is, and validate the remaining

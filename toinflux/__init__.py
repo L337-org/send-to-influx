@@ -8,6 +8,7 @@ __version__ = "1.0"
 from .carbonintensity import CarbonIntensity
 from .general import (
     DEFAULT_SOURCE,
+    resolve_default_source,
     load_settings,
     get_class,
     configure_logging,
