@@ -22,9 +22,13 @@ fi
 # directory" warnings on upgrade). Must happen before anything below runs the venv.
 # Idempotent: -n replaces nothing that already exists correctly, and a stale entry
 # from an older layout is removed first.
+# The bounds are substituted by build-deb.sh from PYTHON_MIN/MAX_SUPPORTED_MINOR,
+# which also drive the Depends: range - one source of truth, so a future version bump
+# cannot leave a supported interpreter without its symlink (or create one outside the
+# declared range). build-deb.sh fails the build if these placeholders survive.
 if [ -d /opt/send-to-influx/venv/lib/python3 ]; then
-    minor=10
-    while [ "$minor" -le 30 ]; do
+    minor=@PYTHON_MIN_SUPPORTED_MINOR@
+    while [ "$minor" -le @PYTHON_MAX_SUPPORTED_MINOR@ ]; do
         link="/opt/send-to-influx/venv/lib/python3.${minor}"
         [ -L "$link" ] || rm -rf "$link"
         ln -sfn python3 "$link"

@@ -129,6 +129,7 @@ find "$PKG_ROOT/opt/send-to-influx/venv/lib" -type f \( -name "*.so" -o -name "*
 # site-packages failure this change exists to prevent, just at a higher version number.
 PYTHON_MAJOR_MINOR="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
     'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+PYTHON_MIN_SUPPORTED_MINOR=10
 PYTHON_MAX_SUPPORTED_MINOR=30
 VENV_LIB_DIR="$PKG_ROOT/opt/send-to-influx/venv/lib"
 # Give the real site-packages directory a version-INDEPENDENT name and point every
@@ -185,6 +186,18 @@ cp "$REPO_ROOT/example_settings.yaml" "$PKG_ROOT/usr/share/send-to-influx/exampl
 cp "$REPO_ROOT/packaging/send-to-influx.service" "$PKG_ROOT/lib/systemd/system/send-to-influx.service"
 cp "$REPO_ROOT/packaging/deb/preinst" "$PKG_ROOT/DEBIAN/preinst"
 cp "$REPO_ROOT/packaging/deb/postinst" "$PKG_ROOT/DEBIAN/postinst"
+# postinst creates the venv's python3.X -> python3 symlinks (see above), and needs
+# the same supported range this script uses for Depends: - substituted here rather
+# than duplicated as literals there.
+sed -i.bak \
+    -e "s/@PYTHON_MIN_SUPPORTED_MINOR@/${PYTHON_MIN_SUPPORTED_MINOR}/g" \
+    -e "s/@PYTHON_MAX_SUPPORTED_MINOR@/${PYTHON_MAX_SUPPORTED_MINOR}/g" \
+    "$PKG_ROOT/DEBIAN/postinst"
+rm -f "$PKG_ROOT/DEBIAN/postinst.bak"
+if grep -q "@PYTHON_M.._SUPPORTED_MINOR@" "$PKG_ROOT/DEBIAN/postinst"; then
+    echo "error: unsubstituted placeholder left in postinst" >&2
+    exit 1
+fi
 cp "$REPO_ROOT/packaging/deb/prerm" "$PKG_ROOT/DEBIAN/prerm"
 cp "$REPO_ROOT/packaging/deb/postrm" "$PKG_ROOT/DEBIAN/postrm"
 cp "$REPO_ROOT/packaging/deb/config" "$PKG_ROOT/DEBIAN/config"
@@ -204,7 +217,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: all
-Depends: debconf (>= 0.5), python3 (>= 3.10), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
+Depends: debconf (>= 0.5), python3 (>= 3.${PYTHON_MIN_SUPPORTED_MINOR}), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
 Suggests: mosquitto, mosquitto-clients
 Maintainer: Gavin Lucas
 Description: Collects data from smart home / energy devices and writes it to InfluxDB
