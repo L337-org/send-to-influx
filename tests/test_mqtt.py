@@ -46,11 +46,13 @@ class _FakeReasonCode:
         return "Not authorized" if self.is_failure else "Success"
 
 
-def _drive_callbacks(mock_client, messages, connack_failure=False):
+def _drive_callbacks(mock_client, messages, connack_failure=False, subscribe_result=0):
     """Make the mocked client's loop() fire on_connect (and deliver the given
     (topic, payload-bytes) messages) on its first call, as a real broker would after
     the CONNACK - subsequent loop() calls are no-ops until the window expires."""
     state = {"delivered": False}
+    # paho's subscribe() returns (error_code, mid); the transport checks the code.
+    mock_client.subscribe.return_value = (subscribe_result, 1)
 
     def fake_loop(timeout=1.0):
         if not state["delivered"]:
@@ -102,9 +104,20 @@ class TestMqttDataHandler:
         with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             _drive_callbacks(mock_client, [], connack_failure=True)
-            with pytest.raises(SourceConnectionError, match="refused"):
+            with pytest.raises(SourceConnectionError, match="rejected the connection"):
                 handler.collect_mqtt_messages("nuki/+/+", WINDOW)
             mock_client.subscribe.assert_not_called()
+            mock_client.disconnect.assert_called_once()
+
+    def test_subscribe_failure_raises_source_connection_error(self, sample_settings):
+        """A failed subscribe would otherwise leave the client looping out the window
+        and returning an empty list - a transport failure disguised as "no data"."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            _drive_callbacks(mock_client, [], subscribe_result=1)
+            with pytest.raises(SourceConnectionError, match="could not subscribe"):
+                handler.collect_mqtt_messages("nuki/+/+", WINDOW)
             mock_client.disconnect.assert_called_once()
 
     def test_empty_window_returns_empty_list(self, sample_settings):
@@ -166,6 +179,7 @@ class TestMqttDataHandler:
         handler = _handler(_mqtt_settings(sample_settings))
         with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
+            mock_client.subscribe.return_value = (0, 1)
             state = {"calls": 0}
 
             def fake_loop(timeout=1.0):

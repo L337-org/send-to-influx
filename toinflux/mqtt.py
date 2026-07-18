@@ -77,15 +77,14 @@ class MqttDataHandler(DataHandler):
         host = mqtt_settings["broker_host"]
         port = mqtt_settings.get("broker_port", 1883)
         messages = []
-        connack_failure = []
+        # Any reason the collection window cannot proceed, recorded from the
+        # callbacks (which cannot raise usefully - paho runs them inside its own
+        # network loop) and turned into a SourceConnectionError once the loop exits.
+        failures = []
         connected = []
 
         def on_connect(client, userdata, connect_flags, reason_code, properties):
-            if reason_code.is_failure:
-                connack_failure.append(str(reason_code))
-            else:
-                connected.append(True)
-                client.subscribe(topic_filter)
+            self._subscribe_on_connect(client, reason_code, topic_filter, failures, connected)
 
         def on_message(client, userdata, message):
             messages.append((message.topic, message.payload.decode("utf-8", errors="replace")))
@@ -103,7 +102,7 @@ class MqttDataHandler(DataHandler):
             client.connect(host, port)
             deadline = time.monotonic() + timeout
             remaining = timeout
-            while remaining > 0 and not connack_failure:
+            while remaining > 0 and not failures:
                 if client.loop(timeout=min(LOOP_INTERVAL, remaining)) != 0:
                     # The connection died mid-window (paho returns a nonzero
                     # error code once the socket is gone) - stop collecting
@@ -118,11 +117,45 @@ class MqttDataHandler(DataHandler):
             raise SourceConnectionError(str(e)) from e
         finally:
             client.disconnect()
-        self._raise_for_failed_connection(host, port, timeout, connack_failure, connected)
+        self._raise_for_failed_connection(host, port, timeout, failures, connected)
         return messages
 
     @staticmethod
-    def _raise_for_failed_connection(host, port, timeout, connack_failure, connected):
+    def _subscribe_on_connect(client, reason_code, topic_filter, failures, connected):
+        """
+        Handle a CONNACK: subscribe if it succeeded, otherwise record why not.
+
+        Both outcomes are recorded rather than raised - paho runs this inside its own
+        network loop, where an exception would be swallowed - and turned into a
+        SourceConnectionError by _raise_for_failed_connection once the loop exits.
+
+        subscribe() reports client-side failures (a malformed topic filter, a dead
+        socket) through its return code rather than an exception. Ignoring it would
+        leave a never-subscribed client looping out the whole window and returning an
+        empty list - indistinguishable from a healthy broker with nothing retained,
+        which is the failure mode this transport exists to avoid everywhere else.
+
+        :param client: the paho client the callback fired on
+        :param reason_code: CONNACK reason code
+        :param topic_filter: filter to subscribe to
+        :type topic_filter: str
+        :param failures: accumulator for the reason this window cannot proceed
+        :type failures: list
+        :param connected: accumulator marking a usable, subscribed connection
+        :type connected: list
+        :return: None
+        """
+        if reason_code.is_failure:
+            failures.append(f"broker rejected the connection: {reason_code}")
+            return
+        result = client.subscribe(topic_filter)[0]
+        if result != mqtt_client.MQTT_ERR_SUCCESS:
+            failures.append(f"could not subscribe to '{topic_filter}' (code {result})")
+            return
+        connected.append(True)
+
+    @staticmethod
+    def _raise_for_failed_connection(host, port, timeout, failures, connected):
         """
         Raise SourceConnectionError if the collection window ended without a usable
         connection - either the broker refused the CONNACK (e.g. bad credentials), or
@@ -134,15 +167,17 @@ class MqttDataHandler(DataHandler):
         :param host: broker host (for the error message)
         :param port: broker port (for the error message)
         :param timeout: the collection window length (for the error message)
-        :param connack_failure: CONNACK failure reasons recorded by on_connect
-        :type connack_failure: list
+        :param failures: reasons recorded by on_connect (a rejected CONNACK, or a
+            failed subscribe) - the first is reported verbatim, so the message
+            carries the specific cause rather than a guess at it
+        :type failures: list
         :param connected: truthy entries recorded by on_connect on success
         :type connected: list
         :return: None
         :raises SourceConnectionError: as described above; no-op on a healthy outcome
         """
-        if connack_failure:
-            error = f"MQTT broker {host}:{port} refused the connection - {connack_failure[0]}"
+        if failures:
+            error = f"MQTT broker {host}:{port}: {failures[0]}"
         elif not connected:
             error = f"MQTT broker {host}:{port} did not complete the MQTT handshake within {timeout}s"
         else:
