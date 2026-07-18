@@ -157,7 +157,7 @@ def mqtt_block_errors(settings, context=""):
     which sources happen to need it.
 
     Shared by ``validate_settings()`` (config-check time) and
-    ``MqttDataHandler.collect_mqtt_messages()` (runtime), deliberately: those are two
+    ``MqttDataHandler.collect_mqtt_messages()`` (runtime), deliberately: those are two
     genuinely different entry points, since ``load_settings()`` only validates the
     *configured* sources - a one-off ``--source nuki`` on an install where nuki isn't
     in ``sources:`` reaches the transport without this block ever having been checked.
