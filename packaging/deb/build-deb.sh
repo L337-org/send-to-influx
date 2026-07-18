@@ -132,6 +132,18 @@ PYTHON_MAJOR_MINOR="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
 PYTHON_MIN_SUPPORTED_MINOR=10
 PYTHON_MAX_SUPPORTED_MINOR=30
 VENV_LIB_DIR="$PKG_ROOT/opt/send-to-influx/venv/lib"
+# Read the version from the venv while its site-packages is still at the path the
+# interpreter computes (lib/python<major.minor>/) - after the rename below it is not
+# on sys.path at all. Run it from a neutral cwd too: `python -c` puts the current
+# directory on sys.path, and pip regenerates a *.egg-info in the source tree during
+# the install above, so running from the repo root would read the version out of
+# that source-tree artefact instead of out of what was actually installed into the
+# package. That masked this exact ordering bug (the lookup appeared to work while
+# silently consulting the wrong thing) and is the same failure class as building
+# from a stale build/ directory.
+VERSION="$(cd / && "$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
+    "from importlib.metadata import version; print(version('${PKG_NAME}'))")"
+
 # Give the real site-packages directory a version-INDEPENDENT name and point every
 # supported minor at it as a symlink, rather than leaving the real directory named
 # after whichever interpreter happened to build the package.
@@ -158,8 +170,6 @@ mv "$VENV_LIB_DIR/python${PYTHON_MAJOR_MINOR}" "$VENV_LIB_DIR/python3"
 # Creating them after the unpack sidesteps it entirely: at cleanup time the paths
 # simply do not exist, so there is nothing to warn about.
 
-VERSION="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
-    "from importlib.metadata import version; print(version('${PKG_NAME}'))")"
 # Optional override for locally-built dev packages (scripts/dev-build-deb.sh),
 # which stamp a "~dev<timestamp>.g<sha>" version so an installed dev build is
 # distinguishable from the release. "~" sorts BEFORE the bare version in Debian
