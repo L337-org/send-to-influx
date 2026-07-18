@@ -392,11 +392,11 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     # --- Nuki (shared MQTT broker block) ---
     # The second shared-infrastructure block after InfluxDB, but conditional:
     # only processed when an MQTT-based source was selected, mirroring config's
-    # gating on the asking side. Secret semantics follow the InfluxDB
-    # stored-credential branch: an mqtt-password already in systemd-creds
-    # satisfies the secret requirement (blank keeps it), and a username
-    # provided alongside a blank secret is still applied. The broker host is
-    # the exception - required like hue-host, see below.
+    # gating on the asking side. Only the broker host is required (see
+    # below); username/password are optional - blank means anonymous broker
+    # access, a completely valid configuration. Whatever auth *was* provided
+    # is applied, and a blank password with an mqtt-password already in
+    # systemd-creds keeps that stored credential (see influx-secret).
     NUKI_OK=0
     case "$SOURCES" in
         *" nuki "*)
@@ -411,17 +411,24 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
             # half of a credential pair.
             db_set send-to-influx/mqtt-password "" || true
             db_set send-to-influx/mqtt-username "" || true
-            # A non-empty broker host is required even when the password is
-            # already stored (mirroring Hue's required-host behaviour, not the
-            # InfluxDB blank-URL-keeps path): debconf *string* answers persist
-            # across reconfigures, so any install configured through these
-            # prompts always has a non-blank host here - a blank one means the
-            # host was only ever hand-edited (or never set), and auto-enabling
-            # on top of that would be speculative, possibly enabling nuki
-            # against the shipped placeholder host. Same precedent as
-            # plaintext-settings credentials: don't auto-enable what postinst
-            # can't verify - the admin hand-edits sources: instead.
-            if [ -n "$MQTT_HOST" ] && { [ -n "$MQTT_PASS" ] || [ -e "$CREDSTORE/mqtt-password.cred" ]; }; then
+            # A non-empty broker host is required (hue-host style, not
+            # blank-keeps: debconf *string* answers persist across
+            # reconfigures, so any install configured through these prompts
+            # always has a non-blank host here - a blank one means the host
+            # was only ever hand-edited or never set, where auto-enabling
+            # would be speculative, possibly against the shipped placeholder).
+            # Auth is optional but must be coherent: both blank means
+            # anonymous access, both supplied means authenticated - a username
+            # with no password material is neither (see the elif).
+            if [ -z "$MQTT_HOST" ]; then
+                echo "send-to-influx: Nuki not fully configured (MQTT broker host missing) - not enabling it." >&2
+            elif [ -n "$MQTT_USER" ] && [ -z "$MQTT_PASS" ] && [ ! -e "$CREDSTORE/mqtt-password.cred" ]; then
+                # Incoherent auth: a username with no password material would
+                # auto-enable straight into an authenticated connect with an
+                # empty password - a guaranteed rejection retry loop. Both for
+                # authenticated access, neither for anonymous.
+                echo "send-to-influx: Nuki not fully configured (username given without a password - provide both for authenticated access, or neither for anonymous) - not enabling it." >&2
+            else
                 CLI_FAILED=0
                 set_field mqtt.broker_host "$MQTT_HOST"
                 if [ -n "$MQTT_USER" ]; then
@@ -433,8 +440,6 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
                 if [ "$CLI_FAILED" = 0 ]; then
                     NUKI_OK=1
                 fi
-            else
-                echo "send-to-influx: Nuki not fully configured (MQTT broker host/password missing) - not enabling it." >&2
             fi
             ;;
     esac

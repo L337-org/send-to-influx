@@ -277,6 +277,28 @@ echo "$out" | grep -q "MQTT broker username" || fail "mqtt-username not shown at
 echo "$out" | grep -q "MQTT broker password" || fail "mqtt-password not shown at priority high with nuki selected"
 pass "shared mqtt questions appear at priority high when an MQTT source is selected"
 
+# --- Scenario: incoherent MQTT auth is not auto-enabled ----------------------
+# A username with no password material would auto-enable straight into an
+# authenticated connect with an empty password - a guaranteed CONNACK-rejection
+# retry loop. Placed last (before purge) because it has to remove the stored
+# credential to reach the guard; --remove is used rather than deleting the file,
+# so the drop-in is regenerated first (a drop-in referencing a missing .cred
+# hard-fails unit startup with 243/CREDENTIALS).
+echo "=== scenario: incoherent MQTT auth (username, no password) ==="
+if [ "$CREDS_WORK" = 1 ]; then
+    /usr/sbin/send-to-influx-set-credential mqtt-password --remove >/dev/null
+fi
+debconf-set-selections <<'EOF'
+send-to-influx send-to-influx/sources-to-configure multiselect nuki
+send-to-influx send-to-influx/mqtt-broker-host string ci-mqtt-broker.example.com
+send-to-influx send-to-influx/mqtt-username string ci-mqtt-reader
+send-to-influx send-to-influx/mqtt-password password
+EOF
+out=$(dpkg-reconfigure -fnoninteractive send-to-influx 2>&1) || { echo "$out"; fail "incoherent-auth reconfigure failed"; }
+echo "$out" | grep -qi "username given without a password" \
+    || { echo "$out"; fail "expected the incoherent-auth warning instead of auto-enabling"; }
+pass "incoherent MQTT auth warns instead of auto-enabling"
+
 # --- Scenario: purge -----------------------------------------------------------
 echo "=== scenario: purge ==="
 dpkg -P send-to-influx >/dev/null 2>&1 || dpkg -P send-to-influx

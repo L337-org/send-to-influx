@@ -80,8 +80,8 @@ otherwise masquerade as "no data". `Nuki` (`toinflux/nuki.py`) holds only vendor
 known state topics (command/event topics are ignored), grouping by device ID, prefixing field keys
 with each lock's own Nuki-app name, and resolving the numeric `state`/`doorsensorState` codes to
 labels via hardcoded tables from the MQTT API spec (unlike the Bridge HTTP API, MQTT publishes no
-`stateName` strings; an unrecognised code is written through as its raw number). `paho-mqtt` (the
-project's first source-specific dependency beyond `requests`, pure Python so the `.deb`'s
+`stateName` strings; an unrecognised code is written through as its raw number). `paho-mqtt` (a
+source-specific runtime dependency like `speedtest-cli`, pure Python so the `.deb`'s
 `Architecture: all` design holds) is imported only in `toinflux/mqtt.py`.
 
 ### Entry point (`sendtoinflux.py`)
@@ -349,7 +349,14 @@ from `postinst`, once package files are unpacked and everything's been answered.
   install configured through the prompts always has a non-blank host anyway, and a blank one
   means hand-configured - where auto-enable would be speculative (possibly against the shipped
   placeholder host), so those installs hand-edit `sources:` instead, same precedent as
-  plaintext-settings credentials. `mqtt-username` is cleared from debconf's database after use like
+  plaintext-settings credentials. Blank username *and* password mean anonymous broker access - a
+  valid configuration, not an incomplete one. Auth must be *coherent* to auto-enable though: a
+  username with no password material (neither typed nor stored) warns instead of enabling a
+  guaranteed auth-rejection retry loop. And switching an existing authenticated install to
+  anonymous is not expressible through the prompts (blank means keep, per the standing
+  no-clearing-via-debconf convention) - it's done by blanking `mqtt.username` in settings.yaml
+  plus `send-to-influx-set-credential mqtt-password --remove`.
+  `mqtt-username` is cleared from debconf's database after use like
   `influx-identity` (the other half of a credential pair), and both are in the final sweep.
 - `postinst` (inside the fresh-install-or-reconfigure gate above): `sources-to-configure` is read
   first (`$SOURCES`, purely to know whether *anything* was

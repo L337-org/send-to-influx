@@ -44,7 +44,8 @@ Description: MQTT broker hostname or IP address
  Needed by MQTT-based sources (currently Nuki). The broker (e.g. Mosquitto)
  must be on your LAN - see the README's "Nuki Smart Lock (MQTT)" section for
  first-time broker setup, including provisioning the lock itself.
- When reconfiguring, leaving this blank keeps the currently configured value.
+ When reconfiguring, your previous answer is offered as the default - this
+ field is required, so accept or edit it rather than blanking it.
 
 Template: send-to-influx/mqtt-username
 Type: string
@@ -53,12 +54,20 @@ Description: MQTT broker username for send-to-influx
  send-to-influx's own (read-only) broker login - use a separate account from
  the one the lock itself publishes with, so either can be rotated or revoked
  independently.
- When reconfiguring, leaving this blank keeps the currently configured value.
+ Leave blank (with the password also blank) if your broker allows anonymous
+ access - that is a valid configuration, not an incomplete one.
+ When reconfiguring, a blank answer keeps the currently configured value -
+ switching an existing authenticated install to anonymous is done by blanking
+ mqtt.username in settings.yaml and running
+ 'send-to-influx-set-credential mqtt-password --remove', not via these
+ prompts (blank means keep, never remove - the same convention as every
+ other credential here).
 
 Template: send-to-influx/mqtt-password
 Type: password
 Description: MQTT broker password for send-to-influx
- The password for the broker username above.
+ The password for the broker username above. Leave blank (with the username
+ also blank) for anonymous access, if your broker allows it.
  When reconfiguring, leaving this blank keeps the credential already stored
  in systemd-creds, if any (a secret kept in plaintext in settings.yaml is
  not read back here).

@@ -49,6 +49,13 @@ LOCK_STATE_NAMES = {
     255: "undefined",
 }
 
+# Fields whose values are inherently text and must never be shape-cast: a firmware
+# of "4.0" would otherwise become a float while "3.9.5" stays a string, and since an
+# InfluxDB field's type is fixed by its first write, the type conflict would reject
+# the WHOLE point (all fields, all devices) until it aged out of the write buffer -
+# real data loss caused by a cosmetic field.
+STRING_FIELDS = frozenset({"firmware", "timestamp", "ringactionTimestamp"})
+
 DOORSENSOR_STATE_NAMES = {
     1: "deactivated",
     2: "door closed",
@@ -150,6 +157,8 @@ class Nuki(MqttDataHandler):
         :return: (field key, decoded value)
         :rtype: tuple
         """
+        if field in STRING_FIELDS:
+            return field, raw
         value = Nuki._decode_scalar(raw)
         if field == "state" and value in LOCK_STATE_NAMES:
             return "stateName", LOCK_STATE_NAMES[value]

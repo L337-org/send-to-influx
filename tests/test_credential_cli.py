@@ -1128,9 +1128,10 @@ class TestEnsureInfluxStorage:
         create_resp.raise_for_status.return_value = None
 
         with patch("subprocess.run"):
-            with patch("requests.get", side_effect=fake_get) as get, patch(
-                "requests.post", return_value=create_resp
-            ) as post:
+            with (
+                patch("requests.get", side_effect=fake_get) as get,
+                patch("requests.post", return_value=create_resp) as post,
+            ):
                 _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
 
         assert all(kwargs["verify"] is False for _, kwargs in get.call_args_list)

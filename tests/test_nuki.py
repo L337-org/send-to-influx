@@ -1,6 +1,6 @@
 """Unit tests for toinflux.nuki (Nuki smart lock via MQTT)."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from toinflux.nuki import Nuki
 
@@ -42,15 +42,12 @@ def _nuki(settings, messages):
     with patch("toinflux.influx.load_settings") as mock_load_settings:
         mock_load_settings.return_value = settings
         nuki = Nuki(source="nuki")
-    patch.object(nuki, "collect_mqtt_messages", return_value=messages).start()
+    nuki.collect_mqtt_messages = MagicMock(return_value=messages)
     return nuki
 
 
 class TestNuki:
     """Tests for the Nuki class."""
-
-    def teardown_method(self):
-        patch.stopall()
 
     def test_get_data_sets_header_and_parses_state(self, sample_settings):
         """Happy path: one device, fields prefixed by its name, labels resolved."""
@@ -153,6 +150,19 @@ class TestNuki:
         result = nuki.get_data()
         assert result["2BB28570_state"] == 42
         assert result["2BB28570_doorsensorState"] == 99
+
+    def test_textual_fields_never_shape_cast(self, sample_settings):
+        """firmware/timestamp stay strings even when they happen to look numeric - a
+        firmware of "4.0" cast to float would type-conflict the whole point against
+        an install whose firmware field was established as a string."""
+        messages = [
+            ("nuki/2BB28570/firmware", "4.0"),
+            ("nuki/2BB28570/timestamp", "20260718"),
+        ]
+        nuki = _nuki(_nuki_settings(sample_settings), messages)
+        result = nuki.get_data()
+        assert result["2BB28570_firmware"] == "4.0"
+        assert result["2BB28570_timestamp"] == "20260718"
 
     def test_timestamp_left_none(self, sample_settings):
         """Nuki reports current state - send_data() should default to poll time."""
