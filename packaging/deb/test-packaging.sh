@@ -133,6 +133,19 @@ else
         sum_before=$(md5sum < "$SETTINGS")
         upgrade_and_assert_silent "release upgrade"
         [ "$(md5sum < "$SETTINGS")" = "$sum_before" ] || fail "release upgrade modified settings.yaml"
+        # The venv's per-minor symlinks are created by postinst rather than shipped,
+        # specifically so dpkg's cleanup of the previous version cannot resolve old
+        # lib/python3.<minor>/... paths through them into the newly-unpacked tree -
+        # which produced ~166 "unable to delete old directory" warnings on a release
+        # upgrade. Assert both halves: the warnings are gone AND the symlinks that
+        # make the venv usable on any supported interpreter are actually there.
+        echo "$LAST_UPGRADE_OUTPUT" | grep -q "unable to delete old directory" \
+            && { echo "$LAST_UPGRADE_OUTPUT" | grep -c "unable to delete"; fail "release upgrade printed stale-directory warnings"; }
+        [ -d /opt/send-to-influx/venv/lib/python3 ] || fail "venv site-packages not at the version-independent path"
+        for m in 10 12 30; do
+            [ "$(readlink "/opt/send-to-influx/venv/lib/python3.$m")" = python3 ] \
+                || fail "venv lib/python3.$m is not a symlink to python3"
+        done
         if [ "$CREDS_WORK" = 1 ]; then
             [ -e "$CREDSTORE/hue-user.cred" ] || fail "stored credential lost across release upgrade"
         fi

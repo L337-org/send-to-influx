@@ -17,6 +17,26 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Refuse to build from a tree containing stale setuptools artefacts. `pip install
+# "$REPO_ROOT"` runs setuptools' build_py, which copies package sources into
+# build/lib and SKIPS any file already there that looks newer - so a leftover
+# build/ directory silently ships the code it holds instead of the code in the
+# tree. This is not hypothetical: a locally-built package shipped pre-Nuki library
+# code under a 4.4 version banner, producing "Source nuki not found" and
+# "send_data() got an unexpected keyword argument use_buffer" at runtime while
+# every file in the working tree was correct. Aborting is right rather than
+# deleting them: they are the developer's, and silently shipping the wrong code is
+# far worse than one clear message. CI is unaffected (it builds fresh checkouts);
+# scripts/dev-build-deb.sh strips them from its own build copy.
+for stale in "$REPO_ROOT/build" "$REPO_ROOT"/*.egg-info; do
+    if [ -e "$stale" ]; then
+        echo "error: stale Python build artefact: $stale" >&2
+        echo "It would be used in preference to the current sources, shipping the wrong code." >&2
+        echo "Remove it and re-run:  rm -rf '$REPO_ROOT/build' '$REPO_ROOT'/*.egg-info" >&2
+        exit 1
+    fi
+done
 PKG_NAME="send-to-influx"
 BUILD_DIR="$(mktemp -d)"
 PKG_ROOT="$BUILD_DIR/pkg"
@@ -124,9 +144,16 @@ VENV_LIB_DIR="$PKG_ROOT/opt/send-to-influx/venv/lib"
 # never a swap to perform. (preinst still clears the venv on upgrade, which is what
 # gets installs created under the old scheme onto this one.)
 mv "$VENV_LIB_DIR/python${PYTHON_MAJOR_MINOR}" "$VENV_LIB_DIR/python3"
-for minor in $(seq 10 "$PYTHON_MAX_SUPPORTED_MINOR"); do
-    ln -s python3 "$VENV_LIB_DIR/python3.${minor}"
-done
+# The per-minor python3.X -> python3 symlinks are deliberately NOT shipped in the
+# package; postinst creates them (and postrm removes them). If they were shipped,
+# they would exist during dpkg's post-unpack cleanup of the previous version's
+# files, so every old lib/python3.<built-minor>/... path would resolve through the
+# new symlink into the freshly-unpacked tree - which is populated, so each rmdir
+# fails and dpkg prints "unable to delete old directory ... Directory not empty".
+# That is ~166 alarming warnings on an upgrade that is in fact completely fine (no
+# file is lost - verified by diffing the package contents against disk afterwards).
+# Creating them after the unpack sidesteps it entirely: at cleanup time the paths
+# simply do not exist, so there is nothing to warn about.
 
 VERSION="$("$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
     "from importlib.metadata import version; print(version('${PKG_NAME}'))")"

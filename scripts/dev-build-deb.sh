@@ -123,6 +123,10 @@ if [ "$MODE" = container ]; then
             apt-get update -q >/dev/null
             apt-get install -yq python3 python3-venv python3-pip >/dev/null
             cp -r /src /build && cd /build
+            # Stale setuptools output would be used in preference to the real
+            # sources (build-deb.sh aborts if it sees any) - and .venv/.git are
+            # just dead weight in the copy.
+            rm -rf build *.egg-info dist .venv .git
             python3 -c "$PATCH_PYPROJECT" pyproject.toml "$PY_VERSION"
             bash packaging/deb/build-deb.sh "/out/$OUT_NAME"
             chown "$HOST_UID:$HOST_GID" "/out/$OUT_NAME"
@@ -138,6 +142,9 @@ else
     trap 'rm -rf "$BUILD_COPY"' EXIT
     # -a to preserve the executable bits the maintainer scripts rely on.
     cp -a "$REPO_ROOT/." "$BUILD_COPY/"
+    # See the container branch above: stale setuptools output in the copy would be
+    # shipped in preference to the actual sources.
+    rm -rf "$BUILD_COPY/build" "$BUILD_COPY"/*.egg-info "$BUILD_COPY/dist" "$BUILD_COPY/.venv" "$BUILD_COPY/.git"
     python3 -c "$PATCH_PYPROJECT" "$BUILD_COPY/pyproject.toml" "$PY_VERSION"
     DEB_VERSION_OVERRIDE="$DEB_VERSION" "$BUILD_COPY/packaging/deb/build-deb.sh" "$REPO_ROOT/dist/$OUT_NAME"
 fi

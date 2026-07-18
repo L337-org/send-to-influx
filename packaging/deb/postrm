@@ -32,6 +32,18 @@ if [ "$1" = "purge" ]; then
     fi
 fi
 
+# postinst creates the venv's python3.X -> python3 symlinks itself (see
+# build-deb.sh), so dpkg doesn't know about them and won't remove them - which
+# would leave /opt/send-to-influx behind as a directory of dangling symlinks after
+# the package's own files are gone. Runs on remove as well as purge: the venv is
+# package-owned either way, and nothing user-created lives under it.
+case "$1" in
+    remove|purge)
+        rm -rf /opt/send-to-influx/venv/lib
+        rmdir /opt/send-to-influx/venv /opt/send-to-influx 2>/dev/null || true
+        ;;
+esac
+
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
 fi

@@ -16,6 +16,22 @@ if [ "$1" != "configure" ]; then
     exit 0
 fi
 
+# Point every supported Python minor at the venv's single real site-packages
+# directory. Created here rather than shipped in the package - see build-deb.sh for
+# why (it is what keeps dpkg from printing ~166 spurious "unable to delete old
+# directory" warnings on upgrade). Must happen before anything below runs the venv.
+# Idempotent: -n replaces nothing that already exists correctly, and a stale entry
+# from an older layout is removed first.
+if [ -d /opt/send-to-influx/venv/lib/python3 ]; then
+    minor=10
+    while [ "$minor" -le 30 ]; do
+        link="/opt/send-to-influx/venv/lib/python3.${minor}"
+        [ -L "$link" ] || rm -rf "$link"
+        ln -sfn python3 "$link"
+        minor=$((minor + 1))
+    done
+fi
+
 if ! getent passwd send-to-influx >/dev/null 2>&1; then
     adduser --system --group --no-create-home --shell /usr/sbin/nologin send-to-influx
 fi
