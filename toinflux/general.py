@@ -153,8 +153,11 @@ MQTT_SOURCES = frozenset({"nuki"})
 def mqtt_block_errors(settings, context=""):
     """
     Return a list of error strings for the shared ``mqtt`` settings block itself -
-    its type, ``broker_host`` presence, and ``broker_port`` range - independent of
-    which sources happen to need it.
+    its own type, ``broker_host`` presence and type, ``username``/``password`` types,
+    and ``broker_port`` type and range - independent of which sources happen to need
+    it. The type checks matter because YAML coerces silently (``broker_host: 10.0``
+    is a float, ``broker_host: yes`` is a bool) and a non-string reaches paho as a
+    raw TypeError that the transport's connection-error handling can't catch.
 
     Shared by ``validate_settings()`` (config-check time) and
     ``MqttDataHandler.collect_mqtt_messages()`` (runtime), deliberately: those are two
