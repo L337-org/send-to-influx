@@ -284,7 +284,7 @@ def main():
         sys.exit(0)
 
     _configure_logging_or_exit(settings, args)
-    default_source = settings.get("default_source", "hue")
+    default_source = settings.get("default_source") or toinflux.DEFAULT_SOURCE
 
     if args.source:
         logging.info("Starting send-to-influx v%s (source=%s)", __version__, args.source)

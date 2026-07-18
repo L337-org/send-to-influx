@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 import pytest
 import yaml
-from toinflux.general import flatten_dict, load_settings, get_class, validate_settings
+from toinflux.general import DEFAULT_SOURCE, flatten_dict, load_settings, get_class, validate_settings
 from toinflux.exceptions import ConfigError
 
 
@@ -329,6 +329,25 @@ class TestValidateSettings:
         sample_settings["mqtt"] = {"broker_host": "   "}
         with pytest.raises(ConfigError, match="broker_host is required"):
             validate_settings(sample_settings, source="nuki")
+
+    def test_falls_back_to_the_same_default_source_as_the_runtime(self, sample_settings):
+        """With neither sources: nor default_source:, sendtoinflux.py runs
+        DEFAULT_SOURCE - so validation must check that source's block, or a config
+        whose effective source has no settings section passes --check-config and then
+        dies at startup."""
+        del sample_settings["sources"]
+        del sample_settings["default_source"]
+        validate_settings(sample_settings)  # hue block present, matches what runs
+        del sample_settings[DEFAULT_SOURCE]
+        with pytest.raises(ConfigError, match=f"no configuration section found for source '{DEFAULT_SOURCE}'"):
+            validate_settings(sample_settings)
+
+    def test_explicit_null_entry_in_sources_is_rejected(self, sample_settings):
+        """A null entry is a malformed list entry, not an absent default - it must be
+        reported rather than silently skipped."""
+        sample_settings["sources"] = ["hue", None]
+        with pytest.raises(ConfigError, match="must be strings"):
+            validate_settings(sample_settings)
 
 
 class TestGetClass:

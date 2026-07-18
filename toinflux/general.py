@@ -16,6 +16,13 @@ import yaml
 from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, SENTINEL_PREFIX, apply_credential_substitution
 from toinflux.exceptions import ConfigError
 
+# The source sendtoinflux.py runs when neither sources: nor default_source: is
+# configured. Defined here so validate_settings() checks exactly what the runtime
+# will actually run - the two previously disagreed (the runtime fell back to "hue"
+# while validation checked nothing), so --check-config could report OK on a config
+# whose effective source had no settings block at all.
+DEFAULT_SOURCE = "hue"
+
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_LOG_BACKUP_COUNT = 3
 
@@ -281,11 +288,16 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
         # default_source so the rest of validation still runs sensibly.
         errors.append(f"sources must be a list (got {type(raw_sources).__name__})")
         raw_sources = None
-    sources = raw_sources or [settings.get("default_source")]
-    # A non-string entry (e.g. a YAML mapping from a malformed sources list) would
-    # raise a raw TypeError from the dict/set membership tests below - report it as
-    # the ConfigError it really is, and validate the remaining string entries.
-    invalid = [src for src in sources if src is not None and not isinstance(src, str)]
+    # An absent or empty sources list means the runtime falls back to
+    # default_source, and to DEFAULT_SOURCE if that is absent too - validate exactly
+    # what will actually run, or a config whose effective source has no settings
+    # block would pass --check-config and then fail at startup.
+    sources = raw_sources or [settings.get("default_source") or DEFAULT_SOURCE]
+    # A non-string entry (e.g. a YAML mapping, or an explicit null, from a malformed
+    # sources list) would raise a raw TypeError from the dict/set membership tests
+    # below - report it as the ConfigError it really is, and validate the remaining
+    # string entries.
+    invalid = [src for src in sources if not isinstance(src, str)]
     if invalid:
         errors.append("sources entries must be strings (got: " + ", ".join(repr(s) for s in invalid) + ")")
     sources = [src.lower() for src in sources if isinstance(src, str)]
