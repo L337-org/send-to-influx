@@ -350,7 +350,12 @@ from `postinst`, once package files are unpacked and everything's been answered.
   means hand-configured - where auto-enable would be speculative (possibly against the shipped
   placeholder host), so those installs hand-edit `sources:` instead, same precedent as
   plaintext-settings credentials. Blank username *and* password mean anonymous broker access - a
-  valid configuration, not an incomplete one - so only the host gates auto-enable.
+  valid configuration, not an incomplete one. Auth must be *coherent* to auto-enable though: a
+  username with no password material (neither typed nor stored) warns instead of enabling a
+  guaranteed auth-rejection retry loop. And switching an existing authenticated install to
+  anonymous is not expressible through the prompts (blank means keep, per the standing
+  no-clearing-via-debconf convention) - it's done by blanking `mqtt.username` in settings.yaml
+  plus `send-to-influx-set-credential mqtt-password --remove`.
   `mqtt-username` is cleared from debconf's database after use like
   `influx-identity` (the other half of a credential pair), and both are in the final sweep.
 - `postinst` (inside the fresh-install-or-reconfigure gate above): `sources-to-configure` is read

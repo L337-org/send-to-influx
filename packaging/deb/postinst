@@ -417,9 +417,18 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
             # always has a non-blank host here - a blank one means the host
             # was only ever hand-edited or never set, where auto-enabling
             # would be speculative, possibly against the shipped placeholder).
-            # Nothing else is required: blank username/password means
-            # anonymous access.
-            if [ -n "$MQTT_HOST" ]; then
+            # Auth is optional but must be coherent: both blank means
+            # anonymous access, both supplied means authenticated - a username
+            # with no password material is neither (see the elif).
+            if [ -z "$MQTT_HOST" ]; then
+                echo "send-to-influx: Nuki not fully configured (MQTT broker host missing) - not enabling it." >&2
+            elif [ -n "$MQTT_USER" ] && [ -z "$MQTT_PASS" ] && [ ! -e "$CREDSTORE/mqtt-password.cred" ]; then
+                # Incoherent auth: a username with no password material would
+                # auto-enable straight into an authenticated connect with an
+                # empty password - a guaranteed rejection retry loop. Both for
+                # authenticated access, neither for anonymous.
+                echo "send-to-influx: Nuki not fully configured (username given without a password - provide both for authenticated access, or neither for anonymous) - not enabling it." >&2
+            else
                 CLI_FAILED=0
                 set_field mqtt.broker_host "$MQTT_HOST"
                 if [ -n "$MQTT_USER" ]; then
@@ -431,8 +440,6 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
                 if [ "$CLI_FAILED" = 0 ]; then
                     NUKI_OK=1
                 fi
-            else
-                echo "send-to-influx: Nuki not fully configured (MQTT broker host missing) - not enabling it." >&2
             fi
             ;;
     esac

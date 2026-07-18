@@ -56,6 +56,12 @@ Description: MQTT broker username for send-to-influx
  independently.
  Leave blank (with the password also blank) if your broker allows anonymous
  access - that is a valid configuration, not an incomplete one.
+ When reconfiguring, a blank answer keeps the currently configured value -
+ switching an existing authenticated install to anonymous is done by blanking
+ mqtt.username in settings.yaml and running
+ 'send-to-influx-set-credential mqtt-password --remove', not via these
+ prompts (blank means keep, never remove - the same convention as every
+ other credential here).
 
 Template: send-to-influx/mqtt-password
 Type: password

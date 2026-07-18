@@ -143,7 +143,9 @@ Setting up Mosquitto on Debian/Ubuntu:
 Then fill in the shared `mqtt:` block in `settings.yaml` with the `sendtoinflux` credential and add
 `nuki` to `sources:`. (If your broker permits anonymous access you can instead leave
 `username`/`password` blank - the two-credential setup above is the recommended default, not a
-requirement.) On the packaged install the broker password can be moved into `systemd-creds`
+requirement. To switch an already-authenticated install to anonymous later, blank `mqtt.username`
+in settings.yaml and run `sudo send-to-influx-set-credential mqtt-password --remove` - the
+install prompts can't do it, since a blank answer there means "keep the current value".) On the packaged install the broker password can be moved into `systemd-creds`
 with `send-to-influx-set-credential mqtt-password`, like any other credential.
 
 Speedtest
