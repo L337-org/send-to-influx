@@ -90,7 +90,11 @@ class MqttDataHandler(DataHandler):
         def on_message(client, userdata, message):
             messages.append((message.topic, message.payload.decode("utf-8", errors="replace")))
 
-        client = mqtt_client.Client(mqtt_client.CallbackAPIVersion.VERSION2)
+        # Keyword form deliberately: callback_api_version IS paho 2.x's first
+        # positional parameter (that was 2.0's breaking change), so positional
+        # works - but naming it makes the call self-documenting and immune to
+        # being misread as a client_id.
+        client = mqtt_client.Client(callback_api_version=mqtt_client.CallbackAPIVersion.VERSION2)
         if mqtt_settings.get("username"):
             client.username_pw_set(mqtt_settings["username"], mqtt_settings.get("password"))
         client.on_connect = on_connect

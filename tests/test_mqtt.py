@@ -83,7 +83,7 @@ class TestMqttDataHandler:
         with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
             _drive_callbacks(mock_client_cls.return_value, [])
             handler.collect_mqtt_messages("nuki/+/+", WINDOW)
-            assert mock_client_cls.call_args[0][0] is mqtt_client.CallbackAPIVersion.VERSION2
+            assert mock_client_cls.call_args.kwargs["callback_api_version"] is mqtt_client.CallbackAPIVersion.VERSION2
 
     def test_connect_failure_raises_source_connection_error(self, sample_settings):
         """A network-level connect failure (OSError family) maps to SourceConnectionError."""
