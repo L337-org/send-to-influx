@@ -151,14 +151,33 @@ else
         fi
         pass "release upgrade: silent, settings.yaml and credential preserved"
 
-        # The released package predates the mqtt:/nuki: sections, so an install
-        # upgraded from it has a settings.yaml without them. Reconfiguring and
-        # selecting nuki must back-fill both from the shipped example - otherwise
-        # --set-field fails ("no 'mqtt:' section found") and, worse, enabling the
-        # source writes it into sources: with no nuki: block behind it, which makes
-        # load_settings() raise a fatal ConfigError and stops the WHOLE service,
-        # taking every already-working source down with it. Both were live bugs.
-        grep -q "^mqtt:" "$SETTINGS" && fail "released package unexpectedly has an mqtt: section"
+        # Simulate an install that predates the mqtt:/nuki: sections, regardless of
+        # whether the currently-published "latest release" happens to already ship
+        # them - it does as of 4.4, which made this scenario fail outright the
+        # moment 4.4 became latest, since its own example_settings.yaml (copied
+        # verbatim into settings.yaml on install) already has both sections
+        # unconditionally. Relying on the real gap between "latest release" and
+        # current dev content only works until a section they both already have
+        # stops being new, so strip them here instead of asserting their absence.
+        # Reconfiguring and selecting nuki must then back-fill both from the
+        # shipped example - otherwise --set-field fails ("no 'mqtt:' section
+        # found") and, worse, enabling the source writes it into sources: with no
+        # nuki: block behind it, which makes load_settings() raise a fatal
+        # ConfigError and stops the WHOLE service, taking every already-working
+        # source down with it. Both were live bugs.
+        # set -e does not trigger on a failing left side of && (it's exempt as
+        # part of an and-or list), so a broken awk here would silently fall
+        # through to mv never running - fail each step explicitly instead of
+        # relying only on the content checks below to notice.
+        awk '
+            skip && /^[^ \t]/ { skip = 0 }
+            /^mqtt:/ || /^nuki:/ { skip = 1; next }
+            skip { next }
+            { print }
+        ' "$SETTINGS" > "$SETTINGS.tmp" || fail "test setup: awk failed to strip the mqtt:/nuki: sections"
+        mv "$SETTINGS.tmp" "$SETTINGS" || fail "test setup: failed to replace settings.yaml with the stripped copy"
+        grep -q "^mqtt:" "$SETTINGS" && fail "test setup: failed to strip the mqtt: section for the backfill scenario"
+        grep -q "^nuki:" "$SETTINGS" && fail "test setup: failed to strip the nuki: section for the backfill scenario"
         debconf-set-selections <<EOF
 send-to-influx send-to-influx/sources-to-configure multiselect nuki
 send-to-influx send-to-influx/mqtt-broker-host string ci-mqtt-broker.example.com
