@@ -436,8 +436,13 @@ def configured_sources(settings):
     the single default source when no list is configured."""
     raw = settings.get("sources")
     if isinstance(raw, list) and raw:
-        return [str(src).lower() for src in raw if isinstance(src, str)]
-    return [resolve_default_source(settings)]
+        return [src.lower() for src in raw if isinstance(src, str)]
+    # Normalise the default-source fallback the same way: lowercase it, and drop
+    # a non-string value (YAML coerces `default_source: no` to False) so callers
+    # always get a list[str] - a mixed-case default would otherwise never match
+    # source.lower(), and a non-string would crash the error-message join.
+    default = resolve_default_source(settings)
+    return [default.lower()] if isinstance(default, str) else []
 
 
 def _resolve_handler(source, settings, settings_file):
