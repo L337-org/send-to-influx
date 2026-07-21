@@ -524,6 +524,47 @@ class TestRegisterReadTools:
         assert '"limit": 3' in text
         assert '"truncated": true' in text
 
+    def test_query_history_closes_the_session(self):
+        server = self._server()
+        register_read_tools(server, self._settings(), None)
+        handler = self._handler()
+        with (
+            patch("toinflux.mcp_read.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
+            patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], [[1, 2]])),
+        ):
+            anyio.run(
+                server.call_tool,
+                "query_history",
+                {"source": "zappi", "field": "gen", "start": "-1h", "end": "now"},
+            )
+        handler.session.close.assert_called_once()
+
+    def test_query_history_closes_the_session_on_error(self):
+        server = self._server()
+        register_read_tools(server, self._settings(), None)
+        handler = self._handler()
+        with (
+            patch("toinflux.mcp_read.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", side_effect=SourceConnectionError("boom")),
+        ):
+            with pytest.raises(Exception, match="boom"):
+                anyio.run(
+                    server.call_tool,
+                    "query_history",
+                    {"source": "zappi", "field": "gen", "start": "-1h", "end": "now"},
+                )
+        # discover_fields failed inside resolve_schema -> its except path closed it.
+        handler.session.close.assert_called_once()
+
+    def test_list_sources_closes_each_session(self):
+        server = self._server()
+        register_read_tools(server, self._settings(), None)
+        handler = self._handler()
+        with patch("toinflux.mcp_read.get_class", return_value=handler):
+            anyio.run(server.call_tool, "list_sources", {})
+        handler.session.close.assert_called_once()
+
     def test_query_history_bad_field_is_tool_error(self):
         server = self._server()
         register_read_tools(server, self._settings(), None)

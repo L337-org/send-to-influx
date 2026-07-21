@@ -513,8 +513,25 @@ def resolve_schema(source, settings, settings_file):
     # so reads hit the same database the collectors write to.
     influx_settings = handler.settings["influx"]
     db = resolve_db(handler.source_settings, influx_settings)
-    fields = discover_fields(handler.session, influx_settings, db, measurement)
+    try:
+        fields = discover_fields(handler.session, influx_settings, db, measurement)
+    except Exception:
+        # A fresh requests.Session is created per handler (per tool call); close
+        # it if discovery fails, or a long-running server accumulates open
+        # connection pools/FDs on intermittent errors. On success the caller owns
+        # the returned handler and closes its session when done.
+        _close_session(handler.session)
+        raise
     return handler, build_schema(handler, fields, db)
+
+
+def _close_session(session):
+    """Best-effort close of a handler's requests.Session, swallowing any error -
+    this runs in cleanup paths and must never mask the real result or exception."""
+    try:
+        session.close()
+    except Exception:  # pragma: no cover - close() shouldn't raise; never let cleanup break a tool
+        logging.debug("Ignoring error closing an MCP read session", exc_info=True)
 
 
 def _list_sources_result(settings, settings_file):
@@ -525,28 +542,44 @@ def _list_sources_result(settings, settings_file):
             handler = _resolve_handler(source, settings, settings_file)
         except QueryParamError:
             continue
-        out.append({"source": source, "measurement": handler.MCP_MEASUREMENT or handler.source})
+        # Constructed only to read class metadata; close its session immediately.
+        try:
+            out.append({"source": source, "measurement": handler.MCP_MEASUREMENT or handler.source})
+        finally:
+            _close_session(handler.session)
     return {"sources": out}
 
 
 def _list_fields_result(source, settings, settings_file):
     """Build the list_fields tool payload (runs in a worker thread)."""
-    _handler, schema = resolve_schema(source, settings, settings_file)
-    fields = []
-    for name in sorted(schema.allowed_fields):
-        meta = schema.metadata_for(name)
-        entry = {"field": name}
-        if meta.get("unit"):
-            entry["unit"] = meta["unit"]
-        if meta.get("codes"):
-            entry["codes"] = {str(code): label for code, label in meta["codes"].items()}
-        fields.append(entry)
-    return {"source": source, "measurement": schema.measurement, "fields": fields}
+    handler, schema = resolve_schema(source, settings, settings_file)
+    try:
+        fields = []
+        for name in sorted(schema.allowed_fields):
+            meta = schema.metadata_for(name)
+            entry = {"field": name}
+            if meta.get("unit"):
+                entry["unit"] = meta["unit"]
+            if meta.get("codes"):
+                entry["codes"] = {str(code): label for code, label in meta["codes"].items()}
+            fields.append(entry)
+        return {"source": source, "measurement": schema.measurement, "fields": fields}
+    finally:
+        _close_session(handler.session)
 
 
 def _query_history_result(settings, settings_file, *, source, field, start, end, aggregation, group_by, limit):
     """Build the query_history tool payload (runs in a worker thread)."""
     handler, schema = resolve_schema(source, settings, settings_file)
+    try:
+        return _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit)
+    finally:
+        _close_session(handler.session)
+
+
+def _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit):
+    """Execute the query and shape the payload (session lifecycle owned by the
+    caller). Split out so _query_history_result's finally: stays a thin wrapper."""
     # handler.settings["influx"], not the startup snapshot, so the query runs
     # against the same (possibly freshly-edited) InfluxDB the schema was
     # discovered from - see resolve_schema.
