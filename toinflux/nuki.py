@@ -32,23 +32,6 @@ KNOWN_STATE_FIELDS = frozenset(
     }
 )
 
-# Numeric-code-to-label tables from the Nuki MQTT API spec (v1.6). Unlike the Bridge
-# HTTP API, MQTT publishes only the numeric codes - the human-readable labels have to
-# be resolved here. An unrecognised code is written through as its raw number rather
-# than dropped: a new code is more likely a future firmware addition than bad data.
-LOCK_STATE_NAMES = {
-    0: "uncalibrated",
-    1: "locked",
-    2: "unlocking",
-    3: "unlocked",
-    4: "locking",
-    5: "unlatched",
-    6: "unlocked (lock 'n' go)",
-    7: "unlatching",
-    254: "motor blocked",
-    255: "undefined",
-}
-
 # Fields whose values are inherently text and must never be shape-cast: a firmware
 # of "4.0" would otherwise become a float while "3.9.5" stays a string, and since an
 # InfluxDB field's type is fixed by its first write, the type conflict would reject
@@ -56,15 +39,13 @@ LOCK_STATE_NAMES = {
 # real data loss caused by a cosmetic field.
 STRING_FIELDS = frozenset({"firmware", "timestamp", "ringactionTimestamp"})
 
-DOORSENSOR_STATE_NAMES = {
-    1: "deactivated",
-    2: "door closed",
-    3: "door opened",
-    4: "door state unknown",
-    5: "calibrating",
-    16: "uncalibrated",
-    240: "tampered",
-    255: "unknown",
+# state/doorsensorState are reported under these renamed keys, numeric always -
+# Grafana struggles to visualise text (see UNITS.md for what each code means), and a
+# fixed field name/type per lock is simpler to chart than one whose name changes
+# depending on whether a given code happens to be documented.
+STATE_VALUE_FIELDS = {
+    "state": "stateValue",
+    "doorsensorState": "doorsensorStateValue",
 }
 
 
@@ -121,7 +102,7 @@ class Nuki(MqttDataHandler):
         # than letting fields flap between devices.
         for device_id, fields in sorted(devices.items()):
             # A blank/whitespace name gets the same device-ID fallback as an absent one -
-            # an empty prefix would produce keys like "_stateName" and collide across devices.
+            # an empty prefix would produce keys like "_stateValue" and collide across devices.
             prefix = (fields.pop("name", "").strip() or device_id).replace(" ", "_")
             for field, raw in fields.items():
                 key, value = self._decode_field(field, raw)
@@ -144,9 +125,9 @@ class Nuki(MqttDataHandler):
         """
         Decode one state topic's payload into an InfluxDB field key and value.
 
-        The numeric ``state``/``doorsensorState`` codes are resolved to their
-        human-readable labels (as ``stateName``/``doorsensorStateName``); an
-        unrecognised code keeps the original field key and its raw numeric value.
+        ``state``/``doorsensorState`` are renamed to ``stateValue``/
+        ``doorsensorStateValue`` (see :data:`STATE_VALUE_FIELDS`); their value is
+        always the raw numeric code - see UNITS.md for what each code means.
         Everything else is cast by shape: true/false to bool, numeric strings to
         int/float, anything else left as a string.
 
@@ -160,16 +141,7 @@ class Nuki(MqttDataHandler):
         if field in STRING_FIELDS:
             return field, raw
         value = Nuki._decode_scalar(raw)
-        # bool is an int subclass and False/True equal 0/1, so a state topic carrying
-        # "true" would otherwise resolve to a lock-state label - a silently wrong
-        # value rather than an obviously odd one.
-        if isinstance(value, bool):
-            return field, value
-        if field == "state" and value in LOCK_STATE_NAMES:
-            return "stateName", LOCK_STATE_NAMES[value]
-        if field == "doorsensorState" and value in DOORSENSOR_STATE_NAMES:
-            return "doorsensorStateName", DOORSENSOR_STATE_NAMES[value]
-        return field, value
+        return STATE_VALUE_FIELDS.get(field, field), value
 
     @staticmethod
     def _decode_scalar(raw):

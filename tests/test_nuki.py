@@ -50,21 +50,21 @@ class TestNuki:
     """Tests for the Nuki class."""
 
     def test_get_data_sets_header_and_parses_state(self, sample_settings):
-        """Happy path: one device, fields prefixed by its name, labels resolved."""
+        """Happy path: one device, fields prefixed by its name, state codes renamed."""
         nuki = _nuki(_nuki_settings(sample_settings), FRONT_DOOR)
         result = nuki.get_data()
         assert nuki.influx_header == "nuki,host=mqtt.example.com "
         assert nuki.data == result
-        assert result["Front_Door_stateName"] == "locked"
-        assert result["Front_Door_doorsensorStateName"] == "door closed"
+        assert result["Front_Door_stateValue"] == 1
+        assert result["Front_Door_doorsensorStateValue"] == 2
         assert result["Front_Door_batteryCritical"] is False
         assert result["Front_Door_batteryChargeState"] == 85
         assert result["Front_Door_connected"] is True
         assert result["Front_Door_timestamp"] == "2026-07-17T10:00:00+00:00"
 
-    def test_raw_numeric_codes_and_name_field_absent_from_output(self, sample_settings):
-        """state/doorsensorState are replaced by their labels, and the name topic is
-        consumed as the prefix rather than written as a redundant field."""
+    def test_raw_field_names_and_name_field_absent_from_output(self, sample_settings):
+        """state/doorsensorState are renamed to their *Value counterparts, and the
+        name topic is consumed as the prefix rather than written as a redundant field."""
         nuki = _nuki(_nuki_settings(sample_settings), FRONT_DOOR)
         result = nuki.get_data()
         assert "Front_Door_state" not in result
@@ -86,9 +86,9 @@ class TestNuki:
         ]
         nuki = _nuki(_nuki_settings(sample_settings), FRONT_DOOR + back_door)
         result = nuki.get_data()
-        assert result["Front_Door_stateName"] == "locked"
-        assert result["Back_Door_stateName"] == "unlocked"
-        assert result["Back_Door_doorsensorStateName"] == "door opened"
+        assert result["Front_Door_stateValue"] == 1
+        assert result["Back_Door_stateValue"] == 3
+        assert result["Back_Door_doorsensorStateValue"] == 3
 
     def test_control_and_event_topics_filtered_out(self, sample_settings):
         """A command/event topic arriving during the window must not become a field."""
@@ -105,14 +105,14 @@ class TestNuki:
         """A device whose name topic didn't arrive is still reported, keyed by its ID."""
         messages = [("nuki/2BB28570/state", "1")]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
-        assert nuki.get_data() == {"2BB28570_stateName": "locked"}
+        assert nuki.get_data() == {"2BB28570_stateValue": 1}
 
     def test_blank_name_payload_falls_back_to_hex_id(self, sample_settings):
         """A blank/whitespace name payload gets the ID fallback too - an empty prefix
-        would produce keys like _stateName and collide across devices."""
+        would produce keys like _stateValue and collide across devices."""
         messages = [("nuki/2BB28570/name", "   "), ("nuki/2BB28570/state", "1")]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
-        assert nuki.get_data() == {"2BB28570_stateName": "locked"}
+        assert nuki.get_data() == {"2BB28570_stateValue": 1}
 
     def test_duplicate_device_names_warn_and_last_wins(self, sample_settings, caplog):
         """Two devices with the same Nuki-app name collide - highest device ID wins
@@ -130,7 +130,7 @@ class TestNuki:
             result = nuki.get_data()
         # BBBB0002 sorts after AAAA0001, so it wins (state 3 = unlocked) regardless of
         # the reversed arrival order above.
-        assert result["Door_stateName"] == "unlocked"
+        assert result["Door_stateValue"] == 3
         assert any("Duplicate Nuki device name" in record.message for record in caplog.records)
 
     def test_empty_window_returns_empty_dict_with_debug_log(self, sample_settings, caplog):
@@ -142,14 +142,15 @@ class TestNuki:
         records = [r for r in caplog.records if "No Nuki device state" in r.message]
         assert records and all(r.levelname == "DEBUG" for r in records)
 
-    def test_unrecognised_state_code_kept_as_raw_number(self, sample_settings):
-        """An unknown numeric code (e.g. a future firmware addition) keeps the original
-        field key and its raw value rather than being dropped or mislabelled."""
+    def test_undocumented_state_code_still_written_as_raw_number(self, sample_settings):
+        """A code with no documented meaning in UNITS.md (e.g. a future firmware
+        addition) is still written through as-is - the renamed field carries the raw
+        code regardless of whether Nuki has documented it."""
         messages = [("nuki/2BB28570/state", "42"), ("nuki/2BB28570/doorsensorState", "99")]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
         result = nuki.get_data()
-        assert result["2BB28570_state"] == 42
-        assert result["2BB28570_doorsensorState"] == 99
+        assert result["2BB28570_stateValue"] == 42
+        assert result["2BB28570_doorsensorStateValue"] == 99
 
     def test_textual_fields_never_shape_cast(self, sample_settings):
         """firmware/timestamp stay strings even when they happen to look numeric - a
@@ -174,7 +175,7 @@ class TestNuki:
         """Topics that don't match nuki/<id>/<field> are skipped, not fatal."""
         messages = [("nuki/oddness", "x"), ("nuki/2BB28570/state/extra", "1")] + FRONT_DOOR
         nuki = _nuki(_nuki_settings(sample_settings), messages)
-        assert nuki.get_data()["Front_Door_stateName"] == "locked"
+        assert nuki.get_data()["Front_Door_stateValue"] == 1
 
     def test_decodes_float_and_non_numeric_payloads(self, sample_settings):
         """_decode_scalar's float and string-fallback branches: MQTT payloads are bare
@@ -188,11 +189,11 @@ class TestNuki:
         assert result["2BB28570_batteryChargeState"] == 85.5
         assert result["2BB28570_mode"] == "door mode"
 
-    def test_bool_payload_never_resolves_to_a_state_label(self, sample_settings):
-        """bool is an int subclass and True == 1, so a state topic carrying "true"
-        must not silently become stateName="locked"."""
+    def test_bool_payload_on_state_field_still_renamed(self, sample_settings):
+        """A malformed "true"/"false" payload on the state topic is still shape-cast
+        to bool and still renamed to stateValue - there's no label lookup left to
+        confuse it with."""
         messages = [("nuki/2BB28570/state", "true")]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
         result = nuki.get_data()
-        assert result["2BB28570_state"] is True
-        assert "2BB28570_stateName" not in result
+        assert result["2BB28570_stateValue"] is True

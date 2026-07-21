@@ -82,12 +82,12 @@ page for the default unit of each one.
 ## Nuki Smart Lock (`nuki`)
 
 Field keys are prefixed with the lock's own name from the Nuki app (spaces replaced with
-underscores), e.g. `Front_Door_stateName`; every lock provisioned to the broker is reported.
+underscores), e.g. `Front_Door_stateValue`; every lock provisioned to the broker is reported.
 
 | Field | Unit | Notes |
 |---|---|---|
-| `stateName` | - | Lock state label (`locked`, `unlocked`, `unlatched`, ...); an unrecognised numeric code is written unchanged as `state` (under the same lock-name prefix, e.g. `Front_Door_state`) instead |
-| `doorsensorStateName` | - | Door sensor label (`door closed`, `door opened`, ...); unrecognised codes written unchanged as `doorsensorState` (same prefix rule) |
+| `stateValue` | - | Lock state, numeric (see table below); a code not in the table is still written through as its raw number - Nuki firmware may add new ones |
+| `doorsensorStateValue` | - | Door sensor state, numeric (see table below); same raw-passthrough rule for undocumented codes |
 | `batteryChargeState` | % | Battery charge level |
 | `batteryCritical`, `batteryCharging`, `keypadBatteryCritical`, `doorsensorBatteryCritical` | bool | Battery status flags (keypad/door-sensor flags only present when those accessories are paired) |
 | `mode`, `deviceType`, `firmware` | - | Device metadata |
@@ -95,6 +95,34 @@ underscores), e.g. `Front_Door_stateName`; every lock provisioned to the broker 
 | `serverConnected` | bool | Whether the lock currently has a connection to Nuki's cloud |
 | `ringactionTimestamp` | - | ISO8601 time of the last ring action (string; Nuki Opener only - not published by locks) |
 | `timestamp` | - | ISO8601 time of the lock's last state update (string) |
+
+`stateValue` codes (Nuki MQTT API spec v1.6):
+
+| Value | Meaning |
+|---|---|
+| 0 | uncalibrated |
+| 1 | locked |
+| 2 | unlocking |
+| 3 | unlocked |
+| 4 | locking |
+| 5 | unlatched |
+| 6 | unlocked (lock 'n' go) |
+| 7 | unlatching |
+| 254 | motor blocked |
+| 255 | undefined |
+
+`doorsensorStateValue` codes:
+
+| Value | Meaning |
+|---|---|
+| 1 | deactivated |
+| 2 | door closed |
+| 3 | door opened |
+| 4 | door state unknown |
+| 5 | calibrating |
+| 16 | uncalibrated |
+| 240 | tampered |
+| 255 | unknown |
 
 ## Speedtest (`speedtest`)
 
