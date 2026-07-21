@@ -491,6 +491,52 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     SPEEDTEST_OK=0
     case "$SOURCES" in *" speedtest "*) SPEEDTEST_OK=1 ;; esac
 
+    # --- Remote MCP server ---
+    # The third shared-infrastructure block, gated on its own mcp-enable boolean
+    # rather than a source selection: the MCP server is an optional interface over
+    # every source, not a source itself. Independent of INFLUX_OK too - the server
+    # runs regardless (queries just fail if InfluxDB is unreachable), so it's not
+    # inside the auto-enable/INFLUX_OK block below. The service is only (re)started
+    # at the very END of this script, so only the FINAL settings.yaml state matters
+    # - which is what makes the enable-then-revert on a password failure safe.
+    db_get send-to-influx/mcp-enable
+    if [ "$RET" = "true" ]; then
+        db_get send-to-influx/mcp-public-url
+        MCP_URL="$RET"
+        db_get send-to-influx/mcp-user
+        MCP_USER="$RET"
+        db_get send-to-influx/mcp-password
+        MCP_PASS="$RET"
+        # Clear the consumed secret and its paired username (see influx/mqtt).
+        db_set send-to-influx/mcp-password "" || true
+        db_set send-to-influx/mcp-user "" || true
+        # An enabled mcp block needs public_url AND a coherent user+password, or
+        # load_settings() raises a fatal ConfigError that stops the WHOLE service
+        # (every collector), not just the MCP server. So require all three -
+        # password may be freshly typed or already in systemd-creds - and
+        # otherwise leave the shipped blank (disabled, valid) block untouched.
+        if [ -z "$MCP_URL" ] || [ -z "$MCP_USER" ]; then
+            echo "send-to-influx: MCP server not fully configured (public URL and username required) - not enabling it." >&2
+        elif [ -z "$MCP_PASS" ] && [ ! -e "$CREDSTORE/mcp-password.cred" ]; then
+            echo "send-to-influx: MCP server not fully configured (login password required) - not enabling it." >&2
+        else
+            ensure_section mcp
+            set_field mcp.public_url "$MCP_URL"
+            set_field mcp.user "$MCP_USER"
+            if [ -n "$MCP_PASS" ]; then
+                if ! printf '%s' "$MCP_PASS" | "$CLI" mcp-password >/dev/null; then
+                    # Password store failed. Revert the username so the FINAL block
+                    # is coherent-and-disabled (blank user) rather than
+                    # user-without-password, which fails validation and takes every
+                    # collector down with it. Only the end-of-script state matters.
+                    "$CLI" --set-field mcp.user "" >/dev/null 2>&1 || true
+                    CLI_FAILED=1
+                    echo "send-to-influx: could not store the MCP login password - MCP server left disabled. Set it by hand with 'sudo $CLI mcp-password', then re-run 'dpkg-reconfigure send-to-influx'." >&2
+                fi
+            fi
+        fi
+    fi
+
     # Belt-and-braces: clear every credential-bearing answer - the five
     # password-type questions plus the two string-typed identity halves
     # (influx-identity, a possible v1 username, and mqtt-username - see the
@@ -500,7 +546,7 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
     # but a preseed (debconf-set-selections) can supply e.g. hue-user without
     # ticking hue, and that answer would otherwise sit in passwords.dat
     # indefinitely. Re-clearing the already-cleared ones is harmless.
-    for q in influx-secret influx-identity hue-user myenergi-apikey octopus-api-key mqtt-password mqtt-username; do
+    for q in influx-secret influx-identity hue-user myenergi-apikey octopus-api-key mqtt-password mqtt-username mcp-password mcp-user; do
         db_set "send-to-influx/$q" "" || true
     done
 

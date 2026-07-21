@@ -72,6 +72,40 @@ Description: MQTT broker password for send-to-influx
  in systemd-creds, if any (a secret kept in plaintext in settings.yaml is
  not read back here).
 
+Template: send-to-influx/mcp-enable
+Type: boolean
+Default: false
+Description: Enable the remote MCP server (for Claude Desktop/Mobile)?
+ Lets Claude query your collected device history, and optionally control Hue
+ lights, over an OAuth-protected HTTPS endpoint. The server binds a private
+ interface only (127.0.0.1:8420) - you must front it with your own
+ TLS-terminating reverse proxy. Leave this off unless you want that; the
+ collector works exactly as before either way.
+
+Template: send-to-influx/mcp-public-url
+Type: string
+Default:
+Description: External HTTPS URL your reverse proxy serves for the MCP server
+ e.g. https://mcp.example.org - the address you'll add as a connector in
+ Claude. Required to enable the server (its OAuth metadata must advertise it);
+ must start with https://. When reconfiguring, leaving this blank keeps the
+ currently configured value.
+
+Template: send-to-influx/mcp-user
+Type: string
+Default:
+Description: MCP server login username
+ The username for the OAuth login page that gates access to the MCP server.
+ When reconfiguring, leaving this blank keeps the currently configured value.
+
+Template: send-to-influx/mcp-password
+Type: password
+Description: MCP server login password
+ The password for the MCP login username above.
+ When reconfiguring, leaving this blank keeps the credential already stored
+ in systemd-creds, if any (a secret kept in plaintext in settings.yaml is
+ not read back here).
+
 Template: send-to-influx/hue-host
 Type: string
 Default:

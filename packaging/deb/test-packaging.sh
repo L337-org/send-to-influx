@@ -25,6 +25,7 @@ SETTINGS=/etc/send-to-influx/settings.yaml
 CREDSTORE=/etc/send-to-influx/credstore.encrypted
 HUE_TEST_SECRET="${HUE_TEST_SECRET:-test-hue-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 MQTT_TEST_SECRET="${MQTT_TEST_SECRET:-test-mqtt-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
+MCP_TEST_SECRET="${MCP_TEST_SECRET:-test-mcp-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 export DEBIAN_FRONTEND=noninteractive
 
 [ "$(id -u)" = 0 ] || { echo "must run as root (on a DISPOSABLE system)" >&2; exit 1; }
@@ -89,6 +90,10 @@ send-to-influx send-to-influx/sources-to-configure multiselect hue, nuki
 send-to-influx send-to-influx/mqtt-broker-host string ci-mqtt-broker.example.com
 send-to-influx send-to-influx/mqtt-username string ci-mqtt-reader
 send-to-influx send-to-influx/mqtt-password password ${MQTT_TEST_SECRET}
+send-to-influx send-to-influx/mcp-enable boolean true
+send-to-influx send-to-influx/mcp-public-url string https://ci-mcp.example.org
+send-to-influx send-to-influx/mcp-user string ci-mcp-user
+send-to-influx send-to-influx/mcp-password password ${MCP_TEST_SECRET}
 EOF
 }
 
@@ -222,15 +227,24 @@ with open("$SETTINGS", encoding="utf8") as f:
 assert data["hue"]["host"] == "ci-test-bridge.example.com", data["hue"]["host"]
 assert data["mqtt"]["broker_host"] == "ci-mqtt-broker.example.com", data["mqtt"]["broker_host"]
 assert data["mqtt"]["username"] == "ci-mqtt-reader", data["mqtt"]["username"]
+# The MCP block (shared infrastructure, gated on its own mcp-enable boolean):
+# public_url and user applied; password is a credential, so it must NOT be in
+# plaintext here (asserted by assert_secret_absent below and the credstore check).
+assert data["mcp"]["public_url"] == "https://ci-mcp.example.org", data["mcp"]["public_url"]
+assert data["mcp"]["user"] == "ci-mcp-user", data["mcp"]["user"]
 PYEOF
 if [ "$CREDS_WORK" = 1 ]; then
     [ -e "$CREDSTORE/hue-user.cred" ] || fail "hue-user credential not migrated"
     [ -e "$CREDSTORE/mqtt-password.cred" ] || fail "mqtt-password credential not migrated"
+    [ -e "$CREDSTORE/mcp-password.cred" ] || fail "mcp-password credential not migrated"
     grep -q "stored in systemd-creds" "$SETTINGS" || fail "hue.user not rewritten to the sentinel"
 fi
+# The seeded MCP secret must not leak into settings.yaml or debconf's database.
+grep -q "$MCP_TEST_SECRET" "$SETTINGS" && fail "MCP password leaked into settings.yaml"
+grep -rq "$MCP_TEST_SECRET" /var/cache/debconf/ && fail "MCP password left in debconf database"
 assert_secret_absent "$SETTINGS"
 assert_secret_absent /var/cache/debconf/
-pass "fresh install: fields applied (incl. shared mqtt block), credentials migrated, secrets cleared everywhere"
+pass "fresh install: fields applied (incl. shared mqtt + mcp blocks), credentials migrated, secrets cleared everywhere"
 
 # --- Scenario: plain upgrade is silent and touches nothing -------------------
 echo "=== scenario: plain upgrade (interactive frontend, hand-edited config) ==="
@@ -250,6 +264,23 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
     systemctl enable --now send-to-influx >/dev/null 2>&1
     sleep 3
     systemctl is-active --quiet send-to-influx || fail "service did not stay active on the example config"
+    # The seeded settings.yaml has the MCP server enabled, so - when systemd-creds
+    # actually migrated its password - it must be listening on its loopback port
+    # under the FULL systemd sandbox: the hardening directives plus
+    # LoadCredentialEncrypted decrypting mcp-password. This is the real test that
+    # the hardened unit doesn't break the project's first network-facing server;
+    # the unauthenticated OAuth-metadata endpoint is enough to prove it bound.
+    if [ "$CREDS_WORK" = 1 ]; then
+        mcp_up=0
+        for _ in $(seq 1 15); do
+            if curl -fsS http://127.0.0.1:8420/.well-known/oauth-authorization-server >/dev/null 2>&1; then
+                mcp_up=1; break
+            fi
+            sleep 1
+        done
+        [ "$mcp_up" = 1 ] || fail "MCP server did not bind 127.0.0.1:8420 under the hardened systemd unit"
+        pass "MCP server bound and served OAuth metadata under the hardened systemd sandbox"
+    fi
     pid_before=$(systemctl show -p MainPID --value send-to-influx)
     upgrade_and_assert_silent "upgrade with running service"
     echo "$LAST_UPGRADE_OUTPUT" | grep -q "has been restarted" || fail "expected the restarted upgrade message"
