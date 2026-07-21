@@ -6,10 +6,11 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from unittest.mock import patch
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import anyio
 import pytest
@@ -308,6 +309,28 @@ class TestHttpSurface:
         assert any("Failed MCP login attempt" in record.message for record in warnings)
         # The attacker-controlled username must not appear in the WARNING line.
         assert all("attacker-supplied" not in record.getMessage() for record in warnings)
+
+    def test_login_form_action_is_root_absolute(self, http_client):
+        """The form action must be the root-absolute /login, not a relative
+        "login". Both happen to resolve to /login when the page is served at
+        /login (no trailing slash), but the relative form resolves to
+        /login/login the moment a trailing slash appears (a proxy rewrite, a
+        route change) - the absolute form is robust against that. The
+        direct-POST tests never render the form, so this is the only guard on
+        the action attribute."""
+        client_id = _register_client(http_client)
+        _verifier, challenge = _pkce_pair()
+        txn = _authorize_to_login_txn(http_client, client_id, challenge)
+        page = http_client.get("/login", params={"txn": txn})
+        action = re.search(r'<form[^>]*action="([^"]*)"', page.text).group(1)
+        assert action == "/login"
+        # Robust even under a trailing-slash base a relative action would break on.
+        assert urlparse(urljoin(f"{MCP_PUBLIC_URL}/login/?txn={txn}", action)).path == "/login"
+        # And a POST to that action actually completes the login.
+        response = http_client.post(
+            action, data={"txn": txn, "username": MCP_USER, "password": MCP_PASSWORD}, follow_redirects=False
+        )
+        assert response.status_code == 302
 
     def test_lockout_after_repeated_failures(self, http_client):
         client_id = _register_client(http_client)

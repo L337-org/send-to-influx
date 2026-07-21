@@ -66,7 +66,7 @@ form {{ display: flex; flex-direction: column; gap: 0.6em; min-width: 16em; }}
 input {{ padding: 0.4em; }}
 .error {{ color: #b00020; }}
 </style></head><body>
-<form method="post" action="login" autocomplete="off">
+<form method="post" action="/login" autocomplete="off">
 <h2>send-to-influx</h2>
 {error}
 <input type="hidden" name="txn" value="{txn}">
