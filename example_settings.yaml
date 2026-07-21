@@ -101,6 +101,11 @@ mcp:
 hue:
   # The database to use
   db: "hue_db"
+  # Opt in to letting the MCP server control Hue lights/plugs (on/off, brightness)
+  # via the set_device_state tool. Off by default - the MCP server is read-only
+  # unless you set this true. Has no effect unless the MCP server is enabled (see
+  # the mcp block above).
+  mcp_read_write: false
   # The hostname or IP address of the Hue bridge
   host: "hue.example.com"
   # Hue bridge username.  See https://developers.meethue.com/develop/get-started-2/
