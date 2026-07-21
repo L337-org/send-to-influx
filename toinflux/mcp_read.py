@@ -38,8 +38,14 @@ from dataclasses import dataclass, field as dataclass_field
 import requests
 import urllib3
 
-from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.general import get_class, resolve_default_source
+
+# Back-compat alias: this error was originally named QueryParamError and defined
+# here; it now lives in toinflux.exceptions as the shared ToolParamError (raised
+# by the write tools too). Kept so existing `from toinflux.mcp_read import
+# QueryParamError` imports still work.
+QueryParamError = ToolParamError
 
 # User-facing aggregation name -> InfluxQL selector/aggregator function. "raw"
 # is handled separately (no function, no GROUP BY) and is the default.
@@ -85,14 +91,6 @@ MAX_RESULT_POINTS = 5000
 DEFAULT_RESULT_POINTS = 500
 
 _RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
-
-
-class QueryParamError(ValueError):
-    """A read-query parameter was invalid (unknown field, bad time, etc.).
-
-    Distinct from SourceConnectionError: this is a caller/model mistake to be
-    reported back as a tool error, not a transport failure to retry.
-    """
 
 
 @dataclass

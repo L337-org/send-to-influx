@@ -7,9 +7,8 @@ import anyio
 import pytest
 import requests
 
-from toinflux.exceptions import SourceConnectionError
+from toinflux.exceptions import SourceConnectionError, ToolParamError
 from toinflux.mcp_write import (
-    QueryParamError,
     register_write_tools,
     writable_enabled_sources,
     _set_device_state_result,
@@ -68,10 +67,27 @@ def _wire_bridge(handler, put_result=None):
     return fake_put
 
 
+def test_param_error_is_not_a_retryable_connection_error():
+    # The taxonomy the write path relies on: a parameter mistake must not be a
+    # SourceConnectionError (which the collector worker loop retries with backoff);
+    # retrying a permanently-invalid input would loop forever.
+    assert not issubclass(ToolParamError, SourceConnectionError)
+    assert not issubclass(SourceConnectionError, ToolParamError)
+
+
 class TestHueWritePrimitive:
     def test_write_enabled_reflects_setting(self):
         assert make_hue(mcp_read_write=True).mcp_write_enabled() is True
         assert make_hue(mcp_read_write=False).mcp_write_enabled() is False
+
+    def test_input_validation_raises_tool_param_not_connection_error(self):
+        # A bad input raises ToolParamError, and specifically NOT
+        # SourceConnectionError, so it isn't misclassified as retryable.
+        handler = make_hue()
+        _wire_bridge(handler)
+        with pytest.raises(ToolParamError) as excinfo:
+            handler.mcp_set_device_state("Kitchen", brightness_pct=999)
+        assert not isinstance(excinfo.value, SourceConnectionError)
 
     def test_write_disabled_for_non_bool_truthy(self):
         # Strict `is True`: a stray string doesn't silently enable writes.
@@ -148,26 +164,26 @@ class TestHueWritePrimitive:
     def test_nothing_to_set_rejected(self):
         handler = make_hue()
         _wire_bridge(handler)
-        with pytest.raises(SourceConnectionError, match="nothing to set"):
+        with pytest.raises(ToolParamError, match="nothing to set"):
             handler.mcp_set_device_state("Kitchen")
 
     def test_unknown_device_rejected(self):
         handler = make_hue()
         _wire_bridge(handler)
-        with pytest.raises(SourceConnectionError, match="unknown device"):
+        with pytest.raises(ToolParamError, match="unknown device"):
             handler.mcp_set_device_state("Nonexistent", on=True)
 
     @pytest.mark.parametrize("bad", [-1, 101, "50", True])
     def test_invalid_brightness_rejected(self, bad):
         handler = make_hue()
         _wire_bridge(handler)
-        with pytest.raises(SourceConnectionError):
+        with pytest.raises(ToolParamError):
             handler.mcp_set_device_state("Kitchen", brightness_pct=bad)
 
     def test_non_bool_on_rejected(self):
         handler = make_hue()
         _wire_bridge(handler)
-        with pytest.raises(SourceConnectionError, match="on must be"):
+        with pytest.raises(ToolParamError, match="on must be"):
             handler.mcp_set_device_state("Kitchen", on="yes")
 
     def test_ambiguous_name_rejected(self):
@@ -180,7 +196,7 @@ class TestHueWritePrimitive:
             return resp
 
         handler.session.get.side_effect = fake_get
-        with pytest.raises(SourceConnectionError, match="ambiguous"):
+        with pytest.raises(ToolParamError, match="ambiguous"):
             handler.mcp_set_device_state("Dup", on=True)
 
     def test_bridge_error_response_surfaces(self):
@@ -259,7 +275,7 @@ class TestWriteToolRegistration:
     def test_set_device_state_on_disabled_source_is_rejected(self):
         handler = make_hue(mcp_read_write=False)
         with patch("toinflux.mcp_write._resolve_handler", return_value=handler):
-            with pytest.raises(QueryParamError, match="not enabled for device writes"):
+            with pytest.raises(ToolParamError, match="not enabled for device writes"):
                 _set_device_state_result(
                     self._settings(), None, source="hue", device="Kitchen", on=True, brightness_pct=None
                 )

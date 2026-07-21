@@ -24,3 +24,20 @@ class SourceConnectionError(Exception):
     source's own API failures and its InfluxDB write failures aren't conflated should any
     caller ever need to react to them differently.
     """
+
+
+class ToolParamError(ValueError):
+    """An MCP tool was called with an invalid parameter - an unknown field or
+    device, a time/range/aggregation that doesn't parse, an out-of-range value,
+    or a missing required argument.
+
+    A caller/model mistake, surfaced back to the model as a tool error and never
+    retried. Deliberately distinct from SourceConnectionError, which is a
+    *transient* API/transport failure the collector worker loop retries with
+    backoff - raising SourceConnectionError for a permanently-invalid input would
+    make such a caller retry something that can never succeed. Lives here rather
+    than in an MCP module so both the read/write tool layers and the source
+    handlers (which implement the write primitives) can raise it without importing
+    the MCP layer. A ValueError subclass so it reads as the bad-argument error it
+    is.
+    """

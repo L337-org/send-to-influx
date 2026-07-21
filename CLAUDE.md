@@ -149,7 +149,7 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     light) unless `on` is explicitly false, and `PUT`s to `/api/{user}/lights/{id}/state` over the
     collector's own session/auth and `hue.insecure` TLS policy. The CLIP API returns 200 with a
     per-key success/error list, so a bridge-reported error is surfaced as `SourceConnectionError`.
-  - Per-call handler/session lifecycle and the QueryParamError-vs-SourceConnectionError split are the
+  - Per-call handler/session lifecycle and the ToolParamError-vs-SourceConnectionError split are the
     same as the read tools (shared `_resolve_handler`/`_close_session` from `mcp_read`). Every applied
     write is logged at INFO.
   - This is the project's first device-control capability and gets a dedicated `/security-review`
@@ -186,8 +186,11 @@ live field set. Design points:
     `annotate_rows()` attaches units and decodes coded values to labels (an undocumented code passes
     through with a null label, matching the collector's raw-passthrough rule). Sourced from UNITS.md.
   - Blocking InfluxDB HTTP runs in a worker thread (`anyio.to_thread.run_sync`) so a query doesn't
-    stall the server's async event loop. `QueryParamError` (a bad field/time/aggregation) surfaces
-    to the model as a tool error; `SourceConnectionError` is a transport failure.
+    stall the server's async event loop. `ToolParamError` (a bad field/time/aggregation/device -
+    shared by the read and write tools, defined in `toinflux/exceptions.py`; a non-retryable
+    caller/model mistake) surfaces to the model as a tool error; `SourceConnectionError` is a
+    transient transport failure the collector loop would retry, so the two are kept distinct.
+    (`toinflux.mcp_read.QueryParamError` remains as a back-compat alias for `ToolParamError`.)
 
 ### Entry point (`sendtoinflux.py`)
 

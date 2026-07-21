@@ -26,10 +26,12 @@ __license__ = "MIT License"
 
 import logging
 
+from toinflux.exceptions import ToolParamError
+
 # Reuse the read module's handler construction and best-effort session close -
 # writes share the same per-call handler lifecycle (construct from current
 # settings, close the session afterwards) as reads, so there is one implementation.
-from toinflux.mcp_read import QueryParamError, _close_session, _resolve_handler, configured_sources
+from toinflux.mcp_read import _close_session, _resolve_handler, configured_sources
 
 
 def writable_enabled_sources(settings, settings_file=None):
@@ -46,7 +48,7 @@ def writable_enabled_sources(settings, settings_file=None):
     for source in configured_sources(settings):
         try:
             handler = _resolve_handler(source, settings, settings_file)
-        except QueryParamError:
+        except ToolParamError:
             continue
         try:
             if handler.mcp_write_enabled():
@@ -58,15 +60,15 @@ def writable_enabled_sources(settings, settings_file=None):
 
 def _resolve_writable_handler(source, settings, settings_file):
     """Construct a handler for a source and confirm it's enabled for writes, or
-    raise QueryParamError. The caller owns the returned handler's session and must
+    raise ToolParamError. The caller owns the returned handler's session and must
     close it.
 
-    :raises QueryParamError: unknown source, or a source not opted in for writes
+    :raises ToolParamError: unknown source, or a source not opted in for writes
     """
     handler = _resolve_handler(source, settings, settings_file)
     if not handler.mcp_write_enabled():
         _close_session(handler.session)
-        raise QueryParamError(
+        raise ToolParamError(
             f"source {source!r} is not enabled for device writes; set {source}.mcp_read_write: true to allow it"
         )
     return handler

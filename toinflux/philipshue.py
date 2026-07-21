@@ -10,7 +10,7 @@ import warnings
 import urllib3
 import requests
 from toinflux.influx import DataHandler
-from toinflux.exceptions import SourceConnectionError
+from toinflux.exceptions import SourceConnectionError, ToolParamError
 
 
 class Hue(DataHandler):
@@ -72,8 +72,12 @@ class Hue(DataHandler):
         # fail cleanly rather than raise IndexError/KeyError unhandled.
         if isinstance(hue_data, list):
             first = hue_data[0] if hue_data else None
-            if isinstance(first, dict) and "error" in first:
-                description = first["error"].get("description", str(first["error"]))
+            error = first.get("error") if isinstance(first, dict) else None
+            # The "error" value should itself be a dict with a "description"; guard
+            # it too, so a malformed error shape still fails cleanly rather than
+            # raising AttributeError from .get() on a non-dict.
+            if isinstance(error, dict):
+                description = error.get("description", str(error))
             else:
                 description = f"unexpected list response: {hue_data!r:.200}"
             logging.error("Error connecting to Hue Bridge - %s", description)
@@ -181,11 +185,14 @@ class Hue(DataHandler):
         :type brightness_pct: int or float or None
         :return: a summary dict of what was applied
         :rtype: dict
-        :raises SourceConnectionError: unknown device, invalid parameters, or a
-            bridge/transport failure (mapped from the bridge's own error)
+        :raises ToolParamError: a caller/model input mistake - nothing to set, an
+            invalid brightness/on value, or an unknown/ambiguous device (not
+            retryable)
+        :raises SourceConnectionError: a bridge/transport failure reaching the
+            device list or PUTting the change (retryable)
         """
         if on is None and brightness_pct is None:
-            raise SourceConnectionError("nothing to set: provide 'on' and/or 'brightness_pct'")
+            raise ToolParamError("nothing to set: provide 'on' and/or 'brightness_pct'")
 
         devices = self.mcp_list_writable_devices()
         light_id = self._resolve_device_id(device, devices)
@@ -193,9 +200,9 @@ class Hue(DataHandler):
         state = {}
         if brightness_pct is not None:
             if not isinstance(brightness_pct, (int, float)) or isinstance(brightness_pct, bool):
-                raise SourceConnectionError(f"brightness_pct must be a number 0-100 (got {brightness_pct!r})")
+                raise ToolParamError(f"brightness_pct must be a number 0-100 (got {brightness_pct!r})")
             if not 0 <= brightness_pct <= 100:
-                raise SourceConnectionError(f"brightness_pct must be between 0 and 100 (got {brightness_pct!r})")
+                raise ToolParamError(f"brightness_pct must be between 0 and 100 (got {brightness_pct!r})")
             state["bri"] = self._bri_from_percent(brightness_pct)
             # Changing brightness only takes effect on a light that's on; default
             # it on unless the caller explicitly asked to turn it off.
@@ -203,7 +210,7 @@ class Hue(DataHandler):
                 on = True
         if on is not None:
             if not isinstance(on, bool):
-                raise SourceConnectionError(f"on must be true or false (got {on!r})")
+                raise ToolParamError(f"on must be true or false (got {on!r})")
             state["on"] = on
 
         self._put_light_state(light_id, state)
@@ -216,9 +223,11 @@ class Hue(DataHandler):
         An id match wins over a name match. A name that isn't unique is rejected
         rather than guessed at, since actuating the wrong light is not a
         recoverable mistake.
+
+        :raises ToolParamError: the device is empty, unknown, or an ambiguous name
         """
         if not isinstance(device, str) or not device.strip():
-            raise SourceConnectionError(f"device must be a non-empty light id or name (got {device!r})")
+            raise ToolParamError(f"device must be a non-empty light id or name (got {device!r})")
         if device in devices:
             return device
         matches = [light_id for light_id, name in devices.items() if name == device]
@@ -226,8 +235,8 @@ class Hue(DataHandler):
             return matches[0]
         available = ", ".join(f"{name!r} (id {light_id})" for light_id, name in sorted(devices.items())) or "(none)"
         if len(matches) > 1:
-            raise SourceConnectionError(f"device name {device!r} is ambiguous; use the light id. Devices: {available}")
-        raise SourceConnectionError(f"unknown device {device!r}; available devices: {available}")
+            raise ToolParamError(f"device name {device!r} is ambiguous; use the light id. Devices: {available}")
+        raise ToolParamError(f"unknown device {device!r}; available devices: {available}")
 
     def _put_light_state(self, light_id, state):
         """PUT a state body to a light and surface any bridge-reported error.
