@@ -550,9 +550,11 @@ def _query_history_result(settings, settings_file, *, source, field, start, end,
     )
     columns, values = run_query(handler.session, handler.settings["influx"], schema.db, query)
     result = annotate_rows(schema, field, columns, values)
-    # Surface the effective limit and whether it truncated the result, so the
-    # model can narrow the range or aggregate rather than silently acting on a
-    # partial view. build_query already validated limit, so this can't raise.
+    # Surface the effective limit and whether the query hit it. `truncated` means
+    # exactly that - the result reached the limit, so more data *may* exist beyond
+    # it (if precisely `limit` points exist, nothing more does) - it's a prompt to
+    # narrow the range or aggregate, not a guarantee of omitted data. build_query
+    # already validated limit, so this can't raise.
     effective_limit = _clamp_limit(limit)
     result["limit"] = effective_limit
     result["truncated"] = len(result["points"]) >= effective_limit
@@ -605,9 +607,10 @@ def register_read_tools(server, settings, settings_file=None):
 
         Points come back newest-first, each with a unix-seconds time and value;
         coded fields (e.g. Nuki lock state) also carry a decoded label. The result
-        also reports the effective `limit` and a `truncated` flag - when
-        `truncated` is true, more data exists than was returned, so narrow the
-        range or use an aggregation.
+        also reports the effective `limit` and a `truncated` flag - `truncated` is
+        true when the query returned as many points as the limit allowed, so more
+        data may exist beyond it; narrow the range or use an aggregation to be sure
+        of a complete view.
         """
         return await anyio.to_thread.run_sync(
             lambda: _query_history_result(
