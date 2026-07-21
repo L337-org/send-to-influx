@@ -341,7 +341,10 @@ credential into `systemd-creds` without touching anything else), then a checklis
 sources you want to configure now, then - only for the ones you pick - the fields needed to
 actually reach that source's API (credentials plus things like a Hue bridge hostname or an Octopus
 meter number; tuning settings like intervals keep their shipped defaults and can be adjusted in
-`settings.yaml` afterwards). A plain package *upgrade* never prompts and never applies debconf
+`settings.yaml` afterwards). You're also asked, with a default of "no", whether to enable the
+[remote MCP server](#remote-mcp-server) - answer yes and it collects the public URL, login username
+and password for it (the password goes into `systemd-creds` like any other). A plain package
+*upgrade* never prompts and never applies debconf
 answers: your `settings.yaml` and credentials are only ever written by a fresh install's prompts or
 by an explicit `sudo dpkg-reconfigure send-to-influx`, which re-runs the same flow at any time.
 Secrets you enter are moved into `systemd-creds` (see below)

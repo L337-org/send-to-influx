@@ -25,6 +25,7 @@ SETTINGS=/etc/send-to-influx/settings.yaml
 CREDSTORE=/etc/send-to-influx/credstore.encrypted
 HUE_TEST_SECRET="${HUE_TEST_SECRET:-test-hue-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 MQTT_TEST_SECRET="${MQTT_TEST_SECRET:-test-mqtt-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
+MCP_TEST_SECRET="${MCP_TEST_SECRET:-test-mcp-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 export DEBIAN_FRONTEND=noninteractive
 
 [ "$(id -u)" = 0 ] || { echo "must run as root (on a DISPOSABLE system)" >&2; exit 1; }
@@ -89,6 +90,10 @@ send-to-influx send-to-influx/sources-to-configure multiselect hue, nuki
 send-to-influx send-to-influx/mqtt-broker-host string ci-mqtt-broker.example.com
 send-to-influx send-to-influx/mqtt-username string ci-mqtt-reader
 send-to-influx send-to-influx/mqtt-password password ${MQTT_TEST_SECRET}
+send-to-influx send-to-influx/mcp-enable boolean true
+send-to-influx send-to-influx/mcp-public-url string https://ci-mcp.example.org
+send-to-influx send-to-influx/mcp-user string ci-mcp-user
+send-to-influx send-to-influx/mcp-password password ${MCP_TEST_SECRET}
 EOF
 }
 
@@ -226,11 +231,38 @@ PYEOF
 if [ "$CREDS_WORK" = 1 ]; then
     [ -e "$CREDSTORE/hue-user.cred" ] || fail "hue-user credential not migrated"
     [ -e "$CREDSTORE/mqtt-password.cred" ] || fail "mqtt-password credential not migrated"
+    [ -e "$CREDSTORE/mcp-password.cred" ] || fail "mcp-password credential not migrated"
     grep -q "stored in systemd-creds" "$SETTINGS" || fail "hue.user not rewritten to the sentinel"
+    # MCP enabled end to end: public_url + user in settings.yaml (password is a
+    # credential, migrated to the credstore above, not in plaintext here).
+    /opt/send-to-influx/venv/bin/python3 - <<PYEOF || fail "MCP block not applied when systemd-creds works"
+import yaml
+d = yaml.safe_load(open("$SETTINGS", encoding="utf8"))
+assert d["mcp"]["public_url"] == "https://ci-mcp.example.org", d["mcp"]["public_url"]
+assert d["mcp"]["user"] == "ci-mcp-user", d["mcp"]["user"]
+PYEOF
+else
+    # systemd-creds unavailable (systemd < 250): postinst cannot store
+    # mcp-password, so on this fresh enable it reverts the username to leave a
+    # cleanly *disabled* block rather than the fatal user-without-password. Assert
+    # exactly that - mcp.user blank and settings.yaml still valid - matching the
+    # relaxed-credential-assertions contract in this script's header.
+    /opt/send-to-influx/venv/bin/python3 - <<PYEOF || fail "MCP not cleanly disabled when systemd-creds is unavailable"
+import yaml
+d = yaml.safe_load(open("$SETTINGS", encoding="utf8"))
+assert not d.get("mcp", {}).get("user"), "mcp.user should be reverted when mcp-password can't be stored"
+PYEOF
+    /opt/send-to-influx/venv/bin/send-to-influx --check-config --settings "$SETTINGS" >/dev/null 2>&1 \
+        || fail "settings.yaml invalid after MCP disabled-on-no-creds"
 fi
+# The seeded MCP secret must not leak into settings.yaml or debconf's database.
+# -F (literal) and -- (end of options), like the assert_secret_absent helper: the
+# secret is arbitrary text, so it must never be treated as a regex or a flag.
+grep -qF -- "$MCP_TEST_SECRET" "$SETTINGS" && fail "MCP password leaked into settings.yaml"
+grep -rqF -- "$MCP_TEST_SECRET" /var/cache/debconf/ && fail "MCP password left in debconf database"
 assert_secret_absent "$SETTINGS"
 assert_secret_absent /var/cache/debconf/
-pass "fresh install: fields applied (incl. shared mqtt block), credentials migrated, secrets cleared everywhere"
+pass "fresh install: fields applied (incl. shared mqtt + mcp blocks), credentials migrated, secrets cleared everywhere"
 
 # --- Scenario: plain upgrade is silent and touches nothing -------------------
 echo "=== scenario: plain upgrade (interactive frontend, hand-edited config) ==="
@@ -250,6 +282,23 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
     systemctl enable --now send-to-influx >/dev/null 2>&1
     sleep 3
     systemctl is-active --quiet send-to-influx || fail "service did not stay active on the example config"
+    # The seeded settings.yaml has the MCP server enabled, so - when systemd-creds
+    # actually migrated its password - it must be listening on its loopback port
+    # under the FULL systemd sandbox: the hardening directives plus
+    # LoadCredentialEncrypted decrypting mcp-password. This is the real test that
+    # the hardened unit doesn't break the project's first network-facing server;
+    # the unauthenticated OAuth-metadata endpoint is enough to prove it bound.
+    if [ "$CREDS_WORK" = 1 ]; then
+        mcp_up=0
+        for _ in $(seq 1 15); do
+            if curl -fsS http://127.0.0.1:8420/.well-known/oauth-authorization-server >/dev/null 2>&1; then
+                mcp_up=1; break
+            fi
+            sleep 1
+        done
+        [ "$mcp_up" = 1 ] || fail "MCP server did not bind 127.0.0.1:8420 under the hardened systemd unit"
+        pass "MCP server bound and served OAuth metadata under the hardened systemd sandbox"
+    fi
     pid_before=$(systemctl show -p MainPID --value send-to-influx)
     upgrade_and_assert_silent "upgrade with running service"
     echo "$LAST_UPGRADE_OUTPUT" | grep -q "has been restarted" || fail "expected the restarted upgrade message"
@@ -274,11 +323,20 @@ echo "$out" | grep -qi "InfluxDB user/org or password/token not provided" \
     || { echo "$out"; fail "expected the engaged-but-incomplete InfluxDB warning on reconfigure"; }
 # Reconfigure (unlike an upgrade) deliberately re-asserts debconf's answers.
 grep -q "ci-test-bridge.example.com" "$SETTINGS" || fail "reconfigure did not re-apply hue-host"
+# The MCP block must survive reconfigure with the (blank-on-reconfigure) password
+# satisfied by the stored mcp-password.cred: public_url/user are required strings
+# that persist and pre-fill, so the server stays configured, not disabled. This is
+# the password-only-rotation / blank-secret case that must not un-configure it.
+if [ "$CREDS_WORK" = 1 ]; then
+    echo "$out" | grep -qi "MCP server not fully configured" && { echo "$out"; fail "reconfigure un-configured MCP despite stored mcp-password and persisted url/user"; }
+    grep -q "https://ci-mcp.example.org" "$SETTINGS" || fail "reconfigure did not keep mcp.public_url"
+    grep -q "ci-mcp-user" "$SETTINGS" || fail "reconfigure did not keep mcp.user (required string must persist)"
+fi
 if [ "$HAVE_SYSTEMD" = 1 ]; then
     echo "$out" | grep -q "service restarted to apply the new configuration" \
         || { echo "$out"; fail "reconfigure did not report restarting the running service"; }
 fi
-pass "reconfigure: answers re-applied, stored credential satisfied the blank secret"
+pass "reconfigure: answers re-applied (incl. MCP), stored credential satisfied the blank secret"
 
 if [ "$CREDS_WORK" = 1 ]; then
     # Migrate an InfluxDB token via the CLI (as an admin would), then

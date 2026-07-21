@@ -155,6 +155,33 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
   - This is the project's first device-control capability and gets a dedicated `/security-review`
     before the feature branch merges to `main`.
 
+**Packaging** (debconf + systemd): the `mcp:` block is the third shared-infrastructure block after
+`influx:` and `mqtt:`, but gated on its own `mcp-enable` boolean (asked at priority `high`, default
+no) rather than a source selection - the MCP server is an interface over all sources, not a source.
+When enabled, debconf collects `mcp-public-url`/`mcp-user`/`mcp-password`; `bind_address` is a
+defaulted tuning field and never prompted. `postinst` back-fills the `mcp:` section with
+`--ensure-section` (settings.yaml is never rewritten by an upgrade, so the section is absent on
+installs predating this feature) and requires public_url + user + a password (typed or already in
+systemd-creds) all present before enabling - a partial `mcp:` block makes `load_settings()` raise a
+fatal `ConfigError` that stops **every** collector, not just the server. `public_url` and `user` are
+required strings that persist and pre-fill on reconfigure (like `mqtt-broker-host`/`hue-host` - only
+the *secret* `mcp-password` is cleared after use, so password-only rotation works: leave the
+pre-filled url/user and type just the new password). Because the service is only (re)started at the
+very end of `postinst`, only the final settings state matters, so on a failed password store: if no
+credential existed yet (a fresh enable) the username is reverted (enable-then-revert → coherent
+disabled block); if one already existed (a reconfigure) the previously-stored password is kept and
+the working install is left enabled - never disabled out from under a running server.
+`hue.mcp_read_write` stays hand-edited (a tuning toggle, never prompted). The MCP server also made
+this the first inbound-network-facing service, so the systemd unit gained a conservative hardening
+set (`ProtectKernel*`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, empty
+`CapabilityBoundingSet`, `SystemCallFilter=@system-service`, etc. - `MemoryDenyWriteExecute` and a
+hand-rolled narrower syscall filter deliberately omitted as Python-fragile); `ReadWritePaths` already
+covers the OAuth state file (it lives in `/etc/send-to-influx`). `test-packaging.sh` seeds the MCP
+answers in the fresh-install scenario (asserting public_url/user land in settings.yaml, the password
+in the credstore and not in plaintext) and, where real systemd is present, asserts the server
+actually binds `127.0.0.1:8420` under the full hardened sandbox (the real test that the hardening +
+`LoadCredentialEncrypted` don't break the network-facing server).
+
 **Read tools** (`toinflux/mcp_read.py`, registered onto the server by `register_read_tools()`):
 three read-only tools - `list_sources`, `list_fields`, and `query_history` - exposing each
 configured collector's InfluxDB history, domain-aware rather than a raw passthrough. The read
