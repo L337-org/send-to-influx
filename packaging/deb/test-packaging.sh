@@ -227,17 +227,33 @@ with open("$SETTINGS", encoding="utf8") as f:
 assert data["hue"]["host"] == "ci-test-bridge.example.com", data["hue"]["host"]
 assert data["mqtt"]["broker_host"] == "ci-mqtt-broker.example.com", data["mqtt"]["broker_host"]
 assert data["mqtt"]["username"] == "ci-mqtt-reader", data["mqtt"]["username"]
-# The MCP block (shared infrastructure, gated on its own mcp-enable boolean):
-# public_url and user applied; password is a credential, so it must NOT be in
-# plaintext here (asserted by assert_secret_absent below and the credstore check).
-assert data["mcp"]["public_url"] == "https://ci-mcp.example.org", data["mcp"]["public_url"]
-assert data["mcp"]["user"] == "ci-mcp-user", data["mcp"]["user"]
 PYEOF
 if [ "$CREDS_WORK" = 1 ]; then
     [ -e "$CREDSTORE/hue-user.cred" ] || fail "hue-user credential not migrated"
     [ -e "$CREDSTORE/mqtt-password.cred" ] || fail "mqtt-password credential not migrated"
     [ -e "$CREDSTORE/mcp-password.cred" ] || fail "mcp-password credential not migrated"
     grep -q "stored in systemd-creds" "$SETTINGS" || fail "hue.user not rewritten to the sentinel"
+    # MCP enabled end to end: public_url + user in settings.yaml (password is a
+    # credential, migrated to the credstore above, not in plaintext here).
+    /opt/send-to-influx/venv/bin/python3 - <<PYEOF || fail "MCP block not applied when systemd-creds works"
+import yaml
+d = yaml.safe_load(open("$SETTINGS", encoding="utf8"))
+assert d["mcp"]["public_url"] == "https://ci-mcp.example.org", d["mcp"]["public_url"]
+assert d["mcp"]["user"] == "ci-mcp-user", d["mcp"]["user"]
+PYEOF
+else
+    # systemd-creds unavailable (systemd < 250): postinst cannot store
+    # mcp-password, so on this fresh enable it reverts the username to leave a
+    # cleanly *disabled* block rather than the fatal user-without-password. Assert
+    # exactly that - mcp.user blank and settings.yaml still valid - matching the
+    # relaxed-credential-assertions contract in this script's header.
+    /opt/send-to-influx/venv/bin/python3 - <<PYEOF || fail "MCP not cleanly disabled when systemd-creds is unavailable"
+import yaml
+d = yaml.safe_load(open("$SETTINGS", encoding="utf8"))
+assert not d.get("mcp", {}).get("user"), "mcp.user should be reverted when mcp-password can't be stored"
+PYEOF
+    /opt/send-to-influx/venv/bin/send-to-influx --check-config --settings "$SETTINGS" >/dev/null 2>&1 \
+        || fail "settings.yaml invalid after MCP disabled-on-no-creds"
 fi
 # The seeded MCP secret must not leak into settings.yaml or debconf's database.
 # -F (literal) and -- (end of options), like the assert_secret_absent helper: the

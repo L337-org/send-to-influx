@@ -550,8 +550,11 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
                         # FINAL block is coherent-and-disabled. Only the
                         # end-of-script state matters (the service restarts once, at
                         # the end), so this transient write-then-revert is safe.
-                        "$CLI" --set-field mcp.user "" >/dev/null 2>&1 || true
-                        echo "send-to-influx: could not store the MCP login password - MCP server left disabled. Set it by hand with 'sudo $CLI mcp-password', then re-run 'dpkg-reconfigure send-to-influx'." >&2
+                        # Use the set_field helper (not a raw '|| true') so a
+                        # failure to revert is itself tracked and reported rather
+                        # than silently leaving the fatal user-without-password.
+                        set_field mcp.user ""
+                        echo "send-to-influx: could not store the MCP login password - MCP server disabled (username reverted). Set it by hand with 'sudo $CLI mcp-password', then re-run 'dpkg-reconfigure send-to-influx'." >&2
                     fi
                 fi
             fi
