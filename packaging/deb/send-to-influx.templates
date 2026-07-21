@@ -88,15 +88,20 @@ Default:
 Description: External HTTPS URL your reverse proxy serves for the MCP server
  e.g. https://mcp.example.org - the address you'll add as a connector in
  Claude. Required to enable the server (its OAuth metadata must advertise it);
- must start with https://. When reconfiguring, leaving this blank keeps the
- currently configured value.
+ must start with https://. When reconfiguring, your previous answer is offered
+ as the default - accept or edit it rather than blanking it (like the MQTT
+ broker host, it's a required field, so a blank one leaves the server
+ unconfigured; to rotate only the password, leave this and the username as
+ pre-filled and enter just the new password below).
 
 Template: send-to-influx/mcp-user
 Type: string
 Default:
 Description: MCP server login username
  The username for the OAuth login page that gates access to the MCP server.
- When reconfiguring, leaving this blank keeps the currently configured value.
+ When reconfiguring, your previous answer is offered as the default - accept
+ or edit it rather than blanking it (a blank username leaves the server
+ unconfigured).
 
 Template: send-to-influx/mcp-password
 Type: password

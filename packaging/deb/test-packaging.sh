@@ -305,11 +305,20 @@ echo "$out" | grep -qi "InfluxDB user/org or password/token not provided" \
     || { echo "$out"; fail "expected the engaged-but-incomplete InfluxDB warning on reconfigure"; }
 # Reconfigure (unlike an upgrade) deliberately re-asserts debconf's answers.
 grep -q "ci-test-bridge.example.com" "$SETTINGS" || fail "reconfigure did not re-apply hue-host"
+# The MCP block must survive reconfigure with the (blank-on-reconfigure) password
+# satisfied by the stored mcp-password.cred: public_url/user are required strings
+# that persist and pre-fill, so the server stays configured, not disabled. This is
+# the password-only-rotation / blank-secret case that must not un-configure it.
+if [ "$CREDS_WORK" = 1 ]; then
+    echo "$out" | grep -qi "MCP server not fully configured" && { echo "$out"; fail "reconfigure un-configured MCP despite stored mcp-password and persisted url/user"; }
+    grep -q "https://ci-mcp.example.org" "$SETTINGS" || fail "reconfigure did not keep mcp.public_url"
+    grep -q "ci-mcp-user" "$SETTINGS" || fail "reconfigure did not keep mcp.user (required string must persist)"
+fi
 if [ "$HAVE_SYSTEMD" = 1 ]; then
     echo "$out" | grep -q "service restarted to apply the new configuration" \
         || { echo "$out"; fail "reconfigure did not report restarting the running service"; }
 fi
-pass "reconfigure: answers re-applied, stored credential satisfied the blank secret"
+pass "reconfigure: answers re-applied (incl. MCP), stored credential satisfied the blank secret"
 
 if [ "$CREDS_WORK" = 1 ]; then
     # Migrate an InfluxDB token via the CLI (as an admin would), then

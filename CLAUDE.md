@@ -163,9 +163,14 @@ defaulted tuning field and never prompted. `postinst` back-fills the `mcp:` sect
 `--ensure-section` (settings.yaml is never rewritten by an upgrade, so the section is absent on
 installs predating this feature) and requires public_url + user + a password (typed or already in
 systemd-creds) all present before enabling - a partial `mcp:` block makes `load_settings()` raise a
-fatal `ConfigError` that stops **every** collector, not just the server. Because the service is only
-(re)started at the very end of `postinst`, only the final settings state matters, so a failed
-password store reverts the username (enable-then-revert) leaving a coherent, disabled block.
+fatal `ConfigError` that stops **every** collector, not just the server. `public_url` and `user` are
+required strings that persist and pre-fill on reconfigure (like `mqtt-broker-host`/`hue-host` - only
+the *secret* `mcp-password` is cleared after use, so password-only rotation works: leave the
+pre-filled url/user and type just the new password). Because the service is only (re)started at the
+very end of `postinst`, only the final settings state matters, so on a failed password store: if no
+credential existed yet (a fresh enable) the username is reverted (enable-then-revert → coherent
+disabled block); if one already existed (a reconfigure) the previously-stored password is kept and
+the working install is left enabled - never disabled out from under a running server.
 `hue.mcp_read_write` stays hand-edited (a tuning toggle, never prompted). The MCP server also made
 this the first inbound-network-facing service, so the systemd unit gained a conservative hardening
 set (`ProtectKernel*`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, empty
