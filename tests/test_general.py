@@ -535,6 +535,29 @@ class TestMcpBlockValidation:
         errors = mcp_block_errors({"mcp": block})
         assert any("must be an https:// URL" in error for error in errors)
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://mcp.example.org/some/path",
+            "https://user:pass@mcp.example.org",
+            "https://mcp.example.org?x=1",
+            "https://mcp.example.org#frag",
+            "https://",
+        ],
+    )
+    def test_public_url_must_be_bare_origin(self, url):
+        """A path, embedded credentials, query or fragment would break endpoint
+        mounting and the Host/Origin allowlists - rejected at config time."""
+        block = dict(self.ENABLED_BLOCK)
+        block["public_url"] = url
+        assert mcp_block_errors({"mcp": block})
+
+    @pytest.mark.parametrize("url", ["https://mcp.example.org:8443", "https://mcp.example.org/"])
+    def test_public_url_port_and_bare_trailing_slash_are_fine(self, url):
+        block = dict(self.ENABLED_BLOCK)
+        block["public_url"] = url
+        assert mcp_block_errors({"mcp": block}) == []
+
     @pytest.mark.parametrize("bind", ["0.0.0.0:8420", ":::8420", "[::]:8420"])
     def test_public_binds_are_refused(self, bind):
         block = dict(self.ENABLED_BLOCK)

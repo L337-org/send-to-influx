@@ -151,10 +151,16 @@ class OAuthStateStore:
                 )
 
     def prune_expired_refresh_tokens(self):
-        """Drop expired refresh tokens; returns True if anything was removed."""
+        """Drop expired refresh tokens; returns True if anything was removed.
+
+        A malformed (non-mapping) entry counts as expired - same recoverable-state
+        contract as the provider's load paths, and pruning is the one place every
+        entry gets touched, so a bad one must not be able to break token issuance."""
         now = time.time()
         expired = [
-            key for key, entry in self.refresh_tokens.items() if entry.get("expires_at") and entry["expires_at"] < now
+            key
+            for key, entry in self.refresh_tokens.items()
+            if not isinstance(entry, dict) or (entry.get("expires_at") and entry["expires_at"] < now)
         ]
         for key in expired:
             del self.refresh_tokens[key]
@@ -256,7 +262,13 @@ def build_mcp_server(settings, settings_file=None):
         state_store=OAuthStateStore(state_path),
     )
 
-    public_host = urlparse(public_url).netloc
+    # netloc is the exact Host header a reverse-proxied request carries (including
+    # any explicit port); hostname is the port-less form used for the any-port
+    # wildcard entries - conflating the two would produce a malformed
+    # "host:port:*" allowlist entry whenever public_url carries a port.
+    parsed_public = urlparse(public_url)
+    public_host = parsed_public.netloc
+    public_hostname = parsed_public.hostname or public_host
     server = FastMCP(
         name="send-to-influx",
         instructions=(
@@ -280,8 +292,13 @@ def build_mcp_server(settings, settings_file=None):
         # Host header, which the SDK's localhost-only default would reject.
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=[public_host, f"{public_host}:*", "127.0.0.1:*", "localhost:*", "[::1]:*"],
-            allowed_origins=[f"https://{public_host}", "http://127.0.0.1:*", "http://localhost:*"],
+            allowed_hosts=[public_host, f"{public_hostname}:*", "127.0.0.1:*", "localhost:*", "[::1]:*"],
+            allowed_origins=[
+                f"https://{public_host}",
+                f"https://{public_hostname}",
+                "http://127.0.0.1:*",
+                "http://localhost:*",
+            ],
         ),
     )
 
@@ -407,13 +424,30 @@ class SendToInfluxOAuthProvider:
     # -- OAuthAuthorizationServerProvider protocol --
 
     async def get_client(self, client_id):
-        """Look up a dynamically-registered client in the persisted store."""
+        """Look up a dynamically-registered client in the persisted store.
+
+        A malformed persisted entry (hand-edited file, an older/newer schema) is
+        dropped and treated as an unknown client rather than raised - the state
+        file's whole contract is that bad state is recoverable (the connector
+        just re-registers), never something that breaks requests."""
         from mcp.shared.auth import OAuthClientInformationFull
+        from pydantic import ValidationError
 
         raw = self.state.clients.get(client_id)
         if raw is None:
             return None
-        return OAuthClientInformationFull.model_validate(raw)
+        try:
+            return OAuthClientInformationFull.model_validate(raw)
+        except ValidationError as exc:
+            logging.warning(
+                "Dropping malformed MCP OAuth client entry '%s' from %s: %s",
+                client_id,
+                self.state.state_path,
+                exc,
+            )
+            del self.state.clients[client_id]
+            self.state.save()
+            return None
 
     async def register_client(self, client_info):
         """Persist a dynamic client registration (RFC 7591, initiated by Claude)."""
@@ -443,11 +477,21 @@ class SendToInfluxOAuthProvider:
         return self._issue_tokens(client, authorization_code.scopes, authorization_code.subject)
 
     async def load_refresh_token(self, client, refresh_token):
-        """Look a refresh token up by hash in the persisted store."""
+        """Look a refresh token up by hash in the persisted store.
+
+        Same recoverable-state contract as get_client(): a malformed entry is
+        dropped and treated as an invalid token (the client falls back to a full
+        re-authorization), never raised into the token endpoint."""
         from mcp.server.auth.provider import RefreshToken
 
-        entry = self.state.refresh_tokens.get(_hash_token(refresh_token))
+        token_hash = _hash_token(refresh_token)
+        entry = self.state.refresh_tokens.get(token_hash)
         if entry is None:
+            return None
+        if not isinstance(entry, dict) or not entry.get("client_id"):
+            logging.warning("Dropping malformed MCP OAuth refresh-token entry from %s", self.state.state_path)
+            del self.state.refresh_tokens[token_hash]
+            self.state.save()
             return None
         return RefreshToken(
             token=refresh_token,

@@ -396,3 +396,59 @@ class TestProviderInternals:
         assert provider.check_credentials(MCP_USER, MCP_PASSWORD) is True
         assert provider.check_credentials(MCP_USER, "wrong") is False
         assert provider.check_credentials("wrong", MCP_PASSWORD) is False
+
+    def test_malformed_client_entry_is_dropped_not_raised(self, provider, caplog):
+        provider.state.clients["bad"] = {"redirect_uris": "not-a-list"}
+        with caplog.at_level(logging.WARNING):
+            assert anyio.run(provider.get_client, "bad") is None
+        assert "bad" not in provider.state.clients
+        assert any("malformed MCP OAuth client entry" in record.message for record in caplog.records)
+
+    def test_malformed_refresh_entry_is_dropped_not_raised(self, provider, caplog):
+        from toinflux.mcpserver import _hash_token
+
+        provider.state.refresh_tokens[_hash_token("tok1")] = {"scopes": []}  # no client_id
+        provider.state.refresh_tokens[_hash_token("tok2")] = "not-a-dict"
+        with caplog.at_level(logging.WARNING):
+            assert anyio.run(provider.load_refresh_token, None, "tok1") is None
+            assert anyio.run(provider.load_refresh_token, None, "tok2") is None
+        assert provider.state.refresh_tokens == {}
+
+
+class TestPublicUrlWithPort:
+    """A non-443 public_url must produce well-formed Host/Origin allowlist
+    entries (netloc for the exact match, port-less hostname for the wildcard -
+    never a malformed \"host:port:*\")."""
+
+    def test_allowlists_are_well_formed(self, tmp_path):
+        settings = {
+            "mcp": {
+                "bind_address": "127.0.0.1:8420",
+                "public_url": "https://mcp.example.org:8443",
+                "user": MCP_USER,
+                "password": MCP_PASSWORD,
+                "state_file": str(tmp_path / "state.json"),
+            },
+        }
+        server = build_mcp_server(settings)
+        security = server.settings.transport_security
+        assert "mcp.example.org:8443" in security.allowed_hosts
+        assert "mcp.example.org:*" in security.allowed_hosts
+        assert not any(entry.count(":") > 1 for entry in security.allowed_hosts if "[" not in entry)
+        assert "https://mcp.example.org:8443" in security.allowed_origins
+
+    def test_proxied_request_with_ported_host_header_is_served(self, tmp_path):
+        settings = {
+            "mcp": {
+                "bind_address": "127.0.0.1:8420",
+                "public_url": "https://mcp.example.org:8443",
+                "user": MCP_USER,
+                "password": MCP_PASSWORD,
+                "state_file": str(tmp_path / "state.json"),
+            },
+        }
+        server = build_mcp_server(settings)
+        with TestClient(server.streamable_http_app(), base_url="https://mcp.example.org:8443") as client:
+            response = client.get("/.well-known/oauth-authorization-server")
+            assert response.status_code == 200
+            assert response.json()["issuer"].rstrip("/") == "https://mcp.example.org:8443"

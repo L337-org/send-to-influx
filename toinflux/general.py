@@ -12,6 +12,7 @@ import os
 import stat
 import sys
 from logging.handlers import RotatingFileHandler
+from urllib.parse import urlparse
 import yaml
 from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, SENTINEL_PREFIX, apply_credential_substitution
 from toinflux.exceptions import ConfigError
@@ -382,6 +383,25 @@ def _mcp_enabled_block_errors(mcp):
             f"mcp.public_url must be an https:// URL (got {public_url!r}) - the public side "
             "of the MCP server is always TLS, terminated by your reverse proxy"
         )
+    else:
+        # More than scheme + host[:port] silently breaks things downstream: the
+        # OAuth routes are mounted at the root of this address, so a path would
+        # advertise endpoints that 404, and userinfo/query/fragment would leak
+        # into the issuer and the Host/Origin allowlists. Reject at config time.
+        parsed = urlparse(public_url.strip())
+        if (
+            not parsed.hostname
+            or parsed.username is not None
+            or parsed.path.rstrip("/")
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            errors.append(
+                f"mcp.public_url must be just https://host[:port] with no path, credentials, "
+                f"query or fragment (got {public_url!r}) - the OAuth endpoints are served at "
+                "the root of that address"
+            )
     try:
         parse_mcp_bind_address(mcp.get("bind_address"))
     except ConfigError as exc:
