@@ -60,6 +60,12 @@ class Hue(DataHandler):
         except requests.exceptions.RequestException as e:
             logging.error("Error connecting to Hue Bridge - %s", e)
             raise SourceConnectionError(str(e)) from e
+        except ValueError as e:
+            # response.json() raises on a non-JSON body (e.g. an HTML error page);
+            # guarding here fixes both the collector read path and the MCP write
+            # tools' device discovery, which both go through this method.
+            logging.error("Hue Bridge returned an unparseable response - %s", e)
+            raise SourceConnectionError(f"Hue Bridge returned an unparseable response: {e}") from e
         if isinstance(hue_data, list) and "error" in hue_data[0]:
             description = hue_data[0]["error"]["description"]
             logging.error("Error connecting to Hue Bridge - %s", description)
@@ -134,7 +140,12 @@ class Hue(DataHandler):
         :raises SourceConnectionError: if the bridge can't be reached
         """
         hue_data = self.get_data_from_hue_bridge()
-        return {str(light_id): device.get("name", light_id) for light_id, device in hue_data.get("lights", {}).items()}
+        # Coerce both id and name to str: the docstring promises {id: name} as
+        # strings, and a missing/blank/non-string bridge name falls back to the id.
+        return {
+            str(light_id): str(device.get("name") or light_id)
+            for light_id, device in hue_data.get("lights", {}).items()
+        }
 
     def _bri_from_percent(self, percent):
         """Map a 0-100 brightness percentage to Hue's 1-254 ``bri`` scale.

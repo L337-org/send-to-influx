@@ -83,6 +83,35 @@ class TestHueWritePrimitive:
         _wire_bridge(handler)
         assert handler.mcp_list_writable_devices() == {"1": "Kitchen", "2": "Lamp"}
 
+    def test_list_writable_devices_names_are_strings(self):
+        # A missing or non-string bridge name falls back to the id, and everything
+        # comes back as a string (the docstring promises {id: name}).
+        handler = make_hue()
+
+        def fake_get(url, **kwargs):
+            resp = MagicMock()
+            resp.json.return_value = {"lights": {"1": {}, "2": {"name": ""}, "3": {"name": "Lamp"}}}
+            resp.raise_for_status.return_value = None
+            return resp
+
+        handler.session.get.side_effect = fake_get
+        devices = handler.mcp_list_writable_devices()
+        assert devices == {"1": "1", "2": "2", "3": "Lamp"}
+        assert all(isinstance(v, str) for v in devices.values())
+
+    def test_list_writable_devices_unparseable_response_surfaces(self):
+        handler = make_hue()
+
+        def fake_get(url, **kwargs):
+            resp = MagicMock()
+            resp.raise_for_status.return_value = None
+            resp.json.side_effect = ValueError("not JSON")
+            return resp
+
+        handler.session.get.side_effect = fake_get
+        with pytest.raises(SourceConnectionError, match="unparseable response"):
+            handler.mcp_list_writable_devices()
+
     def test_set_brightness_by_name_maps_and_auto_ons(self):
         handler = make_hue()
         put = _wire_bridge(handler)
