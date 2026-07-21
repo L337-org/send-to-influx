@@ -115,9 +115,14 @@ def register_write_tools(server, settings, settings_file=None):
 
     @server.tool()
     async def list_writable_devices(source: str) -> dict:
-        """List the controllable devices for a write-enabled source, with the id
-        and name to pass to `set_device_state`. Use this to discover targets
-        before writing."""
+        """List the controllable devices for a write-enabled source, each with the
+        id and name to pass to `set_device_state`.
+
+        The read-side counterpart is `list_fields` (queryable fields); this lists
+        *controllable* targets. Call it before `set_device_state` to get exact
+        ids/names - an unknown or ambiguous name there is rejected. `source` must
+        be a source with writes enabled (`<source>.mcp_read_write: true`); another
+        source returns an error."""
         return await anyio.to_thread.run_sync(_list_writable_devices_result, source, settings, settings_file)
 
     @server.tool()
@@ -128,17 +133,25 @@ def register_write_tools(server, settings, settings_file=None):
         brightness_pct: "float | None" = None,
     ) -> dict:
         """Set a device's state on a write-enabled source (e.g. a Hue light/plug).
+        This changes a real device; to read history instead, use `query_history`.
+
+        Get exact ids/names from `list_writable_devices` first: an unknown device,
+        an ambiguous name (resolve it with the id instead), out-of-range
+        brightness, or giving neither `on` nor `brightness_pct` all return an
+        error *before* any device change. A bridge/transport failure during the
+        write is reported rather than silently dropped; note the bridge applies a
+        multi-field change per-field, so an error can mean part of the change
+        (e.g. `on` but not `bri`) already took effect - re-read to confirm.
 
         - device: the device id or its exact name (from `list_writable_devices`).
         - on: turn the device on (true) or off (false); omit to leave unchanged.
         - brightness_pct: target brightness 0-100 for dimmable lights; omit to
           leave unchanged. Setting a brightness turns the light on unless `on` is
-          explicitly false.
+          explicitly false; 0 is the lowest on-brightness, not off (use on=false).
 
-        At least one of `on`/`brightness_pct` must be given. Returns what was
-        applied. This is a real physical action - only enabled sources
-        (`<source>.mcp_read_write: true`) expose it.
-        """
+        At least one of `on`/`brightness_pct` must be given. Returns the source,
+        resolved device id/name, and the state actually applied. Only sources with
+        `<source>.mcp_read_write: true` expose this tool at all."""
         return await anyio.to_thread.run_sync(
             lambda: _set_device_state_result(
                 settings, settings_file, source=source, device=device, on=on, brightness_pct=brightness_pct
