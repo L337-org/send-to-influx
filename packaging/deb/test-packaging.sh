@@ -165,12 +165,17 @@ else
         # nuki: block behind it, which makes load_settings() raise a fatal
         # ConfigError and stops the WHOLE service, taking every already-working
         # source down with it. Both were live bugs.
+        # set -e does not trigger on a failing left side of && (it's exempt as
+        # part of an and-or list), so a broken awk here would silently fall
+        # through to mv never running - fail each step explicitly instead of
+        # relying only on the content checks below to notice.
         awk '
             skip && /^[^ \t]/ { skip = 0 }
             /^mqtt:/ || /^nuki:/ { skip = 1; next }
             skip { next }
             { print }
-        ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+        ' "$SETTINGS" > "$SETTINGS.tmp" || fail "test setup: awk failed to strip the mqtt:/nuki: sections"
+        mv "$SETTINGS.tmp" "$SETTINGS" || fail "test setup: failed to replace settings.yaml with the stripped copy"
         grep -q "^mqtt:" "$SETTINGS" && fail "test setup: failed to strip the mqtt: section for the backfill scenario"
         grep -q "^nuki:" "$SETTINGS" && fail "test setup: failed to strip the nuki: section for the backfill scenario"
         debconf-set-selections <<EOF
