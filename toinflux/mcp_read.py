@@ -38,8 +38,14 @@ from dataclasses import dataclass, field as dataclass_field
 import requests
 import urllib3
 
-from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.general import get_class, resolve_default_source
+
+# Back-compat alias: this error was originally named QueryParamError and defined
+# here; it now lives in toinflux.exceptions as the shared ToolParamError (raised
+# by the write tools too). Kept so existing `from toinflux.mcp_read import
+# QueryParamError` imports still work.
+QueryParamError = ToolParamError
 
 # User-facing aggregation name -> InfluxQL selector/aggregator function. "raw"
 # is handled separately (no function, no GROUP BY) and is the default.
@@ -85,14 +91,6 @@ MAX_RESULT_POINTS = 5000
 DEFAULT_RESULT_POINTS = 500
 
 _RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
-
-
-class QueryParamError(ValueError):
-    """A read-query parameter was invalid (unknown field, bad time, etc.).
-
-    Distinct from SourceConnectionError: this is a caller/model mistake to be
-    reported back as a tool error, not a transport failure to retry.
-    """
 
 
 @dataclass
@@ -613,15 +611,25 @@ def register_read_tools(server, settings, settings_file=None):
 
     @server.tool()
     async def list_sources() -> dict:
-        """List the collector sources whose history can be queried, with the
-        InfluxDB measurement each maps to."""
+        """List the collector sources whose history can be queried, each with its
+        InfluxDB measurement.
+
+        The entry point for reads and the only one needing no arguments: start
+        here, then `list_fields` for a source's fields, then `query_history` to
+        read them. Takes no parameters and returns every configured source; use
+        `list_fields` when you already know the source and want its fields."""
         return await anyio.to_thread.run_sync(_list_sources_result, settings, settings_file)
 
     @server.tool()
     async def list_fields(source: str) -> dict:
-        """List the field keys available for a source, with any known unit and
-        the meanings of coded fields. Use this to discover what `query_history`
-        can ask for."""
+        """List the field keys available for one source, each with any known unit
+        and, for coded fields, what each numeric value means.
+
+        Call this before `query_history`: a field name it did not list is
+        rejected as an error, so use it to discover exact field names (they can
+        contain spaces-as-underscores and punctuation). Use `list_sources`
+        instead when you don't yet know which source you want. `source` is a
+        source name from `list_sources`; an unknown one returns an error."""
         return await anyio.to_thread.run_sync(_list_fields_result, source, settings, settings_file)
 
     @server.tool()
@@ -634,21 +642,27 @@ def register_read_tools(server, settings, settings_file=None):
         group_by: "str | None" = None,
         limit: int = DEFAULT_RESULT_POINTS,
     ) -> dict:
-        """Query a field's history for a source from InfluxDB.
+        """Query a field's history for a source from InfluxDB. Reads only; to
+        change a device use `set_device_state` (when write-enabled).
 
-        - start/end: 'now', a relative offset like '-24h'/'-7d', or an ISO 8601
-          timestamp. Defaults to the last 24 hours.
+        Discover valid `source`/`field` names with `list_sources`/`list_fields`
+        first - an unknown field, or a start/end/aggregation/group_by that does
+        not parse, returns an error rather than empty data.
+
+        - start/end: 'now', a relative past offset like '-24h'/'-7d' (leading '-'
+          required; the future has no data), or an ISO 8601 timestamp. Defaults to
+          the last 24 hours; start must be before end.
         - aggregation: 'raw' (individual points) or one of mean/median/min/max/
-          sum/count/first/last/spread/stddev, which require a group_by interval.
+          sum/count/first/last/spread/stddev, which each require a group_by interval.
         - group_by: a bucket interval like '5m'/'1h'/'1d' (only with aggregation).
-        - limit: max points returned (capped server-side).
+        - limit: max points returned, 1..5000 (values outside are clamped).
 
-        Points come back newest-first, each with a unix-seconds time and value;
-        coded fields (e.g. Nuki lock state) also carry a decoded label. The result
-        also reports the effective `limit` and a `truncated` flag - `truncated` is
-        true when the query returned as many points as the limit allowed, so more
-        data may exist beyond it; narrow the range or use an aggregation to be sure
-        of a complete view.
+        Points come back newest-first, each with a unix-seconds `time` and
+        `value`; coded fields (e.g. Nuki lock state) also carry a decoded `label`.
+        The result also reports the effective `limit` and a `truncated` flag -
+        `truncated` is true when the query returned as many points as the limit
+        allowed, so more data may exist beyond it; narrow the range or use an
+        aggregation to be sure of a complete view.
         """
         return await anyio.to_thread.run_sync(
             lambda: _query_history_result(

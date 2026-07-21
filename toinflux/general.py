@@ -450,6 +450,11 @@ def _validate_source_block(source, settings, is_v2):
             errors.append(f"{source}.db (or {source}.bucket for InfluxDB v2) is required")
     elif "db" not in source_cfg:
         errors.append(f"{source}.db is required when using InfluxDB v1 (user/password) authentication")
+    # mcp_read_write gates the MCP device-write tools and is checked with a strict
+    # `is True`, so a mistyped `mcp_read_write: "true"` (string) would silently
+    # leave writes off. Fail loud instead - a user who set it meant to enable it.
+    if "mcp_read_write" in source_cfg and not isinstance(source_cfg["mcp_read_write"], bool):
+        errors.append(f"{source}.mcp_read_write must be true or false (got {source_cfg['mcp_read_write']!r})")
     return errors
 
 

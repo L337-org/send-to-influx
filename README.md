@@ -422,8 +422,19 @@ Key points:
 - **Connections survive restarts.** OAuth client registrations and refresh tokens are persisted
   (hashed) in `mcp-oauth-state.json` next to the settings file (override with `mcp.state_file`),
   so package upgrades and reboots don't make Claude re-authenticate.
-- **Read-only by default.** Write tools (e.g. controlling Hue lights) are opt-in per collector and
-  aren't registered at all unless enabled in that collector's own settings block.
+- **Read-only by default.** Device-control tools are opt-in per collector and aren't registered at
+  all unless enabled in that collector's own settings block - when none is enabled, the write tools
+  don't exist on the server.
+
+To let Claude control Hue lights and plugs, set `hue.mcp_read_write: true`. That adds two tools:
+
+- **`list_writable_devices`** - the controllable lights/plugs, with the id and name to target.
+- **`set_device_state`** - turn a light/plug on or off and set its brightness (0-100 %). It's a real
+  physical action; brightness is mapped to the bridge's scale, and setting a brightness turns the
+  light on unless you explicitly turn it off.
+
+Only Hue supports control today. The write tool is a generic "set device state" primitive, so more
+device types can be added without new tooling.
 
 Once connected, Claude has three read tools:
 

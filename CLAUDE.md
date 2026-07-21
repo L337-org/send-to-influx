@@ -127,8 +127,33 @@ decisions:
   needs `pydantic_core` and `rpds-py` (Rust-compiled, no fallback), which is what the packaging
   section's compiled-wheel matrix exists for. `rpds-py` is held to `~=0.30.0` in requirements.txt
   (2026.x CalVer releases dropped Python 3.10 wheels; the build fails loudly if coverage regresses).
-- Hue write tools (opt-in per collector via `hue.mcp_read_write`, shaped as a generic "set device
-  state" primitive) land in a later slice.
+**Write tools** (`toinflux/mcp_write.py`, `register_write_tools()`): the MCP server is read-only by
+default. A source becomes controllable only when it's both `MCP_WRITABLE` (a class flag - Hue is the
+only one today) *and* the operator opts in with `<source>.mcp_read_write: true`
+(`DataHandler.mcp_write_enabled()`, strict `is True`; `validate_settings()` rejects a non-bool so a
+mistyped `"true"` fails loud instead of silently staying off). Design points:
+  - **Least privilege**: when no source is write-enabled, `register_write_tools()` registers *nothing*
+    - the `set_device_state`/`list_writable_devices` tools are absent from the server's advertised
+      surface entirely, not present-and-refusing. So the capability can't be probed or bypassed when
+      it's off.
+  - **Generic primitive**: `set_device_state(source, device, on, brightness_pct)` dispatches to the
+    source class's own `mcp_set_device_state()`; the device-specific logic (name→bridge-id
+    resolution, the friendly-param→vendor-API mapping) lives on the source, like the read domain
+    knowledge. Deliberately source-agnostic so SI-7's PID actuation can drive the same tool with no
+    new MCP wiring.
+  - **Hue** (`toinflux/philipshue.py`): `mcp_set_device_state()` resolves the target against the live
+    device list (`mcp_list_writable_devices()`, the write allowlist - an unknown or ambiguous name is
+    refused, never guessed, since actuating the wrong light isn't recoverable), maps brightness 0-100%
+    to the bridge's 1-254 `bri` (0% is min-on, not off - off is `on=False`, keeping the two controls
+    independent), auto-adds `on=True` when setting brightness (the bridge ignores `bri` on an off
+    light) unless `on` is explicitly false, and `PUT`s to `/api/{user}/lights/{id}/state` over the
+    collector's own session/auth and `hue.insecure` TLS policy. The CLIP API returns 200 with a
+    per-key success/error list, so a bridge-reported error is surfaced as `SourceConnectionError`.
+  - Per-call handler/session lifecycle and the ToolParamError-vs-SourceConnectionError split are the
+    same as the read tools (shared `_resolve_handler`/`_close_session` from `mcp_read`). Every applied
+    write is logged at INFO.
+  - This is the project's first device-control capability and gets a dedicated `/security-review`
+    before the feature branch merges to `main`.
 
 **Read tools** (`toinflux/mcp_read.py`, registered onto the server by `register_read_tools()`):
 three read-only tools - `list_sources`, `list_fields`, and `query_history` - exposing each
@@ -161,8 +186,11 @@ live field set. Design points:
     `annotate_rows()` attaches units and decodes coded values to labels (an undocumented code passes
     through with a null label, matching the collector's raw-passthrough rule). Sourced from UNITS.md.
   - Blocking InfluxDB HTTP runs in a worker thread (`anyio.to_thread.run_sync`) so a query doesn't
-    stall the server's async event loop. `QueryParamError` (a bad field/time/aggregation) surfaces
-    to the model as a tool error; `SourceConnectionError` is a transport failure.
+    stall the server's async event loop. `ToolParamError` (a bad field/time/aggregation/device -
+    shared by the read and write tools, defined in `toinflux/exceptions.py`; a non-retryable
+    caller/model mistake) surfaces to the model as a tool error; `SourceConnectionError` is a
+    transient transport failure the collector loop would retry, so the two are kept distinct.
+    (`toinflux.mcp_read.QueryParamError` remains as a back-compat alias for `ToolParamError`.)
 
 ### Entry point (`sendtoinflux.py`)
 
@@ -205,6 +233,12 @@ live field set. Design points:
    numeric-coded field) from the UNITS.md entry, and set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS` if the
    source's InfluxDB measurement isn't its own name or it shares a measurement with others. Nothing
    else is needed - the source is exposed by the read tools automatically once it's in `sources:`.
+4c. (Only if the source can be *controlled*, and its vendor API has a documented write path.) Set
+   `MCP_WRITABLE = True` and implement `mcp_set_device_state(device, *, on=..., brightness_pct=...)`
+   plus `mcp_list_writable_devices()` on the class (see `Hue`), keeping the vendor-specific
+   name→id/param mapping there. Add `<source>.mcp_read_write` (bool, default false) to
+   `example_settings.yaml`; validation already rejects a non-bool. The `set_device_state` tool then
+   dispatches to it once the operator opts in. Most sources are read-only and skip this.
 5. Update README.md, UNITS.md, CLAUDE.md, and `.github/copilot-instructions.md`.
 6. Wire the source into the debconf install flow — a mechanical checklist, not a judgment call
    (every rule below is an existing, tested convention; the scenario suite enforces most of them):

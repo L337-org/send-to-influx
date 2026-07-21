@@ -123,6 +123,21 @@ class DataHandler:
     # codes. Sourced from UNITS.md; kept here so the read tool is domain-aware
     # without a parallel schema to maintain.
     MCP_FIELD_METADATA: dict = {}
+    # Whether this source implements a device-write path the MCP server can
+    # expose (a subclass with MCP_WRITABLE = True must implement
+    # mcp_set_device_state() and mcp_list_writable_devices()). Even for a
+    # writable source, the write tool is only registered when the operator also
+    # opts in per source via `<source>.mcp_read_write: true` - see
+    # mcp_write_enabled(). A disabled capability isn't registered at all (least
+    # privilege), never registered-and-refusing.
+    MCP_WRITABLE = False
+
+    def mcp_write_enabled(self):
+        """Return True only when this source is writable *and* the operator has
+        opted in with ``<source>.mcp_read_write: true`` (strict ``is True``, so a
+        stray truthy string like ``"true"`` doesn't silently enable device
+        control). The default is off - writes are opt-in per source."""
+        return self.MCP_WRITABLE and self.source_settings.get("mcp_read_write", False) is True
 
     # Bounded per-source buffer of points that failed to write, flushed on the next
     # successful send. Each entry is a mutable [line, rejection_count] pair - the count

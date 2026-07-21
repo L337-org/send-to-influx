@@ -405,12 +405,15 @@ def build_mcp_server(settings, settings_file=None):
         error_html = '<p class="error">Wrong username or password.</p>'
         return HTMLResponse(_LOGIN_FORM_TEMPLATE.format(txn=html.escape(txn_id), error=error_html), 401)
 
-    # Read-only tools (list sources / list fields / query history). Registered
-    # here so every enabled server exposes them; write tools are added per
-    # collector in a later slice.
+    # Read-only tools (list sources / list fields / query history), always
+    # registered. Device-write tools are registered by register_write_tools only
+    # when a source is opted in via <source>.mcp_read_write - when none is, no
+    # write tool appears on the server at all (least privilege).
     from toinflux.mcp_read import register_read_tools
+    from toinflux.mcp_write import register_write_tools
 
     register_read_tools(server, settings, settings_file)
+    register_write_tools(server, settings, settings_file)
 
     return server
 

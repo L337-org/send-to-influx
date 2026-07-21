@@ -91,6 +91,28 @@ class TestHue:
                 with pytest.raises(SourceConnectionError):
                     hue.get_data_from_hue_bridge()
 
+    def test_get_data_from_hue_bridge_raises_on_empty_list(self, sample_settings):
+        """An empty JSON list must fail cleanly, not raise IndexError from hue_data[0]."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            hue = Hue(source="hue")
+            mock_response = MagicMock()
+            mock_response.json.return_value = []
+            with patch.object(hue.session, "get", return_value=mock_response):
+                with pytest.raises(SourceConnectionError, match="unexpected list response"):
+                    hue.get_data_from_hue_bridge()
+
+    def test_get_data_from_hue_bridge_raises_on_unparseable_body(self, sample_settings):
+        """A non-JSON body raises SourceConnectionError, not an unhandled ValueError."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            hue = Hue(source="hue")
+            mock_response = MagicMock()
+            mock_response.json.side_effect = ValueError("no JSON")
+            with patch.object(hue.session, "get", return_value=mock_response):
+                with pytest.raises(SourceConnectionError, match="unparseable response"):
+                    hue.get_data_from_hue_bridge()
+
     def test_hue_device_name_to_name_uses_mapping_when_present(self, sample_settings):
         """hue_device_name_to_name uses sensors mapping when in settings."""
         settings = {**sample_settings}
