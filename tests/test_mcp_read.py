@@ -343,6 +343,13 @@ class TestDiscoverFields:
         with pytest.raises(SourceConnectionError):
             discover_fields(session, {"url": "http://x", "user": "u", "password": "p"}, "db", "hue")
 
+    def test_result_error_surfaces_not_empty_set(self):
+        # An InfluxDB error in a 200 payload (wrong db/auth) must raise, not come
+        # back as an empty field set that later reads as every field "unknown".
+        payload = {"results": [{"error": "database not found: hue_db"}]}
+        with pytest.raises(SourceConnectionError, match="rejected the field discovery"):
+            discover_fields(_mock_session(payload), {"url": "http://x", "token": "t", "org": "o"}, "db", "hue")
+
 
 class TestRunQuery:
     def test_returns_columns_and_values(self):

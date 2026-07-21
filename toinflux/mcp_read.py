@@ -432,6 +432,11 @@ def discover_fields(session, influx_settings, db, measurement):
     payload = _get(session, url, kwargs, f"discover fields for {measurement}")
     fields = set()
     for result in payload.get("results", []):
+        # A per-result error (wrong db, auth, ...) is returned in a 200 body, same
+        # as run_query - surface it, or an empty field set would later masquerade
+        # as every field being "unknown" and hide the real InfluxDB failure.
+        if result.get("error"):
+            raise SourceConnectionError(f"InfluxDB rejected the field discovery: {result['error']}")
         for series in result.get("series", []):
             name_index = series.get("columns", []).index("fieldKey") if "fieldKey" in series.get("columns", []) else 0
             for row in series.get("values", []):
