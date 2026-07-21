@@ -265,10 +265,14 @@ def build_mcp_server(settings, settings_file=None):
     # netloc is the exact Host header a reverse-proxied request carries (including
     # any explicit port); hostname is the port-less form used for the any-port
     # wildcard entries - conflating the two would produce a malformed
-    # "host:port:*" allowlist entry whenever public_url carries a port.
+    # "host:port:*" allowlist entry whenever public_url carries a port. hostname
+    # also strips the brackets from an IPv6 literal, which Host/Origin syntax
+    # requires - re-add them, or the derived entries would be malformed again.
     parsed_public = urlparse(public_url)
     public_host = parsed_public.netloc
     public_hostname = parsed_public.hostname or public_host
+    if ":" in public_hostname:
+        public_hostname = f"[{public_hostname}]"
     server = FastMCP(
         name="send-to-influx",
         instructions=(

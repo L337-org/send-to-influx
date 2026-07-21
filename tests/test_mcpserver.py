@@ -437,6 +437,24 @@ class TestPublicUrlWithPort:
         assert not any(entry.count(":") > 1 for entry in security.allowed_hosts if "[" not in entry)
         assert "https://mcp.example.org:8443" in security.allowed_origins
 
+    def test_ipv6_public_url_entries_keep_their_brackets(self, tmp_path):
+        settings = {
+            "mcp": {
+                "bind_address": "127.0.0.1:8420",
+                "public_url": "https://[2001:db8::5]:8443",
+                "user": MCP_USER,
+                "password": MCP_PASSWORD,
+                "state_file": str(tmp_path / "state.json"),
+            },
+        }
+        server = build_mcp_server(settings)
+        security = server.settings.transport_security
+        assert "[2001:db8::5]:8443" in security.allowed_hosts
+        assert "[2001:db8::5]:*" in security.allowed_hosts
+        assert not any(entry.startswith("2001") for entry in security.allowed_hosts)
+        assert "https://[2001:db8::5]:8443" in security.allowed_origins
+        assert "https://[2001:db8::5]" in security.allowed_origins
+
     def test_proxied_request_with_ported_host_header_is_served(self, tmp_path):
         settings = {
             "mcp": {
