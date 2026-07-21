@@ -86,6 +86,50 @@ with no documented meaning is written through unchanged); see UNITS.md for what 
 source-specific runtime dependency like `speedtest-cli`, pure Python so the `.deb`'s
 `Architecture: all` design holds) is imported only in `toinflux/mqtt.py`.
 
+### MCP server (`toinflux/mcpserver.py`)
+
+The optional remote MCP server (new in 5.0) is *not* a `DataHandler` - it's the project's
+first inbound-network-facing component, a Streamable-HTTP server built on the official `mcp` SDK's
+`FastMCP` + built-in OAuth 2.1 authorization server, run in its own daemon thread (`anyio` inside
+the thread; nothing else in the synchronous codebase changes). Enabled iff both `mcp.user` and
+`mcp.password` are set (no separate flag; one without the other is a `ConfigError` - see
+`mcp_block_errors()`/`mcp_enabled()` in `toinflux/general.py`); started from
+`sendtoinflux.py`'s `maybe_start_mcp_server()` (skipped in `--print`/`--dump` modes). Key
+decisions:
+
+- **Bind vs public**: binds `mcp.bind_address` (default `127.0.0.1:8420`) in plain HTTP;
+  `validate_settings()` refuses `0.0.0.0`/`::` outright with no override (plain-HTTP OAuth on a
+  public interface is never valid - TLS termination belongs to the user's reverse proxy). The
+  external HTTPS address is `mcp.public_url` (required when enabled, must be `https://`): the
+  OAuth issuer/discovery metadata and login-page redirects are built from it, never from the bind
+  address. The SDK's DNS-rebinding protection stays enabled with the public hostname allowlisted
+  (a reverse-proxied request carries the public Host header, which the SDK's localhost-only
+  default would reject).
+- **OAuth storage** (`SendToInfluxOAuthProvider` + `OAuthStateStore`): dynamic client
+  registrations and refresh tokens persist across restarts in `mcp.state_file` (default
+  `mcp-oauth-state.json` next to settings.yaml - the one path the packaged service's sandbox
+  guarantees writable), written atomically at 0600; refresh tokens stored as SHA-256 hashes only.
+  postinst restarts the service on every upgrade, so in-memory-only state would break the Claude
+  connector on every unattended upgrade. Access tokens are in-memory (1 h TTL) - a restart
+  invalidates them and the client recovers silently via refresh. The SDK's token endpoint does
+  PKCE/expiry/client-binding verification itself; the provider only stores, loads, and issues.
+- **Login page** (`/login`, via `FastMCP.custom_route`): resource-owner step gated on
+  `mcp.user`/`mcp.password` (constant-time comparison), single-use unguessable transaction ids
+  minted by `authorize()`. Failed attempts are throttled per client address
+  (`LoginThrottle`: 5 failures → 300 s lockout, WARNING-logged) - behind a reverse proxy every
+  request carries the proxy's address, so the lockout is effectively global, which is the intended
+  behaviour for a single-user login page, not a limitation.
+- `mcp-password` is in `CREDENTIAL_FIELDS` like every other secret; its `PLACEHOLDER_VALUES`
+  entry is deliberately the empty string (empty-means-disabled is the block's enablement
+  mechanism, and `--remove` reverting to `""` is exactly the disabled state).
+- The `mcp` SDK is imported only inside `toinflux/mcpserver.py` (lazily, gated on `mcp_enabled()`),
+  like `paho-mqtt` in the MQTT transport - but unlike paho it is **not** pure Python: its chain
+  needs `pydantic_core` and `rpds-py` (Rust-compiled, no fallback), which is what the packaging
+  section's compiled-wheel matrix exists for. `rpds-py` is held to `~=0.30.0` in requirements.txt
+  (2026.x CalVer releases dropped Python 3.10 wheels; the build fails loudly if coverage regresses).
+- Read tools/resources land in the next slice; Hue write tools (opt-in per collector via
+  `hue.mcp_read_write`, shaped as a generic "set device state" primitive) the slice after.
+
 ### Entry point (`sendtoinflux.py`)
 
 - **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source. Connection failures (`SourceConnectionError`) are retried with exponential backoff (base 5 s, max 300 s); a `ConfigError` is not retried — it exits the process immediately with code 1.
@@ -177,7 +221,7 @@ source-specific runtime dependency like `speedtest-cli`, pure Python so the `.de
 
 - `pyproject.toml` is the single source of truth for the package version (`[project].version`) and runtime dependencies (dynamically read from `requirements.txt`). Bump the version there, not in `sendtoinflux.py`.
 - `sendtoinflux.py`'s `__version__` is read from installed package metadata (`importlib.metadata.version("send-to-influx")`), falling back to `"0.0.0-dev"` when run from a source checkout without the package installed. `requirements-dev.txt` includes `-e .` so dev/test environments have it installed and see the real version.
-- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/preinst`/`postinst`/`prerm`/`postrm`). `/etc/send-to-influx/settings.yaml` is deliberately *not* a dpkg conffile: `postinst` and `send-to-influx-set-credential` write debconf answers/sentinels into it, and dpkg's conffile machinery treats any maintainer-script write as a local modification (Debian Policy 10.7.3 forbids the combination) - guaranteeing a "modified (by you or by a script)" prompt on every upgrade that ships a changed example, with a one-keypress path to replacing a configured file with the pristine example. Instead the example ships at `/usr/share/send-to-influx/example_settings.yaml` and `postinst` copies it into place only if `/etc/send-to-influx/settings.yaml` doesn't exist (the Policy 10.7.3 "configuration files handled by maintainer scripts" pattern; `postrm` removes it on purge, as that pattern requires) - so upgrades never touch the live file at all. On upgrade (and after a `dpkg-reconfigure` that rewrote configuration), `postinst` restarts the service if - and only if - it's currently running, so unattended upgrades don't leave the replaced code running until the next reboot; a stopped service is never started. Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead renames it to the version-independent `lib/python3` and `postinst` symlinks every supported minor to it (see the `preinst`/layout bullet below for why the symlinks are created there rather than shipped; both bounds come from `PYTHON_MIN_SUPPORTED_MINOR`/`PYTHON_MAX_SUPPORTED_MINOR`, which also drive `Depends:` and are substituted into `postinst`, so the range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds the same script's output on an `ubuntu-24.04-arm` runner on every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - catching both a future dependency change that makes a compiled extension load-bearing rather than optional, and any regression in the maintainer-script behaviour below, before it can merge; `bookworm-verify` re-runs the same suite in a `debian:12` container for systemd-252 coverage (the restart scenario self-skips there - no running systemd - but the systemd-creds *tooling* is the real 252 binaries, which is what caught out 4.1). See the README's "Running as a systemd service" section.
+- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/preinst`/`postinst`/`prerm`/`postrm`). `/etc/send-to-influx/settings.yaml` is deliberately *not* a dpkg conffile: `postinst` and `send-to-influx-set-credential` write debconf answers/sentinels into it, and dpkg's conffile machinery treats any maintainer-script write as a local modification (Debian Policy 10.7.3 forbids the combination) - guaranteeing a "modified (by you or by a script)" prompt on every upgrade that ships a changed example, with a one-keypress path to replacing a configured file with the pristine example. Instead the example ships at `/usr/share/send-to-influx/example_settings.yaml` and `postinst` copies it into place only if `/etc/send-to-influx/settings.yaml` doesn't exist (the Policy 10.7.3 "configuration files handled by maintainer scripts" pattern; `postrm` removes it on purge, as that pattern requires) - so upgrades never touch the live file at all. On upgrade (and after a `dpkg-reconfigure` that rewrote configuration), `postinst` restarts the service if - and only if - it's currently running, so unattended upgrades don't leave the replaced code running until the next reboot; a stopped service is never started. Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. The two exceptions since the MCP server landed are `pydantic_core` and `rpds-py` (required by the `mcp` SDK, Rust-compiled, no pure-Python fallback): the blanket strip removes them too, and a dedicated compiled-wheel-matrix step then merges the compiled extensions from the prebuilt manylinux wheels for every supported minor (3.10-3.14, `COMPILED_WHEEL_MINORS`) x both architectures into the shared site-packages - CPython only imports a `.so` tagged with its own exact ABI, so the variants coexist; the build fails loudly if any minor/arch combination is missing, which (together with the `rpds-py~=0.30.0` hold in requirements.txt) is the guard against a wheel version dropping a supported minor. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead renames it to the version-independent `lib/python3` and `postinst` symlinks every supported minor to it (see the `preinst`/layout bullet below for why the symlinks are created there rather than shipped; both bounds come from `PYTHON_MIN_SUPPORTED_MINOR`/`PYTHON_MAX_SUPPORTED_MINOR`, which also drive `Depends:` and are substituted into `postinst`, so the range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds the same script's output on an `ubuntu-24.04-arm` runner on every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - catching both a future dependency change that makes a compiled extension load-bearing rather than optional, and any regression in the maintainer-script behaviour below, before it can merge; `bookworm-verify` re-runs the same suite in a `debian:12` container for systemd-252 coverage (the restart scenario self-skips there - no running systemd - but the systemd-creds *tooling* is the real 252 binaries, which is what caught out 4.1). See the README's "Running as a systemd service" section.
 - `packaging/deb/preinst` deletes the whole bundled venv (`/opt/send-to-influx/venv`) so the
   unpack that follows lays down a pristine one. The venv is entirely package-owned and recreated by
   every install - no configuration (that's `/etc/send-to-influx`), no credentials (the credstore),
@@ -251,9 +295,11 @@ the source-checkout/screen-session path, where `systemd-creds` doesn't apply at 
 
 - `toinflux/credentials.py`: `CREDENTIAL_FIELDS` is the single source of truth mapping a systemd-creds
   credential name (e.g. `influx-token`) to the `(top-level key, field)` it overlays in the parsed
-  settings dict (e.g. `("influx", "token")`) - 7 credentials across `influx` (`token`, `user`,
-  `password`), `hue` (`user`), `mqtt` (`password`), `myenergi` (`apikey`), `octopus` (`api_key`). `PLACEHOLDER_VALUES`
-  matches `example_settings.yaml`'s literal placeholder text per field; `sentinel_for(name)` returns
+  settings dict (e.g. `("influx", "token")`) - 8 credentials across `influx` (`token`, `user`,
+  `password`), `hue` (`user`), `mqtt` (`password`), `mcp` (`password`), `myenergi` (`apikey`),
+  `octopus` (`api_key`). `PLACEHOLDER_VALUES`
+  matches `example_settings.yaml`'s literal placeholder text per field (`mcp-password`'s is
+  deliberately the empty string - see the MCP server section above); `sentinel_for(name)` returns
   the cosmetic string written into `settings.yaml` once a field is migrated (never read back for real
   use - purely informational for a human reading the file). `apply_credential_substitution(settings)`
   overlays whatever's decrypted into `$CREDENTIALS_DIRECTORY` (set by systemd when the unit's

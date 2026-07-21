@@ -19,6 +19,7 @@ CREDENTIAL_FIELDS = {
     "influx-password": ("influx", "password"),
     "hue-user": ("hue", "user"),
     "mqtt-password": ("mqtt", "password"),
+    "mcp-password": ("mcp", "password"),
     "myenergi-apikey": ("myenergi", "apikey"),
     "octopus-api-key": ("octopus", "api_key"),
 }
@@ -30,6 +31,12 @@ PLACEHOLDER_VALUES = {
     "influx-password": "your_influx_password",
     "hue-user": "your_hue_user",
     "mqtt-password": "your_mqtt_password",
+    # Deliberately the empty string, unlike every other entry: example_settings.yaml
+    # ships mcp.password as "" because empty-means-disabled is the mcp block's whole
+    # enablement mechanism. This works with the existing machinery because
+    # _validate_secret_value() rejects empty input on its own, before the placeholder
+    # comparison, and --remove writing "" back is exactly the disabled state.
+    "mcp-password": "",
     "myenergi-apikey": "your_api_key",
     "octopus-api-key": "your_octopus_api_key",
 }
