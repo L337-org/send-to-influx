@@ -78,9 +78,11 @@ GET. Failure mapping is deliberately strict: bad credentials arrive asynchronous
 handshake raises `SourceConnectionError` rather than returning an empty result - either would
 otherwise masquerade as "no data". `Nuki` (`toinflux/nuki.py`) holds only vendor logic: filtering to
 known state topics (command/event topics are ignored), grouping by device ID, prefixing field keys
-with each lock's own Nuki-app name, and resolving the numeric `state`/`doorsensorState` codes to
-labels via hardcoded tables from the MQTT API spec (unlike the Bridge HTTP API, MQTT publishes no
-`stateName` strings; an unrecognised code is written through as its raw number). `paho-mqtt` (a
+with each lock's own Nuki-app name, and renaming `state`/`doorsensorState` to `stateValue`/
+`doorsensorStateValue` - Grafana visualises numeric fields far better than text, so unlike the
+Bridge HTTP API's `stateName` strings, these are always written as their raw numeric code (a code
+with no documented meaning is written through unchanged); see UNITS.md for what each code means.
+`paho-mqtt` (a
 source-specific runtime dependency like `speedtest-cli`, pure Python so the `.deb`'s
 `Architecture: all` design holds) is imported only in `toinflux/mqtt.py`.
 

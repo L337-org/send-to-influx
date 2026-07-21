@@ -168,10 +168,10 @@ except requests.exceptions.RequestException as e:
 - **InfluxDB measurement**: `octopus,source=octopus_energy`
 
 ### Nuki Smart Lock (`toinflux/nuki.py`)
-- **Collects**: lock state and door-sensor state labels, battery/keypad/door-sensor battery flags, connectivity flags, per provisioned lock
+- **Collects**: lock state and door-sensor state as numeric codes (`stateValue`/`doorsensorStateValue`), battery/keypad/door-sensor battery flags, connectivity flags, per provisioned lock
 - **Transport**: local MQTT broker (shared `mqtt:` settings block) via `MqttDataHandler` (`toinflux/mqtt.py`); all Nuki state topics are retained, so a short subscribe window per cycle gets the full last-known state
 - **Configuration**: `db`, `interval`, `timeout` (collection window); field keys are prefixed with each lock's Nuki-app name
-- **Note**: read-only - command/event topics are filtered out and never published to; numeric state codes are resolved to labels from hardcoded spec tables (unrecognised codes pass through as raw numbers)
+- **Note**: read-only - command/event topics are filtered out and never published to; `state`/`doorsensorState` are renamed to `stateValue`/`doorsensorStateValue` and always written as their raw numeric code (Grafana handles numeric fields far better than text) - see UNITS.md for what each code means
 - **InfluxDB measurement**: `nuki`
 
 ## Dependencies
