@@ -66,8 +66,16 @@ class Hue(DataHandler):
             # tools' device discovery, which both go through this method.
             logging.error("Hue Bridge returned an unparseable response - %s", e)
             raise SourceConnectionError(f"Hue Bridge returned an unparseable response: {e}") from e
-        if isinstance(hue_data, list) and "error" in hue_data[0]:
-            description = hue_data[0]["error"]["description"]
+        # A successful GET returns a dict (sensors/lights); a list only ever comes
+        # back on error. Guard the indexing: an empty list, or a list whose first
+        # item isn't the documented {"error": {...}} shape, is unexpected and must
+        # fail cleanly rather than raise IndexError/KeyError unhandled.
+        if isinstance(hue_data, list):
+            first = hue_data[0] if hue_data else None
+            if isinstance(first, dict) and "error" in first:
+                description = first["error"].get("description", str(first["error"]))
+            else:
+                description = f"unexpected list response: {hue_data!r:.200}"
             logging.error("Error connecting to Hue Bridge - %s", description)
             raise SourceConnectionError(description)
         return hue_data
