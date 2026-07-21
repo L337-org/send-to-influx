@@ -300,9 +300,14 @@ class TestHttpSurface:
         _verifier, challenge = _pkce_pair()
         txn = _authorize_to_login_txn(http_client, client_id, challenge)
         with caplog.at_level(logging.WARNING):
-            response = http_client.post("/login", data={"txn": txn, "username": MCP_USER, "password": "wrong"})
+            response = http_client.post(
+                "/login", data={"txn": txn, "username": "attacker-supplied", "password": "wrong"}
+            )
         assert response.status_code == 401
-        assert any("Failed MCP login attempt" in record.message for record in caplog.records)
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("Failed MCP login attempt" in record.message for record in warnings)
+        # The attacker-controlled username must not appear in the WARNING line.
+        assert all("attacker-supplied" not in record.getMessage() for record in warnings)
 
     def test_lockout_after_repeated_failures(self, http_client):
         client_id = _register_client(http_client)
@@ -435,6 +440,22 @@ class TestProviderInternals:
         assert provider.check_credentials(MCP_USER, MCP_PASSWORD) is True
         assert provider.check_credentials(MCP_USER, "wrong") is False
         assert provider.check_credentials("wrong", MCP_PASSWORD) is False
+
+    def test_revoke_access_token_object(self, provider):
+        from mcp.server.auth.provider import AccessToken
+
+        provider._access_tokens["tok"] = AccessToken(token="tok", client_id="c", scopes=[])
+        anyio.run(provider.revoke_token, AccessToken(token="tok", client_id="c", scopes=[]))
+        assert "tok" not in provider._access_tokens
+
+    def test_revoke_tolerates_raw_string_token(self, provider):
+        """revoke_token must not raise AttributeError if handed a token value
+        without a .token attribute (a raw string / future representation)."""
+        provider._access_tokens["raw"] = object()
+        anyio.run(provider.revoke_token, "raw")  # must not raise
+        assert "raw" not in provider._access_tokens
+        # An unknown token stays a silent no-op.
+        anyio.run(provider.revoke_token, "never-seen")
 
     def test_malformed_client_entry_is_dropped_not_raised(self, provider, caplog):
         provider.state.clients["bad"] = {"redirect_uris": "not-a-list"}

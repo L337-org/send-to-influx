@@ -365,13 +365,18 @@ def build_mcp_server(settings, settings_file=None):
             redirect_url = provider.complete_authorization(txn_id, subject=username)
             return RedirectResponse(redirect_url, status_code=302)
         failures = provider.throttle.record_failure(address)
+        # The submitted username is attacker-controlled, so it stays out of the
+        # WARNING line (log-injection/noise, and it's a would-be credential):
+        # address + failure count are what matter for alerting on an attack. The
+        # username goes to DEBUG via %r, which escapes control characters, for
+        # the rare case an operator is debugging their own failed login.
         logging.warning(
-            "Failed MCP login attempt from %s (username %r, consecutive failure %d of %d before lockout)",
+            "Failed MCP login attempt from %s (consecutive failure %d of %d before lockout)",
             address,
-            username,
             failures,
             LOGIN_FAILURE_LIMIT,
         )
+        logging.debug("Failed MCP login username: %r", username)
         error_html = '<p class="error">Wrong username or password.</p>'
         return HTMLResponse(_LOGIN_FORM_TEMPLATE.format(txn=html.escape(txn_id), error=error_html), 401)
 
@@ -552,14 +557,20 @@ class SendToInfluxOAuthProvider:
         return access
 
     async def revoke_token(self, token):
-        """Revoke either token type; unknown tokens are a silent no-op per spec."""
+        """Revoke either token type; unknown tokens are a silent no-op per spec.
+
+        The token string is read via getattr with the value itself as fallback,
+        so a raw-string token (or any future representation without a .token
+        attribute) revokes cleanly instead of raising AttributeError into the
+        revocation endpoint."""
         from mcp.server.auth.provider import RefreshToken
 
+        token_str = getattr(token, "token", token)
         if isinstance(token, RefreshToken):
-            if self.state.refresh_tokens.pop(_hash_token(token.token), None) is not None:
+            if self.state.refresh_tokens.pop(_hash_token(token_str), None) is not None:
                 self.state.save()
         else:
-            self._access_tokens.pop(token.token, None)
+            self._access_tokens.pop(token_str, None)
 
     # -- internals --
 
