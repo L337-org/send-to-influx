@@ -73,6 +73,14 @@ class TestParseTimeBound:
         with pytest.raises(QueryParamError):
             parse_time_bound(bad, now=NOW)
 
+    @pytest.mark.parametrize("future", ["24h", "+24h", "1d"])
+    def test_bare_or_positive_offset_rejected(self, future):
+        # Relative offsets must be past-only (leading '-'); a future range has no
+        # data (collectors only write at present time). ISO timestamps cover any
+        # genuine future need.
+        with pytest.raises(QueryParamError):
+            parse_time_bound(future, now=NOW)
+
 
 class TestBuildQuery:
     def test_raw_query_structure(self):
@@ -222,6 +230,25 @@ class TestAnnotateRows:
         result = annotate_rows(schema, "Lock_stateValue", ["time", "Lock_stateValue"], [[10, 99]])
         assert result["points"][0]["label"] is None
 
+    def test_integer_valued_float_decodes(self):
+        # The collector writes every numeric field as a float, so a lock state
+        # arrives as 1.0 - it must still decode.
+        schema = make_schema(field_metadata={"stateValue": {"codes": {1: "locked"}}})
+        result = annotate_rows(schema, "Lock_stateValue", ["time", "Lock_stateValue"], [[10, 1.0]])
+        assert result["points"][0]["label"] == "locked"
+
+    def test_non_integer_float_is_not_truncated_to_a_code(self):
+        # 1.5 must not become code 1 ("locked"); it gets a null label.
+        schema = make_schema(field_metadata={"stateValue": {"codes": {1: "locked"}}})
+        result = annotate_rows(schema, "Lock_stateValue", ["time", "Lock_stateValue"], [[10, 1.5]])
+        assert result["points"][0]["label"] is None
+        assert result["points"][0]["value"] == 1.5
+
+    def test_bool_value_is_not_decoded_as_a_code(self):
+        schema = make_schema(field_metadata={"stateValue": {"codes": {1: "locked"}}})
+        result = annotate_rows(schema, "Lock_stateValue", ["time", "Lock_stateValue"], [[10, True]])
+        assert result["points"][0]["label"] is None
+
     def test_aggregated_column_name_handled(self):
         # Aggregated queries name the value column after the function (e.g. "mean").
         result = annotate_rows(make_schema(), "gen", ["time", "mean"], [[100, 120.0]])
@@ -354,6 +381,25 @@ class TestResolveSchema:
         assert schema.db == "zappi_db"
         assert schema.allowed_fields == {"gen", "grd"}
         assert schema.tag_filters == {"device": "zappi"}
+
+    def test_discovery_uses_handlers_own_influx_block(self):
+        # A live settings edit changes the handler's influx block; discovery must
+        # use that, not the server's startup snapshot.
+        handler = MagicMock()
+        handler.source = "zappi"
+        handler.MCP_MEASUREMENT = "myenergi"
+        handler.MCP_TAG_FILTERS = {}
+        handler.MCP_FIELD_METADATA = {}
+        handler.source_settings = {"db": "zappi_db"}
+        handler.session = MagicMock()
+        handler.settings = {"influx": {"url": "http://FRESH", "user": "u", "password": "p"}}
+        stale = {"sources": ["zappi"], "influx": {"url": "http://STALE", "user": "u", "password": "p"}}
+        with (
+            patch("toinflux.mcp_read.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value=set()) as discover,
+        ):
+            resolve_schema("zappi", stale, None)
+        assert discover.call_args.args[1]["url"] == "http://FRESH"
 
 
 class TestRegisterReadTools:

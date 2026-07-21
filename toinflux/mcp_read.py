@@ -62,8 +62,11 @@ AGGREGATIONS = {
 # could confuse the parser.
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 
-# A relative time offset like "-24h", "-7d", "-90m", or the literal "now".
-_RELATIVE_TIME_RE = re.compile(r"^-?\d+[smhdw]$")
+# A relative time offset into the past, like "-24h", "-7d", "-90m". The leading
+# "-" is required: the collectors only ever write points at the present time (even
+# forecast values are stored at their collection time), so a future range has no
+# data; an explicit ISO timestamp is still accepted for any future need.
+_RELATIVE_TIME_RE = re.compile(r"^-\d+[smhdw]$")
 
 # A GROUP BY interval duration like "5m", "1h", "1d".
 _DURATION_RE = re.compile(r"^\d+[smhdw]$")
@@ -146,6 +149,23 @@ def build_schema(handler, discovered_fields):
     )
 
 
+def _decode_code(value, codes):
+    """Return the label for a coded value, or None.
+
+    Only a genuine integer decodes - an int, or an integer-valued float (the
+    collector writes every numeric field as a float, so a lock state arrives as
+    1.0). A non-integer float (1.5) or a bool is never truncated to a code; it
+    gets a null label rather than a wrong one.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return codes.get(value)
+    if isinstance(value, float) and value.is_integer():
+        return codes.get(int(value))
+    return None
+
+
 def annotate_rows(schema, field, columns, values):
     """Shape a query's (columns, values) into a domain-aware result dict.
 
@@ -164,9 +184,10 @@ def annotate_rows(schema, field, columns, values):
     value_index = next((i for i, c in enumerate(columns) if c != "time"), len(columns) - 1)
     points = []
     for row in values:
-        point = {"time": row[time_index], "value": row[value_index]}
-        if codes and isinstance(row[value_index], (int, float)) and not isinstance(row[value_index], bool):
-            point["label"] = codes.get(int(row[value_index]))
+        value = row[value_index]
+        point = {"time": row[time_index], "value": value}
+        if codes:
+            point["label"] = _decode_code(value, codes)
         points.append(point)
     result = {"source": schema.source, "field": field, "points": points}
     if meta.get("unit"):
@@ -221,10 +242,9 @@ def parse_time_bound(value, *, now=None):
     if text == "now":
         return now
     if _RELATIVE_TIME_RE.match(text):
-        sign = -1 if text.startswith("-") else 1
         digits = text.lstrip("-")
         seconds = int(digits[:-1]) * _RELATIVE_UNIT_SECONDS[digits[-1]]
-        return now + datetime.timedelta(seconds=sign * seconds)
+        return now - datetime.timedelta(seconds=seconds)
     # Accept a trailing Z (RFC 3339) that fromisoformat historically rejected.
     iso = text[:-1] + "+00:00" if text.endswith("Z") else text
     try:
@@ -442,7 +462,12 @@ def resolve_schema(source, settings, settings_file):
     handler = _resolve_handler(source, settings, settings_file)
     measurement = handler.MCP_MEASUREMENT or handler.source
     db = handler.source_settings.get("bucket", handler.source_settings.get("db"))
-    fields = discover_fields(handler.session, settings["influx"], db, measurement)
+    # Use the handler's own freshly-loaded influx block, not the server's startup
+    # snapshot - the handler was constructed from current settings, so an edit to
+    # influx.url/credentials mid-run is honoured (matching the per-source config
+    # this call already picks up), and discovery/query can't disagree about which
+    # InfluxDB they target.
+    fields = discover_fields(handler.session, handler.settings["influx"], db, measurement)
     return handler, build_schema(handler, fields)
 
 
@@ -476,10 +501,13 @@ def _list_fields_result(source, settings, settings_file):
 def _query_history_result(settings, settings_file, *, source, field, start, end, aggregation, group_by, limit):
     """Build the query_history tool payload (runs in a worker thread)."""
     handler, schema = resolve_schema(source, settings, settings_file)
+    # handler.settings["influx"], not the startup snapshot, so the query runs
+    # against the same (possibly freshly-edited) InfluxDB the schema was
+    # discovered from - see resolve_schema.
     query = build_query(
         schema, field=field, start=start, end=end, aggregation=aggregation, group_by=group_by, limit=limit
     )
-    columns, values = run_query(handler.session, settings["influx"], schema.db, query)
+    columns, values = run_query(handler.session, handler.settings["influx"], schema.db, query)
     return annotate_rows(schema, field, columns, values)
 
 
