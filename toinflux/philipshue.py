@@ -237,6 +237,17 @@ class Hue(DataHandler):
         except requests.exceptions.RequestException as e:
             logging.error("Error writing to Hue Bridge - %s", e)
             raise SourceConnectionError(str(e)) from e
+        except ValueError as e:
+            # response.json() raises on a non-JSON body (requests' JSONDecodeError
+            # is a ValueError) - don't let it escape as an unhandled crash.
+            logging.error("Hue Bridge returned an unparseable response to a write - %s", e)
+            raise SourceConnectionError(f"Hue Bridge returned an unparseable response: {e}") from e
+        # The CLIP API always answers a state PUT with a JSON *list* of per-key
+        # success/error items. A non-list body is unexpected and must fail cleanly
+        # rather than being read as success (an empty error list) by the scan below.
+        if not isinstance(result, list):
+            logging.error("Hue Bridge returned an unexpected response shape to a write - %.200r", result)
+            raise SourceConnectionError(f"Hue Bridge returned an unexpected response: {result!r:.200}")
         errors = [
             item["error"].get("description", str(item["error"]))
             for item in result

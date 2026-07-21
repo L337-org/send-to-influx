@@ -167,6 +167,28 @@ class TestHueWritePrimitive:
         with pytest.raises(SourceConnectionError):
             handler.mcp_set_device_state("Kitchen", on=True)
 
+    def test_unparseable_response_surfaces(self):
+        handler = make_hue()
+        _wire_bridge(handler)
+
+        def bad_json_put(url, **kwargs):
+            resp = MagicMock()
+            resp.raise_for_status.return_value = None
+            resp.json.side_effect = ValueError("no JSON")
+            return resp
+
+        handler.session.put.side_effect = bad_json_put
+        with pytest.raises(SourceConnectionError, match="unparseable response"):
+            handler.mcp_set_device_state("Kitchen", on=True)
+
+    def test_non_list_response_not_treated_as_success(self):
+        # A dict body (not the CLIP list shape) must fail, not read as an empty
+        # error list (i.e. silent success).
+        handler = make_hue()
+        _wire_bridge(handler, put_result={"unexpected": "shape"})
+        with pytest.raises(SourceConnectionError, match="unexpected response"):
+            handler.mcp_set_device_state("Kitchen", on=True)
+
     def test_insecure_toggles_verify(self):
         handler = make_hue(insecure=False)
         put = _wire_bridge(handler)
