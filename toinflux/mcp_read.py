@@ -104,15 +104,19 @@ class ReadSchema:
     field_metadata: dict = dataclass_field(default_factory=dict)
 
     def metadata_for(self, field):
-        """Return the metadata dict for a field: an exact key match first, then
-        the longest matching ``_``-delimited suffix (so ``Front_Door_stateValue``
-        picks up the ``stateValue`` entry). Empty dict when nothing matches."""
+        """Return the metadata dict for a field: an exact key match first, else
+        the *longest* matching ``_``-delimited suffix (so ``Front_Door_stateValue``
+        picks up ``stateValue``, and a longer key wins over a shorter one it ends
+        with - e.g. ``stateValue`` over ``value``). Empty dict when nothing
+        matches. Longest-wins is deterministic regardless of dict order and stays
+        correct as metadata grows."""
         if field in self.field_metadata:
             return self.field_metadata[field]
-        for key, meta in self.field_metadata.items():
-            if field == key or field.endswith(f"_{key}"):
-                return meta
-        return {}
+        best_key = None
+        for key in self.field_metadata:
+            if field.endswith(f"_{key}") and (best_key is None or len(key) > len(best_key)):
+                best_key = key
+        return self.field_metadata[best_key] if best_key is not None else {}
 
 
 def build_schema(handler, discovered_fields):

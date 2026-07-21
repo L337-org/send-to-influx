@@ -180,6 +180,15 @@ class TestReadSchemaMetadata:
     def test_no_match_returns_empty(self):
         assert make_schema(field_metadata={"gen": {"unit": "W"}}).metadata_for("grd") == {}
 
+    def test_longest_suffix_wins(self):
+        # "Front_Door_stateValue" ends with both "_value" and "_stateValue"; the
+        # longer, more specific key must win regardless of dict insertion order.
+        schema = make_schema(field_metadata={"value": {"unit": "generic"}, "stateValue": {"codes": {1: "locked"}}})
+        assert schema.metadata_for("Front_Door_stateValue") == {"codes": {1: "locked"}}
+        # And with the keys inserted the other way round.
+        schema2 = make_schema(field_metadata={"stateValue": {"codes": {1: "locked"}}, "value": {"unit": "generic"}})
+        assert schema2.metadata_for("Front_Door_stateValue") == {"codes": {1: "locked"}}
+
 
 class TestAnnotateRows:
     def test_unit_added(self):
