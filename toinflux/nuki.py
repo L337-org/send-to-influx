@@ -141,6 +141,13 @@ class Nuki(MqttDataHandler):
         if field in STRING_FIELDS:
             return field, raw
         value = Nuki._decode_scalar(raw)
+        # bool is an int subclass, but stateValue/doorsensorStateValue are
+        # documented (UNITS.md) as always numeric - an InfluxDB field's type is
+        # fixed by its first write, so a stray "true"/"false" payload renamed into
+        # *Value would poison the field type against every later, real numeric
+        # write. Leave it under its original field key instead.
+        if isinstance(value, bool):
+            return field, value
         return STATE_VALUE_FIELDS.get(field, field), value
 
     @staticmethod

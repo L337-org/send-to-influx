@@ -189,11 +189,14 @@ class TestNuki:
         assert result["2BB28570_batteryChargeState"] == 85.5
         assert result["2BB28570_mode"] == "door mode"
 
-    def test_bool_payload_on_state_field_still_renamed(self, sample_settings):
-        """A malformed "true"/"false" payload on the state topic is still shape-cast
-        to bool and still renamed to stateValue - there's no label lookup left to
-        confuse it with."""
+    def test_bool_payload_never_renamed_into_the_numeric_value_field(self, sample_settings):
+        """A malformed "true"/"false" payload on the state topic is shape-cast to
+        bool but kept under the original "state" key rather than renamed to
+        stateValue - InfluxDB fixes a field's type on first write, so a stray bool
+        renamed into stateValue would poison that field against every later,
+        real numeric write."""
         messages = [("nuki/2BB28570/state", "true")]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
         result = nuki.get_data()
-        assert result["2BB28570_stateValue"] is True
+        assert result["2BB28570_state"] is True
+        assert "2BB28570_stateValue" not in result
