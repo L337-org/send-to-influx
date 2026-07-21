@@ -4,6 +4,10 @@ This document lists the fields collected by each source and the units they are r
 It reflects what the API returns; `send-to-influx` does not convert or rescale any values
 unless explicitly noted below.
 
+The optional MCP server's read tools surface these units and coded-value meanings to Claude
+(see each source class's `MCP_FIELD_METADATA` in `toinflux/`); keep the two in step when adding
+a source or field.
+
 ## Hue Bridge (`hue`)
 
 | Field | Unit | Notes |

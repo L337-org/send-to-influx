@@ -17,6 +17,12 @@ OCTOPUS_BASE_URL = "https://api.octopus.energy/v1"
 class Octopus(DataHandler):
     """Child class of DataHandler to get data from Octopus Energy"""
 
+    MCP_FIELD_METADATA = {
+        "consumption_kwh": {"unit": "kWh"},
+        "gas_consumption": {"unit": "kWh or m³"},
+        "unit_rate_p_per_kwh": {"unit": "pence/kWh (inc. VAT)"},
+    }
+
     def _get(self, path):
         """Make an authenticated GET request to the Octopus Energy API.
 

@@ -120,6 +120,22 @@ class MyEnergi(DataHandler):
 class Zappi(MyEnergi):
     """Child class of MyEnergi (which is in turn a child of DataHandler) to get data from a Zappi"""
 
+    # All three MyEnergi devices share the "myenergi" measurement, distinguished
+    # by the device tag - so the read schema needs both the measurement override
+    # and the tag filter, or a query for one device would return all three.
+    MCP_MEASUREMENT = "myenergi"
+    MCP_TAG_FILTERS = {"device": "zappi"}
+    MCP_FIELD_METADATA = {
+        "frq": {"unit": "Hz"},
+        "gen": {"unit": "W"},
+        "grd": {"unit": "W"},
+        "che": {"unit": "kWh"},
+        "Charge": {"unit": "kWh"},
+        "Import": {"unit": "kWh"},
+        "Export": {"unit": "kWh"},
+        "Genera": {"unit": "kWh"},
+    }
+
     def get_data(self):
         """
         Get the data from the Zappi
@@ -158,6 +174,16 @@ class Zappi(MyEnergi):
 class Eddi(MyEnergi):
     """Child class of MyEnergi to get data from an Eddi hot water diverter"""
 
+    MCP_MEASUREMENT = "myenergi"
+    MCP_TAG_FILTERS = {"device": "eddi"}
+    MCP_FIELD_METADATA = {
+        "frq": {"unit": "Hz"},
+        "div": {"unit": "W"},
+        "che": {"unit": "kWh"},
+        "tp1": {"unit": "°C"},
+        "tp2": {"unit": "°C"},
+    }
+
     def get_data(self):
         """
         Get the data from the Eddi
@@ -181,6 +207,14 @@ class Eddi(MyEnergi):
 
 class Harvi(MyEnergi):
     """Child class of MyEnergi to get data from a Harvi CT clamp energy monitor"""
+
+    MCP_MEASUREMENT = "myenergi"
+    MCP_TAG_FILTERS = {"device": "harvi"}
+    MCP_FIELD_METADATA = {
+        "ectp1": {"unit": "W"},
+        "ectp2": {"unit": "W"},
+        "ectp3": {"unit": "W"},
+    }
 
     def get_data(self):
         """

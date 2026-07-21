@@ -107,6 +107,23 @@ def _escape_key_or_tag_value(value):
 class DataHandler:
     """Class to send data to InfluxDB"""
 
+    # --- MCP read schema (domain knowledge for the read-query tool) ---
+    # The InfluxDB measurement this source writes to; None means "same as the
+    # source name" (true for most sources - hue, speedtest, octopus, ...).
+    # Overridden where they differ (openmeteo -> weather) or where several
+    # sources share one measurement distinguished by a tag (the myenergi trio).
+    MCP_MEASUREMENT: "str | None" = None
+    # Tag key/value filters that disambiguate this source within a shared
+    # measurement (e.g. {"device": "zappi"}); empty for a source that owns its
+    # measurement outright.
+    MCP_TAG_FILTERS: dict = {}
+    # Field annotation for the read tool: maps a field key - or a _-delimited
+    # suffix, for collectors with dynamic prefixes (Nuki's per-lock fields) - to
+    # {"unit": str} and/or {"codes": {int: str}} for decoding numeric state
+    # codes. Sourced from UNITS.md; kept here so the read tool is domain-aware
+    # without a parallel schema to maintain.
+    MCP_FIELD_METADATA: dict = {}
+
     # Bounded per-source buffer of points that failed to write, flushed on the next
     # successful send. Each entry is a mutable [line, rejection_count] pair - the count
     # tracks how many times the server has rejected (4xx) that specific point, so

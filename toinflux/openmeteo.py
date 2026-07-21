@@ -18,6 +18,20 @@ DEFAULT_FIELDS = ["temperature_2m"]
 class OpenMeteo(DataHandler):
     """Child class of DataHandler to get weather data from Open-Meteo"""
 
+    # Writes to the "weather" measurement, not "openmeteo".
+    MCP_MEASUREMENT = "weather"
+    # Units for the example-settings fields (see UNITS.md); other Open-Meteo
+    # variables use that API's own default unit, so only the common ones are
+    # annotated here.
+    MCP_FIELD_METADATA = {
+        "temperature_2m": {"unit": "°C"},
+        "relative_humidity_2m": {"unit": "%"},
+        "precipitation": {"unit": "mm"},
+        "cloud_cover": {"unit": "%"},
+        "wind_speed_10m": {"unit": "km/h"},
+        "direct_radiation": {"unit": "W/m²"},
+    }
+
     def get_data(self):
         """
         Get current weather observations from Open-Meteo

@@ -405,6 +405,13 @@ def build_mcp_server(settings, settings_file=None):
         error_html = '<p class="error">Wrong username or password.</p>'
         return HTMLResponse(_LOGIN_FORM_TEMPLATE.format(txn=html.escape(txn_id), error=error_html), 401)
 
+    # Read-only tools (list sources / list fields / query history). Registered
+    # here so every enabled server exposes them; write tools are added per
+    # collector in a later slice.
+    from toinflux.mcp_read import register_read_tools
+
+    register_read_tools(server, settings, settings_file)
+
     return server
 
 
