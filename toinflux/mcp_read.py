@@ -56,11 +56,17 @@ AGGREGATIONS = {
     "stddev": "STDDEV",
 }
 
-# A safe InfluxDB identifier (measurement/field/tag key). Field keys are always
-# double-quoted in the queries this module builds, but the extra charset gate is
-# cheap defence-in-depth and rejects anything a discovery step might return that
-# could confuse the parser.
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+# An identifier (measurement/field/tag key) is rejected only if it is empty or
+# contains an ASCII control character (which could corrupt query formatting or a
+# log line). The charset is otherwise unrestricted on purpose: field keys can
+# legitimately contain punctuation - line protocol escapes only comma/equals/
+# space/backslash, and collectors like Hue merely replace spaces with underscores
+# (a light "Kitchen (main)" becomes the field key "Kitchen_(main)"), so a stricter
+# charset would make real fields discoverable via SHOW FIELD KEYS yet unqueryable.
+# Injection safety rests on the allowlist (a queried field must be a key that
+# discovery actually returned) plus double-quote escaping in _quote_identifier,
+# not on this gate.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 # A relative time offset into the past, like "-24h", "-7d", "-90m". The leading
 # "-" is required: the collectors only ever write points at the present time (even
@@ -204,7 +210,7 @@ def _validate_identifier(value, kind):
     :param kind: what it is, for the error message (e.g. "field")
     :raises QueryParamError: if the value isn't a safe identifier
     """
-    if not isinstance(value, str) or not _IDENTIFIER_RE.match(value):
+    if not isinstance(value, str) or not value or _CONTROL_CHAR_RE.search(value):
         raise QueryParamError(f"invalid {kind} name: {value!r}")
     return value
 

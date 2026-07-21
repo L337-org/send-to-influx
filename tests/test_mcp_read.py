@@ -105,12 +105,22 @@ class TestBuildQuery:
         with pytest.raises(QueryParamError):
             build_query(make_schema(), field=evil, start="-1h", end="now")
 
-    def test_identifier_charset_guard_on_allowed_but_unsafe_field(self):
-        # Defence in depth: even if an unsafe name slipped into allowed_fields,
-        # the identifier validator rejects it before it reaches the query.
-        schema = make_schema(allowed_fields={'evil"name'}, field_metadata={})
+    def test_control_char_in_allowlisted_field_rejected(self):
+        # Defence in depth: a control character (which could corrupt the query or
+        # a log line) is rejected even if it somehow reached allowed_fields.
+        schema = make_schema(allowed_fields={"evil\nname"}, field_metadata={})
         with pytest.raises(QueryParamError, match="invalid field name"):
-            build_query(schema, field='evil"name', start="-1h", end="now")
+            build_query(schema, field="evil\nname", start="-1h", end="now")
+
+    def test_punctuated_field_name_is_queryable_and_escaped(self):
+        # A legitimate field with punctuation - e.g. a Hue light "Kitchen (main)"
+        # stored as "Kitchen_(main)" - must be queryable, not rejected. A field
+        # with a double quote is double-quote-escaped rather than refused.
+        schema = make_schema(source="hue", measurement="hue", tag_filters={}, allowed_fields={"Kitchen_(main)", 'a"b'})
+        q = build_query(schema, field="Kitchen_(main)", start="-1h", end="now")
+        assert 'SELECT "Kitchen_(main)" FROM "hue"' in q
+        q2 = build_query(schema, field='a"b', start="-1h", end="now")
+        assert 'SELECT "a\\"b"' in q2
 
     def test_unknown_aggregation_rejected(self):
         with pytest.raises(QueryParamError, match="unknown aggregation"):
