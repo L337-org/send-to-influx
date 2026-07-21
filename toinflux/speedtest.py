@@ -28,7 +28,13 @@ MAX_PLAUSIBLE_PING_MS = 5000
 
 
 class Speedtest(DataHandler):
-    """Speedtest class to send data to InfluxDB"""
+    """Child class of DataHandler to run a speed test and send the results to InfluxDB"""
+
+    MCP_FIELD_METADATA = {
+        "download": {"unit": "bits/s"},
+        "upload": {"unit": "bits/s"},
+        "ping": {"unit": "ms"},
+    }
 
     def get_data(self):
         """Run and get the data from Speedtest

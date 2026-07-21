@@ -425,6 +425,19 @@ Key points:
 - **Read-only by default.** Write tools (e.g. controlling Hue lights) are opt-in per collector and
   aren't registered at all unless enabled in that collector's own settings block.
 
+Once connected, Claude has three read tools:
+
+- **`list_sources`** - the collectors whose history can be queried.
+- **`list_fields`** - the fields available for a source, with their units and (for coded fields
+  like Nuki lock state) what each value means.
+- **`query_history`** - a field's history over a time range, either as individual points or
+  aggregated (mean/max/min/sum/count/…) into buckets. Results are domain-aware: values carry
+  their unit, and coded fields come back with a decoded label alongside the raw number.
+
+Queries run against InfluxDB through a fixed, parameterised query builder - never a raw query
+from the model - with field names checked against the measurement's live field list, time ranges
+normalised in the app, and a capped result size.
+
 Usage
 -----
 >$ ./.venv/bin/python ./sendtoinflux.py --help  

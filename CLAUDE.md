@@ -127,8 +127,42 @@ decisions:
   needs `pydantic_core` and `rpds-py` (Rust-compiled, no fallback), which is what the packaging
   section's compiled-wheel matrix exists for. `rpds-py` is held to `~=0.30.0` in requirements.txt
   (2026.x CalVer releases dropped Python 3.10 wheels; the build fails loudly if coverage regresses).
-- Read tools/resources land in the next slice; Hue write tools (opt-in per collector via
-  `hue.mcp_read_write`, shaped as a generic "set device state" primitive) the slice after.
+- Hue write tools (opt-in per collector via `hue.mcp_read_write`, shaped as a generic "set device
+  state" primitive) land in a later slice.
+
+**Read tools** (`toinflux/mcp_read.py`, registered onto the server by `register_read_tools()`):
+three read-only tools - `list_sources`, `list_fields`, and `query_history` - exposing each
+configured collector's InfluxDB history, domain-aware rather than a raw passthrough. The read
+mechanics live in `mcp_read.py`; the per-source domain knowledge lives on the `DataHandler`
+subclasses as three class attributes (`MCP_MEASUREMENT`, `MCP_TAG_FILTERS`, `MCP_FIELD_METADATA`)
+so there's no parallel schema to keep in step - `ReadSchema`/`build_schema()` combine those with a
+live field set. Design points:
+  - **Measurements aren't always the source name**: `openmeteo` writes to `weather`, and the three
+    MyEnergi devices share the `myenergi` measurement distinguished by a `device` tag - so their
+    classes set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS`, or a query for one device would return all
+    three. Every other source owns its measurement (`MCP_MEASUREMENT` stays `None` → source name).
+  - **Injection defence, layered** (InfluxQL has no identifier parameter binding): the measurement
+    and tags come from the source class's static schema, never model input; a requested field must
+    exactly match a key discovered live via `SHOW FIELD KEYS` (the field set *is* the allowlist,
+    and it handles collectors with dynamic field names - Hue sensors, per-lock Nuki prefixes);
+    every identifier is additionally charset-validated and double-quoted with escaping; time bounds
+    are parsed in Python and re-emitted as RFC3339 (the model's raw string never reaches the query);
+    aggregation is a fixed name→InfluxQL-function map and any GROUP BY interval matches a duration
+    grammar. Result size is capped (`MAX_RESULT_POINTS`).
+  - **A single query path serves v1 and v2**, mirroring `_build_write_request()`'s branch: `GET
+    /query` with a `Token` header (v2) or HTTP basic auth (v1), `epoch=s`. v2's v1-compatibility
+    `/query` endpoint needs no extra provisioning in the default case (virtual DBRP mappings keyed
+    by bucket name since InfluxDB 2.9) - verified against real v1 and v2 containers.
+  - **`SHOW FIELD KEYS` is per-measurement, not per-tag**, so for the three shared-measurement
+    MyEnergi devices `list_fields` shows the others' fields too; a query for a cross-device field
+    is safe and returns no points (the tag filter excludes it). Documented accepted limitation.
+  - **`MCP_FIELD_METADATA`** maps a field key - or a `_`-delimited suffix, for dynamically-prefixed
+    fields like Nuki's `Front_Door_stateValue` - to `{"unit": ...}` and/or `{"codes": {int: str}}`;
+    `annotate_rows()` attaches units and decodes coded values to labels (an undocumented code passes
+    through with a null label, matching the collector's raw-passthrough rule). Sourced from UNITS.md.
+  - Blocking InfluxDB HTTP runs in a worker thread (`anyio.to_thread.run_sync`) so a query doesn't
+    stall the server's async event loop. `QueryParamError` (a bad field/time/aggregation) surfaces
+    to the model as a tool error; `SourceConnectionError` is a transport failure.
 
 ### Entry point (`sendtoinflux.py`)
 
@@ -167,6 +201,10 @@ decisions:
    `CREDENTIAL_FIELDS`/`PLACEHOLDER_VALUES` (`toinflux/credentials.py`) — that alone makes
    `send-to-influx-set-credential <name>` work, the machinery is fully table-driven.
 4. Add tests in `tests/test_newsource.py`, reusing fixtures from `tests/conftest.py`.
+4b. For the MCP read tool: set `MCP_FIELD_METADATA` on the class (units, and `codes` for any
+   numeric-coded field) from the UNITS.md entry, and set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS` if the
+   source's InfluxDB measurement isn't its own name or it shares a measurement with others. Nothing
+   else is needed - the source is exposed by the read tools automatically once it's in `sources:`.
 5. Update README.md, UNITS.md, CLAUDE.md, and `.github/copilot-instructions.md`.
 6. Wire the source into the debconf install flow — a mechanical checklist, not a judgment call
    (every rule below is an existing, tested convention; the scenario suite enforces most of them):
