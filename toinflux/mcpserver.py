@@ -132,11 +132,36 @@ class OAuthStateStore:
         self.refresh_tokens = {}
         self._load()
 
+    def _tighten_permissions(self):
+        """Best-effort: force an existing state file to owner-only (0600).
+
+        save() writes 0600, but a file laid down out of band - a manual
+        copy/restore, a backup tool - can be group/other-readable, and save()
+        only corrects perms when it next mutates the file, which may be never if
+        no client ever registers. The file holds client registrations and
+        refresh-token hashes, so tighten on load too rather than trusting the
+        next write. A chmod failure (not the owner, odd filesystem) is logged,
+        not fatal."""
+        try:
+            mode = os.stat(self.state_path).st_mode
+        except OSError:
+            return
+        if mode & 0o077:
+            try:
+                os.chmod(self.state_path, 0o600)
+            except OSError as exc:
+                logging.warning(
+                    "MCP OAuth state file %s is group/other accessible and could not be " "tightened to 0600: %s",
+                    self.state_path,
+                    exc,
+                )
+
     def _load(self):
         """Load existing state; a missing file is a normal first run, and a
         corrupt one is logged and treated as empty (the connector re-registers
         and the user logs in again - annoying, recoverable) rather than
         preventing the whole service from starting."""
+        self._tighten_permissions()
         try:
             with open(self.state_path, encoding="utf8") as f:
                 raw = json.load(f)

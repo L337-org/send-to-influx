@@ -167,6 +167,16 @@ class TestOAuthStateStore:
         store.save()
         assert os.stat(path).st_mode & 0o777 == 0o600
 
+    def test_load_tightens_broad_permissions(self, tmp_path):
+        """A state file laid down group/other-readable (manual copy/restore) is
+        tightened to 0600 on load, not left exposed until the next save()."""
+        path = str(tmp_path / "state.json")
+        with open(path, "w", encoding="utf8") as f:
+            json.dump({"clients": {}, "refresh_tokens": {}}, f)
+        os.chmod(path, 0o644)
+        OAuthStateStore(path)  # __init__ calls _load()
+        assert os.stat(path).st_mode & 0o777 == 0o600
+
     def test_corrupt_file_warns_and_starts_empty(self, tmp_path, caplog):
         path = str(tmp_path / "state.json")
         with open(path, "w", encoding="utf8") as f:
