@@ -20,6 +20,7 @@ from toinflux.mcp_read import (
     discover_fields,
     parse_time_bound,
     register_read_tools,
+    resolve_db,
     resolve_schema,
     run_query,
     _influx_read_request,
@@ -172,6 +173,18 @@ class TestBuildQuery:
         assert datetime.datetime.strptime(hi, fmt) - datetime.datetime.strptime(lo, fmt) == datetime.timedelta(hours=1)
 
 
+class TestResolveDb:
+    def test_v1_uses_db_only_ignoring_stale_bucket(self):
+        # v1 (no token): db only, even if a stale bucket remains from a v2->v1
+        # switch - reads must hit the same db the collectors write to.
+        db = resolve_db({"db": "hue_db", "bucket": "hue_bucket"}, {"user": "u", "password": "p"})
+        assert db == "hue_db"
+
+    def test_v2_prefers_bucket_then_db(self):
+        assert resolve_db({"db": "hue_db", "bucket": "hue_bucket"}, {"token": "t", "org": "o"}) == "hue_bucket"
+        assert resolve_db({"db": "hue_db"}, {"token": "t", "org": "o"}) == "hue_db"
+
+
 class TestBuildSchema:
     def test_combines_class_metadata_with_discovered_fields(self):
         handler = MagicMock()
@@ -179,22 +192,20 @@ class TestBuildSchema:
         handler.MCP_MEASUREMENT = "weather"
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {"temperature_2m": {"unit": "°C"}}
-        handler.source_settings = {"db": "weather_db"}
-        schema = build_schema(handler, {"temperature_2m", "precipitation"})
+        schema = build_schema(handler, {"temperature_2m", "precipitation"}, "weather_db")
         assert schema.measurement == "weather"
         assert schema.db == "weather_db"
         assert schema.allowed_fields == {"temperature_2m", "precipitation"}
 
-    def test_bucket_preferred_over_db(self):
+    def test_measurement_falls_back_to_source_name(self):
         handler = MagicMock()
         handler.source = "hue"
         handler.MCP_MEASUREMENT = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
-        handler.source_settings = {"db": "hue_db", "bucket": "hue_bucket"}
-        schema = build_schema(handler, set())
-        assert schema.measurement == "hue"  # None -> source name
-        assert schema.db == "hue_bucket"
+        schema = build_schema(handler, set(), "hue_db")
+        assert schema.measurement == "hue"
+        assert schema.db == "hue_db"
 
 
 class TestReadSchemaMetadata:
@@ -447,6 +458,7 @@ class TestRegisterReadTools:
         handler.MCP_TAG_FILTERS = {"device": "zappi"}
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}}
         handler.source_settings = {"db": "zappi_db"}
+        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
         handler.session = MagicMock()
         return handler
 
@@ -482,6 +494,28 @@ class TestRegisterReadTools:
         text = result[0][0].text if isinstance(result, tuple) else result[0].text
         assert '"value": 42' in text
         assert '"unit": "W"' in text
+        # The effective limit and truncation flag are surfaced (1 point < 500).
+        assert '"limit": 500' in text
+        assert '"truncated": false' in text
+
+    def test_query_history_reports_truncation_at_limit(self):
+        server = self._server()
+        register_read_tools(server, self._settings(), None)
+        rows = [[i, i] for i in range(3)]
+        with (
+            patch("toinflux.mcp_read.get_class", return_value=self._handler()),
+            patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
+            patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], rows)),
+        ):
+            result = anyio.run(
+                server.call_tool,
+                "query_history",
+                {"source": "zappi", "field": "gen", "start": "-1h", "end": "now", "limit": 3},
+            )
+        text = result[0][0].text if isinstance(result, tuple) else result[0].text
+        # 3 points returned at limit 3 -> truncated true (more may exist).
+        assert '"limit": 3' in text
+        assert '"truncated": true' in text
 
     def test_query_history_bad_field_is_tool_error(self):
         server = self._server()

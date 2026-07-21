@@ -78,7 +78,9 @@ _RELATIVE_TIME_RE = re.compile(r"^-\d+[smhdw]$")
 _DURATION_RE = re.compile(r"^\d+[smhdw]$")
 
 # Upper bound on points returned by a single query, so a broad range can't
-# produce an unbounded response. Applied as a LIMIT and surfaced in the result.
+# produce an unbounded response. Applied as a LIMIT; query_history's result
+# reports the effective limit and whether the result was truncated by it, so the
+# model can narrow the range or aggregate instead of silently seeing a partial view.
 MAX_RESULT_POINTS = 5000
 DEFAULT_RESULT_POINTS = 500
 
@@ -128,9 +130,27 @@ class ReadSchema:
         return self.field_metadata[best_key] if best_key is not None else {}
 
 
-def build_schema(handler, discovered_fields):
-    """Assemble a ReadSchema from a DataHandler instance's static class metadata
-    and the live discovered field set.
+def resolve_db(source_settings, influx_settings):
+    """Return the database/bucket name the collector actually writes to, matching
+    ``DataHandler._build_write_request()`` exactly: v2 (``influx.token`` set) uses
+    ``bucket`` falling back to ``db``; v1 uses ``db`` only, ignoring ``bucket``.
+
+    Mirroring the write path matters because a config can carry both keys - e.g.
+    a stale ``bucket`` left after switching v2->v1 - and picking ``bucket`` in v1
+    mode would send reads to a different database than the collectors write to.
+
+    :param source_settings: the source's own settings block
+    :param influx_settings: the ``influx`` block (its ``token`` selects the mode)
+    :return: the db/bucket name (or None if unset)
+    """
+    if influx_settings.get("token"):
+        return source_settings.get("bucket", source_settings.get("db"))
+    return source_settings.get("db")
+
+
+def build_schema(handler, discovered_fields, db):
+    """Assemble a ReadSchema from a DataHandler instance's static class metadata,
+    the live discovered field set, and the resolved db (see resolve_db).
 
     Note the field set comes from ``SHOW FIELD KEYS``, which is per-measurement,
     not per-tag. For the three MyEnergi devices that share the ``myenergi``
@@ -141,10 +161,10 @@ def build_schema(handler, discovered_fields):
 
     :param handler: a constructed DataHandler subclass instance
     :param discovered_fields: field keys found via discover_fields()
+    :param db: the resolved database/bucket name (from resolve_db)
     :return: ReadSchema
     """
     measurement = handler.MCP_MEASUREMENT or handler.source
-    db = handler.source_settings.get("bucket", handler.source_settings.get("db"))
     return ReadSchema(
         source=handler.source,
         measurement=measurement,
@@ -269,6 +289,18 @@ def _rfc3339(dt):
     return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _clamp_limit(limit):
+    """Validate and clamp a requested point limit into [1, MAX_RESULT_POINTS].
+
+    :raises QueryParamError: if the value isn't an integer
+    """
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        raise QueryParamError(f"invalid limit {limit!r}") from None
+    return max(1, min(value, MAX_RESULT_POINTS))
+
+
 def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, limit=DEFAULT_RESULT_POINTS):
     """Build a parameterised InfluxQL SELECT for a source's measurement.
 
@@ -321,11 +353,7 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
             raise QueryParamError(f"invalid group_by interval {group_by!r}; use a duration like '5m', '1h', '1d'")
         group_clause = f" GROUP BY time({group_by}) fill(none)"
 
-    try:
-        limit_value = int(limit)
-    except (TypeError, ValueError):
-        raise QueryParamError(f"invalid limit {limit!r}") from None
-    limit_value = max(1, min(limit_value, MAX_RESULT_POINTS))
+    limit_value = _clamp_limit(limit)
 
     where = [
         f"time >= {_quote_string_literal(_rfc3339(start_dt))}",
@@ -472,14 +500,16 @@ def resolve_schema(source, settings, settings_file):
     """
     handler = _resolve_handler(source, settings, settings_file)
     measurement = handler.MCP_MEASUREMENT or handler.source
-    db = handler.source_settings.get("bucket", handler.source_settings.get("db"))
     # Use the handler's own freshly-loaded influx block, not the server's startup
     # snapshot - the handler was constructed from current settings, so an edit to
     # influx.url/credentials mid-run is honoured (matching the per-source config
     # this call already picks up), and discovery/query can't disagree about which
-    # InfluxDB they target.
-    fields = discover_fields(handler.session, handler.settings["influx"], db, measurement)
-    return handler, build_schema(handler, fields)
+    # InfluxDB they target. resolve_db() mirrors the write path's v1/v2 db choice
+    # so reads hit the same database the collectors write to.
+    influx_settings = handler.settings["influx"]
+    db = resolve_db(handler.source_settings, influx_settings)
+    fields = discover_fields(handler.session, influx_settings, db, measurement)
+    return handler, build_schema(handler, fields, db)
 
 
 def _list_sources_result(settings, settings_file):
@@ -519,7 +549,14 @@ def _query_history_result(settings, settings_file, *, source, field, start, end,
         schema, field=field, start=start, end=end, aggregation=aggregation, group_by=group_by, limit=limit
     )
     columns, values = run_query(handler.session, handler.settings["influx"], schema.db, query)
-    return annotate_rows(schema, field, columns, values)
+    result = annotate_rows(schema, field, columns, values)
+    # Surface the effective limit and whether it truncated the result, so the
+    # model can narrow the range or aggregate rather than silently acting on a
+    # partial view. build_query already validated limit, so this can't raise.
+    effective_limit = _clamp_limit(limit)
+    result["limit"] = effective_limit
+    result["truncated"] = len(result["points"]) >= effective_limit
+    return result
 
 
 def register_read_tools(server, settings, settings_file=None):
@@ -567,7 +604,10 @@ def register_read_tools(server, settings, settings_file=None):
         - limit: max points returned (capped server-side).
 
         Points come back newest-first, each with a unix-seconds time and value;
-        coded fields (e.g. Nuki lock state) also carry a decoded label.
+        coded fields (e.g. Nuki lock state) also carry a decoded label. The result
+        also reports the effective `limit` and a `truncated` flag - when
+        `truncated` is true, more data exists than was returned, so narrow the
+        range or use an aggregation.
         """
         return await anyio.to_thread.run_sync(
             lambda: _query_history_result(
