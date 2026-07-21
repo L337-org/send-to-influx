@@ -240,8 +240,10 @@ if [ "$CREDS_WORK" = 1 ]; then
     grep -q "stored in systemd-creds" "$SETTINGS" || fail "hue.user not rewritten to the sentinel"
 fi
 # The seeded MCP secret must not leak into settings.yaml or debconf's database.
-grep -q "$MCP_TEST_SECRET" "$SETTINGS" && fail "MCP password leaked into settings.yaml"
-grep -rq "$MCP_TEST_SECRET" /var/cache/debconf/ && fail "MCP password left in debconf database"
+# -F (literal) and -- (end of options), like the assert_secret_absent helper: the
+# secret is arbitrary text, so it must never be treated as a regex or a flag.
+grep -qF -- "$MCP_TEST_SECRET" "$SETTINGS" && fail "MCP password leaked into settings.yaml"
+grep -rqF -- "$MCP_TEST_SECRET" /var/cache/debconf/ && fail "MCP password left in debconf database"
 assert_secret_absent "$SETTINGS"
 assert_secret_absent /var/cache/debconf/
 pass "fresh install: fields applied (incl. shared mqtt + mcp blocks), credentials migrated, secrets cleared everywhere"
