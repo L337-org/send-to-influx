@@ -63,6 +63,20 @@ def _pkce_pair():
     return verifier, challenge
 
 
+def _make_auth_code(expires_at):
+    from mcp.server.auth.provider import AuthorizationCode
+
+    return AuthorizationCode(
+        code="c",
+        scopes=[],
+        expires_at=expires_at,
+        client_id="c",
+        code_challenge="chal",
+        redirect_uri=REDIRECT_URI,
+        redirect_uri_provided_explicitly=True,
+    )
+
+
 def _register_client(client):
     response = client.post(
         "/register",
@@ -167,6 +181,31 @@ class TestOAuthStateStore:
         store.refresh_tokens["live"] = {"client_id": "a", "expires_at": time.time() + 1000}
         assert store.prune_expired_refresh_tokens() is True
         assert list(store.refresh_tokens) == ["live"]
+
+    def test_prune_treats_non_numeric_expiry_as_expired(self, tmp_path):
+        """A hand-edited/schema-drifted entry with a non-numeric expires_at must
+        be dropped, not raise TypeError from comparing str/None to a float."""
+        store = OAuthStateStore(str(tmp_path / "state.json"))
+        store.refresh_tokens["str_exp"] = {"client_id": "a", "expires_at": "soon"}
+        store.refresh_tokens["bool_exp"] = {"client_id": "a", "expires_at": True}
+        store.refresh_tokens["not_dict"] = "garbage"
+        store.refresh_tokens["never"] = {"client_id": "a"}  # no expires_at = never expires
+        store.refresh_tokens["live"] = {"client_id": "a", "expires_at": time.time() + 1000}
+        assert store.prune_expired_refresh_tokens() is True
+        assert sorted(store.refresh_tokens) == ["live", "never"]
+
+    def test_save_forces_owner_only_over_a_broad_leftover_tmp(self, tmp_path):
+        """A leftover .tmp from a previous crash with broad perms must not carry
+        those perms onto the state file via os.replace() (os.open only sets mode
+        on creation)."""
+        path = str(tmp_path / "state.json")
+        tmp_leftover = f"{path}.tmp"
+        with open(tmp_leftover, "w", encoding="utf8") as f:
+            f.write("stale")
+        os.chmod(tmp_leftover, 0o666)
+        store = OAuthStateStore(path)
+        store.save()
+        assert os.stat(path).st_mode & 0o777 == 0o600
 
 
 class TestLoginThrottle:
@@ -413,6 +452,25 @@ class TestProviderInternals:
             assert anyio.run(provider.load_refresh_token, None, "tok1") is None
             assert anyio.run(provider.load_refresh_token, None, "tok2") is None
         assert provider.state.refresh_tokens == {}
+
+    def test_minting_a_code_prunes_expired_ones(self, provider):
+        """A client that completes /login but never calls /token must not grow
+        _auth_codes without bound: minting a new code drops expired ones."""
+        from mcp.server.auth.provider import AuthorizationParams
+
+        provider._auth_codes["stale"] = _make_auth_code(expires_at=time.time() - 1)
+        provider._auth_codes["fresh"] = _make_auth_code(expires_at=time.time() + 1000)
+        params = AuthorizationParams(
+            state="s",
+            scopes=[],
+            code_challenge="chal",
+            redirect_uri=REDIRECT_URI,
+            redirect_uri_provided_explicitly=True,
+        )
+        provider._transactions["txn"] = {"client_id": "c", "params": params, "created_at": time.time()}
+        provider.complete_authorization("txn", subject=MCP_USER)
+        assert "stale" not in provider._auth_codes
+        assert "fresh" in provider._auth_codes
 
 
 class TestPublicUrlWithPort:

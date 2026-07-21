@@ -87,6 +87,32 @@ def _hash_token(token):
     return hashlib.sha256(token.encode("utf8")).hexdigest()
 
 
+def _refresh_entry_expired(entry, now):
+    """Return True if a persisted refresh-token entry is expired or malformed.
+
+    A non-mapping entry, or one whose ``expires_at`` is present but not a real
+    number (hand-edited state, schema drift), counts as expired - the state
+    file's contract is that bad state is recoverable, and a naive
+    ``entry["expires_at"] < now`` would otherwise raise ``TypeError`` on a
+    string/None and break token issuance. A missing/``None`` ``expires_at`` means
+    "never expires" and is honoured. ``bool`` is excluded explicitly because it
+    is an ``int`` subclass and a stray ``true`` should not read as epoch 1.
+
+    :param entry: the persisted entry (any JSON-decoded value)
+    :param now: current unix time
+    :type now: float
+    :rtype: bool
+    """
+    if not isinstance(entry, dict):
+        return True
+    expires_at = entry.get("expires_at")
+    if expires_at is None:
+        return False
+    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+        return True
+    return expires_at < now
+
+
 class OAuthStateStore:
     """Persistent OAuth state: dynamic client registrations and refresh-token
     hashes, saved atomically to a 0600 JSON file on every mutation.
@@ -137,6 +163,13 @@ class OAuthStateStore:
         with self._lock:
             try:
                 fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                # The 0o600 mode above only applies when os.open *creates* the file
+                # (and is further masked by umask); a leftover tmp file from a
+                # previous crash is reused with its existing, possibly broader
+                # permissions, which os.replace() would then carry onto the real
+                # state file. fchmod the actual fd so owner-only is guaranteed
+                # regardless of how the tmp file came to exist.
+                os.fchmod(fd, 0o600)
                 with os.fdopen(fd, "w", encoding="utf8") as f:
                     f.write(payload)
                 os.replace(tmp_path, self.state_path)
@@ -153,15 +186,12 @@ class OAuthStateStore:
     def prune_expired_refresh_tokens(self):
         """Drop expired refresh tokens; returns True if anything was removed.
 
-        A malformed (non-mapping) entry counts as expired - same recoverable-state
-        contract as the provider's load paths, and pruning is the one place every
-        entry gets touched, so a bad one must not be able to break token issuance."""
+        A malformed entry (non-mapping, or a non-numeric ``expires_at``) counts
+        as expired - same recoverable-state contract as the provider's load
+        paths, and pruning is the one place every entry gets touched, so a bad
+        one must not be able to break token issuance (see _refresh_entry_expired)."""
         now = time.time()
-        expired = [
-            key
-            for key, entry in self.refresh_tokens.items()
-            if not isinstance(entry, dict) or (entry.get("expires_at") and entry["expires_at"] < now)
-        ]
+        expired = [key for key, entry in self.refresh_tokens.items() if _refresh_entry_expired(entry, now)]
         for key in expired:
             del self.refresh_tokens[key]
         return bool(expired)
@@ -412,6 +442,7 @@ class SendToInfluxOAuthProvider:
         entry = self._transactions.pop(txn_id)
         params = entry["params"]
         code = secrets.token_urlsafe(32)
+        self._prune_auth_codes()
         self._auth_codes[code] = AuthorizationCode(
             code=code,
             scopes=params.scopes or [],
@@ -577,6 +608,17 @@ class SendToInfluxOAuthProvider:
         expired = [key for key, tok in self._access_tokens.items() if tok.expires_at and tok.expires_at < now]
         for key in expired:
             del self._access_tokens[key]
+
+    def _prune_auth_codes(self):
+        """Drop expired authorization codes so the in-memory dict stays bounded.
+
+        The SDK enforces code expiry at exchange time regardless; this only stops
+        a client that repeatedly completes /login but never calls /token from
+        growing the dict without bound. Called when a new code is minted."""
+        now = time.time()
+        expired = [key for key, auth_code in self._auth_codes.items() if auth_code.expires_at < now]
+        for key in expired:
+            del self._auth_codes[key]
 
 
 def start_mcp_server_thread(settings, settings_file=None):
