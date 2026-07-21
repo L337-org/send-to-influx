@@ -848,3 +848,38 @@ class TestConfigureLogging:
                 configure_logging(logfile="/nonexistent-directory/send-to-influx.log")
         finally:
             self._remove_handlers(root, [h for h in root.handlers if h not in before])
+
+
+class TestMaybeStartMcpServer:
+    """Tests for the MCP server startup gate in the entry point."""
+
+    ENABLED_SETTINGS = {
+        "mcp": {
+            "public_url": "https://mcp.example.org",
+            "user": "gavin",
+            "password": "hunter22",
+        },
+    }
+
+    def test_disabled_settings_do_not_start_a_server(self):
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+        assert sendtoinflux.maybe_start_mcp_server({}, args) is None
+
+    def test_print_mode_never_starts_a_server(self):
+        args = SimpleNamespace(print=True, dump=False, settings=None)
+        with patch("toinflux.mcpserver.start_mcp_server_thread") as start:
+            assert sendtoinflux.maybe_start_mcp_server(self.ENABLED_SETTINGS, args) is None
+        start.assert_not_called()
+
+    def test_dump_mode_never_starts_a_server(self):
+        args = SimpleNamespace(print=False, dump=True, settings=None)
+        with patch("toinflux.mcpserver.start_mcp_server_thread") as start:
+            assert sendtoinflux.maybe_start_mcp_server(self.ENABLED_SETTINGS, args) is None
+        start.assert_not_called()
+
+    def test_enabled_settings_start_the_server_thread(self):
+        args = SimpleNamespace(print=False, dump=False, settings="/etc/send-to-influx/settings.yaml")
+        with patch("toinflux.mcpserver.start_mcp_server_thread") as start:
+            result = sendtoinflux.maybe_start_mcp_server(self.ENABLED_SETTINGS, args)
+        start.assert_called_once_with(self.ENABLED_SETTINGS, "/etc/send-to-influx/settings.yaml")
+        assert result is start.return_value

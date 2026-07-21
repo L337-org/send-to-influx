@@ -13,6 +13,7 @@ from .general import (
     get_class,
     configure_logging,
     validate_settings,
+    mcp_enabled,
     DEFAULT_LOG_MAX_BYTES,
     DEFAULT_LOG_BACKUP_COUNT,
 )

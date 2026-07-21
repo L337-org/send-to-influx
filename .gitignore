@@ -46,4 +46,5 @@ Thumbs.db
 /settings.json
 /settings.yaml
 /settings.yml
+/mcp-oauth-state.json
 *.deb

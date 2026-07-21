@@ -26,6 +26,7 @@ Contents
 - [InfluxDB setup](#influxdb)
 - [Running the script](#running-the-script)
 - [Using the .deb package](#using-the-deb-package)
+- [Remote MCP server (ask Claude about your devices)](#remote-mcp-server)
 - [Usage / CLI reference](#usage)
 - [Contributing](#contributing)
 - [Privacy and Security](#privacy-and-security)
@@ -391,6 +392,38 @@ afterwards if you still need it.
 This is entirely optional and per-field - you can mix systemd-creds and plaintext values freely, and
 the source-checkout/screen-session path is unaffected either way, since systemd-creds only applies
 under the packaged systemd service.
+
+Remote MCP server
+-----------------
+
+send-to-influx can optionally run a remote [MCP](https://modelcontextprotocol.io/) server inside the
+same process, so Claude Desktop and Claude Mobile can ask natural-language questions about your
+devices via a custom connector. It is disabled unless **both** `user` and `password` are set in the
+`mcp:` settings block - there is no separate enabled flag.
+
+```yaml
+mcp:
+  bind_address: "127.0.0.1:8420"   # private interfaces only - 0.0.0.0/:: are refused
+  public_url: "https://mcp.example.org"  # the external HTTPS address your reverse proxy serves
+  user: "your-login-name"
+  password: "your-login-password"
+```
+
+Key points:
+
+- **You provide the TLS side.** The server itself speaks plain HTTP on a private/loopback address;
+  put your own TLS-terminating reverse proxy (nginx, Caddy, ...) in front of it and set
+  `public_url` to the address the proxy serves. Binding a public interface is refused outright.
+- **Authentication is OAuth 2.1** (the mode Claude's custom-connector UI uses): add the connector
+  in Claude with URL `https://mcp.example.org/mcp`, and Claude registers itself and sends you to a
+  login page gated on `mcp.user`/`mcp.password`. Failed logins are throttled and logged. On the
+  packaged install the password can be stored in systemd-creds:
+  `sudo send-to-influx-set-credential mcp-password`.
+- **Connections survive restarts.** OAuth client registrations and refresh tokens are persisted
+  (hashed) in `mcp-oauth-state.json` next to the settings file (override with `mcp.state_file`),
+  so package upgrades and reboots don't make Claude re-authenticate.
+- **Read-only by default.** Write tools (e.g. controlling Hue lights) are opt-in per collector and
+  aren't registered at all unless enabled in that collector's own settings block.
 
 Usage
 -----

@@ -173,6 +173,31 @@ def signal_handler(sig, _frame):
     sys.exit(0)
 
 
+def maybe_start_mcp_server(settings, args):
+    """Start the embedded MCP server thread when enabled and in a collection mode.
+
+    ``--print`` and ``--dump`` are interactive debugging modes that never touch
+    InfluxDB, so they don't start a network server either. The import is lazy
+    (and gated on ``mcp_enabled``): ``toinflux.mcpserver`` pulls in the ``mcp``
+    SDK, which the disabled path must not require - same pattern as paho-mqtt
+    only being imported by the MQTT transport.
+
+    :param settings: loaded settings dict
+    :type settings: dict
+    :param args: parsed CLI arguments
+    :type args: argparse.Namespace
+    :return: the server thread, or None when not started
+    :rtype: threading.Thread or None
+    """
+    if args.print or args.dump:
+        return None
+    if not toinflux.mcp_enabled(settings):
+        return None
+    from toinflux.mcpserver import start_mcp_server_thread
+
+    return start_mcp_server_thread(settings, args.settings)
+
+
 def _configure_logging_or_exit(settings, args):
     """
     Configure logging from settings/args, exiting 1 with a clean message on failure.
@@ -284,6 +309,7 @@ def main():
         sys.exit(0)
 
     _configure_logging_or_exit(settings, args)
+    maybe_start_mcp_server(settings, args)
     default_source = toinflux.resolve_default_source(settings)
 
     if args.source:

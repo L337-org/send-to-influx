@@ -76,6 +76,27 @@ mqtt:
   username: ""
   password: ""
 
+# Optional remote MCP server - lets Claude Desktop/Mobile query collected device
+# data over an OAuth-protected Streamable-HTTP endpoint. Disabled unless BOTH
+# user and password are set (there is no separate enabled flag). The server only
+# ever binds a private interface and speaks plain HTTP: TLS termination is your
+# reverse proxy's job, and public_url is the external https:// address it serves
+# (required when enabled - OAuth discovery metadata must advertise it).
+mcp:
+  # Refused outright for public interfaces (0.0.0.0/::) - see the README's MCP section.
+  bind_address: "127.0.0.1:8420"
+  # e.g. "https://mcp.example.org" - the reverse-proxied address Claude connects to
+  public_url: ""
+  # Resource-owner login for the OAuth authorise page. Leave both blank to keep the
+  # MCP server disabled. (Real, empty keys - like influx.token/org above - so the
+  # packaged install's debconf flow has YAML keys to write into. password can be
+  # stored via 'send-to-influx-set-credential mcp-password' on the packaged install.)
+  user: ""
+  password: ""
+  # Where OAuth client registrations/refresh tokens persist across restarts.
+  # Defaults to mcp-oauth-state.json next to this settings file.
+  # state_file: "/etc/send-to-influx/mcp-oauth-state.json"
+
 # Hue bridge settings
 hue:
   # The database to use
