@@ -558,8 +558,11 @@ class TestMcpBlockValidation:
         block["public_url"] = url
         assert mcp_block_errors({"mcp": block}) == []
 
-    @pytest.mark.parametrize("bind", ["0.0.0.0:8420", ":::8420", "[::]:8420"])
+    @pytest.mark.parametrize("bind", ["0.0.0.0:8420", "[::]:8420"])
     def test_public_binds_are_refused(self, bind):
+        # The any-interface literals in bracketed/host form. The unbracketed
+        # "::" (":::8420") is rejected earlier for not being bracketed - see
+        # test_parse_bind_address_rejects_unbracketed_ipv6.
         block = dict(self.ENABLED_BLOCK)
         block["bind_address"] = bind
         errors = mcp_block_errors({"mcp": block})
@@ -587,6 +590,14 @@ class TestMcpBlockValidation:
     def test_parse_bind_address_rejects_public_host(self):
         with pytest.raises(ConfigError, match="public interface"):
             parse_mcp_bind_address("0.0.0.0:8420")
+
+    @pytest.mark.parametrize("bind", ["::1:8420", "2001:db8::1:8420", "2001:db8::1"])
+    def test_parse_bind_address_rejects_unbracketed_ipv6(self, bind):
+        """An unbracketed IPv6 literal is ambiguous - rpartition would silently
+        mis-split it (e.g. 2001:db8::1 -> host 2001:db8::, port 1) - so brackets
+        are required."""
+        with pytest.raises(ConfigError, match="IPv6 literals must be bracketed"):
+            parse_mcp_bind_address(bind)
 
     def test_validate_settings_rejects_bad_mcp_block(self, sample_settings):
         settings = dict(sample_settings)

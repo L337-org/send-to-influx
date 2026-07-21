@@ -286,6 +286,12 @@ def _split_bind_address(value, original):
     host, sep, port_text = value.rpartition(":")
     if not sep:
         raise ConfigError(f"mcp.bind_address must be host:port (got {original!r})")
+    if ":" in host:
+        # A colon still in the host portion means an unbracketed IPv6 literal:
+        # rpartition would have split "2001:db8::1" into host "2001:db8:", port
+        # "1" (a surprising bind), and "::1:8420" would slip through as a host.
+        # IPv6 must be bracketed so host and port are unambiguous.
+        raise ConfigError(f"mcp.bind_address IPv6 literals must be bracketed as [ipv6]:port (got {original!r})")
     return host, port_text
 
 
