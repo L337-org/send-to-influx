@@ -270,8 +270,12 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     _validate_identifier(schema.measurement, "measurement")
     _validate_identifier(field, "field")
 
-    start_dt = parse_time_bound(start)
-    end_dt = parse_time_bound(end)
+    # One reference time for both bounds, so a query with two relative bounds
+    # (start='-24h', end='-1h') describes a self-consistent window rather than
+    # measuring each end against a slightly different "now".
+    now = datetime.datetime.now(datetime.timezone.utc)
+    start_dt = parse_time_bound(start, now=now)
+    end_dt = parse_time_bound(end, now=now)
     if start_dt >= end_dt:
         raise QueryParamError(f"start ({_rfc3339(start_dt)}) must be before end ({_rfc3339(end_dt)})")
 
@@ -325,11 +329,16 @@ def _influx_read_request(influx_settings, db, query):
     """
     timeout = influx_settings.get("timeout", 5)
     params = {"db": db, "q": query, "epoch": "s"}
+    url = f'{influx_settings["url"]}/query'
     if influx_settings.get("token"):
-        url = f'{influx_settings["url"]}/query'
+        # The v1-compatibility /query endpoint resolves the bucket via its DBRP
+        # mapping (keyed by db) and the token is already org-scoped, so org isn't
+        # strictly required - but pass it when set, mirroring the v2 write path
+        # and disambiguating a token with access to more than one org.
+        if influx_settings.get("org"):
+            params["org"] = influx_settings["org"]
         kwargs = {"headers": {"Authorization": f'Token {influx_settings["token"]}'}, "params": params}
     else:
-        url = f'{influx_settings["url"]}/query'
         kwargs = {"auth": (influx_settings["user"], influx_settings["password"]), "params": params}
     kwargs["verify"] = not influx_settings.get("insecure", False)
     kwargs["timeout"] = timeout
@@ -409,6 +418,8 @@ def _resolve_handler(source, settings, settings_file):
     """Construct the DataHandler for a configured source, or raise
     QueryParamError if the name isn't one the read tools expose. Case-insensitive,
     matching the collector factory."""
+    if not isinstance(source, str) or not source.strip():
+        raise QueryParamError(f"source must be a non-empty string (got {source!r})")
     available = configured_sources(settings)
     if source.lower() not in available:
         raise QueryParamError(

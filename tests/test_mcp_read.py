@@ -142,6 +142,17 @@ class TestBuildQuery:
         q = build_query(make_schema(), field="gen", start="-1h", end="now")
         assert f"LIMIT {DEFAULT_RESULT_POINTS}" in q
 
+    def test_two_relative_bounds_share_one_reference_time(self):
+        # start='-2h', end='-1h' must be exactly one hour apart - both parsed
+        # against a single 'now', not two datetime.now() calls.
+        import re as _re
+
+        q = build_query(make_schema(), field="gen", start="-2h", end="-1h")
+        lo = _re.search(r"time >= '([^']+)'", q).group(1)
+        hi = _re.search(r"time <= '([^']+)'", q).group(1)
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        assert datetime.datetime.strptime(hi, fmt) - datetime.datetime.strptime(lo, fmt) == datetime.timedelta(hours=1)
+
 
 class TestBuildSchema:
     def test_combines_class_metadata_with_discovered_fields(self):
@@ -234,6 +245,11 @@ class TestInfluxReadRequest:
         url, kwargs = _influx_read_request({"url": "http://influx", "token": "tok", "org": "o"}, "bucket1", "SELECT 1")
         assert kwargs["headers"]["Authorization"] == "Token tok"
         assert kwargs["params"]["db"] == "bucket1"
+        assert kwargs["params"]["org"] == "o"
+
+    def test_v2_omits_org_when_absent(self):
+        _url, kwargs = _influx_read_request({"url": "http://influx", "token": "tok"}, "b", "SELECT 1")
+        assert "org" not in kwargs["params"]
 
     def test_insecure_toggles_verify(self):
         _url, kwargs = _influx_read_request(
@@ -313,6 +329,12 @@ class TestResolveSchema:
     def test_unknown_source_rejected(self):
         with pytest.raises(QueryParamError, match="unknown source"):
             resolve_schema("nosuch", {"sources": ["hue"]}, None)
+
+    @pytest.mark.parametrize("bad", [None, "", "   ", 5, ["hue"]])
+    def test_non_string_or_empty_source_is_query_param_error(self, bad):
+        # A clean tool error, not an AttributeError from .lower() on a non-string.
+        with pytest.raises(QueryParamError, match="non-empty string"):
+            resolve_schema(bad, {"sources": ["hue"]}, None)
 
     def test_builds_schema_from_handler_and_discovery(self):
         handler = MagicMock()
