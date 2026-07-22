@@ -38,7 +38,7 @@ Contents
 - [InfluxDB setup](#influxdb)
 - [Running the script](#running-the-script)
 - [Using the .deb package](#using-the-deb-package)
-- [Remote MCP server (ask Claude about your devices)](#remote-mcp-server)
+- [Remote MCP server (query and control your devices via an MCP client like Claude)](#remote-mcp-server)
 - [Usage / CLI reference](#usage)
 - [Contributing](#contributing)
 - [Privacy and Security](#privacy-and-security)
@@ -412,9 +412,9 @@ Remote MCP server
 -----------------
 
 send-to-influx can optionally run a remote [MCP](https://modelcontextprotocol.io/) server inside the
-same process, so Claude Desktop and Claude Mobile can ask natural-language questions about your
-devices via a custom connector. It is disabled unless **both** `user` and `password` are set in the
-`mcp:` settings block - there is no separate enabled flag.
+same process, so an MCP client — Claude Desktop or Claude Mobile, or another — can ask
+natural-language questions about your devices via a custom connector. It is disabled unless **both**
+`user` and `password` are set in the `mcp:` settings block - there is no separate enabled flag.
 
 ```yaml
 mcp:
@@ -431,22 +431,64 @@ Key points:
   `public_url` to the address the proxy serves. Binding a public interface is refused outright: the
   server speaks plain HTTP — OAuth login and tokens included — so it must sit behind your
   TLS-terminating proxy, never face the internet directly.
-- **Authentication is OAuth 2.1** (the mode Claude's custom-connector UI uses): add the connector
-  in Claude with URL `https://mcp.example.org/mcp`, and Claude registers itself and sends you to a
-  login page gated on `mcp.user`/`mcp.password`. Failed logins are throttled and logged. On the
-  packaged install the password can be stored in systemd-creds:
+- **Authentication is OAuth 2.1** (what Claude's connector UI uses, and the remote-MCP standard):
+  add the connector in your MCP client (Claude, say) with URL `https://mcp.example.org/mcp`, and it
+  registers itself and sends you to a login page gated on `mcp.user`/`mcp.password`. Leave the
+  client's OAuth **Client ID blank** - the server uses dynamic client registration, and filling one
+  in makes the client skip registration so `/authorize` rejects it. Failed logins are throttled and
+  logged. On the packaged install the password can be stored in systemd-creds:
   `sudo send-to-influx-set-credential mcp-password`.
 - **Connections survive restarts.** OAuth client registrations and refresh tokens are persisted
   (hashed) in `mcp-oauth-state.json` next to the settings file (override with `mcp.state_file`),
-  so package upgrades and reboots don't make Claude re-authenticate.
+  so package upgrades and reboots don't make the client re-authenticate.
 - **Read-only by default.** Device-control tools are opt-in per collector and aren't registered at
   all unless enabled in that collector's own settings block - when none is enabled, the write tools
   don't exist on the server.
 
+**Example nginx config.** Give the server its own subdomain and serve it at the root - its OAuth
+flow uses several root-level routes (`/authorize`, `/token`, `/.well-known/oauth-*`, `/login`), so a
+sub-path of a shared site won't work:
+
+```nginx
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name mcp.example.org;               # must match the host in mcp.public_url
+
+    ssl_certificate     /etc/letsencrypt/live/mcp.example.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp.example.org/privkey.pem;
+
+    location / {
+        # Literal 127.0.0.1, not 'localhost' - 'localhost' can resolve to ::1 while the
+        # server listens on IPv4, which gives a 502. No trailing slash on proxy_pass.
+        proxy_pass http://127.0.0.1:8420;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto https;
+
+        # Streamable-HTTP / SSE: don't buffer, keep the upstream connection alive,
+        # and allow long-lived streams.
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+        proxy_buffering    off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+Two things that catch people out:
+
+- **`public_url` must be a bare origin** (`https://host[:port]`, no path). The server refuses to
+  start with a path in it, since the OAuth metadata is built from it - so use a subdomain
+  (`https://mcp.example.org`), not a path prefix (`https://example.org/mcp`).
+- **Leave the OAuth Client ID blank** in the connector (see the OAuth point above) - the server
+  registers clients dynamically, and a manually-set client id makes `/authorize` reject it.
+
 Each controllable collector adds its own tools when you opt it in - writes differ too much between
 device types to share one tool.
 
-To let Claude control Hue lights and plugs, set `hue.mcp_read_write: true`. That adds:
+To allow controlling Hue lights and plugs, set `hue.mcp_read_write: true`. That adds:
 
 - **`hue_list_devices`** - the controllable lights/plugs, each with its id, name, and which controls
   it supports (on/off, brightness, colour temperature, colour).
@@ -455,12 +497,12 @@ To let Claude control Hue lights and plugs, set `hue.mcp_read_write: true`. That
   white"). It's capability-aware - asking a plain white bulb for a colour is refused rather than
   ignored - and setting brightness/temperature/colour turns the light on unless you turn it off.
 
-To let Claude run a speed test on demand, set `speedtest.mcp_read_write: true`. That adds:
+To allow triggering a speed test on demand, set `speedtest.mcp_read_write: true`. That adds:
 
 - **`speedtest_run`** - runs a speed test now, on the host running the server, and returns the
   result (also recording it like a scheduled run). Only one runs at a time per host.
 
-Once connected, Claude has these read tools:
+Once connected, the client has these read tools:
 
 - **`list_sources`** - the collectors that can be queried, each with a short description.
 - **`list_fields`** - the fields available for a source, with their units and (for coded fields

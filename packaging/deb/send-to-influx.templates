@@ -75,19 +75,20 @@ Description: MQTT broker password for send-to-influx
 Template: send-to-influx/mcp-enable
 Type: boolean
 Default: false
-Description: Enable the remote MCP server (for Claude Desktop/Mobile)?
- Lets Claude query your collected device history, and optionally control Hue
- lights, over an OAuth-protected HTTPS endpoint. The server binds a private
- interface only (127.0.0.1:8420) - you must front it with your own
- TLS-terminating reverse proxy. Leave this off unless you want that; the
- collector works exactly as before either way.
+Description: Enable the remote MCP server (for an MCP client such as Claude)?
+ Lets an MCP client (e.g. Claude Desktop or Mobile) query your collected device
+ history, and optionally control your devices, over an OAuth-protected HTTPS
+ endpoint. The server binds a private interface only (127.0.0.1:8420) - you must
+ front it with your own TLS-terminating reverse proxy. Leave this off unless you
+ want that; the collector works exactly as before either way.
 
 Template: send-to-influx/mcp-public-url
 Type: string
 Default:
 Description: External HTTPS URL your reverse proxy serves for the MCP server
- e.g. https://mcp.example.org - the address you'll add as a connector in
- Claude. Required to enable the server (its OAuth metadata must advertise it);
+ e.g. https://mcp.example.org - the address you'll add as a connector in your
+ MCP client (e.g. Claude). Required to enable the server (its OAuth metadata must
+ advertise it);
  must start with https://. When reconfiguring, your previous answer is offered
  as the default - accept or edit it rather than blanking it (like the MQTT
  broker host, it's a required field, so a blank one leaves the server
