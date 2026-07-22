@@ -204,6 +204,20 @@ class TestValidateSettings:
         with pytest.raises(ConfigError):
             validate_settings(sample_settings)
 
+    def test_non_bool_mcp_read_write_raises_config_error(self, sample_settings):
+        """validate_settings rejects a non-bool <source>.mcp_read_write (e.g. the
+        string 'true'), so a mistyped device-control opt-in fails loud at config
+        time rather than silently leaving control off (mcp_write_enabled is strict
+        `is True`). Covers the general per-source validation, not just Hue."""
+        sample_settings["hue"]["mcp_read_write"] = "true"
+        with pytest.raises(ConfigError, match="mcp_read_write must be true or false"):
+            validate_settings(sample_settings)
+
+    def test_bool_mcp_read_write_is_accepted(self, sample_settings):
+        """A real boolean mcp_read_write passes validation."""
+        sample_settings["hue"]["mcp_read_write"] = True
+        validate_settings(sample_settings)
+
     def test_empty_token_falls_back_to_v1_validation(self, sample_settings):
         """validate_settings treats an empty token as absent and validates v1 user/password instead."""
         sample_settings["influx"]["token"] = ""
