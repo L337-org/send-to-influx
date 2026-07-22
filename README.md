@@ -428,8 +428,9 @@ Key points:
 
 - **You provide the TLS side.** The server itself speaks plain HTTP on a private/loopback address;
   put your own TLS-terminating reverse proxy (nginx, Caddy, ...) in front of it and set
-  `public_url` to the address the proxy serves. Binding a public interface is refused outright
-  since MCP clients won't connect over the plain HTTP connection provided.
+  `public_url` to the address the proxy serves. Binding a public interface is refused outright: the
+  server speaks plain HTTP — OAuth login and tokens included — so it must sit behind your
+  TLS-terminating proxy, never face the internet directly.
 - **Authentication is OAuth 2.1** (the mode Claude's custom-connector UI uses): add the connector
   in Claude with URL `https://mcp.example.org/mcp`, and Claude registers itself and sends you to a
   login page gated on `mcp.user`/`mcp.password`. Failed logins are throttled and logged. On the
