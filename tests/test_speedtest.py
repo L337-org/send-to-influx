@@ -110,3 +110,73 @@ class TestSpeedtest:
                 result = handler.get_data()
                 assert result == {}
                 assert handler.data == {}
+
+
+class TestSpeedtestTriggerAndLock:
+    """The MCP trigger action and the one-run-at-a-time per-host lock."""
+
+    def _handler(self, sample_settings, mcp_read_write=True):
+        settings = {
+            **sample_settings,
+            "speedtest": {"db": "speedtest_db", "interval": 300, "mcp_read_write": mcp_read_write},
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            return Speedtest(source="speedtest")
+
+    def _mock_run(self, payload):
+        mock_st = MagicMock()
+        mock_st.results.dict.return_value = payload
+        return patch("toinflux.speedtest.speedtest.Speedtest", return_value=mock_st)
+
+    def test_get_data_rejects_when_a_run_is_in_progress(self, sample_settings):
+        # A second run while one holds the lock must not start (it would saturate
+        # the link and skew both); it surfaces as a transient error.
+        handler = self._handler(sample_settings)
+        assert Speedtest._run_lock.acquire(blocking=False)
+        try:
+            with pytest.raises(SourceConnectionError, match="already in progress"):
+                handler.get_data()
+        finally:
+            Speedtest._run_lock.release()
+
+    def test_get_data_releases_lock_after_a_successful_run(self, sample_settings):
+        handler = self._handler(sample_settings)
+        with self._mock_run({"download": 1.0, "upload": 2.0, "ping": 3.0}):
+            handler.get_data()
+        assert Speedtest._run_lock.acquire(blocking=False)  # free again
+        Speedtest._run_lock.release()
+
+    def test_get_data_releases_lock_on_failure(self, sample_settings):
+        import speedtest as st_mod
+
+        handler = self._handler(sample_settings)
+        with patch("toinflux.speedtest.speedtest.Speedtest", side_effect=st_mod.SpeedtestException("boom")):
+            with pytest.raises(SourceConnectionError):
+                handler.get_data()
+        assert Speedtest._run_lock.acquire(blocking=False)  # released despite the failure
+        Speedtest._run_lock.release()
+
+    def test_is_writable_and_opt_in(self, sample_settings):
+        assert Speedtest.MCP_WRITABLE is True
+        assert self._handler(sample_settings, mcp_read_write=True).mcp_write_enabled() is True
+        assert self._handler(sample_settings, mcp_read_write=False).mcp_write_enabled() is False
+
+    def test_mcp_trigger_run_runs_records_and_annotates(self, sample_settings):
+        handler = self._handler(sample_settings)
+        with self._mock_run({"download": 111.0, "upload": 22.0, "ping": 9.0}):
+            with patch.object(handler, "send_data") as send:
+                result = handler.mcp_trigger_run()
+        send.assert_called_once()
+        assert result["source"] == "speedtest" and result["recorded"] is True
+        assert result["result"]["download"] == {"value": 111.0, "unit": "bits/s"}
+        assert result["result"]["ping"] == {"value": 9.0, "unit": "ms"}
+
+    def test_mcp_trigger_run_recording_failure_is_best_effort(self, sample_settings):
+        from toinflux.influx import InfluxWriteError
+
+        handler = self._handler(sample_settings)
+        with self._mock_run({"download": 1.0, "upload": 2.0, "ping": 3.0}):
+            with patch.object(handler, "send_data", side_effect=InfluxWriteError("nope")):
+                result = handler.mcp_trigger_run()
+        assert result["recorded"] is False
+        assert result["result"]["download"]["value"] == 1.0

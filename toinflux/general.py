@@ -7,11 +7,13 @@ __version__ = "1.0"
 
 # pylint: disable=import-outside-toplevel
 import copy
+import ipaddress
 import logging
 import os
 import stat
 import sys
 from logging.handlers import RotatingFileHandler
+from urllib.parse import urlparse
 import yaml
 from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, SENTINEL_PREFIX, apply_credential_substitution
 from toinflux.exceptions import ConfigError
@@ -244,6 +246,207 @@ def _validate_mqtt_block(settings, sources):
     return mqtt_block_errors(settings, f" ({', '.join(mqtt_sources)})")
 
 
+# The MCP server only ever binds a private interface - TLS termination and the
+# internet-facing side belong to the deploying user's reverse proxy, so a public
+# bind would serve plain-HTTP OAuth (credentials included) to the network. This is
+# a refusal, not a warning, and deliberately has no override: there is no valid
+# configuration in which send-to-influx itself should listen publicly.
+MCP_DISALLOWED_BIND_HOSTS = frozenset({"0.0.0.0", "::", "[::]"})
+MCP_DEFAULT_BIND_ADDRESS = "127.0.0.1:8420"
+
+
+def mcp_enabled(settings):
+    """Return True when the MCP server is enabled - both ``mcp.user`` and
+    ``mcp.password`` set to non-blank strings. There is no separate enabled flag;
+    credentials-present is the enablement mechanism (validated as coherent by
+    ``mcp_block_errors()``).
+
+    :param settings: parsed settings dictionary (after credential substitution)
+    :type settings: dict
+    :rtype: bool
+    """
+    mcp = settings.get("mcp")
+    if not isinstance(mcp, dict):
+        return False
+    user = mcp.get("user")
+    password = mcp.get("password")
+    return bool(isinstance(user, str) and user.strip() and isinstance(password, str) and password.strip())
+
+
+def _split_bind_address(value, original):
+    """Split a bind-address string into ``(host, port_text)``, handling both
+    ``host:port`` and bracketed IPv6 ``[addr]:port``.
+
+    :raises ConfigError: if the shape is not one of those two forms
+    """
+    if value.startswith("["):
+        closing = value.find("]")
+        if closing == -1 or not value[closing + 1 :].startswith(":"):
+            raise ConfigError(f"mcp.bind_address must be host:port or [ipv6]:port (got {original!r})")
+        return value[1:closing], value[closing + 2 :]
+    host, sep, port_text = value.rpartition(":")
+    if not sep:
+        raise ConfigError(f"mcp.bind_address must be host:port (got {original!r})")
+    if ":" in host:
+        # A colon still in the host portion means an unbracketed IPv6 literal:
+        # rpartition would have split "2001:db8::1" into host "2001:db8:", port
+        # "1" (a surprising bind), and "::1:8420" would slip through as a host.
+        # IPv6 must be bracketed so host and port are unambiguous.
+        raise ConfigError(f"mcp.bind_address IPv6 literals must be bracketed as [ipv6]:port (got {original!r})")
+    return host, port_text
+
+
+def parse_mcp_bind_address(bind_address):
+    """Split an ``mcp.bind_address`` value into ``(host, port)``.
+
+    Accepts ``host:port`` and bracketed IPv6 ``[addr]:port``. Raises ConfigError
+    rather than returning a partial result - shared by ``mcp_block_errors()``
+    (config-check time) and the server startup path (runtime), so the two cannot
+    disagree about what parses.
+
+    :param bind_address: the configured value, or None/"" for the default
+    :type bind_address: str or None
+    :return: (host, port) tuple
+    :rtype: tuple
+    :raises ConfigError: if the value is not a usable host:port pair
+    """
+    if bind_address is None or (isinstance(bind_address, str) and not bind_address.strip()):
+        bind_address = MCP_DEFAULT_BIND_ADDRESS
+    if not isinstance(bind_address, str):
+        raise ConfigError(f"mcp.bind_address must be a string (got {bind_address!r})")
+    host, port_text = _split_bind_address(bind_address.strip(), bind_address)
+    try:
+        port = int(port_text)
+    except ValueError:
+        raise ConfigError(f"mcp.bind_address port must be an integer (got {bind_address!r})") from None
+    if not 1 <= port <= 65535:
+        raise ConfigError(f"mcp.bind_address port must be between 1 and 65535 (got {bind_address!r})")
+    if not host:
+        raise ConfigError(f"mcp.bind_address host must not be empty (got {bind_address!r})")
+    _reject_public_bind_host(host, bind_address)
+    return host, port
+
+
+def _reject_public_bind_host(host, bind_address):
+    """Refuse a bind host that would expose the plain-HTTP MCP server publicly.
+
+    Refuses the any-interface wildcards (0.0.0.0/::) and any globally-routable IP
+    literal - binding plain-HTTP OAuth/login there would put it on the network in
+    cleartext. Loopback and private/LAN addresses are allowed (a reverse proxy on
+    another host legitimately reaches the app on a private IP). A non-IP hostname
+    can't be classified without a DNS lookup (fragile, and it may resolve
+    differently at bind time), so it is allowed with a warning.
+
+    :raises ConfigError: for an any-interface or globally-routable bind host
+    """
+    if host in MCP_DISALLOWED_BIND_HOSTS:
+        raise ConfigError(
+            f"mcp.bind_address must not bind a public interface (got {bind_address!r}) - the MCP "
+            "server speaks plain HTTP and is meant to sit behind your own TLS-terminating reverse "
+            "proxy; bind a loopback or private address instead"
+        )
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        logging.warning(
+            "mcp.bind_address host %r is not an IP literal and can't be checked for public "
+            "exposure; make sure it resolves to a loopback or private address - the MCP server "
+            "speaks plain HTTP and must sit behind your own TLS-terminating reverse proxy",
+            host,
+        )
+        return
+    if ip.is_global:
+        raise ConfigError(
+            f"mcp.bind_address must not bind a public interface (got {bind_address!r}): {host} is "
+            "globally routable and the MCP server speaks plain HTTP. Bind a loopback or private "
+            "address and put your own TLS-terminating reverse proxy in front of it instead"
+        )
+
+
+def mcp_block_errors(settings):
+    """Return a list of error strings for the optional ``mcp`` settings block.
+
+    An absent block, or one with both ``user`` and ``password`` blank, is a valid
+    disabled state. Set together they enable the server, which then requires a
+    ``public_url`` (the external HTTPS address the reverse proxy serves - OAuth
+    discovery metadata must advertise it, so there is no default to fall back to).
+    One of the pair set without the other is incoherent and reported, mirroring
+    the MQTT username-without-password check.
+
+    :param settings: parsed settings dictionary (after credential substitution)
+    :type settings: dict
+    :return: error strings, empty when the block is valid
+    :rtype: list
+    """
+    mcp = settings.get("mcp")
+    if mcp is None:
+        return []
+    if not isinstance(mcp, dict):
+        return [f"mcp must be a mapping of MCP server settings (got {type(mcp).__name__})"]
+    errors = []
+    for field in ("user", "password", "public_url", "bind_address", "state_file"):
+        value = mcp.get(field)
+        if value is not None and not isinstance(value, str):
+            # Same YAML-coercion trap as the mqtt block: an unquoted numeric or
+            # yes/no value arrives as int/float/bool, not the string the code needs.
+            errors.append(f"mcp.{field} must be a string (got {value!r})")
+    user = mcp.get("user")
+    password = mcp.get("password")
+    user_set = isinstance(user, str) and user.strip()
+    password_set = isinstance(password, str) and password.strip()
+    if bool(user_set) != bool(password_set):
+        errors.append(
+            "mcp.user and mcp.password must be set together to enable the MCP server "
+            "(one without the other is never valid). If the password was migrated to "
+            "systemd-creds, check 'send-to-influx-set-credential --list' - a missing "
+            "credential file leaves the password blank here."
+        )
+    if user_set and password_set:
+        errors.extend(_mcp_enabled_block_errors(mcp))
+    return errors
+
+
+def _mcp_enabled_block_errors(mcp):
+    """Return the error strings that only apply once the MCP server is enabled:
+    a usable public_url and a parseable, non-public bind_address."""
+    errors = []
+    public_url = mcp.get("public_url")
+    if not (isinstance(public_url, str) and public_url.strip()):
+        errors.append(
+            "mcp.public_url is required when the MCP server is enabled - the external "
+            "https:// URL your reverse proxy serves, e.g. https://mcp.example.org"
+        )
+    elif not public_url.strip().startswith("https://"):
+        errors.append(
+            f"mcp.public_url must be an https:// URL (got {public_url!r}) - the public side "
+            "of the MCP server is always TLS, terminated by your reverse proxy"
+        )
+    else:
+        # More than scheme + host[:port] silently breaks things downstream: the
+        # OAuth routes are mounted at the root of this address, so a path would
+        # advertise endpoints that 404, and userinfo/query/fragment would leak
+        # into the issuer and the Host/Origin allowlists. Reject at config time.
+        parsed = urlparse(public_url.strip())
+        if (
+            not parsed.hostname
+            or parsed.username is not None
+            or parsed.path.rstrip("/")
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            errors.append(
+                f"mcp.public_url must be just https://host[:port] with no path, credentials, "
+                f"query or fragment (got {public_url!r}) - the OAuth endpoints are served at "
+                "the root of that address"
+            )
+    try:
+        parse_mcp_bind_address(mcp.get("bind_address"))
+    except ConfigError as exc:
+        errors.append(str(exc))
+    return errors
+
+
 def _validate_influx_block(influx):
     """Return a list of error strings for the influx configuration block."""
     errors = []
@@ -279,6 +482,11 @@ def _validate_source_block(source, settings, is_v2):
             errors.append(f"{source}.db (or {source}.bucket for InfluxDB v2) is required")
     elif "db" not in source_cfg:
         errors.append(f"{source}.db is required when using InfluxDB v1 (user/password) authentication")
+    # mcp_read_write gates the MCP device-write tools and is checked with a strict
+    # `is True`, so a mistyped `mcp_read_write: "true"` (string) would silently
+    # leave writes off. Fail loud instead - a user who set it meant to enable it.
+    if "mcp_read_write" in source_cfg and not isinstance(source_cfg["mcp_read_write"], bool):
+        errors.append(f"{source}.mcp_read_write must be true or false (got {source_cfg['mcp_read_write']!r})")
     return errors
 
 
@@ -339,6 +547,7 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
     for src in sources:
         errors.extend(_validate_source_block(src, settings, is_v2))
     errors.extend(_validate_mqtt_block(settings, sources))
+    errors.extend(mcp_block_errors(settings))
     if errors:
         for error in errors:
             logging.critical("%s: %s", settings_path, error)

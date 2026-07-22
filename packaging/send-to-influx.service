@@ -15,7 +15,44 @@ RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+# /etc/send-to-influx holds settings.yaml and, when the MCP server is enabled,
+# its OAuth state file (mcp-oauth-state.json) - the only path the service writes.
 ReadWritePaths=/etc/send-to-influx
+
+# Sandbox hardening. Especially relevant since the MCP server made this the
+# project's first inbound-network-facing service (it binds a loopback TCP port).
+# This set is deliberately the well-established, low-risk directives that don't
+# break a pure-Python service that makes outbound HTTPS (requests), runs an
+# async HTTP server (uvicorn/anyio), and reads systemd-creds. The service needs
+# no privileges (it binds 8420 > 1024, so not even CAP_NET_BIND_SERVICE), so the
+# capability set is emptied.
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+# AF_UNIX is kept alongside the INET families: glibc NSS/resolver and syslog use
+# Unix sockets, so dropping it can break name resolution and logging.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+# @system-service is systemd's curated allow-list for normal services and covers
+# threads, sockets and file I/O (uvicorn/anyio/requests). MemoryDenyWriteExecute
+# is deliberately NOT set - it breaks some Python C extensions - and neither is a
+# hand-rolled narrower SystemCallFilter, which is fragile across interpreter and
+# library versions.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

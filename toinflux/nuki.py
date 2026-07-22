@@ -49,6 +49,34 @@ STATE_VALUE_FIELDS = {
 }
 
 
+# Nuki state-code meanings (MQTT API spec v1.6), for the MCP read tool to decode
+# the numeric stateValue/doorsensorStateValue fields into labels - see UNITS.md.
+# An undocumented code is passed through with a null label, matching the
+# collector's own raw-passthrough rule.
+STATE_VALUE_CODES = {
+    0: "uncalibrated",
+    1: "locked",
+    2: "unlocking",
+    3: "unlocked",
+    4: "locking",
+    5: "unlatched",
+    6: "unlocked (lock 'n' go)",
+    7: "unlatching",
+    254: "motor blocked",
+    255: "undefined",
+}
+DOORSENSOR_STATE_CODES = {
+    1: "deactivated",
+    2: "door closed",
+    3: "door opened",
+    4: "door state unknown",
+    5: "calibrating",
+    16: "uncalibrated",
+    240: "tampered",
+    255: "unknown",
+}
+
+
 class Nuki(MqttDataHandler):
     """
     Child class of MqttDataHandler to get lock/door-sensor state from Nuki smart locks.
@@ -60,6 +88,15 @@ class Nuki(MqttDataHandler):
     reported automatically, with field keys prefixed by the device's own Nuki-app
     name, so multiple locks need no per-lock configuration.
     """
+
+    MCP_DESCRIPTION = "Nuki smart locks and door sensors: lock state, door state and battery levels."
+    # Fields carry a per-lock name prefix (Front_Door_stateValue), so the read
+    # tool's metadata keys on the suffix - see ReadSchema.metadata_for.
+    MCP_FIELD_METADATA = {
+        "stateValue": {"codes": STATE_VALUE_CODES},
+        "doorsensorStateValue": {"codes": DOORSENSOR_STATE_CODES},
+        "batteryChargeState": {"unit": "%"},
+    }
 
     def get_data(self):
         """

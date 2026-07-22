@@ -1,5 +1,6 @@
 """Unit tests for toinflux.general (load_settings, get_class)."""
 
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -8,9 +9,13 @@ import pytest
 import yaml
 from toinflux.general import (
     DEFAULT_SOURCE,
+    MCP_DEFAULT_BIND_ADDRESS,
     flatten_dict,
     get_class,
     load_settings,
+    mcp_block_errors,
+    mcp_enabled,
+    parse_mcp_bind_address,
     resolve_default_source,
     validate_settings,
 )
@@ -199,6 +204,20 @@ class TestValidateSettings:
         del sample_settings["hue"]["db"]
         with pytest.raises(ConfigError):
             validate_settings(sample_settings)
+
+    def test_non_bool_mcp_read_write_raises_config_error(self, sample_settings):
+        """validate_settings rejects a non-bool <source>.mcp_read_write (e.g. the
+        string 'true'), so a mistyped device-control opt-in fails loud at config
+        time rather than silently leaving control off (mcp_write_enabled is strict
+        `is True`). Covers the general per-source validation, not just Hue."""
+        sample_settings["hue"]["mcp_read_write"] = "true"
+        with pytest.raises(ConfigError, match="mcp_read_write must be true or false"):
+            validate_settings(sample_settings)
+
+    def test_bool_mcp_read_write_is_accepted(self, sample_settings):
+        """A real boolean mcp_read_write passes validation."""
+        sample_settings["hue"]["mcp_read_write"] = True
+        validate_settings(sample_settings)
 
     def test_empty_token_falls_back_to_v1_validation(self, sample_settings):
         """validate_settings treats an empty token as absent and validates v1 user/password instead."""
@@ -481,3 +500,149 @@ class TestFlattenDict:
     def test_empty_dict_returns_empty_dict(self):
         """flatten_dict returns empty dict for empty input."""
         assert not flatten_dict({})
+
+
+class TestMcpBlockValidation:
+    """Tests for the optional mcp settings block (mcp_block_errors, mcp_enabled,
+    parse_mcp_bind_address)."""
+
+    ENABLED_BLOCK = {
+        "bind_address": "127.0.0.1:8420",
+        "public_url": "https://mcp.example.org",
+        "user": "gavin",
+        "password": "hunter22",
+    }
+
+    def test_absent_block_is_valid_and_disabled(self):
+        assert mcp_block_errors({}) == []
+        assert mcp_enabled({}) is False
+
+    def test_blank_credentials_mean_disabled(self):
+        settings = {"mcp": {"bind_address": "127.0.0.1:8420", "user": "", "password": ""}}
+        assert mcp_block_errors(settings) == []
+        assert mcp_enabled(settings) is False
+
+    def test_valid_enabled_block(self):
+        settings = {"mcp": dict(self.ENABLED_BLOCK)}
+        assert mcp_block_errors(settings) == []
+        assert mcp_enabled(settings) is True
+
+    def test_non_mapping_block_is_an_error(self):
+        errors = mcp_block_errors({"mcp": "oops"})
+        assert errors and "must be a mapping" in errors[0]
+
+    @pytest.mark.parametrize("present,absent", [("user", "password"), ("password", "user")])
+    def test_one_credential_without_the_other_is_incoherent(self, present, absent):
+        settings = {"mcp": {present: "value", absent: ""}}
+        errors = mcp_block_errors(settings)
+        assert any("must be set together" in error for error in errors)
+        assert mcp_enabled(settings) is False
+
+    def test_enabled_requires_public_url(self):
+        block = dict(self.ENABLED_BLOCK)
+        block["public_url"] = ""
+        errors = mcp_block_errors({"mcp": block})
+        assert any("public_url is required" in error for error in errors)
+
+    def test_public_url_must_be_https(self):
+        block = dict(self.ENABLED_BLOCK)
+        block["public_url"] = "http://mcp.example.org"
+        errors = mcp_block_errors({"mcp": block})
+        assert any("must be an https:// URL" in error for error in errors)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://mcp.example.org/some/path",
+            "https://user:pass@mcp.example.org",
+            "https://mcp.example.org?x=1",
+            "https://mcp.example.org#frag",
+            "https://",
+        ],
+    )
+    def test_public_url_must_be_bare_origin(self, url):
+        """A path, embedded credentials, query or fragment would break endpoint
+        mounting and the Host/Origin allowlists - rejected at config time."""
+        block = dict(self.ENABLED_BLOCK)
+        block["public_url"] = url
+        assert mcp_block_errors({"mcp": block})
+
+    @pytest.mark.parametrize("url", ["https://mcp.example.org:8443", "https://mcp.example.org/"])
+    def test_public_url_port_and_bare_trailing_slash_are_fine(self, url):
+        block = dict(self.ENABLED_BLOCK)
+        block["public_url"] = url
+        assert mcp_block_errors({"mcp": block}) == []
+
+    @pytest.mark.parametrize("bind", ["0.0.0.0:8420", "[::]:8420"])
+    def test_public_binds_are_refused(self, bind):
+        # The any-interface literals in bracketed/host form. The unbracketed
+        # "::" (":::8420") is rejected earlier for not being bracketed - see
+        # test_parse_bind_address_rejects_unbracketed_ipv6.
+        block = dict(self.ENABLED_BLOCK)
+        block["bind_address"] = bind
+        errors = mcp_block_errors({"mcp": block})
+        assert any("must not bind a public interface" in error for error in errors)
+
+    @pytest.mark.parametrize("bind", ["nonsense", "host:notaport", "host:99999", ":8420", 8420])
+    def test_malformed_bind_addresses_are_errors(self, bind):
+        block = dict(self.ENABLED_BLOCK)
+        block["bind_address"] = bind
+        assert mcp_block_errors({"mcp": block})
+
+    def test_yaml_coerced_field_types_are_reported(self):
+        settings = {"mcp": {"user": True, "password": 5, "public_url": 1.0}}
+        errors = mcp_block_errors(settings)
+        assert len([error for error in errors if "must be a string" in error]) == 3
+
+    def test_parse_bind_address_default(self):
+        assert parse_mcp_bind_address(None) == ("127.0.0.1", 8420)
+        assert parse_mcp_bind_address("") == ("127.0.0.1", 8420)
+        assert MCP_DEFAULT_BIND_ADDRESS == "127.0.0.1:8420"
+
+    def test_parse_bind_address_ipv6(self):
+        assert parse_mcp_bind_address("[::1]:9000") == ("::1", 9000)
+
+    def test_parse_bind_address_rejects_public_host(self):
+        with pytest.raises(ConfigError, match="public interface"):
+            parse_mcp_bind_address("0.0.0.0:8420")
+
+    @pytest.mark.parametrize("bind", ["8.8.8.8:8420", "1.1.1.1:8420", "[2606:4700:4700::1111]:8420"])
+    def test_parse_bind_address_rejects_globally_routable_ip(self, bind):
+        # Refusing only the 0.0.0.0/:: wildcards isn't enough: an explicit public IP
+        # would still expose plain-HTTP OAuth/login on the network.
+        with pytest.raises(ConfigError, match="globally routable"):
+            parse_mcp_bind_address(bind)
+
+    @pytest.mark.parametrize("bind", ["127.0.0.1:8420", "192.168.1.5:8420", "10.0.0.3:8420", "[fd00::1]:8420"])
+    def test_parse_bind_address_allows_loopback_and_private(self, bind):
+        # A reverse proxy on another host legitimately reaches the app on a private
+        # LAN address, so loopback/private must not be refused.
+        _host, port = parse_mcp_bind_address(bind)
+        assert port == 8420
+
+    def test_parse_bind_address_hostname_allowed_with_warning(self, caplog):
+        # A non-IP hostname can't be classified without a DNS lookup, so it's allowed
+        # but warned about - only IP literals are checked for public exposure.
+        with caplog.at_level(logging.WARNING):
+            result = parse_mcp_bind_address("myhost.example:8420")
+        assert result == ("myhost.example", 8420)
+        assert any("not an IP literal" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("bind", ["::1:8420", "2001:db8::1:8420", "2001:db8::1"])
+    def test_parse_bind_address_rejects_unbracketed_ipv6(self, bind):
+        """An unbracketed IPv6 literal is ambiguous - rpartition would silently
+        mis-split it (e.g. 2001:db8::1 -> host 2001:db8::, port 1) - so brackets
+        are required."""
+        with pytest.raises(ConfigError, match="IPv6 literals must be bracketed"):
+            parse_mcp_bind_address(bind)
+
+    def test_validate_settings_rejects_bad_mcp_block(self, sample_settings):
+        settings = dict(sample_settings)
+        settings["mcp"] = {"user": "gavin", "password": ""}
+        with pytest.raises(ConfigError, match="must be set together"):
+            validate_settings(settings)
+
+    def test_validate_settings_accepts_enabled_mcp_block(self, sample_settings):
+        settings = dict(sample_settings)
+        settings["mcp"] = dict(self.ENABLED_BLOCK)
+        validate_settings(settings)

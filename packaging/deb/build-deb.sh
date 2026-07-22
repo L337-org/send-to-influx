@@ -8,10 +8,16 @@
 # Python with pure-Python fallbacks for any optional compiled accelerators
 # (see the .so-stripping step below), and the venv's own python3 is a symlink
 # to the system-provided /usr/bin/python3 (declared as a Depends:), not a
-# bundled interpreter binary. A CI job builds and smoke-tests this same script
-# on an arm64 runner on every push/PR (a required status check), to catch a
-# future dependency change that makes a compiled extension load-bearing
-# rather than optional before it can merge.
+# bundled interpreter binary. The two exceptions - pydantic_core and rpds-py,
+# needed by the mcp SDK with no pure-Python fallback - are handled by bundling
+# the full matrix of prebuilt manylinux wheels' compiled extensions (supported
+# minors x amd64/arm64) into the shared site-packages: CPython only imports a
+# .so tagged with its own exact ABI, so the variants coexist (see the
+# compiled-wheel-matrix step below). A CI job builds and smoke-tests this same
+# script on an arm64 runner on every push/PR (a required status check), to
+# catch a dependency change that makes some OTHER compiled extension
+# load-bearing, or a compiled-wheel version dropping a supported minor,
+# before it can merge.
 #
 # Usage: packaging/deb/build-deb.sh [output-path.deb]
 set -euo pipefail
@@ -106,10 +112,13 @@ find "$VENV_STAGING_PATH/bin" -name "*.bak" -delete
 ln -s /opt/send-to-influx/venv/bin/send-to-influx-set-credential "$PKG_ROOT/usr/sbin/send-to-influx-set-credential"
 
 # Strip any compiled extensions pip's dependency resolution happened to pull
-# in (e.g. PyYAML's / charset-normalizer's optional C accelerators) - both
-# have documented pure-Python fallbacks, and stripping these makes the
-# resulting package genuinely architecture-independent regardless of what
-# wheels were available on the build host.
+# in (e.g. PyYAML's / charset-normalizer's optional C accelerators) - those
+# have documented pure-Python fallbacks, and stripping them makes the package
+# architecture-independent regardless of what wheels were available on the
+# build host. This also removes the build host's own pydantic_core/rpds-py
+# extensions, which have NO pure-Python fallback - the compiled-wheel-matrix
+# step further down re-adds those for every supported minor and both
+# architectures, which is what keeps Architecture: all honest.
 find "$PKG_ROOT/opt/send-to-influx/venv/lib" -type f \( -name "*.so" -o -name "*.pyd" \) -delete
 
 # A venv's site-packages lives at lib/pythonX.Y/site-packages, named after the exact
@@ -161,6 +170,89 @@ VERSION="$(cd / && "$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
 # never a swap to perform. (preinst still clears the venv on upgrade, which is what
 # gets installs created under the old scheme onto this one.)
 mv "$VENV_LIB_DIR/python${PYTHON_MAJOR_MINOR}" "$VENV_LIB_DIR/python3"
+
+# ---- compiled-wheel matrix (pydantic_core, rpds-py) ----
+# The mcp SDK's dependency chain needs pydantic_core (via pydantic) and rpds-py
+# (via jsonschema/referencing) - Rust-compiled, no pure-Python fallback, so the
+# blanket .so-strip above removed something load-bearing. Rather than giving up
+# Architecture: all, download the prebuilt manylinux wheels for JUST these two
+# packages across the supported minors and both target architectures, and merge
+# only their compiled extensions into the shared site-packages (the pure-Python
+# half of each package is already installed by pip above). CPython imports only
+# a .so whose filename carries its own exact ABI tag, so the variants coexist
+# with zero collision.
+#
+# COMPILED_WHEEL_MINORS spans the minors these packages publish wheels for
+# today - unlike the symlink range (which extends to PYTHON_MAX_SUPPORTED_MINOR
+# for pure-Python code), compiled wheels can only exist for released CPythons.
+# On a target running a newer minor the collectors still work; only the opt-in
+# MCP server would fail to import until a rebuilt package ships newer wheels.
+# The pip download below pins each package to the exact version pip resolved
+# into the venv, so the .so and its pure-Python half can never disagree - and
+# fails the build (deliberately) if that version doesn't cover every minor
+# here, which is why requirements.txt holds rpds-py to a version that does.
+COMPILED_WHEEL_PACKAGES="pydantic-core rpds-py"
+COMPILED_WHEEL_MINORS="10 11 12 13 14"
+COMPILED_WHEEL_PLATFORMS="manylinux2014_x86_64 manylinux2014_aarch64"
+WHEEL_DIR="$BUILD_DIR/compiled-wheels"
+SITE_PACKAGES="$VENV_LIB_DIR/python3/site-packages"
+mkdir -p "$WHEEL_DIR"
+# The downloads run via the BUILD HOST's pip, not the staged venv's: the shebang
+# rewrite near the top of this script already re-pointed every venv/bin script
+# (pip included) at the final /opt install path, which doesn't exist at build
+# time - and the venv's site-packages has just been renamed out from under its
+# own interpreter anyway. `pip download` never touches the host environment, so
+# Debian/Ubuntu's externally-managed-environment guard doesn't apply to it.
+if ! "$BUILD_PYTHON" -m pip --version >/dev/null 2>&1; then
+    echo "error: pip for $BUILD_PYTHON is required for the compiled-wheel matrix" >&2
+    echo "(on Debian/Ubuntu: apt-get install python3-pip)" >&2
+    exit 1
+fi
+for pkg in $COMPILED_WHEEL_PACKAGES; do
+    # Resolve the exact version pip installed into the venv from its .dist-info
+    # directory name (e.g. pydantic_core-2.47.0.dist-info) - the staged venv's
+    # own pip can no longer run to be asked (see above).
+    dist_name="${pkg//-/_}"
+    info_dir="$(find "$SITE_PACKAGES" -maxdepth 1 -type d -name "${dist_name}-*.dist-info" | head -n 1)"
+    if [ -z "$info_dir" ]; then
+        echo "error: $pkg is not installed in the venv - did the mcp dependency chain change?" >&2
+        exit 1
+    fi
+    ver="$(basename "$info_dir")"
+    ver="${ver#"${dist_name}"-}"
+    ver="${ver%.dist-info}"
+    for minor in $COMPILED_WHEEL_MINORS; do
+        for plat in $COMPILED_WHEEL_PLATFORMS; do
+            "$BUILD_PYTHON" -m pip download "$pkg==$ver" \
+                --only-binary=:all: --no-deps --quiet \
+                --python-version "3.$minor" --implementation cp --platform "$plat" \
+                -d "$WHEEL_DIR"
+        done
+    done
+done
+EXTRACT_DIR="$BUILD_DIR/compiled-wheels-extracted"
+for whl in "$WHEEL_DIR"/*.whl; do
+    rm -rf "$EXTRACT_DIR"
+    mkdir -p "$EXTRACT_DIR"
+    "$BUILD_PYTHON" -m zipfile -e "$whl" "$EXTRACT_DIR"
+    while IFS= read -r -d '' so; do
+        rel="${so#"$EXTRACT_DIR"/}"
+        mkdir -p "$SITE_PACKAGES/$(dirname "$rel")"
+        cp "$so" "$SITE_PACKAGES/$rel"
+    done < <(find "$EXTRACT_DIR" -name "*.so" -print0)
+done
+# Fail the build if the matrix came out incomplete - a runtime ImportError on
+# some target's minor/arch combination is far harder to diagnose than this.
+for minor in $COMPILED_WHEEL_MINORS; do
+    for arch in x86_64 aarch64; do
+        for probe in "pydantic_core/_pydantic_core" "rpds/rpds"; do
+            if ! ls "$SITE_PACKAGES/${probe}".cpython-3"${minor}"-"${arch}"-linux-gnu.so >/dev/null 2>&1; then
+                echo "error: missing compiled extension ${probe} for Python 3.${minor}/${arch}" >&2
+                exit 1
+            fi
+        done
+    done
+done
 # The per-minor python3.X -> python3 symlinks are deliberately NOT shipped in the
 # package; postinst creates them (and postrm removes them). If they were shipped,
 # they would exist during dpkg's post-unpack cleanup of the previous version's

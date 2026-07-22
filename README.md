@@ -4,13 +4,25 @@ send-to-influx
 https://github.com/L337-org/send-to-influx
 -----------------------------------------
 
-Script to take data from various APIs and post it to InfluxDB in order to view the data in Grafana.
+Collect metrics from your smart-home and energy devices into InfluxDB, and then really take control!
 
-It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data sources.
+The built-in [MCP server](#remote-mcp-server) means that you can use your AI of choice as one place
+to **control** your devices, query their **live and historical** state, and ask **complex questions**
+about **relationships between different measurements**, and **spot trends** in your data.
 
-It can be installed as a .deb package on supported platforms, or run directly from the source code in a Python virtual environment.
+Because the data is stored in InfluxDB it can also be **displayed in Grafana** dashboards and other
+visualization tools that support it.
 
-For a full field-by-field reference of what each source collects and the units it's reported in, see [UNITS.md](UNITS.md).
+It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid
+Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data sources.
+Most are read-only; Hue lights/plugs and on-demand Speedtest runs can be controlled through the MCP server
+when you opt in.
+
+It can be installed as a .deb package on supported platforms, or run directly from the source code in a
+Python virtual environment.
+
+For a full field-by-field reference of what each source collects and the units it's reported in, see
+[UNITS.md](UNITS.md).
 
 Contents
 --------
@@ -26,6 +38,7 @@ Contents
 - [InfluxDB setup](#influxdb)
 - [Running the script](#running-the-script)
 - [Using the .deb package](#using-the-deb-package)
+- [Remote MCP server (query and control your devices via an MCP client like Claude)](#remote-mcp-server)
 - [Usage / CLI reference](#usage)
 - [Contributing](#contributing)
 - [Privacy and Security](#privacy-and-security)
@@ -340,7 +353,10 @@ credential into `systemd-creds` without touching anything else), then a checklis
 sources you want to configure now, then - only for the ones you pick - the fields needed to
 actually reach that source's API (credentials plus things like a Hue bridge hostname or an Octopus
 meter number; tuning settings like intervals keep their shipped defaults and can be adjusted in
-`settings.yaml` afterwards). A plain package *upgrade* never prompts and never applies debconf
+`settings.yaml` afterwards). You're also asked, with a default of "no", whether to enable the
+[remote MCP server](#remote-mcp-server) - answer yes and it collects the public URL, login username
+and password for it (the password goes into `systemd-creds` like any other). A plain package
+*upgrade* never prompts and never applies debconf
 answers: your `settings.yaml` and credentials are only ever written by a fresh install's prompts or
 by an explicit `sudo dpkg-reconfigure send-to-influx`, which re-runs the same flow at any time.
 Secrets you enter are moved into `systemd-creds` (see below)
@@ -391,6 +407,125 @@ afterwards if you still need it.
 This is entirely optional and per-field - you can mix systemd-creds and plaintext values freely, and
 the source-checkout/screen-session path is unaffected either way, since systemd-creds only applies
 under the packaged systemd service.
+
+Remote MCP server
+-----------------
+
+send-to-influx can optionally run a remote [MCP](https://modelcontextprotocol.io/) server inside the
+same process, so an MCP client — Claude Desktop or Claude Mobile, or another — can ask
+natural-language questions about your devices via a custom connector. It is disabled unless **both**
+`user` and `password` are set in the `mcp:` settings block - there is no separate enabled flag.
+
+```yaml
+mcp:
+  bind_address: "127.0.0.1:8420"   # loopback/private only - any-interface (0.0.0.0/::) and public IPs are refused
+  public_url: "https://mcp.example.org"  # the external HTTPS address your reverse proxy serves
+  user: "your-login-name"
+  password: "your-login-password"
+```
+
+Key points:
+
+- **You provide the TLS side.** The server itself speaks plain HTTP on a private/loopback address;
+  put your own TLS-terminating reverse proxy (nginx, Caddy, ...) in front of it and set
+  `public_url` to the address the proxy serves. Binding a public interface is refused outright: the
+  server speaks plain HTTP — OAuth login and tokens included — so it must sit behind your
+  TLS-terminating proxy, never face the internet directly.
+- **Authentication is OAuth 2.1** (what Claude's connector UI uses, and the remote-MCP standard):
+  add the connector in your MCP client (Claude, say) with URL `https://mcp.example.org/mcp`, and it
+  registers itself and sends you to a login page gated on `mcp.user`/`mcp.password`. Leave the
+  client's OAuth **Client ID blank** - the server uses dynamic client registration, and filling one
+  in makes the client skip registration so `/authorize` rejects it. Failed logins are throttled and
+  logged. On the packaged install the password can be stored in systemd-creds:
+  `sudo send-to-influx-set-credential mcp-password`.
+- **Connections survive restarts.** OAuth client registrations and refresh tokens are persisted
+  (hashed) in `mcp-oauth-state.json` next to the settings file (override with `mcp.state_file`),
+  so package upgrades and reboots don't make the client re-authenticate.
+- **Read-only by default.** Device-control tools are opt-in per collector and aren't registered at
+  all unless enabled in that collector's own settings block - when none is enabled, the write tools
+  don't exist on the server.
+
+**Example nginx config.** Give the server its own subdomain and serve it at the root - its OAuth
+flow uses several root-level routes (`/authorize`, `/token`, `/.well-known/oauth-*`, `/login`), so a
+sub-path of a shared site won't work:
+
+```nginx
+server {
+    listen 443 ssl http2;                      # 'listen ... http2' works on old and new nginx;
+    listen [::]:443 ssl http2;                 # newer nginx (1.25.1+) prefers a separate 'http2 on;'
+    server_name mcp.example.org;               # must match the host in mcp.public_url
+
+    ssl_certificate     /etc/letsencrypt/live/mcp.example.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mcp.example.org/privkey.pem;
+
+    location / {
+        # Literal 127.0.0.1, not 'localhost' - 'localhost' can resolve to ::1 while the
+        # server listens on IPv4, which gives a 502. No trailing slash on proxy_pass.
+        proxy_pass http://127.0.0.1:8420;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto https;
+
+        # Streamable-HTTP / SSE: don't buffer, keep the upstream connection alive,
+        # and allow long-lived streams.
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+        proxy_buffering    off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+Two things that catch people out:
+
+- **`public_url` must be a bare origin** (`https://host[:port]`, no path). The server refuses to
+  start with a path in it, since the OAuth metadata is built from it - so use a subdomain
+  (`https://mcp.example.org`), not a path prefix (`https://example.org/mcp`).
+- **Leave the OAuth Client ID blank** in the connector (see the OAuth point above) - the server
+  registers clients dynamically, and a manually-set client id makes `/authorize` reject it.
+
+Each controllable collector adds its own tools when you opt it in - writes differ too much between
+device types to share one tool.
+
+To allow controlling Hue lights and plugs, set `hue.mcp_read_write: true`. That adds:
+
+- **`hue_list_devices`** - the controllable lights/plugs, each with its id, name, and which controls
+  it supports (on/off, brightness, colour temperature, colour).
+- **`hue_set_light`** - a real physical action: turn a light/plug on or off, set brightness
+  (0-100 %), white colour temperature (in kelvin), or colour (an `#rrggbb` hex or a name like "warm
+  white"). It's capability-aware - asking a plain white bulb for a colour is refused rather than
+  ignored - and setting brightness/temperature/colour turns the light on unless you turn it off.
+
+To allow triggering a speed test on demand, set `speedtest.mcp_read_write: true`. That adds:
+
+- **`speedtest_run`** - runs a speed test now, on the host running the server, and returns the
+  result (also recording it like a scheduled run). Only one runs at a time per host.
+
+Once connected, the client has these read tools:
+
+- **`list_sources`** - the collectors that can be queried, each with a short description.
+- **`list_fields`** - the fields available for a source, with their units and (for coded fields
+  like Nuki lock state) what each value means.
+- **`get_current_state`** - a source's state *right now* ("is the door locked?", "which lights are
+  on?"). Most sources are read live from the device; Speedtest and Octopus report their latest
+  recorded reading instead.
+- **`query_history`** - a field's history over a time range, either as individual points or
+  aggregated (mean/max/min/sum/count/…) into buckets ("how much electricity this month vs last?",
+  "when did the light go off?").
+- **`get_documentation`** - a one-call reference of what every source reports and what its coded
+  values mean.
+
+Results are domain-aware throughout: values carry their unit, and coded fields come back with a
+decoded label alongside the raw number. The same data is also exposed as MCP **resources** (a
+documentation reference, and a live-state and schema resource per source) for clients that use them.
+
+The server also offers a few **prompts** - ready-made tasks you can pick in the client: *home status*
+(summarise everything now), *usage trends* (historical analysis, e.g. "electricity this month vs
+last"), and, when device control is enabled, *control device*.
+
+History queries run against InfluxDB through a fixed, parameterised query builder - never a raw
+query from the model - with field names checked against the measurement's live field list, time
+ranges normalised in the app, and a capped result size.
 
 Usage
 -----

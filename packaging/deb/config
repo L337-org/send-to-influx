@@ -170,6 +170,29 @@ case "$SOURCES" in
         ;;
 esac
 
+# Remote MCP server - the third shared-infrastructure block, and like MQTT
+# conditional rather than unconditional, but gated on its own yes/no rather
+# than on a source selection: the MCP server isn't a data source, it's an
+# optional interface over all of them. The mcp-enable boolean is asked at
+# high priority (defaults to "no") so it actually appears on a normal install
+# - a medium question would be silently skipped at debconf's default
+# threshold, exactly the trap the per-source questions hit. Its three fields
+# are only asked when enabled, so a user who answers "no" (the common case)
+# sees just the one extra question. bind_address is deliberately NOT asked -
+# it's a tuning field with a safe default (127.0.0.1:8420) and public binds
+# are refused anyway, so it keeps the shipped default and is hand-edited if
+# ever needed, consistent with every other tuning field.
+db_input high send-to-influx/mcp-enable || true
+db_go || true
+
+db_get send-to-influx/mcp-enable
+if [ "$RET" = "true" ]; then
+    db_input high send-to-influx/mcp-public-url || true
+    db_input high send-to-influx/mcp-user || true
+    db_input high send-to-influx/mcp-password || true
+    db_go || true
+fi
+
 # Release the frontend cleanly at the end of the conversation, matching the
 # upgrade early-exit path above.
 db_stop || true

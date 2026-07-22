@@ -86,6 +86,196 @@ with no documented meaning is written through unchanged); see UNITS.md for what 
 source-specific runtime dependency like `speedtest-cli`, pure Python so the `.deb`'s
 `Architecture: all` design holds) is imported only in `toinflux/mqtt.py`.
 
+### MCP server (`toinflux/mcpserver.py`)
+
+The optional remote MCP server (introduced in 5.0) is *not* a `DataHandler` - it's the project's
+first inbound-network-facing component, a Streamable-HTTP server built on the official `mcp` SDK's
+`FastMCP` + built-in OAuth 2.1 authorization server, run in its own daemon thread (`anyio` inside
+the thread; nothing else in the synchronous codebase changes). Enabled iff both `mcp.user` and
+`mcp.password` are set (no separate flag; one without the other is a `ConfigError` - see
+`mcp_block_errors()`/`mcp_enabled()` in `toinflux/general.py`); started from
+`sendtoinflux.py`'s `maybe_start_mcp_server()` (skipped in `--print`/`--dump` modes). Key
+decisions:
+
+- **Bind vs public**: binds `mcp.bind_address` (default `127.0.0.1:8420`) in plain HTTP;
+  `validate_settings()` refuses the any-interface wildcards (`0.0.0.0`/`::`) *and* any
+  globally-routable public IP literal outright with no override (loopback and private/LAN addresses
+  are allowed, since the reverse proxy may run on another host; a non-IP hostname can't be
+  classified without a DNS lookup so is allowed with a WARNING) - plain-HTTP OAuth on a public
+  interface is never valid, TLS termination belongs to the user's reverse proxy. The
+  external HTTPS address is `mcp.public_url` (required when enabled, must be `https://`): the
+  OAuth issuer/discovery metadata and login-page redirects are built from it, never from the bind
+  address. The SDK's DNS-rebinding protection stays enabled with the public hostname allowlisted
+  (a reverse-proxied request carries the public Host header, which the SDK's localhost-only
+  default would reject).
+- **OAuth storage** (`SendToInfluxOAuthProvider` + `OAuthStateStore`): dynamic client
+  registrations and refresh tokens persist across restarts in `mcp.state_file` (default
+  `mcp-oauth-state.json` next to settings.yaml - the one path the packaged service's sandbox
+  guarantees writable), written atomically at 0600; refresh tokens stored as SHA-256 hashes only.
+  postinst restarts the service on every upgrade, so in-memory-only state would break the Claude
+  connector on every unattended upgrade. Access tokens are in-memory (1 h TTL) - a restart
+  invalidates them and the client recovers silently via refresh. The SDK's token endpoint does
+  PKCE/expiry/client-binding verification itself; the provider only stores, loads, and issues.
+- **Login page** (`/login`, via `FastMCP.custom_route`): resource-owner step gated on
+  `mcp.user`/`mcp.password` (constant-time comparison), single-use unguessable transaction ids
+  minted by `authorize()`. Failed attempts are throttled per client address
+  (`LoginThrottle`: 5 failures → 300 s lockout, WARNING-logged) - behind a reverse proxy every
+  request carries the proxy's address, so the lockout is effectively global, which is the intended
+  behaviour for a single-user login page, not a limitation.
+- `mcp-password` is in `CREDENTIAL_FIELDS` like every other secret; its `PLACEHOLDER_VALUES`
+  entry is deliberately the empty string (empty-means-disabled is the block's enablement
+  mechanism, and `--remove` reverting to `""` is exactly the disabled state).
+- The `mcp` SDK is imported only inside `toinflux/mcpserver.py` (lazily, gated on `mcp_enabled()`),
+  like `paho-mqtt` in the MQTT transport - but unlike paho it is **not** pure Python: its chain
+  needs `pydantic_core` and `rpds-py` (Rust-compiled, no fallback), which is what the packaging
+  section's compiled-wheel matrix exists for. `rpds-py` is held to `~=0.30.0` in requirements.txt
+  (2026.x CalVer releases dropped Python 3.10 wheels; the build fails loudly if coverage regresses).
+**Write tools** (`toinflux/mcp_write.py`, `register_write_tools()`): the MCP server is read-only by
+default. A source becomes controllable only when it's both `MCP_WRITABLE` (a class flag - Hue and
+Speedtest today) *and* the operator opts in with `<source>.mcp_read_write: true`
+(`DataHandler.mcp_write_enabled()`, strict `is True`; `validate_settings()` rejects a non-bool so a
+mistyped `"true"` fails loud instead of silently staying off). Design points:
+  - **Least privilege**: when no source is write-enabled, `register_write_tools()` registers *nothing*
+    - no write tool appears on the server's advertised surface at all, not present-and-refusing. So
+      the capability can't be probed or bypassed when it's off.
+  - **Per-collector, not generic**: writes are heterogeneous (a Hue light takes on/brightness/colour,
+    a Speedtest run takes nothing), so each writable source gets its own bespoke, well-described
+    tool(s), wired by a per-source registrar in `_WRITE_TOOL_REGISTRARS` (keyed by source name) and
+    gated per source; a write-enabled source with no registrar is logged and skipped, not a crash.
+    The vendor logic lives on the source class (like the read domain knowledge); `mcp_write.py` only
+    wires it up and owns the per-call handler lifecycle. (This supersedes the earlier single generic
+    `set_device_state`; SI-7's PID actuation reuses the shared `mcp_common` plumbing, not one tool.)
+  - **Hue** (`toinflux/philipshue.py`): tools `hue_list_devices` + `hue_set_light`.
+    `mcp_set_device_state()` resolves the target against the live device list
+    (`mcp_list_writable_devices()`, the write allowlist which also reports each light's capabilities -
+    an unknown or ambiguous name is refused, never guessed, since actuating the wrong light isn't
+    recoverable), and is **capability-aware per capability**: brightness, colour temperature and
+    colour are independent (a Hue install spans white-only / colour-temperature / full-RGB tiers), and
+    asking a light for one it lacks is a `ToolParamError` naming the device, not a silent no-op.
+    Brightness 0-100% maps to the bridge's 1-254 `bri` (0% is min-on, not off - off is `on=False`);
+    `color_temp_k` (kelvin) converts to `ct` mireds and clamps to the light's reported range; `color`
+    (an `#rrggbb` hex or a known name) converts to CIE `xy` (`ct`/`xy` are mutually exclusive - asking
+    for both is rejected). Setting brightness/temperature/colour auto-adds `on=True` (the bridge
+    ignores them on an off light) unless `on` is explicitly false. `PUT`s to
+    `/api/{user}/lights/{id}/state` over the collector's own session/auth and `hue.insecure` TLS
+    policy; the CLIP API returns 200 with a per-key success/error list, so a bridge-reported error is
+    surfaced as `SourceConnectionError`.
+  - **Speedtest** (`toinflux/speedtest.py`): tool `speedtest_run` (no args) via `mcp_trigger_run()` -
+    runs a test *on the local host only* (separate hosts run separate processes with no listener, so
+    cross-host triggering isn't possible; kept deliberately simple) and records it to InfluxDB
+    best-effort (a failed write flags `recorded: false`, not fatal). A class-level `_run_lock` in
+    `get_data()` enforces one run at a time per host - shared between the collector worker and the
+    trigger, so a triggered run overlapping the scheduled cycle (or another trigger) raises
+    `SourceConnectionError` rather than starting a second, mutually-skewing test. Unlike Hue this
+    controls no external device; `MCP_LIVE_STATE=False` still keeps the *read* path from ever running
+    a test.
+  - Per-call handler/session lifecycle and the ToolParamError-vs-SourceConnectionError split are the
+    same as the read tools: the shared per-call plumbing (`resolve_handler`, `close_session`,
+    `configured_sources`) lives in `toinflux/mcp_common.py`, which every tool module imports from
+    rather than from each other. Every applied write is logged at INFO.
+  - This is the project's first device-control capability and gets a dedicated `/security-review`
+    before the feature branch merges to `main`.
+
+**Packaging** (debconf + systemd): the `mcp:` block is the third shared-infrastructure block after
+`influx:` and `mqtt:`, but gated on its own `mcp-enable` boolean (asked at priority `high`, default
+no) rather than a source selection - the MCP server is an interface over all sources, not a source.
+When enabled, debconf collects `mcp-public-url`/`mcp-user`/`mcp-password`; `bind_address` is a
+defaulted tuning field and never prompted. `postinst` back-fills the `mcp:` section with
+`--ensure-section` (settings.yaml is never rewritten by an upgrade, so the section is absent on
+installs predating this feature) and requires public_url + user + a password (typed or already in
+systemd-creds) all present before enabling - a partial `mcp:` block makes `load_settings()` raise a
+fatal `ConfigError` that stops **every** collector, not just the server. `public_url` and `user` are
+required strings that persist and pre-fill on reconfigure (like `mqtt-broker-host`/`hue-host` - only
+the *secret* `mcp-password` is cleared after use, so password-only rotation works: leave the
+pre-filled url/user and type just the new password). Because the service is only (re)started at the
+very end of `postinst`, only the final settings state matters, so on a failed password store: if no
+credential existed yet (a fresh enable) the username is reverted (enable-then-revert → coherent
+disabled block); if one already existed (a reconfigure) the previously-stored password is kept and
+the working install is left enabled - never disabled out from under a running server.
+`hue.mcp_read_write` stays hand-edited (a tuning toggle, never prompted). The MCP server also made
+this the first inbound-network-facing service, so the systemd unit gained a conservative hardening
+set (`ProtectKernel*`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, empty
+`CapabilityBoundingSet`, `SystemCallFilter=@system-service`, etc. - `MemoryDenyWriteExecute` and a
+hand-rolled narrower syscall filter deliberately omitted as Python-fragile); `ReadWritePaths` already
+covers the OAuth state file (it lives in `/etc/send-to-influx`). `test-packaging.sh` seeds the MCP
+answers in the fresh-install scenario (asserting public_url/user land in settings.yaml, the password
+in the credstore and not in plaintext) and, where real systemd is present, asserts the server
+actually binds `127.0.0.1:8420` under the full hardened sandbox (the real test that the hardening +
+`LoadCredentialEncrypted` don't break the network-facing server).
+
+**Read tools** (`toinflux/mcp_read.py`, registered onto the server by `register_read_tools()`):
+five read-only tools - `list_sources`, `list_fields`, `query_history`, `get_current_state`, and
+`get_documentation` - exposing each configured collector's live and historical state, domain-aware
+rather than a raw passthrough. The read mechanics live in `mcp_read.py`; the per-source domain
+knowledge lives on the `DataHandler` subclasses as class attributes (`MCP_MEASUREMENT`,
+`MCP_TAG_FILTERS`, `MCP_FIELD_METADATA`, plus `MCP_DESCRIPTION` and `MCP_LIVE_STATE` - see below) so
+there's no parallel schema to keep in step - `ReadSchema`/`build_schema()` combine those with a live
+field set. Design points:
+  - **History vs current state**: `query_history` answers "when did X change / trends"; the new
+    `get_current_state(source)` answers "what is X *now*" ("is the door locked", "which lights are
+    on"). For a live source it calls the source's own `get_data()` (a cheap API/MQTT read) and
+    decodes it through the *same* `MCP_FIELD_METADATA` as history, so a coded value reads back as its
+    label ("locked"), never a bare number. `MCP_LIVE_STATE` (base default `True`) is `False` on
+    Speedtest (its `get_data()` runs a full speed test - must never fire on a read) and Octopus (~24 h
+    delayed, so no fresher than InfluxDB); for those, current-state reads the latest recorded point
+    from InfluxDB (`build_latest_query`/`_latest_recorded`) and the result's `state` field says which
+    (`live`/`last_recorded`). `get_documentation()` synthesises a static, InfluxDB-free Markdown
+    reference of every source's `MCP_DESCRIPTION` + field units/codes (not a shipped file - it can't
+    drift from what the tools expose); `list_sources` now carries each source's `MCP_DESCRIPTION`.
+  - **Measurements aren't always the source name**: `openmeteo` writes to `weather`, and the three
+    MyEnergi devices share the `myenergi` measurement distinguished by a `device` tag - so their
+    classes set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS`, or a query for one device would return all
+    three. Every other source owns its measurement (`MCP_MEASUREMENT` stays `None` → source name).
+  - **Injection defence, layered** (InfluxQL has no identifier parameter binding): the measurement
+    and tags come from the source class's static schema, never model input; a requested field must
+    exactly match a key discovered live via `SHOW FIELD KEYS` (the field set *is* the allowlist,
+    and it handles collectors with dynamic field names - Hue sensors, per-lock Nuki prefixes);
+    every identifier is additionally charset-validated and double-quoted with escaping; time bounds
+    are parsed in Python and re-emitted as RFC3339 (the model's raw string never reaches the query);
+    aggregation is a fixed name→InfluxQL-function map and any GROUP BY interval matches a duration
+    grammar. Result size is capped (`MAX_RESULT_POINTS`).
+  - **A single query path serves v1 and v2**, mirroring `_build_write_request()`'s branch: `GET
+    /query` with a `Token` header (v2) or HTTP basic auth (v1), `epoch=s`. v2's v1-compatibility
+    `/query` endpoint needs no extra provisioning in the default case (virtual DBRP mappings keyed
+    by bucket name since InfluxDB 2.9) - verified against real v1 and v2 containers.
+  - **`SHOW FIELD KEYS` is per-measurement, not per-tag**, so for the three shared-measurement
+    MyEnergi devices `list_fields` shows the others' fields too; a query for a cross-device field
+    is safe and returns no points (the tag filter excludes it). Documented accepted limitation.
+  - **`MCP_FIELD_METADATA`** maps a field key - or a `_`-delimited suffix, for dynamically-prefixed
+    fields like Nuki's `Front_Door_stateValue` - to `{"unit": ...}` and/or `{"codes": {int: str}}`;
+    `annotate_rows()` attaches units and decodes coded values to labels (an undocumented code passes
+    through with a null label, matching the collector's raw-passthrough rule). Sourced from UNITS.md.
+  - Blocking InfluxDB HTTP runs in a worker thread (`anyio.to_thread.run_sync`) so a query doesn't
+    stall the server's async event loop. `ToolParamError` (a bad field/time/aggregation/device -
+    shared by the read and write tools, defined in `toinflux/exceptions.py`; a non-retryable
+    caller/model mistake) surfaces to the model as a tool error; `SourceConnectionError` is a
+    transient transport failure the collector loop would retry, so the two are kept distinct.
+
+**Resources** (`toinflux/mcp_resources.py`, `register_resources()`): the addressable/listable view of
+the same read data - the design rule is *anything exposed as a resource is also a tool* (MCP clients
+use resources in limited ways, so the tools stay the workhorses). Three kinds, all built from the
+read builders in `mcp_read.py` so there's no second implementation: `docs://reference` (the
+`get_documentation` Markdown), and per configured source `schema://<source>` (its `list_fields`
+payload) and `state://<source>` (its `get_current_state` payload). Per-source resources are
+registered *concretely* (one per source, via a factory so each closure binds its own source name),
+not as one URI template, so a client's `resources/list` enumerates each source's snapshot and schema
+directly. The current-state builder (`current_state_result`) and `list_fields` payload builder
+(`list_fields_result`) are public in `mcp_read` for exactly this reason - the resources module imports
+them, rather than reaching into privates.
+
+**Prompts** (`toinflux/mcp_prompts.py`, `register_prompts()`): parameterised task templates the user
+invokes from the client - they add no capability, only orient the model on how to combine the tools
+for the tasks this server is for. Three, kept generic (a free-text focus/question/request, never
+hard-coded devices): `home_status` (summarise current state, optional focus area), `usage_trends`
+(historical analysis/cross-source comparison), and `control_device` (the check-state→act flow).
+`control_device` is registered *only* when a source has writes enabled (`writable_enabled_sources`,
+the same gate as the write tools) - a read-only install offers no control prompt, so nothing
+advertises a capability that isn't there. `home_status`/`usage_trends` are always registered.
+`build_mcp_server()` computes the write-enabled list *once* and passes it into both
+`register_prompts()` and `register_write_tools()` (each accepts an `enabled_sources=` override, and
+falls back to computing it when called standalone), so the per-source handler construction that
+computation costs isn't done twice at startup.
+
 ### Entry point (`sendtoinflux.py`)
 
 - **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source. Connection failures (`SourceConnectionError`) are retried with exponential backoff (base 5 s, max 300 s); a `ConfigError` is not retried — it exits the process immediately with code 1.
@@ -123,6 +313,24 @@ source-specific runtime dependency like `speedtest-cli`, pure Python so the `.de
    `CREDENTIAL_FIELDS`/`PLACEHOLDER_VALUES` (`toinflux/credentials.py`) — that alone makes
    `send-to-influx-set-credential <name>` work, the machinery is fully table-driven.
 4. Add tests in `tests/test_newsource.py`, reusing fixtures from `tests/conftest.py`.
+4b. For the MCP read tools/resources: set `MCP_FIELD_METADATA` on the class (units, and `codes` for
+   any numeric-coded field) from the UNITS.md entry, and a one-line `MCP_DESCRIPTION` of what the
+   source reports (surfaced by `list_sources`, the documentation tool, and the per-source resources).
+   Set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS` if the source's InfluxDB measurement isn't its own name or
+   it shares a measurement with others. Leave `MCP_LIVE_STATE` at its `True` default *unless*
+   `get_data()` is expensive or pointless to call live (a full run like Speedtest, or delayed data
+   like Octopus) - set it `False` and current-state will read the latest InfluxDB point instead.
+   Nothing else is needed - the source is exposed by the read tools *and* resources automatically once
+   it's in `sources:`.
+4c. (Only if the source can be *controlled* or *actioned*, and its vendor API has a documented write
+   path.) Set `MCP_WRITABLE = True` and implement the source's vendor write logic as method(s) on the
+   class (see `Hue`'s `mcp_set_device_state`/`mcp_list_writable_devices`, or `Speedtest`'s
+   `mcp_trigger_run`), keeping the name→id/param/capability mapping there. Then add a per-source
+   registrar to `_WRITE_TOOL_REGISTRARS` in `toinflux/mcp_write.py` that wires the source's bespoke,
+   well-described tool(s) onto the server (a write-enabled source with no registrar is logged and
+   skipped, not silently controllable). Add `<source>.mcp_read_write` (bool, default false) to
+   `example_settings.yaml`; validation already rejects a non-bool. The tools appear once the operator
+   opts in. Most sources are read-only and skip this.
 5. Update README.md, UNITS.md, CLAUDE.md, and `.github/copilot-instructions.md`.
 6. Wire the source into the debconf install flow — a mechanical checklist, not a judgment call
    (every rule below is an existing, tested convention; the scenario suite enforces most of them):
@@ -177,7 +385,7 @@ source-specific runtime dependency like `speedtest-cli`, pure Python so the `.de
 
 - `pyproject.toml` is the single source of truth for the package version (`[project].version`) and runtime dependencies (dynamically read from `requirements.txt`). Bump the version there, not in `sendtoinflux.py`.
 - `sendtoinflux.py`'s `__version__` is read from installed package metadata (`importlib.metadata.version("send-to-influx")`), falling back to `"0.0.0-dev"` when run from a source checkout without the package installed. `requirements-dev.txt` includes `-e .` so dev/test environments have it installed and see the real version.
-- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/preinst`/`postinst`/`prerm`/`postrm`). `/etc/send-to-influx/settings.yaml` is deliberately *not* a dpkg conffile: `postinst` and `send-to-influx-set-credential` write debconf answers/sentinels into it, and dpkg's conffile machinery treats any maintainer-script write as a local modification (Debian Policy 10.7.3 forbids the combination) - guaranteeing a "modified (by you or by a script)" prompt on every upgrade that ships a changed example, with a one-keypress path to replacing a configured file with the pristine example. Instead the example ships at `/usr/share/send-to-influx/example_settings.yaml` and `postinst` copies it into place only if `/etc/send-to-influx/settings.yaml` doesn't exist (the Policy 10.7.3 "configuration files handled by maintainer scripts" pattern; `postrm` removes it on purge, as that pattern requires) - so upgrades never touch the live file at all. On upgrade (and after a `dpkg-reconfigure` that rewrote configuration), `postinst` restarts the service if - and only if - it's currently running, so unattended upgrades don't leave the replaced code running until the next reboot; a stopped service is never started. Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead renames it to the version-independent `lib/python3` and `postinst` symlinks every supported minor to it (see the `preinst`/layout bullet below for why the symlinks are created there rather than shipped; both bounds come from `PYTHON_MIN_SUPPORTED_MINOR`/`PYTHON_MAX_SUPPORTED_MINOR`, which also drive `Depends:` and are substituted into `postinst`, so the range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds the same script's output on an `ubuntu-24.04-arm` runner on every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - catching both a future dependency change that makes a compiled extension load-bearing rather than optional, and any regression in the maintainer-script behaviour below, before it can merge; `bookworm-verify` re-runs the same suite in a `debian:12` container for systemd-252 coverage (the restart scenario self-skips there - no running systemd - but the systemd-creds *tooling* is the real 252 binaries, which is what caught out 4.1). See the README's "Running as a systemd service" section.
+- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/preinst`/`postinst`/`prerm`/`postrm`). `/etc/send-to-influx/settings.yaml` is deliberately *not* a dpkg conffile: `postinst` and `send-to-influx-set-credential` write debconf answers/sentinels into it, and dpkg's conffile machinery treats any maintainer-script write as a local modification (Debian Policy 10.7.3 forbids the combination) - guaranteeing a "modified (by you or by a script)" prompt on every upgrade that ships a changed example, with a one-keypress path to replacing a configured file with the pristine example. Instead the example ships at `/usr/share/send-to-influx/example_settings.yaml` and `postinst` copies it into place only if `/etc/send-to-influx/settings.yaml` doesn't exist (the Policy 10.7.3 "configuration files handled by maintainer scripts" pattern; `postrm` removes it on purge, as that pattern requires) - so upgrades never touch the live file at all. On upgrade (and after a `dpkg-reconfigure` that rewrote configuration), `postinst` restarts the service if - and only if - it's currently running, so unattended upgrades don't leave the replaced code running until the next reboot; a stopped service is never started. Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. The two exceptions since the MCP server landed are `pydantic_core` and `rpds-py` (required by the `mcp` SDK, Rust-compiled, no pure-Python fallback): the blanket strip removes them too, and a dedicated compiled-wheel-matrix step then merges the compiled extensions from the prebuilt manylinux wheels for every supported minor (3.10-3.14, `COMPILED_WHEEL_MINORS`) x both architectures into the shared site-packages - CPython only imports a `.so` tagged with its own exact ABI, so the variants coexist; the build fails loudly if any minor/arch combination is missing, which (together with the `rpds-py~=0.30.0` hold in requirements.txt) is the guard against a wheel version dropping a supported minor. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead renames it to the version-independent `lib/python3` and `postinst` symlinks every supported minor to it (see the `preinst`/layout bullet below for why the symlinks are created there rather than shipped; both bounds come from `PYTHON_MIN_SUPPORTED_MINOR`/`PYTHON_MAX_SUPPORTED_MINOR`, which also drive `Depends:` and are substituted into `postinst`, so the range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds the same script's output on an `ubuntu-24.04-arm` runner on every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - catching both a future dependency change that makes a compiled extension load-bearing rather than optional, and any regression in the maintainer-script behaviour below, before it can merge; `bookworm-verify` re-runs the same suite in a `debian:12` container for systemd-252 coverage (the restart scenario self-skips there - no running systemd - but the systemd-creds *tooling* is the real 252 binaries, which is what caught out 4.1). See the README's "Running as a systemd service" section.
 - `packaging/deb/preinst` deletes the whole bundled venv (`/opt/send-to-influx/venv`) so the
   unpack that follows lays down a pristine one. The venv is entirely package-owned and recreated by
   every install - no configuration (that's `/etc/send-to-influx`), no credentials (the credstore),
@@ -251,9 +459,11 @@ the source-checkout/screen-session path, where `systemd-creds` doesn't apply at 
 
 - `toinflux/credentials.py`: `CREDENTIAL_FIELDS` is the single source of truth mapping a systemd-creds
   credential name (e.g. `influx-token`) to the `(top-level key, field)` it overlays in the parsed
-  settings dict (e.g. `("influx", "token")`) - 7 credentials across `influx` (`token`, `user`,
-  `password`), `hue` (`user`), `mqtt` (`password`), `myenergi` (`apikey`), `octopus` (`api_key`). `PLACEHOLDER_VALUES`
-  matches `example_settings.yaml`'s literal placeholder text per field; `sentinel_for(name)` returns
+  settings dict (e.g. `("influx", "token")`) - 8 credentials across `influx` (`token`, `user`,
+  `password`), `hue` (`user`), `mqtt` (`password`), `mcp` (`password`), `myenergi` (`apikey`),
+  `octopus` (`api_key`). `PLACEHOLDER_VALUES`
+  matches `example_settings.yaml`'s literal placeholder text per field (`mcp-password`'s is
+  deliberately the empty string - see the MCP server section above); `sentinel_for(name)` returns
   the cosmetic string written into `settings.yaml` once a field is migrated (never read back for real
   use - purely informational for a human reading the file). `apply_credential_substitution(settings)`
   overlays whatever's decrypted into `$CREDENTIALS_DIRECTORY` (set by systemd when the unit's

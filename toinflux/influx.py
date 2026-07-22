@@ -107,6 +107,53 @@ def _escape_key_or_tag_value(value):
 class DataHandler:
     """Class to send data to InfluxDB"""
 
+    # --- MCP read schema (domain knowledge for the read-query tool) ---
+    # The InfluxDB measurement this source writes to; None means "same as the
+    # source name" (true for most sources - hue, speedtest, octopus, ...).
+    # Overridden where they differ (openmeteo -> weather) or where several
+    # sources share one measurement distinguished by a tag (the myenergi trio).
+    MCP_MEASUREMENT: "str | None" = None
+    # Tag key/value filters that disambiguate this source within a shared
+    # measurement (e.g. {"device": "zappi"}); empty for a source that owns its
+    # measurement outright.
+    MCP_TAG_FILTERS: dict = {}
+    # Field annotation for the read tool: maps a field key - or a _-delimited
+    # suffix, for collectors with dynamic prefixes (Nuki's per-lock fields) - to
+    # {"unit": str} and/or {"codes": {int: str}} for decoding numeric state
+    # codes. Sourced from UNITS.md; kept here so the read tool is domain-aware
+    # without a parallel schema to maintain.
+    MCP_FIELD_METADATA: dict = {}
+    # A short human description of what this source reports, surfaced by the MCP
+    # read tools/resources (list_sources, the documentation tool, the per-source
+    # resources) so the model knows what a source *is*, not just its name. Empty
+    # on the base; every concrete source sets it.
+    MCP_DESCRIPTION = ""
+    # Whether the MCP current-state read may call this source's get_data() live
+    # (a cheap API/MQTT read for most sources). False where a live read is
+    # expensive or pointless: Speedtest (get_data() runs a full download/upload)
+    # and Octopus (data is ~24 h delayed, so the API is no fresher than InfluxDB)
+    # - for those, current-state reads the latest recorded point from InfluxDB
+    # instead of ever calling get_data().
+    MCP_LIVE_STATE = True
+    # Whether this source implements a write/control path the MCP server can
+    # expose. A subclass with MCP_WRITABLE = True provides its own vendor write
+    # method(s) - the shape is per source, e.g. Hue's mcp_set_device_state()/
+    # mcp_list_writable_devices() or Speedtest's mcp_trigger_run() - and is wired
+    # to its own bespoke tool(s) by a per-source registrar in
+    # _WRITE_TOOL_REGISTRARS (toinflux/mcp_write.py). Even for a writable source,
+    # the write tools are only registered when the operator also opts in per
+    # source via `<source>.mcp_read_write: true` - see mcp_write_enabled(). A
+    # disabled capability isn't registered at all (least privilege), never
+    # registered-and-refusing.
+    MCP_WRITABLE = False
+
+    def mcp_write_enabled(self):
+        """Return True only when this source is writable *and* the operator has
+        opted in with ``<source>.mcp_read_write: true`` (strict ``is True``, so a
+        stray truthy string like ``"true"`` doesn't silently enable device
+        control). The default is off - writes are opt-in per source."""
+        return self.MCP_WRITABLE and self.source_settings.get("mcp_read_write", False) is True
+
     # Bounded per-source buffer of points that failed to write, flushed on the next
     # successful send. Each entry is a mutable [line, rejection_count] pair - the count
     # tracks how many times the server has rejected (4xx) that specific point, so

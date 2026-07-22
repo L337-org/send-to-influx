@@ -17,6 +17,16 @@ OCTOPUS_BASE_URL = "https://api.octopus.energy/v1"
 class Octopus(DataHandler):
     """Child class of DataHandler to get data from Octopus Energy"""
 
+    MCP_DESCRIPTION = "Octopus Energy smart meter: latest electricity/gas consumption and unit rate."
+    # ~24 h delayed, so a live API read is no fresher than InfluxDB - current-state
+    # reads the latest recorded point instead of calling get_data() (see DataHandler).
+    MCP_LIVE_STATE = False
+    MCP_FIELD_METADATA = {
+        "consumption_kwh": {"unit": "kWh"},
+        "gas_consumption": {"unit": "kWh or m³"},
+        "unit_rate_p_per_kwh": {"unit": "pence/kWh (inc. VAT)"},
+    }
+
     def _get(self, path):
         """Make an authenticated GET request to the Octopus Energy API.
 
