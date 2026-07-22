@@ -292,6 +292,14 @@ class TestHueSetLight:
         with pytest.raises(SourceConnectionError, match="resource not available"):
             handler.mcp_set_device_state("Kitchen", on=True)
 
+    def test_bridge_error_non_dict_surfaces_cleanly(self):
+        # A malformed error item whose "error" isn't a dict must still surface a
+        # clean SourceConnectionError, not crash with AttributeError from .get().
+        handler = make_hue()
+        _wire_bridge(handler, put_result=[{"error": "resource not available"}])
+        with pytest.raises(SourceConnectionError, match="resource not available"):
+            handler.mcp_set_device_state("Kitchen", on=True)
+
     def test_transport_failure_surfaces(self):
         handler = make_hue()
         _wire_bridge(handler)

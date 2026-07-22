@@ -459,8 +459,15 @@ class Hue(DataHandler):
         if not isinstance(result, list):
             logging.error("Hue Bridge returned an unexpected response shape to a write - %.200r", result)
             raise SourceConnectionError(f"Hue Bridge returned an unexpected response: {result!r:.200}")
+        # Guard item["error"] being a non-dict (a malformed bridge/proxy response):
+        # fall back to its string form rather than crashing on .get(), mirroring the
+        # read path's defensive handling in get_data_from_hue_bridge().
         errors = [
-            item["error"].get("description", str(item["error"]))
+            (
+                item["error"].get("description", str(item["error"]))
+                if isinstance(item["error"], dict)
+                else str(item["error"])
+            )
             for item in result
             if isinstance(item, dict) and "error" in item
         ]
