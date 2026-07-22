@@ -780,7 +780,8 @@ def register_read_tools(server, settings, settings_file=None):
         limit: int = DEFAULT_RESULT_POINTS,
     ) -> dict:
         """Query a field's history for a source from InfluxDB. Reads only; to
-        change a device use `set_device_state` (when write-enabled).
+        change a device use that source's control tool, e.g. `hue_set_light`
+        (when write-enabled).
 
         Discover valid `source`/`field` names with `list_sources`/`list_fields`
         first - an unknown field, or a start/end/aggregation/group_by that does

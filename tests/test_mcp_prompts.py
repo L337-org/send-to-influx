@@ -67,4 +67,6 @@ class TestPromptContent:
         server = _register(_server(), writable=["hue"])
         text = _render(server, "control_device", {"request": "turn on the kitchen light"})
         assert "turn on the kitchen light" in text
-        assert "list_writable_devices" in text and "set_device_state" in text
+        # References the actual per-collector write tools, not the removed generic ones.
+        assert "hue_list_devices" in text and "hue_set_light" in text
+        assert "set_device_state" not in text and "list_writable_devices" not in text

@@ -80,13 +80,15 @@ def register_prompts(server, settings, settings_file=None, enabled_sources=None)
         def control_device(request: str) -> str:
             return (
                 f"I'd like to control a device: {request}\n\n"
-                "Identify the target with `list_writable_devices` first. If the request is ambiguous "
-                "or names a device that isn't listed, ask me rather than guessing - actuating the "
-                "wrong device isn't recoverable. Where it helps, check the current state first with "
-                "`get_current_state`. Then apply the change with `set_device_state` and confirm what "
-                "actually changed. If the requested control isn't supported (the device is read-only, "
-                "or control isn't enabled for that source), tell me plainly instead of working around "
-                "it."
+                "Pick the right control tool from the ones available - each controllable source has "
+                "its own (e.g. `hue_list_devices`/`hue_set_light` for Hue lights and plugs, "
+                "`speedtest_run` to trigger a speed test). List the devices first where the tool "
+                "offers it; if the request is ambiguous or names a device that isn't listed, ask me "
+                "rather than guessing - actuating the wrong device isn't recoverable. Where it helps, "
+                "check the current state first with `get_current_state`. Then apply the change and "
+                "confirm what actually changed. If the requested control isn't available (the device "
+                "is read-only, or control isn't enabled for that source), tell me plainly instead of "
+                "working around it."
             )
 
     return server
