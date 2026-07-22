@@ -272,6 +272,21 @@ class TestWriteToolRegistration:
         with patch("toinflux.mcp_write.resolve_handler", return_value=make_hue(mcp_read_write=False)):
             assert writable_enabled_sources({"sources": ["hue"]}, None) == []
 
+    def test_precomputed_enabled_sources_skips_recompute(self):
+        # build_mcp_server passes the write-enabled list in; the tools register from
+        # it without reconstructing handlers to recompute it.
+        server = self._server()
+        with patch("toinflux.mcp_write.writable_enabled_sources", side_effect=AssertionError("recomputed")):
+            register_write_tools(server, self._settings(), None, enabled_sources=["hue"])
+        names = {t.name for t in anyio.run(server.list_tools)}
+        assert names == {"list_writable_devices", "set_device_state"}
+
+    def test_precomputed_empty_registers_nothing(self):
+        server = self._server()
+        with patch("toinflux.mcp_write.writable_enabled_sources", side_effect=AssertionError("recomputed")):
+            register_write_tools(server, self._settings(), None, enabled_sources=[])
+        assert not anyio.run(server.list_tools)
+
     def test_set_device_state_on_disabled_source_is_rejected(self):
         handler = make_hue(mcp_read_write=False)
         with patch("toinflux.mcp_write.resolve_handler", return_value=handler):

@@ -97,7 +97,7 @@ def _set_device_state_result(settings, settings_file, *, source, device, on, bri
         close_session(handler.session)
 
 
-def register_write_tools(server, settings, settings_file=None):
+def register_write_tools(server, settings, settings_file=None, enabled_sources=None):
     """Register the device-write tools on a FastMCP server, but only if at least
     one configured source is enabled for writes. When none is, nothing is
     registered - the write capability is entirely absent from the server.
@@ -105,11 +105,15 @@ def register_write_tools(server, settings, settings_file=None):
     :param server: the FastMCP instance
     :param settings: parsed settings dict
     :param settings_file: settings path, for re-resolving handlers per call
+    :param enabled_sources: the pre-computed write-enabled source list, if the
+        caller already has it (build_mcp_server shares one computation with
+        register_prompts); ``None`` computes it here (constructing a handler per
+        source), so the function still stands alone.
     :return: the server
     """
     import anyio
 
-    enabled = writable_enabled_sources(settings, settings_file)
+    enabled = writable_enabled_sources(settings, settings_file) if enabled_sources is None else enabled_sources
     if not enabled:
         return server
     logging.info("MCP device-write tools enabled for: %s", ", ".join(enabled))

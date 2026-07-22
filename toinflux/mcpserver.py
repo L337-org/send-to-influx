@@ -413,12 +413,17 @@ def build_mcp_server(settings, settings_file=None):
     from toinflux.mcp_prompts import register_prompts
     from toinflux.mcp_read import register_read_tools
     from toinflux.mcp_resources import register_resources
-    from toinflux.mcp_write import register_write_tools
+    from toinflux.mcp_write import register_write_tools, writable_enabled_sources
+
+    # Compute the write-enabled source list once (constructing a handler per
+    # source) and share it - both the control_device prompt and the write tools
+    # gate on it, so recomputing would double that per-source work at startup.
+    enabled_sources = writable_enabled_sources(settings, settings_file)
 
     register_read_tools(server, settings, settings_file)
     register_resources(server, settings, settings_file)
-    register_prompts(server, settings, settings_file)
-    register_write_tools(server, settings, settings_file)
+    register_prompts(server, settings, settings_file, enabled_sources=enabled_sources)
+    register_write_tools(server, settings, settings_file, enabled_sources=enabled_sources)
 
     return server
 

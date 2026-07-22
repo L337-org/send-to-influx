@@ -22,7 +22,7 @@ __license__ = "MIT License"
 from toinflux.mcp_write import writable_enabled_sources
 
 
-def register_prompts(server, settings, settings_file=None):
+def register_prompts(server, settings, settings_file=None, enabled_sources=None):
     """Register the task prompts on a FastMCP server. ``home_status`` and
     ``usage_trends`` are always registered; ``control_device`` only when a source
     has writes enabled (so it isn't offered on a read-only install).
@@ -30,8 +30,14 @@ def register_prompts(server, settings, settings_file=None):
     :param server: the FastMCP instance
     :param settings: parsed settings dict
     :param settings_file: settings path, for the write-enabled check
+    :param enabled_sources: the pre-computed write-enabled source list, if the
+        caller already has it (build_mcp_server shares one computation with
+        register_write_tools); ``None`` computes it here, so the function still
+        stands alone.
     :return: the server
     """
+    if enabled_sources is None:
+        enabled_sources = writable_enabled_sources(settings, settings_file)
 
     @server.prompt(
         name="home_status",
@@ -65,7 +71,7 @@ def register_prompts(server, settings, settings_file=None):
             "available history doesn't fully cover the period asked about."
         )
 
-    if writable_enabled_sources(settings, settings_file):
+    if enabled_sources:
 
         @server.prompt(
             name="control_device",

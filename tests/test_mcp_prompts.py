@@ -39,6 +39,14 @@ class TestRegisterPrompts:
     def test_control_prompt_present_when_writes_enabled(self):
         assert "control_device" in _prompt_names(_register(_server(), writable=["hue"]))
 
+    def test_precomputed_enabled_sources_used_without_recompute(self):
+        # build_mcp_server shares one write-enabled computation; when it's passed in,
+        # register_prompts must not call writable_enabled_sources again.
+        server = _server()
+        with patch("toinflux.mcp_prompts.writable_enabled_sources", side_effect=AssertionError("recomputed")):
+            register_prompts(server, {"sources": ["hue"]}, None, enabled_sources=["hue"])
+        assert "control_device" in _prompt_names(server)
+
 
 class TestPromptContent:
     def test_home_status_without_focus(self):

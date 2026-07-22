@@ -251,6 +251,10 @@ hard-coded devices): `home_status` (summarise current state, optional focus area
 `control_device` is registered *only* when a source has writes enabled (`writable_enabled_sources`,
 the same gate as the write tools) - a read-only install offers no control prompt, so nothing
 advertises a capability that isn't there. `home_status`/`usage_trends` are always registered.
+`build_mcp_server()` computes the write-enabled list *once* and passes it into both
+`register_prompts()` and `register_write_tools()` (each accepts an `enabled_sources=` override, and
+falls back to computing it when called standalone), so the per-source handler construction that
+computation costs isn't done twice at startup.
 
 ### Entry point (`sendtoinflux.py`)
 
