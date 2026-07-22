@@ -4,9 +4,13 @@ send-to-influx
 https://github.com/L337-org/send-to-influx
 -----------------------------------------
 
-Script to take data from various APIs and post it to InfluxDB in order to view the data in Grafana.
+Collect metrics from your smart-home and energy devices into InfluxDB — then query their **live and
+historical** state, and **control** the ones that support it, in natural language through Claude via
+an optional built-in [MCP server](#remote-mcp-server). Because the data lands in InfluxDB it's also
+there for Grafana dashboards and anything else that speaks it — Grafana is one consumer now, not the
+whole point.
 
-It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data sources.
+It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data sources. Most are read-only; Hue lights/plugs and on-demand Speedtest runs can be controlled through the MCP server when you opt in.
 
 It can be installed as a .deb package on supported platforms, or run directly from the source code in a Python virtual environment.
 

@@ -1,7 +1,7 @@
 # Copilot Instructions for send-to-influx
 
 ## Project Overview
-send-to-influx is a Python application that collects data from various smart home and energy monitoring devices and sends them to InfluxDB for time-series monitoring and visualization. The project is designed with a modular architecture that makes it easy to add new data sources.
+send-to-influx is a Python application that collects data from smart-home and energy-monitoring devices into InfluxDB, and (new in 5.0) exposes their live and historical state - plus control of the ones that support it (Hue lights/plugs, on-demand Speedtest runs) - in natural language through Claude via an optional built-in MCP server. Landing the data in InfluxDB keeps it available for Grafana and other consumers too. The project uses a modular architecture that makes it easy to add new data sources.
 
 Contributor-facing project structure and conventions live in [CONTRIBUTING.md](../CONTRIBUTING.md); see also [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md), [SECURITY.md](../SECURITY.md), and [PRIVACY.md](../PRIVACY.md).
 
