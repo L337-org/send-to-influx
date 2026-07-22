@@ -11,7 +11,7 @@ to **control** your devices, query their **live and historical** state, and ask 
 about **relationships between different measurements**, and **spot trends** in your data.
 
 Because the data is stored in InfluxDB it can also be **displayed in Grafana** dashboards and other
-visualization tools that supports it.
+visualization tools that support it.
 
 It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid 
 Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data sources. 
