@@ -13,14 +13,19 @@ from toinflux.mcp_read import (
     MAX_RESULT_POINTS,
     ReadSchema,
     annotate_rows,
+    build_documentation,
+    build_latest_query,
     build_query,
     build_schema,
+    current_state_result,
     discover_fields,
+    metadata_for,
     parse_time_bound,
     register_read_tools,
     resolve_db,
     resolve_schema,
     run_query,
+    _annotate_state_field,
     _influx_read_request,
 )
 
@@ -446,11 +451,17 @@ class TestRegisterReadTools:
         handler.session = MagicMock()
         return handler
 
-    def test_all_three_tools_registered(self):
+    def test_read_tools_registered(self):
         server = self._server()
         register_read_tools(server, self._settings(), None)
         names = {t.name for t in anyio.run(server.list_tools)}
-        assert names == {"list_sources", "list_fields", "query_history"}
+        assert names == {
+            "list_sources",
+            "list_fields",
+            "query_history",
+            "get_current_state",
+            "get_documentation",
+        }
 
     def test_list_sources(self):
         server = self._server()
@@ -556,3 +567,169 @@ class TestRegisterReadTools:
                     {"source": "zappi", "field": "evil", "start": "-1h", "end": "now"},
                 )
         assert "unknown field" in str(excinfo.value)
+
+    def test_get_current_state_tool(self):
+        server = self._server()
+        register_read_tools(server, self._settings(), None)
+        handler = self._handler()
+        handler.MCP_LIVE_STATE = True
+        handler.MCP_DESCRIPTION = "Zappi desc"
+        handler.get_data.return_value = {"sta": 3}
+        handler.MCP_FIELD_METADATA = {"sta": {"codes": {3: "charging"}}}
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            result = anyio.run(server.call_tool, "get_current_state", {"source": "zappi"})
+        text = result[0][0].text if isinstance(result, tuple) else result[0].text
+        assert "charging" in text and "live" in text
+
+    def test_get_documentation_tool(self):
+        server = self._server()
+        register_read_tools(server, self._settings(), None)
+        handler = self._handler()
+        handler.MCP_DESCRIPTION = "Zappi desc"
+        handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}}
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            result = anyio.run(server.call_tool, "get_documentation", {})
+        text = result[0][0].text if isinstance(result, tuple) else result[0].text
+        assert "data reference" in text and "zappi" in text
+
+
+class TestMetadataFor:
+    def test_exact_match_wins(self):
+        assert metadata_for({"gen": {"unit": "W"}}, "gen") == {"unit": "W"}
+
+    def test_longest_suffix_match(self):
+        meta = {"value": {"unit": "x"}, "stateValue": {"codes": {1: "locked"}}}
+        assert metadata_for(meta, "Front_Door_stateValue") == {"codes": {1: "locked"}}
+
+    def test_no_match_is_empty(self):
+        assert metadata_for({"gen": {"unit": "W"}}, "unrelated") == {}
+
+
+class TestAnnotateStateField:
+    def test_unit_only(self):
+        assert _annotate_state_field({"gen": {"unit": "W"}}, "gen", 1234) == {"value": 1234, "unit": "W"}
+
+    def test_coded_value_decoded(self):
+        meta = {"stateValue": {"codes": {1: "locked"}}}
+        assert _annotate_state_field(meta, "Front_Door_stateValue", 1) == {"value": 1, "label": "locked"}
+
+    def test_undocumented_code_gets_null_label(self):
+        meta = {"stateValue": {"codes": {1: "locked"}}}
+        assert _annotate_state_field(meta, "Front_Door_stateValue", 99) == {"value": 99, "label": None}
+
+    def test_no_metadata_is_value_only(self):
+        assert _annotate_state_field({}, "whatever", 5) == {"value": 5}
+
+
+class TestBuildLatestQuery:
+    def test_selects_named_fields_with_tag_filter(self):
+        q = build_latest_query("myenergi", {"device": "zappi"}, {"grd", "gen"})
+        assert q == 'SELECT "gen", "grd" FROM "myenergi" WHERE "device" = \'zappi\' ORDER BY time DESC LIMIT 1'
+
+    def test_no_tags(self):
+        q = build_latest_query("speedtest", {}, {"ping"})
+        assert q == 'SELECT "ping" FROM "speedtest" ORDER BY time DESC LIMIT 1'
+
+    def test_rejects_control_char_field(self):
+        with pytest.raises(ToolParamError, match="invalid field"):
+            build_latest_query("speedtest", {}, {"ping\n"})
+
+
+class TestCurrentStateResult:
+    """current_state_result: the live path reads get_data(); the non-live path
+    reads InfluxDB and must never call get_data()."""
+
+    def _live_handler(self):
+        handler = MagicMock()
+        handler.source = "zappi"
+        handler.MCP_LIVE_STATE = True
+        handler.MCP_DESCRIPTION = "Zappi desc"
+        handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}, "sta": {"codes": {3: "charging"}}}
+        handler.get_data.return_value = {"gen": 1234, "sta": 3}
+        handler.session = MagicMock()
+        return handler
+
+    def test_live_annotates_and_reports_state(self):
+        handler = self._live_handler()
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            result = current_state_result("zappi", {"sources": ["zappi"]}, None)
+        assert result["source"] == "zappi"
+        assert result["state"] == "live"
+        assert result["description"] == "Zappi desc"
+        assert result["fields"]["gen"] == {"value": 1234, "unit": "W"}
+        assert result["fields"]["sta"] == {"value": 3, "label": "charging"}
+        handler.session.close.assert_called_once()
+
+    def test_non_live_reads_latest_from_influx_without_get_data(self):
+        handler = MagicMock()
+        handler.source = "speedtest"
+        handler.MCP_LIVE_STATE = False
+        handler.MCP_MEASUREMENT = None
+        handler.MCP_TAG_FILTERS = {}
+        handler.MCP_DESCRIPTION = "speed"
+        handler.MCP_FIELD_METADATA = {"ping": {"unit": "ms"}}
+        handler.source_settings = {"db": "sdb"}
+        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"ping", "download"}),
+            patch(
+                "toinflux.mcp_read.run_query",
+                return_value=(["time", "download", "ping"], [[1700, None, 12.5]]),
+            ),
+        ):
+            result = current_state_result("speedtest", {"sources": ["speedtest"]}, None)
+        # Critical: a non-live source's get_data() (a full speed test) is never run.
+        handler.get_data.assert_not_called()
+        assert result["state"] == "last_recorded"
+        assert result["as_of"] == 1700
+        assert result["fields"]["ping"] == {"value": 12.5, "unit": "ms"}
+        # A field that came back NULL in the latest point is omitted, not reported None.
+        assert "download" not in result["fields"]
+        handler.session.close.assert_called_once()
+
+
+class TestBuildDocumentation:
+    def test_includes_descriptions_units_and_codes(self):
+        handler = MagicMock()
+        handler.source = "zappi"
+        handler.MCP_DESCRIPTION = "Zappi desc"
+        handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}, "sta": {"codes": {1: "paused", 3: "charging"}}}
+        handler.session = MagicMock()
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            doc = build_documentation({"sources": ["zappi"]}, None)
+        assert "# send-to-influx data reference" in doc
+        assert "## zappi" in doc
+        assert "Zappi desc" in doc
+        assert "`gen` - unit W" in doc
+        assert "1=paused, 3=charging" in doc
+        handler.session.close.assert_called_once()
+
+
+class TestSourceMcpMetadata:
+    def test_speedtest_and_octopus_are_not_live(self):
+        from toinflux.octopus import Octopus
+        from toinflux.speedtest import Speedtest
+
+        assert Speedtest.MCP_LIVE_STATE is False
+        assert Octopus.MCP_LIVE_STATE is False
+
+    def test_device_sources_are_live_by_default(self):
+        from toinflux.nuki import Nuki
+        from toinflux.philipshue import Hue
+
+        assert Hue.MCP_LIVE_STATE is True
+        assert Nuki.MCP_LIVE_STATE is True
+
+    def test_every_source_has_a_description(self):
+        from toinflux.carbonintensity import CarbonIntensity
+        from toinflux.myenergi import Eddi, Harvi, Zappi
+        from toinflux.nuki import Nuki
+        from toinflux.octopus import Octopus
+        from toinflux.openmeteo import OpenMeteo
+        from toinflux.philipshue import Hue
+        from toinflux.speedtest import Speedtest
+
+        for cls in (Hue, Nuki, Octopus, OpenMeteo, CarbonIntensity, Speedtest, Zappi, Eddi, Harvi):
+            assert cls.MCP_DESCRIPTION, f"{cls.__name__} has no MCP_DESCRIPTION"

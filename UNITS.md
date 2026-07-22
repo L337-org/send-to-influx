@@ -6,7 +6,9 @@ unless explicitly noted below.
 
 The optional MCP server's read tools surface these units and coded-value meanings to Claude
 (see each source class's `MCP_FIELD_METADATA` in `toinflux/`); keep the two in step when adding
-a source or field.
+a source or field. The server's `get_documentation` tool / `docs://reference` resource generate
+a machine-readable version of this from `MCP_FIELD_METADATA` plus each source's `MCP_DESCRIPTION`,
+so those class attributes - not this file - are what the model actually reads.
 
 ## Hue Bridge (`hue`)
 

@@ -107,19 +107,9 @@ class ReadSchema:
     field_metadata: dict = dataclass_field(default_factory=dict)
 
     def metadata_for(self, field):
-        """Return the metadata dict for a field: an exact key match first, else
-        the *longest* matching ``_``-delimited suffix (so ``Front_Door_stateValue``
-        picks up ``stateValue``, and a longer key wins over a shorter one it ends
-        with - e.g. ``stateValue`` over ``value``). Empty dict when nothing
-        matches. Longest-wins is deterministic regardless of dict order and stays
-        correct as metadata grows."""
-        if field in self.field_metadata:
-            return self.field_metadata[field]
-        best_key = None
-        for key in self.field_metadata:
-            if field.endswith(f"_{key}") and (best_key is None or len(key) > len(best_key)):
-                best_key = key
-        return self.field_metadata[best_key] if best_key is not None else {}
+        """Return the metadata dict for a field in this schema - see the
+        module-level :func:`metadata_for`."""
+        return metadata_for(self.field_metadata, field)
 
 
 def resolve_db(source_settings, influx_settings):
@@ -165,6 +155,31 @@ def build_schema(handler, discovered_fields, db):
         allowed_fields=set(discovered_fields),
         field_metadata=dict(handler.MCP_FIELD_METADATA),
     )
+
+
+def metadata_for(field_metadata, field):
+    """Return the metadata dict for a field: an exact key match first, else the
+    *longest* matching ``_``-delimited suffix (so ``Front_Door_stateValue`` picks
+    up ``stateValue``, and a longer key wins over a shorter one it ends with -
+    e.g. ``stateValue`` over ``value``). Empty dict when nothing matches.
+    Longest-wins is deterministic regardless of dict order and stays correct as
+    metadata grows.
+
+    Kept module-level (not only a ReadSchema method) so the live current-state
+    path can annotate a source's raw ``get_data()`` fields straight from the
+    handler's ``MCP_FIELD_METADATA``, without building an InfluxDB-backed schema.
+
+    :param field_metadata: a source's ``MCP_FIELD_METADATA`` mapping
+    :param field: the field key to look up
+    :return: the metadata dict (``{"unit"...}``/``{"codes"...}``) or ``{}``
+    """
+    if field in field_metadata:
+        return field_metadata[field]
+    best_key = None
+    for key in field_metadata:
+        if field.endswith(f"_{key}") and (best_key is None or len(key) > len(best_key)):
+            best_key = key
+    return field_metadata[best_key] if best_key is not None else {}
 
 
 def _decode_code(value, codes):
@@ -213,6 +228,26 @@ def annotate_rows(schema, field, columns, values):
     if codes:
         result["codes"] = {str(code): label for code, label in codes.items()}
     return result
+
+
+def _annotate_state_field(field_metadata, name, value):
+    """Shape one current-state field into ``{"value"[, "unit"][, "label"]}``,
+    reusing the same per-field metadata (unit, coded-value labels) as the history
+    tool. An undocumented coded value passes through with a null label.
+
+    :param field_metadata: the source's ``MCP_FIELD_METADATA``
+    :param name: the field key (possibly device-prefixed)
+    :param value: the field's current value
+    :return: the annotated entry dict
+    """
+    meta = metadata_for(field_metadata, name)
+    entry = {"value": value}
+    if meta.get("unit"):
+        entry["unit"] = meta["unit"]
+    codes = meta.get("codes")
+    if codes:
+        entry["label"] = _decode_code(value, codes)
+    return entry
 
 
 def _validate_identifier(value, kind):
@@ -362,6 +397,33 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     )
 
 
+def build_latest_query(measurement, tag_filters, fields):
+    """Build an InfluxQL SELECT for the single most recent point of a measurement -
+    the current-state read for a non-live source (see MCP_LIVE_STATE).
+
+    Selects each field explicitly (not ``*``) so tag columns are excluded, and
+    applies the source's static tag filters. Measurement, field and tag keys are
+    charset-validated and double-quoted, tag values quoted string literals - the
+    same layered defence as build_query. Fields come from discover_fields (the
+    live allowlist), never model input.
+
+    :param measurement: the InfluxDB measurement name
+    :param tag_filters: static tag key/value filters (may be empty)
+    :param fields: the field keys to select (non-empty)
+    :return: the InfluxQL query string
+    """
+    _validate_identifier(measurement, "measurement")
+    select = ", ".join(_quote_identifier(_validate_identifier(f, "field")) for f in sorted(fields))
+    query = f"SELECT {select} FROM {_quote_identifier(measurement)}"
+    conditions = []
+    for tag_key, tag_value in sorted(tag_filters.items()):
+        _validate_identifier(tag_key, "tag")
+        conditions.append(f"{_quote_identifier(tag_key)} = {_quote_string_literal(tag_value)}")
+    if conditions:
+        query += f" WHERE {' AND '.join(conditions)}"
+    return query + " ORDER BY time DESC LIMIT 1"
+
+
 def _influx_read_request(influx_settings, db, query):
     """Build (url, kwargs) for a GET /query, mirroring _build_write_request's
     v1/v2 branch: token+org via the v2 /query compatibility endpoint (Token
@@ -495,13 +557,19 @@ def _list_sources_result(settings, settings_file):
             continue
         # Constructed only to read class metadata; close its session immediately.
         try:
-            out.append({"source": source, "measurement": handler.MCP_MEASUREMENT or handler.source})
+            out.append(
+                {
+                    "source": source,
+                    "measurement": handler.MCP_MEASUREMENT or handler.source,
+                    "description": handler.MCP_DESCRIPTION,
+                }
+            )
         finally:
             close_session(handler.session)
     return {"sources": out}
 
 
-def _list_fields_result(source, settings, settings_file):
+def list_fields_result(source, settings, settings_file):
     """Build the list_fields tool payload (runs in a worker thread)."""
     handler, schema = resolve_schema(source, settings, settings_file)
     try:
@@ -550,6 +618,122 @@ def _run_query_history(handler, schema, field, start, end, aggregation, group_by
     return result
 
 
+def _latest_recorded(handler):
+    """Read the most recent recorded point for a non-live source from InfluxDB.
+
+    :param handler: a constructed DataHandler (caller owns its session)
+    :return: (``{field: value}`` dict, ``as_of`` unix-seconds or None). Empty dict
+        when the measurement has no fields or no points recorded yet.
+    """
+    influx_settings = handler.settings["influx"]
+    db = resolve_db(handler.source_settings, influx_settings)
+    measurement = handler.MCP_MEASUREMENT or handler.source
+    fields = discover_fields(handler.session, influx_settings, db, measurement)
+    if not fields:
+        return {}, None
+    query = build_latest_query(measurement, handler.MCP_TAG_FILTERS, fields)
+    columns, values = run_query(handler.session, influx_settings, db, query)
+    if not values:
+        return {}, None
+    row = values[0]
+    index = {col: i for i, col in enumerate(columns)}
+    # Skip a field that came back NULL (a field written in some points but not the
+    # latest one) rather than reporting a meaningless None as its current value.
+    data = {name: row[index[name]] for name in sorted(fields) if name in index and row[index[name]] is not None}
+    as_of = row[index["time"]] if "time" in index else None
+    return data, as_of
+
+
+def current_state_result(source, settings, settings_file):
+    """Build the get_current_state payload (runs in a worker thread).
+
+    A live source (MCP_LIVE_STATE, the default) reports from its own get_data() -
+    a cheap API/MQTT read of the device's current state. A non-live source
+    (Speedtest, Octopus) reports the latest recorded point from InfluxDB and never
+    calls get_data(). Every field carries the same unit/decoded-label annotation
+    as the history tool, so a coded value reads back as its label ("locked"), not
+    a bare number.
+
+    :raises ToolParamError: unknown/unusable source
+    :raises SourceConnectionError: a live get_data() or InfluxDB read failed
+    """
+    handler = resolve_handler(source, settings, settings_file)
+    try:
+        if handler.MCP_LIVE_STATE:
+            data = handler.get_data() or {}
+            as_of = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+            state_kind = "live"
+        else:
+            data, as_of = _latest_recorded(handler)
+            state_kind = "last_recorded"
+        field_metadata = handler.MCP_FIELD_METADATA
+        fields = {name: _annotate_state_field(field_metadata, name, value) for name, value in sorted(data.items())}
+        result = {
+            "source": handler.source,
+            "state": state_kind,
+            "as_of": as_of,
+            "fields": fields,
+        }
+        if handler.MCP_DESCRIPTION:
+            result["description"] = handler.MCP_DESCRIPTION
+        return result
+    finally:
+        close_session(handler.session)
+
+
+def build_documentation(settings, settings_file):
+    """Assemble a static Markdown reference of every configured source: its
+    description and, per annotated field, the unit and any coded-value meanings.
+
+    Generated from the source classes' own MCP metadata (MCP_DESCRIPTION +
+    MCP_FIELD_METADATA), so it can't drift from what the tools expose and needs no
+    packaged docs file. Gives the model a one-call, InfluxDB-free overview of what
+    every source and field means - orientation the per-source list_fields (a live
+    InfluxDB round trip) doesn't provide in one place.
+
+    :param settings: parsed settings dict
+    :param settings_file: settings path, for constructing handlers
+    :return: the Markdown document as a string
+    """
+    lines = [
+        "# send-to-influx data reference",
+        "",
+        "What each configured source reports, and what its values mean. Field keys may carry a "
+        "per-device prefix (e.g. a Nuki lock's name); the meanings below are keyed by the base name.",
+        "",
+    ]
+    for source in configured_sources(settings):
+        try:
+            handler = resolve_handler(source, settings, settings_file)
+        except ToolParamError:
+            continue
+        try:
+            description = handler.MCP_DESCRIPTION
+            field_metadata = handler.MCP_FIELD_METADATA
+        finally:
+            close_session(handler.session)
+        lines.append(f"## {source}")
+        if description:
+            lines.append(description)
+        lines.append("")
+        for key in sorted(field_metadata):
+            meta = field_metadata[key]
+            bits = []
+            if meta.get("unit"):
+                bits.append(f"unit {meta['unit']}")
+            codes = meta.get("codes")
+            if codes:
+                bits.append("values: " + ", ".join(f"{code}={label}" for code, label in sorted(codes.items())))
+            lines.append(f"- `{key}`" + (f" - {'; '.join(bits)}" if bits else ""))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _documentation_result(settings, settings_file):
+    """Build the get_documentation tool payload (runs in a worker thread)."""
+    return {"format": "markdown", "content": build_documentation(settings, settings_file)}
+
+
 def register_read_tools(server, settings, settings_file=None):
     """Register the read-only MCP tools on a FastMCP server: list the queryable
     sources, list a source's fields, and query a field's history. Blocking HTTP
@@ -583,7 +767,7 @@ def register_read_tools(server, settings, settings_file=None):
         contain spaces-as-underscores and punctuation). Use `list_sources`
         instead when you don't yet know which source you want. `source` is a
         source name from `list_sources`; an unknown one returns an error."""
-        return await anyio.to_thread.run_sync(_list_fields_result, source, settings, settings_file)
+        return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file)
 
     @server.tool()
     async def query_history(
@@ -630,5 +814,35 @@ def register_read_tools(server, settings, settings_file=None):
                 limit=limit,
             )
         )
+
+    @server.tool()
+    async def get_current_state(source: str) -> dict:
+        """Get a source's current state *now* - the live answer to "is the light
+        on?", "is the door locked?", "which devices are on?". Use this, not
+        `query_history`, for the present moment; history is for trends and "when
+        did X change?".
+
+        For most sources this reads the device live (Hue bridge, Nuki, MyEnergi,
+        weather, carbon intensity). For Speedtest and Octopus it returns the
+        latest recorded reading from InfluxDB instead (a live read would be slow
+        or no fresher) - the `state` field says which: 'live' or 'last_recorded'.
+        To run a *new* speed test use the speedtest write tool, not this.
+
+        `source` is a name from `list_sources`; an unknown one returns an error.
+        Returns the source, its `state`/`as_of` (unix seconds), and a `fields` map
+        of each field to its `value` plus any `unit` and decoded `label` (so a
+        lock state reads back as 'locked', not a bare number)."""
+        return await anyio.to_thread.run_sync(current_state_result, source, settings, settings_file)
+
+    @server.tool()
+    async def get_documentation() -> dict:
+        """Get a reference for what every source reports and what its values mean -
+        units, and the meaning of coded values (e.g. Nuki lock/door state codes).
+
+        A good first call for orientation: it needs no arguments and no InfluxDB
+        round trip, and covers all sources in one go (unlike `list_fields`, which
+        is per-source and lists only the fields currently in InfluxDB). Returns
+        `{format: 'markdown', content: ...}`."""
+        return await anyio.to_thread.run_sync(_documentation_result, settings, settings_file)
 
     return server

@@ -18,6 +18,7 @@ DEFAULT_FIELDS = ["temperature_2m"]
 class OpenMeteo(DataHandler):
     """Child class of DataHandler to get weather data from Open-Meteo"""
 
+    MCP_DESCRIPTION = "Open-Meteo weather: temperature, humidity, precipitation, cloud, wind and radiation."
     # Writes to the "weather" measurement, not "openmeteo".
     MCP_MEASUREMENT = "weather"
     # Units for the example-settings fields (see UNITS.md); other Open-Meteo
