@@ -446,7 +446,7 @@ Once connected, Claude has these read tools:
   like Nuki lock state) what each value means.
 - **`get_current_state`** - a source's state *right now* ("is the door locked?", "which lights are
   on?"). Most sources are read live from the device; Speedtest and Octopus report their latest
-  recorded reading instead (running a live speed test on demand is a separate, opt-in write tool).
+  recorded reading instead.
 - **`query_history`** - a field's history over a time range, either as individual points or
   aggregated (mean/max/min/sum/count/…) into buckets ("how much electricity this month vs last?",
   "when did the light go off?").

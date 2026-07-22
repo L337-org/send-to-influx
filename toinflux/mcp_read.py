@@ -826,7 +826,6 @@ def register_read_tools(server, settings, settings_file=None):
         weather, carbon intensity). For Speedtest and Octopus it returns the
         latest recorded reading from InfluxDB instead (a live read would be slow
         or no fresher) - the `state` field says which: 'live' or 'last_recorded'.
-        To run a *new* speed test use the speedtest write tool, not this.
 
         `source` is a name from `list_sources`; an unknown one returns an error.
         Returns the source, its `state`/`as_of` (unix seconds), and a `fields` map

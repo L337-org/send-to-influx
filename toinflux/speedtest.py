@@ -33,8 +33,7 @@ class Speedtest(DataHandler):
     MCP_DESCRIPTION = "Internet speed test: download/upload throughput and latency."
     # get_data() runs a full download/upload test (minutes, saturates the link),
     # so current-state must never call it live - it reads the latest recorded run
-    # from InfluxDB instead (see DataHandler.MCP_LIVE_STATE). A fresh run is
-    # triggered by the MCP write tool, not a read.
+    # from InfluxDB instead (see DataHandler.MCP_LIVE_STATE).
     MCP_LIVE_STATE = False
     MCP_FIELD_METADATA = {
         "download": {"unit": "bits/s"},
