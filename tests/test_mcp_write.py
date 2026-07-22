@@ -131,7 +131,10 @@ class TestHueListDevices:
         def fake_get(url, **kwargs):
             resp = MagicMock()
             resp.raise_for_status.return_value = None
-            resp.json.side_effect = ValueError("not JSON")
+            # requests raises its own JSONDecodeError (a ValueError *and* a
+            # RequestException) on a non-JSON body - use it, not a plain ValueError,
+            # so this guards the except-clause ordering (parse before transport).
+            resp.json.side_effect = requests.exceptions.JSONDecodeError("Expecting value", "", 0)
             return resp
 
         handler.session.get.side_effect = fake_get
@@ -330,7 +333,9 @@ class TestHueSetLight:
         def bad_json_put(url, **kwargs):
             resp = MagicMock()
             resp.raise_for_status.return_value = None
-            resp.json.side_effect = ValueError("no JSON")
+            # A real requests JSONDecodeError (ValueError + RequestException), so the
+            # test verifies the parse handler wins over the transport handler.
+            resp.json.side_effect = requests.exceptions.JSONDecodeError("Expecting value", "", 0)
             return resp
 
         handler.session.put.side_effect = bad_json_put

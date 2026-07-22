@@ -108,7 +108,9 @@ class TestHue:
             mock_load_settings.return_value = sample_settings
             hue = Hue(source="hue")
             mock_response = MagicMock()
-            mock_response.json.side_effect = ValueError("no JSON")
+            # requests' JSONDecodeError is a ValueError *and* a RequestException; use
+            # it so the test guards the except ordering (parse handler before transport).
+            mock_response.json.side_effect = requests.exceptions.JSONDecodeError("Expecting value", "", 0)
             with patch.object(hue.session, "get", return_value=mock_response):
                 with pytest.raises(SourceConnectionError, match="unparseable response"):
                     hue.get_data_from_hue_bridge()

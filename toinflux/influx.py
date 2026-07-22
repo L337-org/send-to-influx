@@ -135,13 +135,16 @@ class DataHandler:
     # - for those, current-state reads the latest recorded point from InfluxDB
     # instead of ever calling get_data().
     MCP_LIVE_STATE = True
-    # Whether this source implements a device-write path the MCP server can
-    # expose (a subclass with MCP_WRITABLE = True must implement
-    # mcp_set_device_state() and mcp_list_writable_devices()). Even for a
-    # writable source, the write tool is only registered when the operator also
-    # opts in per source via `<source>.mcp_read_write: true` - see
-    # mcp_write_enabled(). A disabled capability isn't registered at all (least
-    # privilege), never registered-and-refusing.
+    # Whether this source implements a write/control path the MCP server can
+    # expose. A subclass with MCP_WRITABLE = True provides its own vendor write
+    # method(s) - the shape is per source, e.g. Hue's mcp_set_device_state()/
+    # mcp_list_writable_devices() or Speedtest's mcp_trigger_run() - and is wired
+    # to its own bespoke tool(s) by a per-source registrar in
+    # _WRITE_TOOL_REGISTRARS (toinflux/mcp_write.py). Even for a writable source,
+    # the write tools are only registered when the operator also opts in per
+    # source via `<source>.mcp_read_write: true` - see mcp_write_enabled(). A
+    # disabled capability isn't registered at all (least privilege), never
+    # registered-and-refusing.
     MCP_WRITABLE = False
 
     def mcp_write_enabled(self):

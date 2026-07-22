@@ -82,15 +82,18 @@ class Hue(DataHandler):
                     verify=not insecure,
                 )
             hue_data = response.json()
+        except ValueError as e:
+            # response.json() raises on a non-JSON body (e.g. an HTML error page).
+            # requests' own JSONDecodeError is BOTH a ValueError and a
+            # RequestException, so this must be caught before the RequestException
+            # handler below - otherwise a parse failure would be misreported as a
+            # transport "connection" error. (Guards both the collector read path
+            # and the MCP write tools' device discovery, which share this method.)
+            logging.error("Hue Bridge returned an unparseable response - %s", e)
+            raise SourceConnectionError(f"Hue Bridge returned an unparseable response: {e}") from e
         except requests.exceptions.RequestException as e:
             logging.error("Error connecting to Hue Bridge - %s", e)
             raise SourceConnectionError(str(e)) from e
-        except ValueError as e:
-            # response.json() raises on a non-JSON body (e.g. an HTML error page);
-            # guarding here fixes both the collector read path and the MCP write
-            # tools' device discovery, which both go through this method.
-            logging.error("Hue Bridge returned an unparseable response - %s", e)
-            raise SourceConnectionError(f"Hue Bridge returned an unparseable response: {e}") from e
         # A successful GET returns a dict (sensors/lights); a list only ever comes
         # back on error. Guard the indexing: an empty list, or a list whose first
         # item isn't the documented {"error": {...}} shape, is unexpected and must
@@ -452,14 +455,17 @@ class Hue(DataHandler):
                 )
             response.raise_for_status()
             result = response.json()
+        except ValueError as e:
+            # response.json() on a non-JSON body raises requests' JSONDecodeError,
+            # which is BOTH a ValueError and a RequestException - catch it before
+            # the RequestException handler so a parse failure isn't misreported as
+            # a transport error. (raise_for_status()'s HTTPError is a
+            # RequestException but not a ValueError, so it still falls through.)
+            logging.error("Hue Bridge returned an unparseable response to a write - %s", e)
+            raise SourceConnectionError(f"Hue Bridge returned an unparseable response: {e}") from e
         except requests.exceptions.RequestException as e:
             logging.error("Error writing to Hue Bridge - %s", e)
             raise SourceConnectionError(str(e)) from e
-        except ValueError as e:
-            # response.json() raises on a non-JSON body (requests' JSONDecodeError
-            # is a ValueError) - don't let it escape as an unhandled crash.
-            logging.error("Hue Bridge returned an unparseable response to a write - %s", e)
-            raise SourceConnectionError(f"Hue Bridge returned an unparseable response: {e}") from e
         # The CLIP API always answers a state PUT with a JSON *list* of per-key
         # success/error items. A non-list body is unexpected and must fail cleanly
         # rather than being read as success (an empty error list) by the scan below.
