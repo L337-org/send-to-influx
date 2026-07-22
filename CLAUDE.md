@@ -243,6 +243,19 @@ directly. The current-state builder (`current_state_result`) and `list_fields` p
 (`list_fields_result`) are public in `mcp_read` for exactly this reason - the resources module imports
 them, rather than reaching into privates.
 
+**Prompts** (`toinflux/mcp_prompts.py`, `register_prompts()`): parameterised task templates the user
+invokes from the client - they add no capability, only orient the model on how to combine the tools
+for the tasks this server is for. Three, kept generic (a free-text focus/question/request, never
+hard-coded devices): `home_status` (summarise current state, optional focus area), `usage_trends`
+(historical analysis/cross-source comparison), and `control_device` (the check-state→act flow).
+`control_device` is registered *only* when a source has writes enabled (`writable_enabled_sources`,
+the same gate as the write tools) - a read-only install offers no control prompt, so nothing
+advertises a capability that isn't there. `home_status`/`usage_trends` are always registered.
+`build_mcp_server()` computes the write-enabled list *once* and passes it into both
+`register_prompts()` and `register_write_tools()` (each accepts an `enabled_sources=` override, and
+falls back to computing it when called standalone), so the per-source handler construction that
+computation costs isn't done twice at startup.
+
 ### Entry point (`sendtoinflux.py`)
 
 - **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source. Connection failures (`SourceConnectionError`) are retried with exponential backoff (base 5 s, max 300 s); a `ConfigError` is not retried — it exits the process immediately with code 1.

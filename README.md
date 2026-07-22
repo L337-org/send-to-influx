@@ -457,6 +457,10 @@ Results are domain-aware throughout: values carry their unit, and coded fields c
 decoded label alongside the raw number. The same data is also exposed as MCP **resources** (a
 documentation reference, and a live-state and schema resource per source) for clients that use them.
 
+The server also offers a few **prompts** - ready-made tasks you can pick in the client: *home status*
+(summarise everything now), *usage trends* (historical analysis, e.g. "electricity this month vs
+last"), and, when device control is enabled, *control device*.
+
 History queries run against InfluxDB through a fixed, parameterised query builder - never a raw
 query from the model - with field names checked against the measurement's live field list, time
 ranges normalised in the app, and a capped result size.
