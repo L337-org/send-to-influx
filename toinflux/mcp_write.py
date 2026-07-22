@@ -121,7 +121,7 @@ def _register_hue_write_tools(server, settings, settings_file):
         device: str,
         on: "bool | None" = None,
         brightness_pct: "float | None" = None,
-        color_temp_k: "int | None" = None,
+        color_temp_k: "float | None" = None,
         color: "str | None" = None,
     ) -> dict:
         """Set a Hue light or plug's state. This changes a real device; to read its
