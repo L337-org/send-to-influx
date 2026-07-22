@@ -6,9 +6,10 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 import logging
+import threading
 from socket import gethostname
 import speedtest
-from toinflux.influx import DataHandler
+from toinflux.influx import DataHandler, InfluxWriteError
 from toinflux.general import flatten_dict
 from toinflux.exceptions import SourceConnectionError
 
@@ -35,14 +36,48 @@ class Speedtest(DataHandler):
     # so current-state must never call it live - it reads the latest recorded run
     # from InfluxDB instead (see DataHandler.MCP_LIVE_STATE).
     MCP_LIVE_STATE = False
+    # A run can be *triggered* on demand via the MCP write tool (mcp_trigger_run),
+    # opt-in per install with speedtest.mcp_read_write: true - unlike Hue this
+    # controls no external device, it just runs a measurement on the local host.
+    MCP_WRITABLE = True
     MCP_FIELD_METADATA = {
         "download": {"unit": "bits/s"},
         "upload": {"unit": "bits/s"},
         "ping": {"unit": "ms"},
     }
 
+    # One speed test at a time per host: a scheduled collection cycle and an
+    # MCP-triggered run (or two triggered runs) would otherwise saturate the same
+    # link simultaneously and skew each other's results. Class-level so the lock is
+    # shared between the collector worker thread and the MCP server thread in the
+    # one process; there is no cross-host coordination (separate hosts run separate
+    # processes with no shared state, and can't trigger each other anyway).
+    _run_lock = threading.Lock()
+
     def get_data(self):
-        """Run and get the data from Speedtest
+        """Run a speed test on this host and return the results.
+
+        Guarded by a per-host lock (see ``_run_lock``): if a run is already in
+        progress - a scheduled cycle or an MCP-triggered run - this raises
+        ``SourceConnectionError`` rather than starting a second, overlapping test
+        that would skew both.
+
+        :return: data
+        :rtype: dict
+        :raises SourceConnectionError: a run is already in progress, the test
+            failed, or it returned an implausible result
+        """
+        if not Speedtest._run_lock.acquire(blocking=False):
+            raise SourceConnectionError("a Speedtest run is already in progress on this host")
+        try:
+            return self._run_speedtest()
+        finally:
+            Speedtest._run_lock.release()
+
+    def _run_speedtest(self):
+        """Run the test and populate ``self.data``/``self.influx_header``; the
+        caller (``get_data``) holds ``_run_lock``. Split out so ``get_data`` is
+        just the lock guard around it.
 
         :return: data
         :rtype: dict
@@ -83,3 +118,34 @@ class Speedtest(DataHandler):
         self.influx_header = f"speedtest,host={gethostname().split('.')[0]} "
 
         return self.data
+
+    def mcp_trigger_run(self):
+        """Run a speed test now (the MCP write action for this source) and return
+        the result, recording it to InfluxDB like a scheduled run.
+
+        ``get_data()`` enforces the one-run-at-a-time lock, so a run already in
+        progress surfaces as ``SourceConnectionError`` rather than a second test.
+        Recording is best-effort: a failed write is reported in the result's
+        ``recorded`` flag, not raised, since the measurement itself succeeded.
+
+        :return: ``{"source", "recorded", "result": {field: {"value"[, "unit"]}}}``
+        :rtype: dict
+        :raises SourceConnectionError: a run is already in progress, or the test
+            failed
+        """
+        data = self.get_data()
+        recorded = True
+        try:
+            self.send_data()
+        except InfluxWriteError as exc:
+            recorded = False
+            logging.warning("Triggered Speedtest ran but recording it to InfluxDB failed: %s", exc)
+        result = {}
+        for name, value in sorted((data or {}).items()):
+            entry = {"value": value}
+            unit = self.MCP_FIELD_METADATA.get(name, {}).get("unit")
+            if unit:
+                entry["unit"] = unit
+            result[name] = entry
+        logging.info("MCP-triggered Speedtest run complete (recorded=%s)", recorded)
+        return {"source": self.source, "recorded": recorded, "result": result}

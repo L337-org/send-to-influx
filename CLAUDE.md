@@ -128,27 +128,44 @@ decisions:
   section's compiled-wheel matrix exists for. `rpds-py` is held to `~=0.30.0` in requirements.txt
   (2026.x CalVer releases dropped Python 3.10 wheels; the build fails loudly if coverage regresses).
 **Write tools** (`toinflux/mcp_write.py`, `register_write_tools()`): the MCP server is read-only by
-default. A source becomes controllable only when it's both `MCP_WRITABLE` (a class flag - Hue is the
-only one today) *and* the operator opts in with `<source>.mcp_read_write: true`
+default. A source becomes controllable only when it's both `MCP_WRITABLE` (a class flag - Hue and
+Speedtest today) *and* the operator opts in with `<source>.mcp_read_write: true`
 (`DataHandler.mcp_write_enabled()`, strict `is True`; `validate_settings()` rejects a non-bool so a
 mistyped `"true"` fails loud instead of silently staying off). Design points:
   - **Least privilege**: when no source is write-enabled, `register_write_tools()` registers *nothing*
-    - the `set_device_state`/`list_writable_devices` tools are absent from the server's advertised
-      surface entirely, not present-and-refusing. So the capability can't be probed or bypassed when
-      it's off.
-  - **Generic primitive**: `set_device_state(source, device, on, brightness_pct)` dispatches to the
-    source class's own `mcp_set_device_state()`; the device-specific logic (name→bridge-id
-    resolution, the friendly-param→vendor-API mapping) lives on the source, like the read domain
-    knowledge. Deliberately source-agnostic so SI-7's PID actuation can drive the same tool with no
-    new MCP wiring.
-  - **Hue** (`toinflux/philipshue.py`): `mcp_set_device_state()` resolves the target against the live
-    device list (`mcp_list_writable_devices()`, the write allowlist - an unknown or ambiguous name is
-    refused, never guessed, since actuating the wrong light isn't recoverable), maps brightness 0-100%
-    to the bridge's 1-254 `bri` (0% is min-on, not off - off is `on=False`, keeping the two controls
-    independent), auto-adds `on=True` when setting brightness (the bridge ignores `bri` on an off
-    light) unless `on` is explicitly false, and `PUT`s to `/api/{user}/lights/{id}/state` over the
-    collector's own session/auth and `hue.insecure` TLS policy. The CLIP API returns 200 with a
-    per-key success/error list, so a bridge-reported error is surfaced as `SourceConnectionError`.
+    - no write tool appears on the server's advertised surface at all, not present-and-refusing. So
+      the capability can't be probed or bypassed when it's off.
+  - **Per-collector, not generic**: writes are heterogeneous (a Hue light takes on/brightness/colour,
+    a Speedtest run takes nothing), so each writable source gets its own bespoke, well-described
+    tool(s), wired by a per-source registrar in `_WRITE_TOOL_REGISTRARS` (keyed by source name) and
+    gated per source; a write-enabled source with no registrar is logged and skipped, not a crash.
+    The vendor logic lives on the source class (like the read domain knowledge); `mcp_write.py` only
+    wires it up and owns the per-call handler lifecycle. (This supersedes the earlier single generic
+    `set_device_state`; SI-7's PID actuation reuses the shared `mcp_common` plumbing, not one tool.)
+  - **Hue** (`toinflux/philipshue.py`): tools `hue_list_devices` + `hue_set_light`.
+    `mcp_set_device_state()` resolves the target against the live device list
+    (`mcp_list_writable_devices()`, the write allowlist which also reports each light's capabilities -
+    an unknown or ambiguous name is refused, never guessed, since actuating the wrong light isn't
+    recoverable), and is **capability-aware per capability**: brightness, colour temperature and
+    colour are independent (a Hue install spans white-only / colour-temperature / full-RGB tiers), and
+    asking a light for one it lacks is a `ToolParamError` naming the device, not a silent no-op.
+    Brightness 0-100% maps to the bridge's 1-254 `bri` (0% is min-on, not off - off is `on=False`);
+    `color_temp_k` (kelvin) converts to `ct` mireds and clamps to the light's reported range; `color`
+    (an `#rrggbb` hex or a known name) converts to CIE `xy` (`ct`/`xy` are mutually exclusive - asking
+    for both is rejected). Setting brightness/temperature/colour auto-adds `on=True` (the bridge
+    ignores them on an off light) unless `on` is explicitly false. `PUT`s to
+    `/api/{user}/lights/{id}/state` over the collector's own session/auth and `hue.insecure` TLS
+    policy; the CLIP API returns 200 with a per-key success/error list, so a bridge-reported error is
+    surfaced as `SourceConnectionError`.
+  - **Speedtest** (`toinflux/speedtest.py`): tool `speedtest_run` (no args) via `mcp_trigger_run()` -
+    runs a test *on the local host only* (separate hosts run separate processes with no listener, so
+    cross-host triggering isn't possible; kept deliberately simple) and records it to InfluxDB
+    best-effort (a failed write flags `recorded: false`, not fatal). A class-level `_run_lock` in
+    `get_data()` enforces one run at a time per host - shared between the collector worker and the
+    trigger, so a triggered run overlapping the scheduled cycle (or another trigger) raises
+    `SourceConnectionError` rather than starting a second, mutually-skewing test. Unlike Hue this
+    controls no external device; `MCP_LIVE_STATE=False` still keeps the *read* path from ever running
+    a test.
   - Per-call handler/session lifecycle and the ToolParamError-vs-SourceConnectionError split are the
     same as the read tools: the shared per-call plumbing (`resolve_handler`, `close_session`,
     `configured_sources`) lives in `toinflux/mcp_common.py`, which every tool module imports from
@@ -302,12 +319,15 @@ computation costs isn't done twice at startup.
    like Octopus) - set it `False` and current-state will read the latest InfluxDB point instead.
    Nothing else is needed - the source is exposed by the read tools *and* resources automatically once
    it's in `sources:`.
-4c. (Only if the source can be *controlled*, and its vendor API has a documented write path.) Set
-   `MCP_WRITABLE = True` and implement `mcp_set_device_state(device, *, on=..., brightness_pct=...)`
-   plus `mcp_list_writable_devices()` on the class (see `Hue`), keeping the vendor-specific
-   name→id/param mapping there. Add `<source>.mcp_read_write` (bool, default false) to
-   `example_settings.yaml`; validation already rejects a non-bool. The `set_device_state` tool then
-   dispatches to it once the operator opts in. Most sources are read-only and skip this.
+4c. (Only if the source can be *controlled* or *actioned*, and its vendor API has a documented write
+   path.) Set `MCP_WRITABLE = True` and implement the source's vendor write logic as method(s) on the
+   class (see `Hue`'s `mcp_set_device_state`/`mcp_list_writable_devices`, or `Speedtest`'s
+   `mcp_trigger_run`), keeping the name→id/param/capability mapping there. Then add a per-source
+   registrar to `_WRITE_TOOL_REGISTRARS` in `toinflux/mcp_write.py` that wires the source's bespoke,
+   well-described tool(s) onto the server (a write-enabled source with no registrar is logged and
+   skipped, not silently controllable). Add `<source>.mcp_read_write` (bool, default false) to
+   `example_settings.yaml`; validation already rejects a non-bool. The tools appear once the operator
+   opts in. Most sources are read-only and skip this.
 5. Update README.md, UNITS.md, CLAUDE.md, and `.github/copilot-instructions.md`.
 6. Wire the source into the debconf install flow — a mechanical checklist, not a judgment call
    (every rule below is an existing, tested convention; the scenario suite enforces most of them):
