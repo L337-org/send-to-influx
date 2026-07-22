@@ -463,12 +463,17 @@ def _get(session, url, kwargs, description):
             response = session.get(url, **kwargs)
         response.raise_for_status()
         return response.json()
+    except ValueError as exc:
+        # response.json() on a non-JSON body raises requests' JSONDecodeError, which
+        # is BOTH a ValueError and a RequestException - catch it before the
+        # RequestException handler so a parse failure isn't misreported as a
+        # transport read failure. raise_for_status()'s HTTPError is a
+        # RequestException but not a ValueError, so it still classifies as transport.
+        logging.error("MCP read returned non-JSON (%s): %s", description, exc)
+        raise SourceConnectionError(f"InfluxDB read returned an unparseable response ({description})") from exc
     except requests.exceptions.RequestException as exc:
         logging.error("MCP read failed (%s): %s", description, exc)
         raise SourceConnectionError(f"InfluxDB read failed ({description}): {exc}") from exc
-    except ValueError as exc:
-        logging.error("MCP read returned non-JSON (%s): %s", description, exc)
-        raise SourceConnectionError(f"InfluxDB read returned an unparseable response ({description})") from exc
 
 
 def discover_fields(session, influx_settings, db, measurement):

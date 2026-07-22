@@ -346,6 +346,20 @@ class TestDiscoverFields:
         with pytest.raises(SourceConnectionError):
             discover_fields(session, {"url": "http://x", "user": "u", "password": "p"}, "db", "hue")
 
+    def test_non_json_body_surfaces_as_unparseable(self):
+        # requests' JSONDecodeError is a ValueError AND a RequestException; the parse
+        # handler must be caught before the transport handler, or a bad body would be
+        # misreported as a read/transport failure.
+        import requests
+
+        session = MagicMock()
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.side_effect = requests.exceptions.JSONDecodeError("Expecting value", "", 0)
+        session.get.return_value = response
+        with pytest.raises(SourceConnectionError, match="unparseable response"):
+            discover_fields(session, {"url": "http://x", "user": "u", "password": "p"}, "db", "hue")
+
     def test_result_error_surfaces_not_empty_set(self):
         # An InfluxDB error in a 200 payload (wrong db/auth) must raise, not come
         # back as an empty field set that later reads as every field "unknown".
