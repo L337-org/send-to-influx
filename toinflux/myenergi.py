@@ -120,6 +120,8 @@ class MyEnergi(DataHandler):
 class Zappi(MyEnergi):
     """Child class of MyEnergi (which is in turn a child of DataHandler) to get data from a Zappi"""
 
+    MCP_DESCRIPTION = "MyEnergi Zappi EV charger: charge and session energy, grid/generation power, and status."
+
     # All three MyEnergi devices share the "myenergi" measurement, distinguished
     # by the device tag - so the read schema needs both the measurement override
     # and the tag filter, or a query for one device would return all three.
@@ -174,6 +176,7 @@ class Zappi(MyEnergi):
 class Eddi(MyEnergi):
     """Child class of MyEnergi to get data from an Eddi hot water diverter"""
 
+    MCP_DESCRIPTION = "MyEnergi Eddi hot-water diverter: diversion power, tank temperatures, and status."
     MCP_MEASUREMENT = "myenergi"
     MCP_TAG_FILTERS = {"device": "eddi"}
     MCP_FIELD_METADATA = {
@@ -208,6 +211,7 @@ class Eddi(MyEnergi):
 class Harvi(MyEnergi):
     """Child class of MyEnergi to get data from a Harvi CT clamp energy monitor"""
 
+    MCP_DESCRIPTION = "MyEnergi Harvi energy monitor: CT-clamp power readings per channel."
     MCP_MEASUREMENT = "myenergi"
     MCP_TAG_FILTERS = {"device": "harvi"}
     MCP_FIELD_METADATA = {

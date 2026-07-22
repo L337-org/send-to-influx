@@ -439,18 +439,27 @@ To let Claude control Hue lights and plugs, set `hue.mcp_read_write: true`. That
 Only Hue supports control today. The write tool is a generic "set device state" primitive, so more
 device types can be added without new tooling.
 
-Once connected, Claude has three read tools:
+Once connected, Claude has these read tools:
 
-- **`list_sources`** - the collectors whose history can be queried.
+- **`list_sources`** - the collectors that can be queried, each with a short description.
 - **`list_fields`** - the fields available for a source, with their units and (for coded fields
   like Nuki lock state) what each value means.
+- **`get_current_state`** - a source's state *right now* ("is the door locked?", "which lights are
+  on?"). Most sources are read live from the device; Speedtest and Octopus report their latest
+  recorded reading instead.
 - **`query_history`** - a field's history over a time range, either as individual points or
-  aggregated (mean/max/min/sum/count/…) into buckets. Results are domain-aware: values carry
-  their unit, and coded fields come back with a decoded label alongside the raw number.
+  aggregated (mean/max/min/sum/count/…) into buckets ("how much electricity this month vs last?",
+  "when did the light go off?").
+- **`get_documentation`** - a one-call reference of what every source reports and what its coded
+  values mean.
 
-Queries run against InfluxDB through a fixed, parameterised query builder - never a raw query
-from the model - with field names checked against the measurement's live field list, time ranges
-normalised in the app, and a capped result size.
+Results are domain-aware throughout: values carry their unit, and coded fields come back with a
+decoded label alongside the raw number. The same data is also exposed as MCP **resources** (a
+documentation reference, and a live-state and schema resource per source) for clients that use them.
+
+History queries run against InfluxDB through a fixed, parameterised query builder - never a raw
+query from the model - with field names checked against the measurement's live field list, time
+ranges normalised in the app, and a capped result size.
 
 Usage
 -----

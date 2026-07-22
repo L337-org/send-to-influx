@@ -30,6 +30,11 @@ MAX_PLAUSIBLE_PING_MS = 5000
 class Speedtest(DataHandler):
     """Child class of DataHandler to run a speed test and send the results to InfluxDB"""
 
+    MCP_DESCRIPTION = "Internet speed test: download/upload throughput and latency."
+    # get_data() runs a full download/upload test (minutes, saturates the link),
+    # so current-state must never call it live - it reads the latest recorded run
+    # from InfluxDB instead (see DataHandler.MCP_LIVE_STATE).
+    MCP_LIVE_STATE = False
     MCP_FIELD_METADATA = {
         "download": {"unit": "bits/s"},
         "upload": {"unit": "bits/s"},

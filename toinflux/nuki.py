@@ -89,6 +89,7 @@ class Nuki(MqttDataHandler):
     name, so multiple locks need no per-lock configuration.
     """
 
+    MCP_DESCRIPTION = "Nuki smart locks and door sensors: lock state, door state and battery levels."
     # Fields carry a per-lock name prefix (Front_Door_stateValue), so the read
     # tool's metadata keys on the suffix - see ReadSchema.metadata_for.
     MCP_FIELD_METADATA = {

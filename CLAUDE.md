@@ -184,12 +184,24 @@ actually binds `127.0.0.1:8420` under the full hardened sandbox (the real test t
 `LoadCredentialEncrypted` don't break the network-facing server).
 
 **Read tools** (`toinflux/mcp_read.py`, registered onto the server by `register_read_tools()`):
-three read-only tools - `list_sources`, `list_fields`, and `query_history` - exposing each
-configured collector's InfluxDB history, domain-aware rather than a raw passthrough. The read
-mechanics live in `mcp_read.py`; the per-source domain knowledge lives on the `DataHandler`
-subclasses as three class attributes (`MCP_MEASUREMENT`, `MCP_TAG_FILTERS`, `MCP_FIELD_METADATA`)
-so there's no parallel schema to keep in step - `ReadSchema`/`build_schema()` combine those with a
-live field set. Design points:
+five read-only tools - `list_sources`, `list_fields`, `query_history`, `get_current_state`, and
+`get_documentation` - exposing each configured collector's live and historical state, domain-aware
+rather than a raw passthrough. The read mechanics live in `mcp_read.py`; the per-source domain
+knowledge lives on the `DataHandler` subclasses as class attributes (`MCP_MEASUREMENT`,
+`MCP_TAG_FILTERS`, `MCP_FIELD_METADATA`, plus `MCP_DESCRIPTION` and `MCP_LIVE_STATE` - see below) so
+there's no parallel schema to keep in step - `ReadSchema`/`build_schema()` combine those with a live
+field set. Design points:
+  - **History vs current state**: `query_history` answers "when did X change / trends"; the new
+    `get_current_state(source)` answers "what is X *now*" ("is the door locked", "which lights are
+    on"). For a live source it calls the source's own `get_data()` (a cheap API/MQTT read) and
+    decodes it through the *same* `MCP_FIELD_METADATA` as history, so a coded value reads back as its
+    label ("locked"), never a bare number. `MCP_LIVE_STATE` (base default `True`) is `False` on
+    Speedtest (its `get_data()` runs a full speed test - must never fire on a read) and Octopus (~24 h
+    delayed, so no fresher than InfluxDB); for those, current-state reads the latest recorded point
+    from InfluxDB (`build_latest_query`/`_latest_recorded`) and the result's `state` field says which
+    (`live`/`last_recorded`). `get_documentation()` synthesises a static, InfluxDB-free Markdown
+    reference of every source's `MCP_DESCRIPTION` + field units/codes (not a shipped file - it can't
+    drift from what the tools expose); `list_sources` now carries each source's `MCP_DESCRIPTION`.
   - **Measurements aren't always the source name**: `openmeteo` writes to `weather`, and the three
     MyEnergi devices share the `myenergi` measurement distinguished by a `device` tag - so their
     classes set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS`, or a query for one device would return all
@@ -218,6 +230,18 @@ live field set. Design points:
     shared by the read and write tools, defined in `toinflux/exceptions.py`; a non-retryable
     caller/model mistake) surfaces to the model as a tool error; `SourceConnectionError` is a
     transient transport failure the collector loop would retry, so the two are kept distinct.
+
+**Resources** (`toinflux/mcp_resources.py`, `register_resources()`): the addressable/listable view of
+the same read data - the design rule is *anything exposed as a resource is also a tool* (MCP clients
+use resources in limited ways, so the tools stay the workhorses). Three kinds, all built from the
+read builders in `mcp_read.py` so there's no second implementation: `docs://reference` (the
+`get_documentation` Markdown), and per configured source `schema://<source>` (its `list_fields`
+payload) and `state://<source>` (its `get_current_state` payload). Per-source resources are
+registered *concretely* (one per source, via a factory so each closure binds its own source name),
+not as one URI template, so a client's `resources/list` enumerates each source's snapshot and schema
+directly. The current-state builder (`current_state_result`) and `list_fields` payload builder
+(`list_fields_result`) are public in `mcp_read` for exactly this reason - the resources module imports
+them, rather than reaching into privates.
 
 ### Entry point (`sendtoinflux.py`)
 
@@ -256,10 +280,15 @@ live field set. Design points:
    `CREDENTIAL_FIELDS`/`PLACEHOLDER_VALUES` (`toinflux/credentials.py`) — that alone makes
    `send-to-influx-set-credential <name>` work, the machinery is fully table-driven.
 4. Add tests in `tests/test_newsource.py`, reusing fixtures from `tests/conftest.py`.
-4b. For the MCP read tool: set `MCP_FIELD_METADATA` on the class (units, and `codes` for any
-   numeric-coded field) from the UNITS.md entry, and set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS` if the
-   source's InfluxDB measurement isn't its own name or it shares a measurement with others. Nothing
-   else is needed - the source is exposed by the read tools automatically once it's in `sources:`.
+4b. For the MCP read tools/resources: set `MCP_FIELD_METADATA` on the class (units, and `codes` for
+   any numeric-coded field) from the UNITS.md entry, and a one-line `MCP_DESCRIPTION` of what the
+   source reports (surfaced by `list_sources`, the documentation tool, and the per-source resources).
+   Set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS` if the source's InfluxDB measurement isn't its own name or
+   it shares a measurement with others. Leave `MCP_LIVE_STATE` at its `True` default *unless*
+   `get_data()` is expensive or pointless to call live (a full run like Speedtest, or delayed data
+   like Octopus) - set it `False` and current-state will read the latest InfluxDB point instead.
+   Nothing else is needed - the source is exposed by the read tools *and* resources automatically once
+   it's in `sources:`.
 4c. (Only if the source can be *controlled*, and its vendor API has a documented write path.) Set
    `MCP_WRITABLE = True` and implement `mcp_set_device_state(device, *, on=..., brightness_pct=...)`
    plus `mcp_list_writable_devices()` on the class (see `Hue`), keeping the vendor-specific

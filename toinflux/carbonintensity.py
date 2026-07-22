@@ -17,6 +17,7 @@ ACCEPT_JSON = {"Accept": "application/json"}
 class CarbonIntensity(DataHandler):
     """Child class of DataHandler to get National Grid carbon intensity data"""
 
+    MCP_DESCRIPTION = "UK carbon intensity (actual/forecast gCO2/kWh) and the generation fuel mix."
     # Only the two intensity fields carry a unit here. The gen_<fuel>
     # generation-mix fields (gen_wind, gen_gas, ...) are all %, but they share a
     # prefix rather than the suffix ReadSchema.metadata_for matches on, so they

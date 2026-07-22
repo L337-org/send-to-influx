@@ -16,6 +16,8 @@ from toinflux.exceptions import SourceConnectionError, ToolParamError
 class Hue(DataHandler):
     """Child class of DataHandler to get data from a Hue Bridge"""
 
+    MCP_DESCRIPTION = "Philips Hue: lights and smart plugs (on/off, brightness) and motion/temperature/light sensors."
+
     # Hue is the one v1 source with a documented, buildable device-write path
     # (PUT /api/{user}/lights/{id}/state on the same session/auth the collector
     # already uses). The MCP write tool is still only registered when the

@@ -123,6 +123,18 @@ class DataHandler:
     # codes. Sourced from UNITS.md; kept here so the read tool is domain-aware
     # without a parallel schema to maintain.
     MCP_FIELD_METADATA: dict = {}
+    # A short human description of what this source reports, surfaced by the MCP
+    # read tools/resources (list_sources, the documentation tool, the per-source
+    # resources) so the model knows what a source *is*, not just its name. Empty
+    # on the base; every concrete source sets it.
+    MCP_DESCRIPTION = ""
+    # Whether the MCP current-state read may call this source's get_data() live
+    # (a cheap API/MQTT read for most sources). False where a live read is
+    # expensive or pointless: Speedtest (get_data() runs a full download/upload)
+    # and Octopus (data is ~24 h delayed, so the API is no fresher than InfluxDB)
+    # - for those, current-state reads the latest recorded point from InfluxDB
+    # instead of ever calling get_data().
+    MCP_LIVE_STATE = True
     # Whether this source implements a device-write path the MCP server can
     # expose (a subclass with MCP_WRITABLE = True must implement
     # mcp_set_device_state() and mcp_list_writable_devices()). Even for a
