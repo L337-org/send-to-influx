@@ -1,5 +1,6 @@
-"""Unit tests for the MCP device-write path: the Hue write primitive and the
-opt-in, least-privilege write tool registration."""
+"""Unit tests for the MCP device-write path: the per-collector write tools (Hue
+light control, Speedtest trigger), the Hue capability handling, and the opt-in,
+least-privilege write-tool registration."""
 
 from unittest.mock import MagicMock, patch
 
@@ -11,7 +12,9 @@ from toinflux.exceptions import SourceConnectionError, ToolParamError
 from toinflux.mcp_write import (
     register_write_tools,
     writable_enabled_sources,
-    _set_device_state_result,
+    _hue_list_devices_result,
+    _hue_set_light_result,
+    _speedtest_run_result,
 )
 
 
@@ -35,21 +38,47 @@ def make_hue(mcp_read_write=True, insecure=True):
     return handler
 
 
+def make_speedtest(mcp_read_write=True):
+    from toinflux.speedtest import Speedtest
+
+    settings = {"speedtest": {"db": "speedtest_db", "mcp_read_write": mcp_read_write}}
+    with patch("toinflux.influx.load_settings", return_value=settings):
+        handler = Speedtest("speedtest")
+    handler.session = MagicMock()
+    return handler
+
+
 def _bridge_lights():
+    # One light per Hue capability tier: dimmable white, colour-temperature, full
+    # colour, and an on/off plug - so capability-awareness can be exercised.
     return {
         "1": {"name": "Kitchen", "state": {"on": False, "bri": 10}},
         "2": {"name": "Lamp", "state": {"on": True, "bri": 200}},
+        "3": {
+            "name": "Hall",
+            "state": {"on": True, "bri": 100, "ct": 300},
+            "capabilities": {"control": {"ct": {"min": 153, "max": 454}}},
+        },
+        "4": {
+            "name": "Lounge",
+            "state": {"on": True, "bri": 100, "ct": 300, "xy": [0.3, 0.3], "hue": 0, "sat": 0},
+            "capabilities": {
+                "control": {"ct": {"min": 153, "max": 500}, "colorgamut": [[0.7, 0.3], [0.2, 0.7], [0.15, 0.05]]}
+            },
+        },
+        "5": {"name": "Plug", "state": {"on": False}},
     }
 
 
-def _wire_bridge(handler, put_result=None):
+def _wire_bridge(handler, put_result=None, lights=None):
     """Point the handler's mocked session at a fake bridge GET (device list) and
     PUT (state change), recording the PUT url/body on the returned closure."""
     put_result = put_result if put_result is not None else [{"success": {"/lights/1/state/on": True}}]
+    lights = _bridge_lights() if lights is None else lights
 
     def fake_get(url, **kwargs):
         resp = MagicMock()
-        resp.json.return_value = {"lights": _bridge_lights()}
+        resp.json.return_value = {"lights": lights}
         resp.raise_for_status.return_value = None
         return resp
 
@@ -75,47 +104,28 @@ def test_param_error_is_not_a_retryable_connection_error():
     assert not issubclass(SourceConnectionError, ToolParamError)
 
 
-class TestHueWritePrimitive:
-    def test_write_enabled_reflects_setting(self):
-        assert make_hue(mcp_read_write=True).mcp_write_enabled() is True
-        assert make_hue(mcp_read_write=False).mcp_write_enabled() is False
-
-    def test_input_validation_raises_tool_param_not_connection_error(self):
-        # A bad input raises ToolParamError, and specifically NOT
-        # SourceConnectionError, so it isn't misclassified as retryable.
+class TestHueListDevices:
+    def test_lists_devices_with_capabilities(self):
         handler = make_hue()
         _wire_bridge(handler)
-        with pytest.raises(ToolParamError) as excinfo:
-            handler.mcp_set_device_state("Kitchen", brightness_pct=999)
-        assert not isinstance(excinfo.value, SourceConnectionError)
+        by_id = {d["id"]: d for d in handler.mcp_list_writable_devices()}
+        assert by_id["1"]["name"] == "Kitchen"
+        assert by_id["1"]["controls"] == ["on_off", "brightness"]
+        assert by_id["3"]["controls"] == ["on_off", "brightness", "color_temp"]
+        # 454 mirek -> 2203 K (warm end), 153 mirek -> 6536 K (cool end)
+        assert by_id["3"]["color_temp_range_k"] == [2203, 6536]
+        assert by_id["4"]["controls"] == ["on_off", "brightness", "color_temp", "color"]
+        assert by_id["5"]["controls"] == ["on_off"]
+        assert "color_temp_range_k" not in by_id["5"]
 
-    def test_write_disabled_for_non_bool_truthy(self):
-        # Strict `is True`: a stray string doesn't silently enable writes.
-        handler = make_hue(mcp_read_write="true")
-        assert handler.mcp_write_enabled() is False
-
-    def test_list_writable_devices(self):
+    def test_missing_or_blank_names_fall_back_to_id_as_strings(self):
         handler = make_hue()
-        _wire_bridge(handler)
-        assert handler.mcp_list_writable_devices() == {"1": "Kitchen", "2": "Lamp"}
+        _wire_bridge(handler, lights={"1": {}, "2": {"name": ""}, "3": {"name": "Lamp"}})
+        names = {d["id"]: d["name"] for d in handler.mcp_list_writable_devices()}
+        assert names == {"1": "1", "2": "2", "3": "Lamp"}
+        assert all(isinstance(n, str) for n in names.values())
 
-    def test_list_writable_devices_names_are_strings(self):
-        # A missing or non-string bridge name falls back to the id, and everything
-        # comes back as a string (the docstring promises {id: name}).
-        handler = make_hue()
-
-        def fake_get(url, **kwargs):
-            resp = MagicMock()
-            resp.json.return_value = {"lights": {"1": {}, "2": {"name": ""}, "3": {"name": "Lamp"}}}
-            resp.raise_for_status.return_value = None
-            return resp
-
-        handler.session.get.side_effect = fake_get
-        devices = handler.mcp_list_writable_devices()
-        assert devices == {"1": "1", "2": "2", "3": "Lamp"}
-        assert all(isinstance(v, str) for v in devices.values())
-
-    def test_list_writable_devices_unparseable_response_surfaces(self):
+    def test_unparseable_response_surfaces(self):
         handler = make_hue()
 
         def fake_get(url, **kwargs):
@@ -127,6 +137,23 @@ class TestHueWritePrimitive:
         handler.session.get.side_effect = fake_get
         with pytest.raises(SourceConnectionError, match="unparseable response"):
             handler.mcp_list_writable_devices()
+
+
+class TestHueSetLight:
+    def test_write_enabled_reflects_setting(self):
+        assert make_hue(mcp_read_write=True).mcp_write_enabled() is True
+        assert make_hue(mcp_read_write=False).mcp_write_enabled() is False
+
+    def test_write_disabled_for_non_bool_truthy(self):
+        # Strict `is True`: a stray string doesn't silently enable writes.
+        assert make_hue(mcp_read_write="true").mcp_write_enabled() is False
+
+    def test_input_validation_raises_tool_param_not_connection_error(self):
+        handler = make_hue()
+        _wire_bridge(handler)
+        with pytest.raises(ToolParamError) as excinfo:
+            handler.mcp_set_device_state("Kitchen", brightness_pct=999)
+        assert not isinstance(excinfo.value, SourceConnectionError)
 
     def test_set_brightness_by_name_maps_and_auto_ons(self):
         handler = make_hue()
@@ -161,6 +188,71 @@ class TestHueWritePrimitive:
         handler.mcp_set_device_state("Kitchen", on=False, brightness_pct=80)
         assert put.body["on"] is False
 
+    def test_set_color_temp_on_ct_light(self):
+        handler = make_hue()
+        put = _wire_bridge(handler)
+        handler.mcp_set_device_state("Hall", color_temp_k=2700)
+        # 2700 K -> 370 mirek, within Hall's [153, 454] range; auto-on.
+        assert put.body == {"ct": 370, "on": True}
+
+    @pytest.mark.parametrize("kelvin,expected_ct", [(1000, 454), (10000, 153)])
+    def test_color_temp_clamped_to_light_range(self, kelvin, expected_ct):
+        handler = make_hue()
+        put = _wire_bridge(handler)
+        handler.mcp_set_device_state("Hall", color_temp_k=kelvin)
+        assert put.body["ct"] == expected_ct
+
+    def test_set_color_on_color_light(self):
+        handler = make_hue()
+        put = _wire_bridge(handler)
+        handler.mcp_set_device_state("Lounge", color="#ff0000")
+        assert put.body["xy"] == [0.6401, 0.33]
+        assert put.body["on"] is True
+
+    def test_color_name_matches_hex(self):
+        handler = make_hue()
+        put = _wire_bridge(handler)
+        handler.mcp_set_device_state("Lounge", color="red")
+        assert put.body["xy"] == [0.6401, 0.33]
+
+    def test_color_temp_on_white_only_light_rejected(self):
+        handler = make_hue()
+        _wire_bridge(handler)
+        with pytest.raises(ToolParamError, match="does not support colour temperature"):
+            handler.mcp_set_device_state("Kitchen", color_temp_k=2700)
+
+    def test_color_on_ct_only_light_rejected(self):
+        handler = make_hue()
+        _wire_bridge(handler)
+        with pytest.raises(ToolParamError, match="does not support colour"):
+            handler.mcp_set_device_state("Hall", color="red")
+
+    def test_brightness_on_plug_rejected(self):
+        handler = make_hue()
+        _wire_bridge(handler)
+        with pytest.raises(ToolParamError, match="does not support brightness"):
+            handler.mcp_set_device_state("Plug", brightness_pct=50)
+
+    def test_color_and_color_temp_together_rejected(self):
+        handler = make_hue()
+        _wire_bridge(handler)
+        with pytest.raises(ToolParamError, match="not both"):
+            handler.mcp_set_device_state("Lounge", color_temp_k=2700, color="red")
+
+    @pytest.mark.parametrize("bad", ["notacolour", "#12", "", 123])
+    def test_invalid_color_rejected(self, bad):
+        handler = make_hue()
+        _wire_bridge(handler)
+        with pytest.raises(ToolParamError, match="color must be"):
+            handler.mcp_set_device_state("Lounge", color=bad)
+
+    @pytest.mark.parametrize("bad", [0, -5, "hot", True])
+    def test_invalid_color_temp_rejected(self, bad):
+        handler = make_hue()
+        _wire_bridge(handler)
+        with pytest.raises(ToolParamError, match="positive number in kelvin"):
+            handler.mcp_set_device_state("Hall", color_temp_k=bad)
+
     def test_nothing_to_set_rejected(self):
         handler = make_hue()
         _wire_bridge(handler)
@@ -188,14 +280,9 @@ class TestHueWritePrimitive:
 
     def test_ambiguous_name_rejected(self):
         handler = make_hue()
-
-        def fake_get(url, **kwargs):
-            resp = MagicMock()
-            resp.json.return_value = {"lights": {"1": {"name": "Dup"}, "2": {"name": "Dup"}}}
-            resp.raise_for_status.return_value = None
-            return resp
-
-        handler.session.get.side_effect = fake_get
+        _wire_bridge(
+            handler, lights={"1": {"name": "Dup", "state": {"on": True}}, "2": {"name": "Dup", "state": {"on": True}}}
+        )
         with pytest.raises(ToolParamError, match="ambiguous"):
             handler.mcp_set_device_state("Dup", on=True)
 
@@ -227,8 +314,6 @@ class TestHueWritePrimitive:
             handler.mcp_set_device_state("Kitchen", on=True)
 
     def test_non_list_response_not_treated_as_success(self):
-        # A dict body (not the CLIP list shape) must fail, not read as an empty
-        # error list (i.e. silent success).
         handler = make_hue()
         _wire_bridge(handler, put_result={"unexpected": "shape"})
         with pytest.raises(SourceConnectionError, match="unexpected response"):
@@ -247,24 +332,33 @@ class TestWriteToolRegistration:
 
         return FastMCP(name="test")
 
-    def _settings(self):
+    def _hue_settings(self):
         return {"sources": ["hue"], "influx": {"url": "http://x", "user": "u", "password": "p"}, "hue": {}}
+
+    def _speedtest_settings(self):
+        return {"sources": ["speedtest"], "influx": {"url": "http://x", "user": "u", "password": "p"}, "speedtest": {}}
 
     def test_no_write_tools_when_nothing_enabled(self):
         handler = make_hue(mcp_read_write=False)
         with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
             server = self._server()
-            register_write_tools(server, self._settings(), None)
-        names = {t.name for t in anyio.run(server.list_tools)}
-        assert "set_device_state" not in names and "list_writable_devices" not in names
+            register_write_tools(server, self._hue_settings(), None)
+        assert not anyio.run(server.list_tools)
 
-    def test_write_tools_registered_when_enabled(self):
+    def test_hue_write_tools_registered_when_enabled(self):
         handler = make_hue(mcp_read_write=True)
         with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
             server = self._server()
-            register_write_tools(server, self._settings(), None)
+            register_write_tools(server, self._hue_settings(), None)
         names = {t.name for t in anyio.run(server.list_tools)}
-        assert names == {"list_writable_devices", "set_device_state"}
+        assert names == {"hue_list_devices", "hue_set_light"}
+
+    def test_speedtest_write_tool_registered_when_enabled(self):
+        with patch("toinflux.mcp_write.resolve_handler", return_value=make_speedtest(True)):
+            server = self._server()
+            register_write_tools(server, self._speedtest_settings(), None)
+        names = {t.name for t in anyio.run(server.list_tools)}
+        assert names == {"speedtest_run"}
 
     def test_writable_enabled_sources(self):
         with patch("toinflux.mcp_write.resolve_handler", return_value=make_hue(mcp_read_write=True)):
@@ -273,45 +367,85 @@ class TestWriteToolRegistration:
             assert writable_enabled_sources({"sources": ["hue"]}, None) == []
 
     def test_precomputed_enabled_sources_skips_recompute(self):
-        # build_mcp_server passes the write-enabled list in; the tools register from
-        # it without reconstructing handlers to recompute it.
         server = self._server()
         with patch("toinflux.mcp_write.writable_enabled_sources", side_effect=AssertionError("recomputed")):
-            register_write_tools(server, self._settings(), None, enabled_sources=["hue"])
+            register_write_tools(server, self._hue_settings(), None, enabled_sources=["hue"])
         names = {t.name for t in anyio.run(server.list_tools)}
-        assert names == {"list_writable_devices", "set_device_state"}
+        assert names == {"hue_list_devices", "hue_set_light"}
 
     def test_precomputed_empty_registers_nothing(self):
         server = self._server()
         with patch("toinflux.mcp_write.writable_enabled_sources", side_effect=AssertionError("recomputed")):
-            register_write_tools(server, self._settings(), None, enabled_sources=[])
+            register_write_tools(server, self._hue_settings(), None, enabled_sources=[])
         assert not anyio.run(server.list_tools)
 
-    def test_set_device_state_on_disabled_source_is_rejected(self):
+    def test_enabled_but_unwired_source_is_skipped_not_fatal(self):
+        # A source that's write-enabled but has no registrar is logged and skipped,
+        # not a crash - defends the _WRITE_TOOL_REGISTRARS invariant.
+        server = self._server()
+        with patch("toinflux.mcp_write.writable_enabled_sources", side_effect=AssertionError("recomputed")):
+            register_write_tools(server, self._hue_settings(), None, enabled_sources=["nosuch"])
+        assert not anyio.run(server.list_tools)
+
+    def test_hue_set_light_on_disabled_source_is_rejected(self):
         handler = make_hue(mcp_read_write=False)
         with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
             with pytest.raises(ToolParamError, match="not enabled for device writes"):
-                _set_device_state_result(
-                    self._settings(), None, source="hue", device="Kitchen", on=True, brightness_pct=None
+                _hue_set_light_result(
+                    self._hue_settings(),
+                    None,
+                    device="Kitchen",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
                 )
 
-    def test_set_device_state_dispatches_and_closes_session(self):
+    def test_hue_set_light_dispatches_and_closes_session(self):
         handler = make_hue(mcp_read_write=True)
         _wire_bridge(handler)
         with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
-            result = _set_device_state_result(
-                self._settings(), None, source="hue", device="Kitchen", on=True, brightness_pct=None
+            result = _hue_set_light_result(
+                self._hue_settings(),
+                None,
+                device="Kitchen",
+                on=True,
+                brightness_pct=None,
+                color_temp_k=None,
+                color=None,
             )
         assert result["device"] == "Kitchen"
         handler.session.close.assert_called_once()
 
-    def test_set_device_state_closes_session_on_error(self):
+    def test_hue_set_light_closes_session_on_error(self):
         handler = make_hue(mcp_read_write=True)
         _wire_bridge(handler)
         handler.session.put.side_effect = requests.exceptions.ConnectionError("down")
         with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
             with pytest.raises(SourceConnectionError):
-                _set_device_state_result(
-                    self._settings(), None, source="hue", device="Kitchen", on=True, brightness_pct=None
+                _hue_set_light_result(
+                    self._hue_settings(),
+                    None,
+                    device="Kitchen",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
                 )
+        handler.session.close.assert_called_once()
+
+    def test_hue_list_devices_dispatches_and_closes_session(self):
+        handler = make_hue(mcp_read_write=True)
+        _wire_bridge(handler)
+        with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
+            result = _hue_list_devices_result(self._hue_settings(), None)
+        assert result["source"] == "hue" and any(d["name"] == "Kitchen" for d in result["devices"])
+        handler.session.close.assert_called_once()
+
+    def test_speedtest_run_result_dispatches_and_closes_session(self):
+        handler = make_speedtest(True)
+        handler.mcp_trigger_run = MagicMock(return_value={"source": "speedtest", "recorded": True, "result": {}})
+        with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
+            result = _speedtest_run_result(self._speedtest_settings(), None)
+        assert result["source"] == "speedtest"
         handler.session.close.assert_called_once()

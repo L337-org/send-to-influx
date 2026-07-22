@@ -1,23 +1,20 @@
 """Device-write support for the MCP server (opt-in, per source).
 
-The MCP server is read-only by default. When a collector both implements a write
-path (``DataHandler.MCP_WRITABLE``) *and* the operator opts in with
-``<source>.mcp_read_write: true``, this module registers two write tools -
-``list_writable_devices`` and ``set_device_state`` - onto the server. When no
-source is enabled for writes, nothing is registered at all: a disabled capability
-is absent, not present-and-refusing, so the tool never even appears in the
-server's advertised surface (least privilege).
+The MCP server is read-only by default. A source becomes controllable only when it
+both implements a write path (``DataHandler.MCP_WRITABLE``) *and* the operator opts
+in with ``<source>.mcp_read_write: true``. When no source is enabled for writes,
+nothing here is registered at all: a disabled capability is absent, not
+present-and-refusing, so it never appears in the server's advertised surface (least
+privilege).
 
-``set_device_state`` is a generic primitive (source + device + desired state)
-that dispatches to the source class's own ``mcp_set_device_state()``. Hue is the
-only writable source today; the primitive is deliberately source-agnostic so a
-later controller (e.g. SI-7's PID actuation) can drive the same tool without new
-MCP wiring.
-
-The per-source device knowledge (how a name resolves to a bridge id, how the
-friendly parameters map to the vendor API, how to read back the device list for
-the write allowlist) lives on the source class, exactly as the read tools' domain
-knowledge does - no parallel adapter hierarchy.
+Writes are heterogeneous - a Hue light takes on/brightness/colour temperature/
+colour, a Speedtest run takes nothing, a future thermostat a setpoint - so each
+writable source gets its own bespoke, well-described tool(s), wired by a per-source
+registrar in ``_WRITE_TOOL_REGISTRARS`` and gated per source. The vendor logic
+(name->id resolution, capability checks, the friendly-parameter->API mapping) lives
+on the source class, exactly as the read tools' domain knowledge does; this module
+only wires those methods up as FastMCP tools and owns the per-call handler
+lifecycle (shared with the read side via ``mcp_common``).
 """
 
 __author__ = "Gavin Lucas"
@@ -73,34 +70,131 @@ def _resolve_writable_handler(source, settings, settings_file):
     return handler
 
 
-def _list_writable_devices_result(source, settings, settings_file):
-    """Build the list_writable_devices payload (runs in a worker thread)."""
-    handler = _resolve_writable_handler(source, settings, settings_file)
+def _hue_list_devices_result(settings, settings_file):
+    """Build the hue_list_devices payload (runs in a worker thread)."""
+    handler = _resolve_writable_handler("hue", settings, settings_file)
     try:
-        devices = handler.mcp_list_writable_devices()
-        return {
-            "source": source,
-            "devices": [{"id": light_id, "name": name} for light_id, name in sorted(devices.items())],
-        }
+        return {"source": "hue", "devices": handler.mcp_list_writable_devices()}
     finally:
         close_session(handler.session)
 
 
-def _set_device_state_result(settings, settings_file, *, source, device, on, brightness_pct):
-    """Build the set_device_state payload (runs in a worker thread)."""
-    handler = _resolve_writable_handler(source, settings, settings_file)
+def _hue_set_light_result(settings, settings_file, *, device, on, brightness_pct, color_temp_k, color):
+    """Build the hue_set_light payload (runs in a worker thread)."""
+    handler = _resolve_writable_handler("hue", settings, settings_file)
     try:
-        result = handler.mcp_set_device_state(device, on=on, brightness_pct=brightness_pct)
-        logging.info("MCP write applied to %s device %r: %s", source, result.get("device"), result.get("applied"))
+        result = handler.mcp_set_device_state(
+            device, on=on, brightness_pct=brightness_pct, color_temp_k=color_temp_k, color=color
+        )
+        logging.info("MCP write applied to hue device %r: %s", result.get("device"), result.get("applied"))
         return result
     finally:
         close_session(handler.session)
 
 
+def _speedtest_run_result(settings, settings_file):
+    """Build the speedtest_run payload (runs in a worker thread)."""
+    handler = _resolve_writable_handler("speedtest", settings, settings_file)
+    try:
+        return handler.mcp_trigger_run()
+    finally:
+        close_session(handler.session)
+
+
+def _register_hue_write_tools(server, settings, settings_file):
+    """Register Hue's write tools (light/plug control)."""
+    import anyio
+
+    @server.tool()
+    async def hue_list_devices() -> dict:
+        """List the controllable Hue lights and plugs, each with its id, name and
+        the controls it supports (on/off, brightness, colour temperature, colour),
+        plus the kelvin range for colour-temperature lights.
+
+        Call this before `hue_set_light` to get exact ids/names and see what a
+        given light can do - an unknown/ambiguous name, or a control the light
+        lacks, is rejected there."""
+        return await anyio.to_thread.run_sync(_hue_list_devices_result, settings, settings_file)
+
+    @server.tool()
+    async def hue_set_light(
+        device: str,
+        on: "bool | None" = None,
+        brightness_pct: "float | None" = None,
+        color_temp_k: "int | None" = None,
+        color: "str | None" = None,
+    ) -> dict:
+        """Set a Hue light or plug's state. This changes a real device; to read its
+        state use `get_current_state`, or `query_history` for history.
+
+        Get exact ids/names and each light's supported controls from
+        `hue_list_devices` first. An unknown device, an ambiguous name (use the id
+        instead), a value out of range, both `color_temp_k` and `color` at once, a
+        control the light doesn't have, or setting nothing all return an error
+        *before* any change. A transport failure mid-write is reported, not hidden;
+        the bridge applies fields one at a time, so an error can mean part of the
+        change already took effect - re-read to confirm.
+
+        - device: the light id or its exact name (from `hue_list_devices`).
+        - on: turn on (true) / off (false); omit to leave unchanged.
+        - brightness_pct: 0-100 for dimmable lights; 0 is the lowest on-brightness,
+          not off (use on=false). Omit to leave unchanged.
+        - color_temp_k: white colour temperature in kelvin (~2000 warm to ~6500
+          cool), clamped to the light's range; colour-temp/colour lights only.
+        - color: a colour as an '#rrggbb' hex or a name (red, warm white, ...);
+          colour lights only.
+
+        Setting brightness/temperature/colour turns the light on unless on=false.
+        Returns the resolved device and the state actually applied."""
+        return await anyio.to_thread.run_sync(
+            lambda: _hue_set_light_result(
+                settings,
+                settings_file,
+                device=device,
+                on=on,
+                brightness_pct=brightness_pct,
+                color_temp_k=color_temp_k,
+                color=color,
+            )
+        )
+
+    return server
+
+
+def _register_speedtest_write_tools(server, settings, settings_file):
+    """Register Speedtest's write tool (trigger a run)."""
+    import anyio
+
+    @server.tool()
+    async def speedtest_run() -> dict:
+        """Run an internet speed test now, on the host this server runs on, and
+        return the result (download/upload throughput and latency). Use this for an
+        on-demand check; `get_current_state`/`query_history` report the last
+        recorded run without starting a new one.
+
+        A run takes up to a couple of minutes and saturates the connection while it
+        runs. Only one runs at a time per host: if a scheduled or triggered run is
+        already in progress, that's reported rather than a second test started. The
+        result is also recorded to InfluxDB like a scheduled run (best-effort; a
+        failed recording is flagged, not fatal). Takes no arguments."""
+        return await anyio.to_thread.run_sync(_speedtest_run_result, settings, settings_file)
+
+    return server
+
+
+# Per-source write-tool registrars, keyed by source name. A writable, opted-in
+# source with no entry here is a wiring bug (writable but no tools) - logged in
+# register_write_tools, not silently ignored.
+_WRITE_TOOL_REGISTRARS = {
+    "hue": _register_hue_write_tools,
+    "speedtest": _register_speedtest_write_tools,
+}
+
+
 def register_write_tools(server, settings, settings_file=None, enabled_sources=None):
-    """Register the device-write tools on a FastMCP server, but only if at least
-    one configured source is enabled for writes. When none is, nothing is
-    registered - the write capability is entirely absent from the server.
+    """Register each write-enabled source's own write tool(s) on a FastMCP server.
+    When no source is enabled for writes, nothing is registered - the write
+    capability is entirely absent from the server.
 
     :param server: the FastMCP instance
     :param settings: parsed settings dict
@@ -111,56 +205,14 @@ def register_write_tools(server, settings, settings_file=None, enabled_sources=N
         source), so the function still stands alone.
     :return: the server
     """
-    import anyio
-
     enabled = writable_enabled_sources(settings, settings_file) if enabled_sources is None else enabled_sources
     if not enabled:
         return server
     logging.info("MCP device-write tools enabled for: %s", ", ".join(enabled))
-
-    @server.tool()
-    async def list_writable_devices(source: str) -> dict:
-        """List the controllable devices for a write-enabled source, each with the
-        id and name to pass to `set_device_state`.
-
-        The read-side counterpart is `list_fields` (queryable fields); this lists
-        *controllable* targets. Call it before `set_device_state` to get exact
-        ids/names - an unknown or ambiguous name there is rejected. `source` must
-        be a source with writes enabled (`<source>.mcp_read_write: true`); another
-        source returns an error."""
-        return await anyio.to_thread.run_sync(_list_writable_devices_result, source, settings, settings_file)
-
-    @server.tool()
-    async def set_device_state(
-        source: str,
-        device: str,
-        on: "bool | None" = None,
-        brightness_pct: "float | None" = None,
-    ) -> dict:
-        """Set a device's state on a write-enabled source (e.g. a Hue light/plug).
-        This changes a real device; to read history instead, use `query_history`.
-
-        Get exact ids/names from `list_writable_devices` first: an unknown device,
-        an ambiguous name (resolve it with the id instead), out-of-range
-        brightness, or giving neither `on` nor `brightness_pct` all return an
-        error *before* any device change. A bridge/transport failure during the
-        write is reported rather than silently dropped; note the bridge applies a
-        multi-field change per-field, so an error can mean part of the change
-        (e.g. `on` but not `bri`) already took effect - re-read to confirm.
-
-        - device: the device id or its exact name (from `list_writable_devices`).
-        - on: turn the device on (true) or off (false); omit to leave unchanged.
-        - brightness_pct: target brightness 0-100 for dimmable lights; omit to
-          leave unchanged. Setting a brightness turns the light on unless `on` is
-          explicitly false; 0 is the lowest on-brightness, not off (use on=false).
-
-        At least one of `on`/`brightness_pct` must be given. Returns the source,
-        resolved device id/name, and the state actually applied. Only sources with
-        `<source>.mcp_read_write: true` expose this tool at all."""
-        return await anyio.to_thread.run_sync(
-            lambda: _set_device_state_result(
-                settings, settings_file, source=source, device=device, on=on, brightness_pct=brightness_pct
-            )
-        )
-
+    for source in enabled:
+        registrar = _WRITE_TOOL_REGISTRARS.get(source)
+        if registrar is None:
+            logging.warning("Source %r is write-enabled but has no MCP write tools wired - skipping", source)
+            continue
+        registrar(server, settings, settings_file)
     return server

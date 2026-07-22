@@ -429,15 +429,22 @@ Key points:
   all unless enabled in that collector's own settings block - when none is enabled, the write tools
   don't exist on the server.
 
-To let Claude control Hue lights and plugs, set `hue.mcp_read_write: true`. That adds two tools:
+Each controllable collector adds its own tools when you opt it in - writes differ too much between
+device types to share one tool.
 
-- **`list_writable_devices`** - the controllable lights/plugs, with the id and name to target.
-- **`set_device_state`** - turn a light/plug on or off and set its brightness (0-100 %). It's a real
-  physical action; brightness is mapped to the bridge's scale, and setting a brightness turns the
-  light on unless you explicitly turn it off.
+To let Claude control Hue lights and plugs, set `hue.mcp_read_write: true`. That adds:
 
-Only Hue supports control today. The write tool is a generic "set device state" primitive, so more
-device types can be added without new tooling.
+- **`hue_list_devices`** - the controllable lights/plugs, each with its id, name, and which controls
+  it supports (on/off, brightness, colour temperature, colour).
+- **`hue_set_light`** - a real physical action: turn a light/plug on or off, set brightness
+  (0-100 %), white colour temperature (in kelvin), or colour (an `#rrggbb` hex or a name like "warm
+  white"). It's capability-aware - asking a plain white bulb for a colour is refused rather than
+  ignored - and setting brightness/temperature/colour turns the light on unless you turn it off.
+
+To let Claude run a speed test on demand, set `speedtest.mcp_read_write: true`. That adds:
+
+- **`speedtest_run`** - runs a speed test now, on the host running the server, and returns the
+  result (also recording it like a scheduled run). Only one runs at a time per host.
 
 Once connected, Claude has these read tools:
 
