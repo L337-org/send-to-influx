@@ -150,8 +150,9 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     collector's own session/auth and `hue.insecure` TLS policy. The CLIP API returns 200 with a
     per-key success/error list, so a bridge-reported error is surfaced as `SourceConnectionError`.
   - Per-call handler/session lifecycle and the ToolParamError-vs-SourceConnectionError split are the
-    same as the read tools (shared `_resolve_handler`/`_close_session` from `mcp_read`). Every applied
-    write is logged at INFO.
+    same as the read tools: the shared per-call plumbing (`resolve_handler`, `close_session`,
+    `configured_sources`) lives in `toinflux/mcp_common.py`, which every tool module imports from
+    rather than from each other. Every applied write is logged at INFO.
   - This is the project's first device-control capability and gets a dedicated `/security-review`
     before the feature branch merges to `main`.
 
@@ -217,7 +218,6 @@ live field set. Design points:
     shared by the read and write tools, defined in `toinflux/exceptions.py`; a non-retryable
     caller/model mistake) surfaces to the model as a tool error; `SourceConnectionError` is a
     transient transport failure the collector loop would retry, so the two are kept distinct.
-    (`toinflux.mcp_read.QueryParamError` remains as a back-compat alias for `ToolParamError`.)
 
 ### Entry point (`sendtoinflux.py`)
 

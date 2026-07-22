@@ -7,16 +7,14 @@ from unittest.mock import MagicMock, patch
 import anyio
 import pytest
 
-from toinflux.exceptions import SourceConnectionError
+from toinflux.exceptions import SourceConnectionError, ToolParamError
 from toinflux.mcp_read import (
     DEFAULT_RESULT_POINTS,
     MAX_RESULT_POINTS,
-    QueryParamError,
     ReadSchema,
     annotate_rows,
     build_query,
     build_schema,
-    configured_sources,
     discover_fields,
     parse_time_bound,
     register_read_tools,
@@ -71,7 +69,7 @@ class TestParseTimeBound:
 
     @pytest.mark.parametrize("bad", ["", "   ", "'; DROP", "yesterday", "-3x", 5, None])
     def test_invalid(self, bad):
-        with pytest.raises(QueryParamError):
+        with pytest.raises(ToolParamError):
             parse_time_bound(bad, now=NOW)
 
     @pytest.mark.parametrize("future", ["24h", "+24h", "1d"])
@@ -79,7 +77,7 @@ class TestParseTimeBound:
         # Relative offsets must be past-only (leading '-'); a future range has no
         # data (collectors only write at present time). ISO timestamps cover any
         # genuine future need.
-        with pytest.raises(QueryParamError):
+        with pytest.raises(ToolParamError):
             parse_time_bound(future, now=NOW)
 
 
@@ -97,20 +95,20 @@ class TestBuildQuery:
         assert "GROUP BY time(1h) fill(none)" in q
 
     def test_unknown_field_rejected(self):
-        with pytest.raises(QueryParamError, match="unknown field"):
+        with pytest.raises(ToolParamError, match="unknown field"):
             build_query(make_schema(), field="nope", start="-1h", end="now")
 
     @pytest.mark.parametrize("evil", ['gen"; DROP', "gen OR 1=1", "gen';--", "a b"])
     def test_injection_field_rejected_as_unknown(self, evil):
         # Not in allowed_fields, so rejected before any interpolation.
-        with pytest.raises(QueryParamError):
+        with pytest.raises(ToolParamError):
             build_query(make_schema(), field=evil, start="-1h", end="now")
 
     def test_control_char_in_allowlisted_field_rejected(self):
         # Defence in depth: a control character (which could corrupt the query or
         # a log line) is rejected even if it somehow reached allowed_fields.
         schema = make_schema(allowed_fields={"evil\nname"}, field_metadata={})
-        with pytest.raises(QueryParamError, match="invalid field name"):
+        with pytest.raises(ToolParamError, match="invalid field name"):
             build_query(schema, field="evil\nname", start="-1h", end="now")
 
     def test_punctuated_field_name_is_queryable_and_escaped(self):
@@ -124,20 +122,20 @@ class TestBuildQuery:
         assert 'SELECT "a\\"b"' in q2
 
     def test_unknown_aggregation_rejected(self):
-        with pytest.raises(QueryParamError, match="unknown aggregation"):
+        with pytest.raises(ToolParamError, match="unknown aggregation"):
             build_query(make_schema(), field="gen", start="-1h", end="now", aggregation="bogus", group_by="1h")
 
     def test_aggregation_requires_group_by(self):
-        with pytest.raises(QueryParamError, match="requires a group_by"):
+        with pytest.raises(ToolParamError, match="requires a group_by"):
             build_query(make_schema(), field="gen", start="-1h", end="now", aggregation="mean")
 
     @pytest.mark.parametrize("bad", ["1", "1x", "h", "-1h", "1 h", "'; DROP"])
     def test_invalid_group_by_rejected(self, bad):
-        with pytest.raises(QueryParamError, match="invalid group_by"):
+        with pytest.raises(ToolParamError, match="invalid group_by"):
             build_query(make_schema(), field="gen", start="-1h", end="now", aggregation="mean", group_by=bad)
 
     def test_start_after_end_rejected(self):
-        with pytest.raises(QueryParamError, match="must be before"):
+        with pytest.raises(ToolParamError, match="must be before"):
             build_query(make_schema(), field="gen", start="now", end="-1h")
 
     def test_limit_clamped_to_max(self):
@@ -149,7 +147,7 @@ class TestBuildQuery:
         assert "LIMIT 1" in q
 
     def test_invalid_limit_rejected(self):
-        with pytest.raises(QueryParamError, match="invalid limit"):
+        with pytest.raises(ToolParamError, match="invalid limit"):
             build_query(make_schema(), field="gen", start="-1h", end="now", limit="lots")
 
     def test_no_tag_filter_omits_tag_clause(self):
@@ -372,36 +370,15 @@ class TestRunQuery:
         assert (cols, vals) == ([], [])
 
 
-class TestConfiguredSources:
-    def test_uses_sources_list(self):
-        assert configured_sources({"sources": ["Hue", "Zappi"]}) == ["hue", "zappi"]
-
-    def test_falls_back_to_default_source(self):
-        assert configured_sources({"default_source": "octopus"}) == ["octopus"]
-
-    def test_default_source_is_lowercased(self):
-        # A capitalised default_source must normalise, or _resolve_handler's
-        # source.lower() comparison would never match it.
-        assert configured_sources({"default_source": "Octopus"}) == ["octopus"]
-
-    def test_non_string_default_source_dropped(self):
-        # YAML coerces `default_source: no` to False; must not end up in the list
-        # (it would crash the sorted()/join in _resolve_handler's error message).
-        assert configured_sources({"sources": [], "default_source": False}) == []
-
-    def test_non_string_entries_filtered_from_list(self):
-        assert configured_sources({"sources": ["Hue", 5, None, "zappi"]}) == ["hue", "zappi"]
-
-
 class TestResolveSchema:
     def test_unknown_source_rejected(self):
-        with pytest.raises(QueryParamError, match="unknown source"):
+        with pytest.raises(ToolParamError, match="unknown source"):
             resolve_schema("nosuch", {"sources": ["hue"]}, None)
 
     @pytest.mark.parametrize("bad", [None, "", "   ", 5, ["hue"]])
     def test_non_string_or_empty_source_is_query_param_error(self, bad):
         # A clean tool error, not an AttributeError from .lower() on a non-string.
-        with pytest.raises(QueryParamError, match="non-empty string"):
+        with pytest.raises(ToolParamError, match="non-empty string"):
             resolve_schema(bad, {"sources": ["hue"]}, None)
 
     def test_builds_schema_from_handler_and_discovery(self):
@@ -414,7 +391,7 @@ class TestResolveSchema:
         handler.session = MagicMock()
         settings = {"sources": ["zappi"], "influx": {"url": "http://x", "user": "u", "password": "p"}}
         with (
-            patch("toinflux.mcp_read.get_class", return_value=handler),
+            patch("toinflux.mcp_common.get_class", return_value=handler),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen", "grd"}),
         ):
             _handler, schema = resolve_schema("zappi", settings, None)
@@ -436,7 +413,7 @@ class TestResolveSchema:
         handler.settings = {"influx": {"url": "http://FRESH", "user": "u", "password": "p"}}
         stale = {"sources": ["zappi"], "influx": {"url": "http://STALE", "user": "u", "password": "p"}}
         with (
-            patch("toinflux.mcp_read.get_class", return_value=handler),
+            patch("toinflux.mcp_common.get_class", return_value=handler),
             patch("toinflux.mcp_read.discover_fields", return_value=set()) as discover,
         ):
             resolve_schema("zappi", stale, None)
@@ -478,7 +455,7 @@ class TestRegisterReadTools:
     def test_list_sources(self):
         server = self._server()
         register_read_tools(server, self._settings(), None)
-        with patch("toinflux.mcp_read.get_class", return_value=self._handler()):
+        with patch("toinflux.mcp_common.get_class", return_value=self._handler()):
             result = anyio.run(server.call_tool, "list_sources", {})
         text = result[0][0].text if isinstance(result, tuple) else result[0].text
         assert "myenergi" in text and "zappi" in text
@@ -488,7 +465,7 @@ class TestRegisterReadTools:
         register_read_tools(server, self._settings(), None)
         payload = {"results": [{"series": [{"columns": ["time", "gen"], "values": [[100, 42]]}]}]}
         with (
-            patch("toinflux.mcp_read.get_class", return_value=self._handler()),
+            patch("toinflux.mcp_common.get_class", return_value=self._handler()),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
             patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], [[100, 42]])),
         ):
@@ -510,7 +487,7 @@ class TestRegisterReadTools:
         register_read_tools(server, self._settings(), None)
         rows = [[i, i] for i in range(3)]
         with (
-            patch("toinflux.mcp_read.get_class", return_value=self._handler()),
+            patch("toinflux.mcp_common.get_class", return_value=self._handler()),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
             patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], rows)),
         ):
@@ -529,7 +506,7 @@ class TestRegisterReadTools:
         register_read_tools(server, self._settings(), None)
         handler = self._handler()
         with (
-            patch("toinflux.mcp_read.get_class", return_value=handler),
+            patch("toinflux.mcp_common.get_class", return_value=handler),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
             patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], [[1, 2]])),
         ):
@@ -545,7 +522,7 @@ class TestRegisterReadTools:
         register_read_tools(server, self._settings(), None)
         handler = self._handler()
         with (
-            patch("toinflux.mcp_read.get_class", return_value=handler),
+            patch("toinflux.mcp_common.get_class", return_value=handler),
             patch("toinflux.mcp_read.discover_fields", side_effect=SourceConnectionError("boom")),
         ):
             with pytest.raises(Exception, match="boom"):
@@ -561,7 +538,7 @@ class TestRegisterReadTools:
         server = self._server()
         register_read_tools(server, self._settings(), None)
         handler = self._handler()
-        with patch("toinflux.mcp_read.get_class", return_value=handler):
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
             anyio.run(server.call_tool, "list_sources", {})
         handler.session.close.assert_called_once()
 
@@ -569,7 +546,7 @@ class TestRegisterReadTools:
         server = self._server()
         register_read_tools(server, self._settings(), None)
         with (
-            patch("toinflux.mcp_read.get_class", return_value=self._handler()),
+            patch("toinflux.mcp_common.get_class", return_value=self._handler()),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
         ):
             with pytest.raises(Exception) as excinfo:

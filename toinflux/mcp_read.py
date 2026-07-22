@@ -38,14 +38,8 @@ from dataclasses import dataclass, field as dataclass_field
 import requests
 import urllib3
 
-from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
-from toinflux.general import get_class, resolve_default_source
-
-# Back-compat alias: this error was originally named QueryParamError and defined
-# here; it now lives in toinflux.exceptions as the shared ToolParamError (raised
-# by the write tools too). Kept so existing `from toinflux.mcp_read import
-# QueryParamError` imports still work.
-QueryParamError = ToolParamError
+from toinflux.exceptions import SourceConnectionError, ToolParamError
+from toinflux.mcp_common import close_session, configured_sources, resolve_handler
 
 # User-facing aggregation name -> InfluxQL selector/aggregator function. "raw"
 # is handled separately (no function, no GROUP BY) and is the default.
@@ -226,10 +220,10 @@ def _validate_identifier(value, kind):
 
     :param value: candidate identifier
     :param kind: what it is, for the error message (e.g. "field")
-    :raises QueryParamError: if the value isn't a safe identifier
+    :raises ToolParamError: if the value isn't a safe identifier
     """
     if not isinstance(value, str) or not value or _CONTROL_CHAR_RE.search(value):
-        raise QueryParamError(f"invalid {kind} name: {value!r}")
+        raise ToolParamError(f"invalid {kind} name: {value!r}")
     return value
 
 
@@ -256,12 +250,12 @@ def parse_time_bound(value, *, now=None):
     :param now: reference time for ``now``/relative offsets (defaults to
         the current UTC time); injected for testability
     :return: timezone-aware UTC datetime
-    :raises QueryParamError: if the value can't be parsed
+    :raises ToolParamError: if the value can't be parsed
     """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
     if not isinstance(value, str) or not value.strip():
-        raise QueryParamError(f"invalid time value: {value!r}")
+        raise ToolParamError(f"invalid time value: {value!r}")
     text = value.strip()
     if text == "now":
         return now
@@ -274,7 +268,7 @@ def parse_time_bound(value, *, now=None):
     try:
         parsed = datetime.datetime.fromisoformat(iso)
     except ValueError:
-        raise QueryParamError(
+        raise ToolParamError(
             f"invalid time value: {value!r} - use 'now', a relative offset like '-24h', " "or an ISO 8601 timestamp"
         ) from None
     if parsed.tzinfo is None:
@@ -290,12 +284,12 @@ def _rfc3339(dt):
 def _clamp_limit(limit):
     """Validate and clamp a requested point limit into [1, MAX_RESULT_POINTS].
 
-    :raises QueryParamError: if the value isn't an integer
+    :raises ToolParamError: if the value isn't an integer
     """
     try:
         value = int(limit)
     except (TypeError, ValueError):
-        raise QueryParamError(f"invalid limit {limit!r}") from None
+        raise ToolParamError(f"invalid limit {limit!r}") from None
     return max(1, min(value, MAX_RESULT_POINTS))
 
 
@@ -316,10 +310,10 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     :param group_by: GROUP BY time interval (required when aggregating), e.g. "1h"
     :param limit: maximum points to return (clamped to MAX_RESULT_POINTS)
     :return: the InfluxQL query string
-    :raises QueryParamError: on any invalid parameter
+    :raises ToolParamError: on any invalid parameter
     """
     if field not in schema.allowed_fields:
-        raise QueryParamError(
+        raise ToolParamError(
             f"unknown field {field!r} for source {schema.source!r}; "
             f"available fields: {', '.join(sorted(schema.allowed_fields)) or '(none)'}"
         )
@@ -333,7 +327,7 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     start_dt = parse_time_bound(start, now=now)
     end_dt = parse_time_bound(end, now=now)
     if start_dt >= end_dt:
-        raise QueryParamError(f"start ({_rfc3339(start_dt)}) must be before end ({_rfc3339(end_dt)})")
+        raise ToolParamError(f"start ({_rfc3339(start_dt)}) must be before end ({_rfc3339(end_dt)})")
 
     if aggregation == "raw":
         select_expr = _quote_identifier(field)
@@ -341,14 +335,14 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     else:
         func = AGGREGATIONS.get(aggregation)
         if func is None:
-            raise QueryParamError(
+            raise ToolParamError(
                 f"unknown aggregation {aggregation!r}; choose one of: raw, {', '.join(sorted(AGGREGATIONS))}"
             )
         select_expr = f"{func}({_quote_identifier(field)})"
         if not group_by:
-            raise QueryParamError(f"aggregation {aggregation!r} requires a group_by interval (e.g. '1h')")
+            raise ToolParamError(f"aggregation {aggregation!r} requires a group_by interval (e.g. '1h')")
         if not _DURATION_RE.match(str(group_by)):
-            raise QueryParamError(f"invalid group_by interval {group_by!r}; use a duration like '5m', '1h', '1d'")
+            raise ToolParamError(f"invalid group_by interval {group_by!r}; use a duration like '5m', '1h', '1d'")
         group_clause = f" GROUP BY time({group_by}) fill(none)"
 
     limit_value = _clamp_limit(limit)
@@ -461,47 +455,15 @@ def run_query(session, influx_settings, db, query):
     return [], []
 
 
-def configured_sources(settings):
-    """Return the lowercased source names the MCP read tools expose - the same
-    ``sources:`` list the collectors run, so the two can't drift. Falls back to
-    the single default source when no list is configured."""
-    raw = settings.get("sources")
-    if isinstance(raw, list) and raw:
-        return [src.lower() for src in raw if isinstance(src, str)]
-    # Normalise the default-source fallback the same way: lowercase it, and drop
-    # a non-string value (YAML coerces `default_source: no` to False) so callers
-    # always get a list[str] - a mixed-case default would otherwise never match
-    # source.lower(), and a non-string would crash the error-message join.
-    default = resolve_default_source(settings)
-    return [default.lower()] if isinstance(default, str) else []
-
-
-def _resolve_handler(source, settings, settings_file):
-    """Construct the DataHandler for a configured source, or raise
-    QueryParamError if the name isn't one the read tools expose. Case-insensitive,
-    matching the collector factory."""
-    if not isinstance(source, str) or not source.strip():
-        raise QueryParamError(f"source must be a non-empty string (got {source!r})")
-    available = configured_sources(settings)
-    if source.lower() not in available:
-        raise QueryParamError(
-            f"unknown source {source!r}; available sources: {', '.join(sorted(available)) or '(none)'}"
-        )
-    try:
-        return get_class(source, settings_file)
-    except ConfigError as exc:
-        raise QueryParamError(f"source {source!r} is not usable: {exc}") from exc
-
-
 def resolve_schema(source, settings, settings_file):
     """Build a fully-populated ReadSchema for a source: its static class metadata
     plus the live field allowlist discovered from InfluxDB. Constructs a handler
     from current settings each call, so a live settings edit is picked up.
 
-    :raises QueryParamError: for an unknown/unusable source
+    :raises ToolParamError: for an unknown/unusable source
     :raises SourceConnectionError: if field discovery fails
     """
-    handler = _resolve_handler(source, settings, settings_file)
+    handler = resolve_handler(source, settings, settings_file)
     measurement = handler.MCP_MEASUREMENT or handler.source
     # Use the handler's own freshly-loaded influx block, not the server's startup
     # snapshot - the handler was constructed from current settings, so an edit to
@@ -518,18 +480,9 @@ def resolve_schema(source, settings, settings_file):
         # it if discovery fails, or a long-running server accumulates open
         # connection pools/FDs on intermittent errors. On success the caller owns
         # the returned handler and closes its session when done.
-        _close_session(handler.session)
+        close_session(handler.session)
         raise
     return handler, build_schema(handler, fields, db)
-
-
-def _close_session(session):
-    """Best-effort close of a handler's requests.Session, swallowing any error -
-    this runs in cleanup paths and must never mask the real result or exception."""
-    try:
-        session.close()
-    except Exception:  # pragma: no cover - close() shouldn't raise; never let cleanup break a tool
-        logging.debug("Ignoring error closing an MCP read session", exc_info=True)
 
 
 def _list_sources_result(settings, settings_file):
@@ -537,14 +490,14 @@ def _list_sources_result(settings, settings_file):
     out = []
     for source in configured_sources(settings):
         try:
-            handler = _resolve_handler(source, settings, settings_file)
-        except QueryParamError:
+            handler = resolve_handler(source, settings, settings_file)
+        except ToolParamError:
             continue
         # Constructed only to read class metadata; close its session immediately.
         try:
             out.append({"source": source, "measurement": handler.MCP_MEASUREMENT or handler.source})
         finally:
-            _close_session(handler.session)
+            close_session(handler.session)
     return {"sources": out}
 
 
@@ -563,7 +516,7 @@ def _list_fields_result(source, settings, settings_file):
             fields.append(entry)
         return {"source": source, "measurement": schema.measurement, "fields": fields}
     finally:
-        _close_session(handler.session)
+        close_session(handler.session)
 
 
 def _query_history_result(settings, settings_file, *, source, field, start, end, aggregation, group_by, limit):
@@ -572,7 +525,7 @@ def _query_history_result(settings, settings_file, *, source, field, start, end,
     try:
         return _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit)
     finally:
-        _close_session(handler.session)
+        close_session(handler.session)
 
 
 def _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit):

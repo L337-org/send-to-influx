@@ -252,7 +252,7 @@ class TestWriteToolRegistration:
 
     def test_no_write_tools_when_nothing_enabled(self):
         handler = make_hue(mcp_read_write=False)
-        with patch("toinflux.mcp_write._resolve_handler", return_value=handler):
+        with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
             server = self._server()
             register_write_tools(server, self._settings(), None)
         names = {t.name for t in anyio.run(server.list_tools)}
@@ -260,21 +260,21 @@ class TestWriteToolRegistration:
 
     def test_write_tools_registered_when_enabled(self):
         handler = make_hue(mcp_read_write=True)
-        with patch("toinflux.mcp_write._resolve_handler", return_value=handler):
+        with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
             server = self._server()
             register_write_tools(server, self._settings(), None)
         names = {t.name for t in anyio.run(server.list_tools)}
         assert names == {"list_writable_devices", "set_device_state"}
 
     def test_writable_enabled_sources(self):
-        with patch("toinflux.mcp_write._resolve_handler", return_value=make_hue(mcp_read_write=True)):
+        with patch("toinflux.mcp_write.resolve_handler", return_value=make_hue(mcp_read_write=True)):
             assert writable_enabled_sources({"sources": ["hue"]}, None) == ["hue"]
-        with patch("toinflux.mcp_write._resolve_handler", return_value=make_hue(mcp_read_write=False)):
+        with patch("toinflux.mcp_write.resolve_handler", return_value=make_hue(mcp_read_write=False)):
             assert writable_enabled_sources({"sources": ["hue"]}, None) == []
 
     def test_set_device_state_on_disabled_source_is_rejected(self):
         handler = make_hue(mcp_read_write=False)
-        with patch("toinflux.mcp_write._resolve_handler", return_value=handler):
+        with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
             with pytest.raises(ToolParamError, match="not enabled for device writes"):
                 _set_device_state_result(
                     self._settings(), None, source="hue", device="Kitchen", on=True, brightness_pct=None
@@ -283,7 +283,7 @@ class TestWriteToolRegistration:
     def test_set_device_state_dispatches_and_closes_session(self):
         handler = make_hue(mcp_read_write=True)
         _wire_bridge(handler)
-        with patch("toinflux.mcp_write._resolve_handler", return_value=handler):
+        with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
             result = _set_device_state_result(
                 self._settings(), None, source="hue", device="Kitchen", on=True, brightness_pct=None
             )
@@ -294,7 +294,7 @@ class TestWriteToolRegistration:
         handler = make_hue(mcp_read_write=True)
         _wire_bridge(handler)
         handler.session.put.side_effect = requests.exceptions.ConnectionError("down")
-        with patch("toinflux.mcp_write._resolve_handler", return_value=handler):
+        with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
             with pytest.raises(SourceConnectionError):
                 _set_device_state_result(
                     self._settings(), None, source="hue", device="Kitchen", on=True, brightness_pct=None
