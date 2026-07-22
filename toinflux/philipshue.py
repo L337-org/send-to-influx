@@ -107,6 +107,13 @@ class Hue(DataHandler):
                 description = f"unexpected list response: {hue_data!r:.200}"
             logging.error("Error connecting to Hue Bridge - %s", description)
             raise SourceConnectionError(description)
+        # A successful GET is a dict (sensors/lights). A non-dict, non-list body - a
+        # JSON scalar/null, e.g. from a misconfigured proxy - is unexpected; fail
+        # cleanly here rather than returning it for a caller (parse_hue_data /
+        # _fetch_lights) to crash on with a TypeError/AttributeError.
+        if not isinstance(hue_data, dict):
+            logging.error("Hue Bridge returned an unexpected response type - %.200r", hue_data)
+            raise SourceConnectionError(f"Hue Bridge returned an unexpected response type: {hue_data!r:.200}")
         return hue_data
 
     def hue_device_name_to_name(self, device_name):

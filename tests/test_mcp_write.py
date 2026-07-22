@@ -138,6 +138,22 @@ class TestHueListDevices:
         with pytest.raises(SourceConnectionError, match="unparseable response"):
             handler.mcp_list_writable_devices()
 
+    def test_non_dict_response_surfaces_cleanly(self):
+        # A valid-JSON but non-dict/non-list body (a scalar, e.g. from a
+        # misconfigured proxy) must fail as SourceConnectionError, not crash a
+        # caller with TypeError/AttributeError on dict access.
+        handler = make_hue()
+
+        def fake_get(url, **kwargs):
+            resp = MagicMock()
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = "totally unexpected"
+            return resp
+
+        handler.session.get.side_effect = fake_get
+        with pytest.raises(SourceConnectionError, match="unexpected response type"):
+            handler.mcp_list_writable_devices()
+
 
 class TestHueSetLight:
     def test_write_enabled_reflects_setting(self):
