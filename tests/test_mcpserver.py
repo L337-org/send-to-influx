@@ -16,6 +16,7 @@ import anyio
 import pytest
 from starlette.testclient import TestClient
 
+from toinflux.exceptions import ConfigError
 from toinflux.mcpserver import (
     ACCESS_TOKEN_TTL_SECONDS,
     LOGIN_FAILURE_LIMIT,
@@ -25,6 +26,7 @@ from toinflux.mcpserver import (
     SendToInfluxOAuthProvider,
     build_mcp_server,
     resolve_state_path,
+    start_mcp_server_thread,
 )
 
 MCP_PUBLIC_URL = "https://mcp.example.org"
@@ -261,6 +263,55 @@ class TestResolveStatePath:
     def test_defaults_next_to_settings_file(self):
         path = resolve_state_path({"mcp": {}}, "/etc/send-to-influx/settings.yaml")
         assert path == "/etc/send-to-influx/mcp-oauth-state.json"
+
+
+class TestBuildServerImport:
+    """The SDK-missing failure path of build_mcp_server."""
+
+    def test_missing_mcp_sdk_raises_config_error(self, mcp_settings):
+        # A source checkout without the mcp package installed: build_mcp_server's
+        # imports fail, and it must surface a clean ConfigError (fatal, not
+        # retried) with an actionable message, not a raw ImportError. Simulate the
+        # missing module by masking it in sys.modules (import then raises).
+        with patch.dict("sys.modules", {"mcp.server.auth.settings": None}):
+            with pytest.raises(ConfigError, match="could not be imported"):
+                build_mcp_server(mcp_settings)
+
+
+class TestServerThreadLifecycle:
+    """The daemon-thread worker's failure handling in start_mcp_server_thread:
+    a ConfigError stops the thread permanently; any other exception is retried."""
+
+    THREAD_SETTINGS = {"mcp": {"bind_address": "127.0.0.1:8420"}}
+
+    def test_config_error_stops_the_thread(self):
+        # A ConfigError from build_mcp_server is fatal-not-retryable, so the worker
+        # returns and the thread exits rather than looping forever.
+        with patch("toinflux.mcpserver.build_mcp_server", side_effect=ConfigError("bad")) as build:
+            thread = start_mcp_server_thread(self.THREAD_SETTINGS, None)
+            thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert build.call_count == 1  # not retried
+
+    def test_unexpected_error_is_retried_then_a_config_error_stops_it(self):
+        # First attempt raises an unexpected error (must be retried, not fatal);
+        # the second raises ConfigError to end the loop deterministically. Both
+        # being consumed proves the unexpected error was retried, not swallowed
+        # into a dead thread. SERVER_RESTART_SECONDS is patched to 0 so there's no
+        # real delay (and no flakiness).
+        with (
+            patch(
+                "toinflux.mcpserver.build_mcp_server",
+                side_effect=[RuntimeError("crash"), ConfigError("give up")],
+            ) as build,
+            patch("toinflux.mcpserver.SERVER_RESTART_SECONDS", 0),
+        ):
+            thread = start_mcp_server_thread(self.THREAD_SETTINGS, None)
+            thread.join(timeout=5)
+        assert not thread.is_alive()
+        # Two calls: the RuntimeError was retried rather than killing the thread,
+        # then the ConfigError on the retry stopped it.
+        assert build.call_count == 2
 
 
 class TestHttpSurface:
