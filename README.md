@@ -4,24 +4,24 @@ send-to-influx
 https://github.com/L337-org/send-to-influx
 -----------------------------------------
 
-Collect metrics from your smart-home and energy devices into InfluxDB, and then really take control! 
+Collect metrics from your smart-home and energy devices into InfluxDB, and then really take control!
 
-The built-in [MCP server](#remote-mcp-server) means that you can use your AI of choice as one place 
-to **control** your devices, query their **live and historical** state, and ask **complex questions** 
+The built-in [MCP server](#remote-mcp-server) means that you can use your AI of choice as one place
+to **control** your devices, query their **live and historical** state, and ask **complex questions**
 about **relationships between different measurements**, and **spot trends** in your data.
 
 Because the data is stored in InfluxDB it can also be **displayed in Grafana** dashboards and other
 visualization tools that support it.
 
-It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid 
-Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data sources. 
-Most are read-only; Hue lights/plugs and on-demand Speedtest runs can be controlled through the MCP server 
+It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid
+Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data sources.
+Most are read-only; Hue lights/plugs and on-demand Speedtest runs can be controlled through the MCP server
 when you opt in.
 
-It can be installed as a .deb package on supported platforms, or run directly from the source code in a 
+It can be installed as a .deb package on supported platforms, or run directly from the source code in a
 Python virtual environment.
 
-For a full field-by-field reference of what each source collects and the units it's reported in, see 
+For a full field-by-field reference of what each source collects and the units it's reported in, see
 [UNITS.md](UNITS.md).
 
 Contents
@@ -428,7 +428,7 @@ Key points:
 
 - **You provide the TLS side.** The server itself speaks plain HTTP on a private/loopback address;
   put your own TLS-terminating reverse proxy (nginx, Caddy, ...) in front of it and set
-  `public_url` to the address the proxy serves. Binding a public interface is refused outright 
+  `public_url` to the address the proxy serves. Binding a public interface is refused outright
   since MCP clients won't connect over the plain HTTP connection provided.
 - **Authentication is OAuth 2.1** (the mode Claude's custom-connector UI uses): add the connector
   in Claude with URL `https://mcp.example.org/mcp`, and Claude registers itself and sends you to a
