@@ -88,7 +88,7 @@ source-specific runtime dependency like `speedtest-cli`, pure Python so the `.de
 
 ### MCP server (`toinflux/mcpserver.py`)
 
-The optional remote MCP server (new in 5.0) is *not* a `DataHandler` - it's the project's
+The optional remote MCP server (introduced in 5.0) is *not* a `DataHandler` - it's the project's
 first inbound-network-facing component, a Streamable-HTTP server built on the official `mcp` SDK's
 `FastMCP` + built-in OAuth 2.1 authorization server, run in its own daemon thread (`anyio` inside
 the thread; nothing else in the synchronous codebase changes). Enabled iff both `mcp.user` and

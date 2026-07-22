@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "send-to-influx"
-version = "4.5"
-description = "Collects data from smart home / energy monitoring devices and sends it to InfluxDB"
+version = "5.0"
+description = "Collect smart-home and energy device metrics into InfluxDB, with an optional MCP server to query and control them through Claude"
 readme = "README.md"
 license = { file = "LICENSE.md" }
 requires-python = ">=3.10"
