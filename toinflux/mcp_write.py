@@ -28,10 +28,9 @@ import logging
 
 from toinflux.exceptions import ToolParamError
 
-# Reuse the read module's handler construction and best-effort session close -
-# writes share the same per-call handler lifecycle (construct from current
-# settings, close the session afterwards) as reads, so there is one implementation.
-from toinflux.mcp_read import _close_session, _resolve_handler, configured_sources
+# Shared per-call handler lifecycle (construct from current settings, close the
+# session afterwards) - writes use the same plumbing as reads, from one place.
+from toinflux.mcp_common import close_session, configured_sources, resolve_handler
 
 
 def writable_enabled_sources(settings, settings_file=None):
@@ -47,14 +46,14 @@ def writable_enabled_sources(settings, settings_file=None):
     enabled = []
     for source in configured_sources(settings):
         try:
-            handler = _resolve_handler(source, settings, settings_file)
+            handler = resolve_handler(source, settings, settings_file)
         except ToolParamError:
             continue
         try:
             if handler.mcp_write_enabled():
                 enabled.append(source)
         finally:
-            _close_session(handler.session)
+            close_session(handler.session)
     return enabled
 
 
@@ -65,9 +64,9 @@ def _resolve_writable_handler(source, settings, settings_file):
 
     :raises ToolParamError: unknown source, or a source not opted in for writes
     """
-    handler = _resolve_handler(source, settings, settings_file)
+    handler = resolve_handler(source, settings, settings_file)
     if not handler.mcp_write_enabled():
-        _close_session(handler.session)
+        close_session(handler.session)
         raise ToolParamError(
             f"source {source!r} is not enabled for device writes; set {source}.mcp_read_write: true to allow it"
         )
@@ -84,7 +83,7 @@ def _list_writable_devices_result(source, settings, settings_file):
             "devices": [{"id": light_id, "name": name} for light_id, name in sorted(devices.items())],
         }
     finally:
-        _close_session(handler.session)
+        close_session(handler.session)
 
 
 def _set_device_state_result(settings, settings_file, *, source, device, on, brightness_pct):
@@ -95,7 +94,7 @@ def _set_device_state_result(settings, settings_file, *, source, device, on, bri
         logging.info("MCP write applied to %s device %r: %s", source, result.get("device"), result.get("applied"))
         return result
     finally:
-        _close_session(handler.session)
+        close_session(handler.session)
 
 
 def register_write_tools(server, settings, settings_file=None):
