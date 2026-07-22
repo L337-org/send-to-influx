@@ -7,6 +7,7 @@ __version__ = "1.0"
 
 # pylint: disable=import-outside-toplevel
 import copy
+import ipaddress
 import logging
 import os
 import stat
@@ -322,13 +323,44 @@ def parse_mcp_bind_address(bind_address):
         raise ConfigError(f"mcp.bind_address port must be between 1 and 65535 (got {bind_address!r})")
     if not host:
         raise ConfigError(f"mcp.bind_address host must not be empty (got {bind_address!r})")
+    _reject_public_bind_host(host, bind_address)
+    return host, port
+
+
+def _reject_public_bind_host(host, bind_address):
+    """Refuse a bind host that would expose the plain-HTTP MCP server publicly.
+
+    Refuses the any-interface wildcards (0.0.0.0/::) and any globally-routable IP
+    literal - binding plain-HTTP OAuth/login there would put it on the network in
+    cleartext. Loopback and private/LAN addresses are allowed (a reverse proxy on
+    another host legitimately reaches the app on a private IP). A non-IP hostname
+    can't be classified without a DNS lookup (fragile, and it may resolve
+    differently at bind time), so it is allowed with a warning.
+
+    :raises ConfigError: for an any-interface or globally-routable bind host
+    """
     if host in MCP_DISALLOWED_BIND_HOSTS:
         raise ConfigError(
             f"mcp.bind_address must not bind a public interface (got {bind_address!r}) - the MCP "
             "server speaks plain HTTP and is meant to sit behind your own TLS-terminating reverse "
             "proxy; bind a loopback or private address instead"
         )
-    return host, port
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        logging.warning(
+            "mcp.bind_address host %r is not an IP literal and can't be checked for public "
+            "exposure; make sure it resolves to a loopback or private address - the MCP server "
+            "speaks plain HTTP and must sit behind your own TLS-terminating reverse proxy",
+            host,
+        )
+        return
+    if ip.is_global:
+        raise ConfigError(
+            f"mcp.bind_address must not bind a public interface (got {bind_address!r}): {host} is "
+            "globally routable and the MCP server speaks plain HTTP. Bind a loopback or private "
+            "address and put your own TLS-terminating reverse proxy in front of it instead"
+        )
 
 
 def mcp_block_errors(settings):

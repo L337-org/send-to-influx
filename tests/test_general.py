@@ -1,5 +1,6 @@
 """Unit tests for toinflux.general (load_settings, get_class)."""
 
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -604,6 +605,28 @@ class TestMcpBlockValidation:
     def test_parse_bind_address_rejects_public_host(self):
         with pytest.raises(ConfigError, match="public interface"):
             parse_mcp_bind_address("0.0.0.0:8420")
+
+    @pytest.mark.parametrize("bind", ["8.8.8.8:8420", "1.1.1.1:8420", "[2606:4700:4700::1111]:8420"])
+    def test_parse_bind_address_rejects_globally_routable_ip(self, bind):
+        # Refusing only the 0.0.0.0/:: wildcards isn't enough: an explicit public IP
+        # would still expose plain-HTTP OAuth/login on the network.
+        with pytest.raises(ConfigError, match="globally routable"):
+            parse_mcp_bind_address(bind)
+
+    @pytest.mark.parametrize("bind", ["127.0.0.1:8420", "192.168.1.5:8420", "10.0.0.3:8420", "[fd00::1]:8420"])
+    def test_parse_bind_address_allows_loopback_and_private(self, bind):
+        # A reverse proxy on another host legitimately reaches the app on a private
+        # LAN address, so loopback/private must not be refused.
+        _host, port = parse_mcp_bind_address(bind)
+        assert port == 8420
+
+    def test_parse_bind_address_hostname_allowed_with_warning(self, caplog):
+        # A non-IP hostname can't be classified without a DNS lookup, so it's allowed
+        # but warned about - only IP literals are checked for public exposure.
+        with caplog.at_level(logging.WARNING):
+            result = parse_mcp_bind_address("myhost.example:8420")
+        assert result == ("myhost.example", 8420)
+        assert any("not an IP literal" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.parametrize("bind", ["::1:8420", "2001:db8::1:8420", "2001:db8::1"])
     def test_parse_bind_address_rejects_unbracketed_ipv6(self, bind):

@@ -83,7 +83,7 @@ mqtt:
 # reverse proxy's job, and public_url is the external https:// address it serves
 # (required when enabled - OAuth discovery metadata must advertise it).
 mcp:
-  # Refused outright for public interfaces (0.0.0.0/::) - see the README's MCP section.
+  # Any-interface (0.0.0.0/::) and public IPs are refused outright - see the README's MCP section.
   bind_address: "127.0.0.1:8420"
   # e.g. "https://mcp.example.org" - the reverse-proxied address Claude connects to
   public_url: ""

@@ -98,8 +98,11 @@ the thread; nothing else in the synchronous codebase changes). Enabled iff both 
 decisions:
 
 - **Bind vs public**: binds `mcp.bind_address` (default `127.0.0.1:8420`) in plain HTTP;
-  `validate_settings()` refuses `0.0.0.0`/`::` outright with no override (plain-HTTP OAuth on a
-  public interface is never valid - TLS termination belongs to the user's reverse proxy). The
+  `validate_settings()` refuses the any-interface wildcards (`0.0.0.0`/`::`) *and* any
+  globally-routable public IP literal outright with no override (loopback and private/LAN addresses
+  are allowed, since the reverse proxy may run on another host; a non-IP hostname can't be
+  classified without a DNS lookup so is allowed with a WARNING) - plain-HTTP OAuth on a public
+  interface is never valid, TLS termination belongs to the user's reverse proxy. The
   external HTTPS address is `mcp.public_url` (required when enabled, must be `https://`): the
   OAuth issuer/discovery metadata and login-page redirects are built from it, never from the bind
   address. The SDK's DNS-rebinding protection stays enabled with the public hostname allowlisted

@@ -418,7 +418,7 @@ natural-language questions about your devices via a custom connector. It is disa
 
 ```yaml
 mcp:
-  bind_address: "127.0.0.1:8420"   # private interfaces only - 0.0.0.0/:: are refused
+  bind_address: "127.0.0.1:8420"   # loopback/private only - any-interface (0.0.0.0/::) and public IPs are refused
   public_url: "https://mcp.example.org"  # the external HTTPS address your reverse proxy serves
   user: "your-login-name"
   password: "your-login-password"
@@ -451,9 +451,8 @@ sub-path of a shared site won't work:
 
 ```nginx
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+    listen 443 ssl http2;                      # 'listen ... http2' works on old and new nginx;
+    listen [::]:443 ssl http2;                 # newer nginx (1.25.1+) prefers a separate 'http2 on;'
     server_name mcp.example.org;               # must match the host in mcp.public_url
 
     ssl_certificate     /etc/letsencrypt/live/mcp.example.org/fullchain.pem;
