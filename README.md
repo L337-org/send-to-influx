@@ -4,17 +4,25 @@ send-to-influx
 https://github.com/L337-org/send-to-influx
 -----------------------------------------
 
-Collect metrics from your smart-home and energy devices into InfluxDB — then query their **live and
-historical** state, and **control** the ones that support it, in natural language through Claude via
-an optional built-in [MCP server](#remote-mcp-server). Because the data lands in InfluxDB it's also
-there for Grafana dashboards and anything else that speaks it — Grafana is one consumer now, not the
-whole point.
+Collect metrics from your smart-home and energy devices into InfluxDB, and then really take control! 
 
-It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data sources. Most are read-only; Hue lights/plugs and on-demand Speedtest runs can be controlled through the MCP server when you opt in.
+The built-in [MCP server](#remote-mcp-server) means that you can use your AI of choice as one place 
+to **control** your devices, query their **live and historical** state, and ask **complex questions** 
+about **relationships between different measurements**, and **spot trends** in your data.
 
-It can be installed as a .deb package on supported platforms, or run directly from the source code in a Python virtual environment.
+Because the data is stored in InfluxDB it can also be **displayed in Grafana** dashboards and other
+visualization tools that supports it.
 
-For a full field-by-field reference of what each source collects and the units it's reported in, see [UNITS.md](UNITS.md).
+It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid 
+Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data sources. 
+Most are read-only; Hue lights/plugs and on-demand Speedtest runs can be controlled through the MCP server 
+when you opt in.
+
+It can be installed as a .deb package on supported platforms, or run directly from the source code in a 
+Python virtual environment.
+
+For a full field-by-field reference of what each source collects and the units it's reported in, see 
+[UNITS.md](UNITS.md).
 
 Contents
 --------
@@ -420,7 +428,8 @@ Key points:
 
 - **You provide the TLS side.** The server itself speaks plain HTTP on a private/loopback address;
   put your own TLS-terminating reverse proxy (nginx, Caddy, ...) in front of it and set
-  `public_url` to the address the proxy serves. Binding a public interface is refused outright.
+  `public_url` to the address the proxy serves. Binding a public interface is refused outright 
+  since MCP clients won't connect over the plain HTTP connection provided.
 - **Authentication is OAuth 2.1** (the mode Claude's custom-connector UI uses): add the connector
   in Claude with URL `https://mcp.example.org/mcp`, and Claude registers itself and sends you to a
   login page gated on `mcp.user`/`mcp.password`. Failed logins are throttled and logged. On the
