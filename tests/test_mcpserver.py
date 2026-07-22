@@ -595,10 +595,12 @@ class TestPublicUrlWithPort:
         }
         server = build_mcp_server(settings)
         security = server.settings.transport_security
-        assert "mcp.example.org:8443" in security.allowed_hosts
-        assert "mcp.example.org:*" in security.allowed_hosts
+        # Exact-membership checks (these are lists of allowlist entries, not URLs to
+        # match a substring against); expressed as set subsets so a static analyser
+        # doesn't misread them as incomplete URL-substring sanitisation.
+        assert {"mcp.example.org:8443", "mcp.example.org:*"} <= set(security.allowed_hosts)
         assert not any(entry.count(":") > 1 for entry in security.allowed_hosts if "[" not in entry)
-        assert "https://mcp.example.org:8443" in security.allowed_origins
+        assert {"https://mcp.example.org:8443"} <= set(security.allowed_origins)
 
     def test_ipv6_public_url_entries_keep_their_brackets(self, tmp_path):
         settings = {
@@ -612,11 +614,10 @@ class TestPublicUrlWithPort:
         }
         server = build_mcp_server(settings)
         security = server.settings.transport_security
-        assert "[2001:db8::5]:8443" in security.allowed_hosts
-        assert "[2001:db8::5]:*" in security.allowed_hosts
+        # Exact-membership checks (see test_allowlists_are_well_formed), as set subsets.
+        assert {"[2001:db8::5]:8443", "[2001:db8::5]:*"} <= set(security.allowed_hosts)
         assert not any(entry.startswith("2001") for entry in security.allowed_hosts)
-        assert "https://[2001:db8::5]:8443" in security.allowed_origins
-        assert "https://[2001:db8::5]" in security.allowed_origins
+        assert {"https://[2001:db8::5]:8443", "https://[2001:db8::5]"} <= set(security.allowed_origins)
 
     def test_proxied_request_with_ported_host_header_is_served(self, tmp_path):
         settings = {
