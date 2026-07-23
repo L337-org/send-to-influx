@@ -6,6 +6,7 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 import logging
+import queue
 import threading
 import time
 from paho.mqtt import client as mqtt_client
@@ -165,19 +166,20 @@ class MqttDataHandler(DataHandler):
         each message the instant it arrives, and ``periodic`` is invoked once every
         ``interval`` seconds for the timer-based safety net (a full-state snapshot and
         the collector heartbeat). Both are the caller's callbacks; this method owns only
-        the transport and the concurrency it creates. It blocks until ``should_stop`` is
-        set, then disconnects cleanly.
+        the transport. It blocks until ``should_stop`` is set, then disconnects cleanly.
 
-        Concurrency: ``on_message`` runs on paho's background network thread while
-        ``periodic`` runs on this (the worker) thread, and both typically write to
-        InfluxDB through the same non-thread-safe ``requests`` session and shared write
-        buffer. This method serialises them under a single lock, so a message write and
-        a snapshot write never overlap; the cost is that a slow InfluxDB write briefly
-        holds up message processing, which is the right trade (correctness over a few
-        milliseconds of latency). A callback that raises is logged and swallowed for
-        ``on_message`` (one bad message must not tear the stream down - the point, if it
-        was buffered, flushes on the next write) but allowed to propagate for
-        ``periodic`` (so the caller's own error handling and the worker's backoff apply).
+        Threading: paho's network thread only *enqueues* each decoded message (see
+        ``_build_stream_client``); this method drains that queue and runs both the
+        immediate per-message writes (``on_message``) and the ``periodic`` snapshot on a
+        single worker thread (see ``_run_stream_loop``). Keeping all InfluxDB I/O off the
+        network thread is deliberate: a callback that blocked the network thread on a slow
+        write (a large backlog flush against a sluggish InfluxDB) would hold up keepalives
+        and ACKs, and the broker would drop the connection - losing exactly the transient
+        events the stream exists to capture. Because one consumer thread runs both write
+        paths, they can't overlap, so no lock is needed. ``on_message`` errors are logged
+        and swallowed (one bad message must not tear the stream down; a buffered point
+        flushes on the next write); ``periodic`` errors propagate so the caller's error
+        handling and the worker's backoff apply.
 
         The initial CONNACK and subscribe are awaited up front and mapped to
         ``SourceConnectionError`` on failure/timeout - identical semantics to
@@ -189,15 +191,14 @@ class MqttDataHandler(DataHandler):
         :param topic_filter: MQTT topic filter to subscribe to (e.g. ``nuki/+/+``)
         :type topic_filter: str
         :param on_message: called ``on_message(topic, payload)`` for each message, with
-            ``payload`` already UTF-8 decoded; runs under the shared lock
+            ``payload`` already UTF-8 decoded; runs on the worker thread, not paho's
         :type on_message: collections.abc.Callable
-        :param periodic: called with no arguments once every ``interval`` seconds, under
-            the shared lock - the timer-based snapshot/heartbeat tick
+        :param periodic: called with no arguments once every ``interval`` seconds - the
+            timer-based snapshot/heartbeat tick
         :type periodic: collections.abc.Callable
         :param interval: seconds between ``periodic`` ticks
         :type interval: float
-        :param should_stop: set to end the stream and return; also woken early when set
-            so shutdown doesn't wait out a full ``interval``
+        :param should_stop: set to end the stream and return
         :type should_stop: threading.Event
         :return: None
         :raises ConfigError: if the shared ``mqtt`` block is missing/malformed or
@@ -214,7 +215,8 @@ class MqttDataHandler(DataHandler):
         mqtt_settings = self.settings["mqtt"]
         host = mqtt_settings["broker_host"]
         port = mqtt_settings.get("broker_port", 1883)
-        client, state = self._build_stream_client(mqtt_settings, host, port, topic_filter, on_message)
+        message_queue = queue.Queue()
+        client, state = self._build_stream_client(mqtt_settings, host, port, topic_filter, message_queue)
         try:
             client.connect(host, port)
         except (OSError, ValueError) as e:
@@ -224,14 +226,7 @@ class MqttDataHandler(DataHandler):
         try:
             self._await_initial_connection(host, port, state["failures"], state["connected"])
             logging.info("Streaming MQTT messages from %s:%s (snapshot every %ss)", host, port, interval)
-            # wait() returns True only when should_stop is set (shutdown) and False on
-            # timeout (run a periodic tick), so a stop is honoured promptly instead of
-            # waiting out a full interval. The first snapshot is one interval in - the
-            # retained state that arrives on subscribe is already written immediately by
-            # on_message, so there's nothing to snapshot sooner.
-            while not should_stop.wait(interval):
-                with state["lock"]:
-                    periodic()
+            self._run_stream_loop(message_queue, on_message, periodic, interval, should_stop)
         finally:
             state["stopping"].set()
             # disconnect() before loop_stop(): with paho's loop_start() background
@@ -243,15 +238,83 @@ class MqttDataHandler(DataHandler):
             client.disconnect()
             client.loop_stop()
 
-    def _build_stream_client(self, mqtt_settings, host, port, topic_filter, on_message):
+    def _run_stream_loop(self, message_queue, on_message, periodic, interval, should_stop):
+        """
+        Consume queued messages and run the periodic snapshot, both on this one thread.
+
+        paho's network thread only enqueues (see ``_build_stream_client``), so every
+        InfluxDB write - the immediate per-message write via ``on_message`` and the
+        ``periodic`` snapshot/heartbeat - happens here, off the network loop. That keeps
+        the network thread free to service keepalives and ACKs even while a write is slow
+        (e.g. a large backlog flush against a sluggish InfluxDB), which would otherwise
+        stall the connection and make the broker drop it - losing the very transient
+        events this stream exists to capture. One consumer thread for both write paths
+        also means they never overlap, so no lock is needed.
+
+        The first snapshot is one interval in: the retained state delivered on subscribe
+        is already written immediately as it arrives, so there's nothing to snapshot
+        sooner.
+
+        :param message_queue: (topic, payload) pairs the network thread fills
+        :type message_queue: queue.Queue
+        :param on_message: caller callback invoked ``on_message(topic, payload)`` per message
+        :type on_message: collections.abc.Callable
+        :param periodic: caller callback invoked once every ``interval`` seconds
+        :type periodic: collections.abc.Callable
+        :param interval: seconds between ``periodic`` ticks
+        :type interval: float
+        :param should_stop: checked each iteration; set to end the loop
+        :type should_stop: threading.Event
+        :return: None
+        """
+        next_snapshot = time.monotonic() + interval
+        while not should_stop.is_set():
+            # Block for a message, but never past the next snapshot deadline, and never
+            # longer than LOOP_INTERVAL, so both the snapshot tick and a shutdown are
+            # honoured promptly rather than waiting out a whole interval.
+            wait = max(0, min(next_snapshot - time.monotonic(), LOOP_INTERVAL))
+            try:
+                topic, payload = message_queue.get(timeout=wait)
+            except queue.Empty:
+                pass
+            else:
+                self._dispatch_stream_message(on_message, topic, payload)
+            if time.monotonic() >= next_snapshot:
+                periodic()
+                next_snapshot += interval
+
+    @staticmethod
+    def _dispatch_stream_message(on_message, topic, payload):
+        """
+        Invoke the caller's per-message callback, logging and swallowing any error.
+
+        One bad or failed message (e.g. an InfluxDB write failure) must not tear down a
+        long-lived stream - the point, if it was buffered, flushes on the next write - so
+        the exception is logged with its traceback and dropped rather than propagated.
+
+        :param on_message: caller callback invoked ``on_message(topic, payload)``
+        :type on_message: collections.abc.Callable
+        :param topic: the message's MQTT topic
+        :type topic: str
+        :param payload: the message payload, already UTF-8 decoded
+        :type payload: str
+        :return: None
+        """
+        try:
+            on_message(topic, payload)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logging.warning("Error handling MQTT message on topic '%s': %s", topic, exc, exc_info=True)
+
+    def _build_stream_client(self, mqtt_settings, host, port, topic_filter, message_queue):
         """
         Construct the paho client and callbacks for a persistent stream.
 
-        Kept separate from ``stream_mqtt_messages`` so that method stays focused on the
-        connect/await/loop lifecycle. Returns the client alongside the shared mutable
-        state its callbacks write to (the handshake accumulators, the send lock that
-        serialises on_message against periodic, and the ``stopping`` flag that keeps our
-        own shutdown disconnect from being logged as a fault).
+        The message callback only *enqueues* decoded (topic, payload) pairs onto
+        ``message_queue`` - it does no InfluxDB I/O - so paho's network thread stays
+        responsive to keepalives/ACKs however slow a write is; the queue is drained and
+        written on the worker thread (see ``_run_stream_loop``). Returns the client
+        alongside the shared handshake accumulators and the ``stopping`` flag that keeps
+        our own shutdown disconnect from being logged as a fault.
 
         :param mqtt_settings: the shared ``mqtt`` settings block
         :type mqtt_settings: dict
@@ -259,18 +322,14 @@ class MqttDataHandler(DataHandler):
         :param port: broker port (for logging on an unexpected disconnect)
         :param topic_filter: filter the on_connect callback (re)subscribes to
         :type topic_filter: str
-        :param on_message: caller callback invoked ``on_message(topic, payload)`` under
-            the send lock for each message
-        :type on_message: collections.abc.Callable
-        :return: (client, state dict with ``failures``/``connected``/``lock``/``stopping``)
+        :param message_queue: queue the message callback puts (topic, payload) onto
+        :type message_queue: queue.Queue
+        :return: (client, state dict with ``failures``/``connected``/``stopping``)
         :rtype: tuple
         """
         state = {
             "failures": [],
             "connected": [],
-            # Serialises on_message (paho's network thread) against periodic (the worker
-            # thread) - see stream_mqtt_messages' concurrency note.
-            "lock": threading.Lock(),
             # Distinguishes our own disconnect() at shutdown from an unexpected drop.
             "stopping": threading.Event(),
         }
@@ -281,15 +340,11 @@ class MqttDataHandler(DataHandler):
             # paho drops subscriptions on a reconnect.
             self._subscribe_on_connect(client, reason_code, topic_filter, state["failures"], state["connected"])
 
-        def dispatch_message(client, userdata, message):
-            payload = message.payload.decode("utf-8", errors="replace")
-            try:
-                with state["lock"]:
-                    on_message(message.topic, payload)
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                # A single failed/odd message must not kill a long-lived stream; if the
-                # handler buffered the point before failing, it flushes on the next write.
-                logging.warning("Error handling MQTT message on topic '%s': %s", message.topic, exc, exc_info=True)
+        def enqueue_message(client, userdata, message):
+            # Runs on paho's network thread - keep it to decode + enqueue, never blocking
+            # on I/O, so keepalives/ACKs aren't held up. The write happens on the worker
+            # thread draining the queue.
+            message_queue.put((message.topic, message.payload.decode("utf-8", errors="replace")))
 
         def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
             if not state["stopping"].is_set():
@@ -301,7 +356,7 @@ class MqttDataHandler(DataHandler):
         if mqtt_settings.get("username"):
             client.username_pw_set(mqtt_settings["username"], mqtt_settings.get("password"))
         client.on_connect = on_connect
-        client.on_message = dispatch_message
+        client.on_message = enqueue_message
         client.on_disconnect = on_disconnect
         client.reconnect_delay_set(min_delay=RECONNECT_MIN_DELAY, max_delay=RECONNECT_MAX_DELAY)
         return client, state

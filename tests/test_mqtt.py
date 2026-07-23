@@ -1,5 +1,7 @@
 """Unit tests for toinflux.mqtt (MqttDataHandler, the shared MQTT transport)."""
 
+import queue
+import threading
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -262,10 +264,11 @@ class TestMqttDataHandler:
 
 def _drive_stream(mock_client, messages, connack_failure=False, subscribe_result=0, connects=1):
     """Make the mocked client's loop_start() synchronously fire on_connect (``connects``
-    times, to exercise reconnect re-subscription) and deliver the given (topic,
-    payload-bytes) messages, as a real broker would after the CONNACK. Because the mock
-    is synchronous, everything is delivered before stream_mqtt_messages awaits the
-    handshake, so the await returns immediately."""
+    times, to exercise reconnect re-subscription) and enqueue the given (topic,
+    payload-bytes) messages via the client's on_message callback, as a real broker would
+    after the CONNACK. Because the mock is synchronous, this all happens before
+    stream_mqtt_messages awaits the handshake, so the await returns immediately and the
+    messages are already queued for the drain loop to process."""
     mock_client.subscribe.return_value = (subscribe_result, 1)
 
     def fake_loop_start():
@@ -277,17 +280,18 @@ def _drive_stream(mock_client, messages, connack_failure=False, subscribe_result
     mock_client.loop_start.side_effect = fake_loop_start
 
 
-def _stop_after(periodic_ticks):
-    """A stand-in for the should_stop Event whose wait() returns False ``periodic_ticks``
-    times (each a periodic tick) then True (shutdown), so the stream loop runs a known
-    number of snapshots without any real waiting."""
+def _stop_after_iterations(n):
+    """A stand-in for the should_stop Event whose is_set() returns False ``n`` times (one
+    per drain-loop iteration) then True, so _run_stream_loop runs a known number of
+    iterations without any real waiting or a background thread."""
     should_stop = MagicMock()
-    should_stop.wait.side_effect = [False] * periodic_ticks + [True]
+    should_stop.is_set.side_effect = [False] * n + [True]
     return should_stop
 
 
 class TestStreamMqttMessages:
-    """Tests for the persistent, event-driven stream_mqtt_messages transport."""
+    """Connection/lifecycle tests for stream_mqtt_messages; the drain-loop behaviour is
+    covered separately in TestRunStreamLoop."""
 
     def test_delivers_each_message_to_on_message_callback(self, sample_settings):
         """A message arriving over the held-open subscription is passed to the caller's
@@ -302,27 +306,38 @@ class TestStreamMqttMessages:
                 on_message=lambda t, p: received.append((t, p)),
                 periodic=lambda: None,
                 interval=300,
-                should_stop=_stop_after(0),
+                should_stop=_stop_after_iterations(2),
             )
             assert received == [("nuki/A/doorsensorState", "3"), ("nuki/A/state", "1")]
             mock_client.subscribe.assert_called_with("nuki/+/+")
             mock_client.loop_stop.assert_called_once()
             mock_client.disconnect.assert_called_once()
 
-    def test_runs_periodic_each_interval(self, sample_settings):
-        """periodic() fires once per interval tick (the snapshot/heartbeat safety net)."""
+    def test_message_callback_runs_off_the_network_thread(self, sample_settings):
+        """The paho on_message callback only enqueues - it must not call the caller's
+        on_message directly, so a slow write can't block paho's network loop. Firing the
+        client callback delivers nothing to the caller until the drain loop runs."""
         handler = _handler(_mqtt_settings(sample_settings))
-        ticks = []
+        received = []
         with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
-            _drive_stream(mock_client_cls.return_value, [])
+            mock_client = mock_client_cls.return_value
+            mock_client.subscribe.return_value = (0, 1)
+
+            def fake_loop_start():
+                mock_client.on_connect(mock_client, None, None, _FakeReasonCode(False), None)
+                mock_client.on_message(mock_client, None, MagicMock(topic="nuki/A/state", payload=b"1"))
+                # only the queue has been fed at this point - the caller hasn't been called
+                assert received == []
+
+            mock_client.loop_start.side_effect = fake_loop_start
             handler.stream_mqtt_messages(
                 "nuki/+/+",
-                on_message=lambda t, p: None,
-                periodic=lambda: ticks.append(1),
+                on_message=lambda t, p: received.append((t, p)),
+                periodic=lambda: None,
                 interval=300,
-                should_stop=_stop_after(3),
+                should_stop=_stop_after_iterations(1),
             )
-            assert ticks == [1, 1, 1]
+            assert received == [("nuki/A/state", "1")]  # drained on the worker thread
 
     def test_resubscribes_on_every_connect(self, sample_settings):
         """on_connect re-subscribes on each (re)connect - paho drops subscriptions on a
@@ -337,7 +352,7 @@ class TestStreamMqttMessages:
                 on_message=lambda t, p: None,
                 periodic=lambda: None,
                 interval=300,
-                should_stop=_stop_after(0),
+                should_stop=_stop_after_iterations(0),
             )
             assert mock_client.subscribe.call_count == 3
 
@@ -352,7 +367,7 @@ class TestStreamMqttMessages:
                 on_message=lambda t, p: None,
                 periodic=lambda: None,
                 interval=300,
-                should_stop=_stop_after(0),
+                should_stop=_stop_after_iterations(0),
             )
             mock_client.reconnect_delay_set.assert_called_once()
 
@@ -369,7 +384,7 @@ class TestStreamMqttMessages:
                     on_message=lambda t, p: None,
                     periodic=lambda: None,
                     interval=300,
-                    should_stop=_stop_after(0),
+                    should_stop=_stop_after_iterations(0),
                 )
             mock_client.loop_start.assert_not_called()
 
@@ -387,7 +402,7 @@ class TestStreamMqttMessages:
                     on_message=lambda t, p: None,
                     periodic=lambda: None,
                     interval=300,
-                    should_stop=_stop_after(0),
+                    should_stop=_stop_after_iterations(0),
                 )
             mock_client.subscribe.assert_not_called()
             mock_client.loop_stop.assert_called_once()
@@ -404,7 +419,7 @@ class TestStreamMqttMessages:
                     on_message=lambda t, p: None,
                     periodic=lambda: None,
                     interval=300,
-                    should_stop=_stop_after(0),
+                    should_stop=_stop_after_iterations(0),
                 )
 
     def test_no_connack_within_timeout_raises_source_connection_error(self, sample_settings):
@@ -423,54 +438,29 @@ class TestStreamMqttMessages:
                     on_message=lambda t, p: None,
                     periodic=lambda: None,
                     interval=300,
-                    should_stop=_stop_after(0),
+                    should_stop=_stop_after_iterations(0),
                 )
             mock_client.loop_stop.assert_called_once()
             mock_client.disconnect.assert_called_once()
 
-    def test_failing_on_message_callback_does_not_kill_the_stream(self, sample_settings):
-        """One message whose handler raises is logged and swallowed - the stream keeps
-        running and later periodic ticks still fire (a bad message must not tear down a
-        long-lived collector)."""
+    def test_disconnect_before_loop_stop_on_shutdown(self, sample_settings):
+        """Clean shutdown disconnects (queuing the DISCONNECT for the still-running
+        network thread) before stopping the loop."""
         handler = _handler(_mqtt_settings(sample_settings))
-        ticks = []
-
-        def boom(topic, payload):
-            raise ValueError("bad message")
-
-        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
-            _drive_stream(mock_client_cls.return_value, [("nuki/A/state", b"1")])
-            handler.stream_mqtt_messages(
-                "nuki/+/+",
-                on_message=boom,
-                periodic=lambda: ticks.append(1),
-                interval=300,
-                should_stop=_stop_after(1),
-            )
-            assert ticks == [1]  # stream survived the failing message
-
-    def test_periodic_exception_propagates(self, sample_settings):
-        """Unlike on_message, a periodic failure is not swallowed - it propagates so the
-        caller's error handling and the worker's backoff apply."""
-        handler = _handler(_mqtt_settings(sample_settings))
-
-        def boom():
-            raise RuntimeError("snapshot failed")
-
+        order = []
         with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
             mock_client = mock_client_cls.return_value
             _drive_stream(mock_client, [])
-            with pytest.raises(RuntimeError, match="snapshot failed"):
-                handler.stream_mqtt_messages(
-                    "nuki/+/+",
-                    on_message=lambda t, p: None,
-                    periodic=boom,
-                    interval=300,
-                    should_stop=_stop_after(1),
-                )
-            # even on a propagating error, the connection is torn down cleanly
-            mock_client.loop_stop.assert_called_once()
-            mock_client.disconnect.assert_called_once()
+            mock_client.disconnect.side_effect = lambda: order.append("disconnect")
+            mock_client.loop_stop.side_effect = lambda: order.append("loop_stop")
+            handler.stream_mqtt_messages(
+                "nuki/+/+",
+                on_message=lambda t, p: None,
+                periodic=lambda: None,
+                interval=300,
+                should_stop=_stop_after_iterations(0),
+            )
+            assert order == ["disconnect", "loop_stop"]
 
     def test_invalid_interval_raises_config_error(self, sample_settings):
         """A non-positive/non-numeric snapshot interval is a fatal config-shape problem,
@@ -484,7 +474,7 @@ class TestStreamMqttMessages:
                         on_message=lambda t, p: None,
                         periodic=lambda: None,
                         interval=bad,
-                        should_stop=_stop_after(0),
+                        should_stop=_stop_after_iterations(0),
                     )
 
     def test_missing_mqtt_block_raises_config_error(self, sample_settings):
@@ -499,7 +489,7 @@ class TestStreamMqttMessages:
                     on_message=lambda t, p: None,
                     periodic=lambda: None,
                     interval=300,
-                    should_stop=_stop_after(0),
+                    should_stop=_stop_after_iterations(0),
                 )
 
     def test_uses_v2_callback_api(self, sample_settings):
@@ -512,6 +502,85 @@ class TestStreamMqttMessages:
                 on_message=lambda t, p: None,
                 periodic=lambda: None,
                 interval=300,
-                should_stop=_stop_after(0),
+                should_stop=_stop_after_iterations(0),
             )
             assert mock_client_cls.call_args.kwargs["callback_api_version"] is mqtt_client.CallbackAPIVersion.VERSION2
+
+
+class TestRunStreamLoop:
+    """Tests for the single-threaded drain loop that processes queued messages and runs
+    the periodic snapshot, with no network layer involved."""
+
+    def test_dispatches_queued_messages_in_order(self, sample_settings):
+        """Queued (topic, payload) pairs are handed to on_message in FIFO order."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        message_queue = queue.Queue()
+        message_queue.put(("nuki/A/state", "1"))
+        message_queue.put(("nuki/A/doorsensorState", "3"))
+        received = []
+        handler._run_stream_loop(
+            message_queue,
+            on_message=lambda t, p: received.append((t, p)),
+            periodic=lambda: None,
+            interval=300,
+            should_stop=_stop_after_iterations(2),
+        )
+        assert received == [("nuki/A/state", "1"), ("nuki/A/doorsensorState", "3")]
+
+    def test_runs_periodic_when_the_interval_elapses(self, sample_settings):
+        """With nothing queued, the loop still fires the periodic snapshot once the
+        interval passes."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        ticks = []
+        should_stop = threading.Event()
+
+        def periodic():
+            ticks.append(1)
+            should_stop.set()  # stop after the first snapshot
+
+        handler._run_stream_loop(
+            queue.Queue(),
+            on_message=lambda t, p: None,
+            periodic=periodic,
+            interval=0.01,
+            should_stop=should_stop,
+        )
+        assert ticks == [1]
+
+    def test_failing_on_message_is_logged_and_swallowed(self, sample_settings):
+        """A message whose handler raises is swallowed - the loop survives (if the error
+        propagated, this test would error out instead of asserting)."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        message_queue = queue.Queue()
+        message_queue.put(("nuki/A/state", "1"))
+        processed = []
+
+        def boom(topic, payload):
+            processed.append((topic, payload))
+            raise ValueError("bad message")
+
+        handler._run_stream_loop(
+            message_queue,
+            on_message=boom,
+            periodic=lambda: None,
+            interval=300,
+            should_stop=_stop_after_iterations(1),
+        )
+        assert processed == [("nuki/A/state", "1")]
+
+    def test_periodic_exception_propagates(self, sample_settings):
+        """Unlike on_message, a periodic failure is not swallowed - it propagates so the
+        caller's error handling and the worker's backoff apply."""
+        handler = _handler(_mqtt_settings(sample_settings))
+
+        def boom():
+            raise RuntimeError("snapshot failed")
+
+        with pytest.raises(RuntimeError, match="snapshot failed"):
+            handler._run_stream_loop(
+                queue.Queue(),
+                on_message=lambda t, p: None,
+                periodic=boom,
+                interval=0.01,
+                should_stop=threading.Event(),
+            )
