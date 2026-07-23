@@ -137,8 +137,10 @@ jobs:
             if sudo apt-get update -q && sudo apt-get install -yq rsyslog logrotate; then
               exit 0
             fi
-            echo "apt install attempt $attempt failed (likely a transient mirror 404); retrying in 15s..."
-            sleep 15
+            if [ "$attempt" -lt 5 ]; then
+              echo "apt install attempt $attempt failed (likely a transient mirror 404); retrying in 15s..."
+              sleep 15
+            fi
           done
           echo "rsyslog/logrotate install still failing after 5 attempts" >&2
           exit 1
