@@ -1,0 +1,10 @@
+# Send send-to-influx's messages to their own dedicated logfile, and stop
+# further processing so they no longer also land in the shared
+# daemon.log/syslog. Mirrors the real haproxy package's own
+# /etc/rsyslog.d/49-haproxy.conf pattern (startswith rather than an exact
+# match, matching that precedent even though this service only ever has the
+# one process name).
+:programname, startswith, "send-to-influx" {
+  /var/log/send-to-influx.log
+  stop
+}

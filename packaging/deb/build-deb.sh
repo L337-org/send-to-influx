@@ -308,6 +308,20 @@ cp "$REPO_ROOT/packaging/deb/config" "$PKG_ROOT/DEBIAN/config"
 cp "$REPO_ROOT/packaging/deb/send-to-influx.templates" "$PKG_ROOT/DEBIAN/templates"
 chmod 755 "$PKG_ROOT/DEBIAN/preinst" "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm" "$PKG_ROOT/DEBIAN/config"
 
+# rsyslog + logrotate config for the packaged install's own dedicated logfile
+# (SI-12) - unlike settings.yaml, no maintainer script ever rewrites either of
+# these, so the Policy 10.7.3 conflict that rules out conffile treatment for
+# settings.yaml doesn't apply here: they're real dpkg conffiles (see the
+# DEBIAN/conffiles write below), exactly like haproxy's own
+# /etc/rsyslog.d/49-haproxy.conf + /etc/logrotate.d/haproxy.
+mkdir -p "$PKG_ROOT/etc/rsyslog.d" "$PKG_ROOT/etc/logrotate.d"
+cp "$REPO_ROOT/packaging/deb/send-to-influx.rsyslog" "$PKG_ROOT/etc/rsyslog.d/49-send-to-influx.conf"
+cp "$REPO_ROOT/packaging/deb/send-to-influx.logrotate" "$PKG_ROOT/etc/logrotate.d/send-to-influx"
+cat > "$PKG_ROOT/DEBIAN/conffiles" <<'CONFFILES'
+/etc/rsyslog.d/49-send-to-influx.conf
+/etc/logrotate.d/send-to-influx
+CONFFILES
+
 # No hard Depends: on systemd - shipping a unit file doesn't require it
 # (Debian packages with units conventionally don't depend on an init), every
 # systemctl call in the maintainer scripts is already guarded on
@@ -315,6 +329,12 @@ chmod 755 "$PKG_ROOT/DEBIAN/preinst" "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBI
 # hard dependency couldn't replace anyway, e.g. in a chroot/container), and
 # systemd-creds availability is checked at runtime with its own specific
 # error message (see CLAUDE.md's "Credential storage" section).
+#
+# rsyslog/logrotate are Recommends:, not Depends:, for the same reason: the
+# service logs to stdout/journald regardless, so the rsyslog+logrotate config
+# above is an optional enhancement (its own dedicated logfile), not something
+# the package needs to function - matching neither being Priority:essential
+# on Debian, so not guaranteed present on a minimal image.
 cat > "$PKG_ROOT/DEBIAN/control" <<CONTROL
 Package: ${PKG_NAME}
 Version: ${VERSION}
@@ -322,6 +342,7 @@ Section: utils
 Priority: optional
 Architecture: all
 Depends: debconf (>= 0.5), python3 (>= 3.${PYTHON_MIN_SUPPORTED_MINOR}), python3 (<< 3.$((PYTHON_MAX_SUPPORTED_MINOR + 1)))
+Recommends: rsyslog, logrotate
 Suggests: mosquitto, mosquitto-clients
 Maintainer: Gavin Lucas
 Description: Collects data from smart home / energy devices and writes it to InfluxDB

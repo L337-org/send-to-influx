@@ -216,8 +216,43 @@ cp /usr/share/send-to-influx/example_settings.yaml /tmp/ci-settings.yaml
     || fail "--check-config smoke test failed on the shipped example settings"
 [ -f "$SETTINGS" ] || fail "settings.yaml not created"
 [ -f /usr/share/send-to-influx/example_settings.yaml ] || fail "example not shipped under /usr/share"
-dpkg-deb -I "$DEB" conffiles >/dev/null 2>&1 && fail "package declares conffiles"
+# settings.yaml is deliberately NOT a conffile (see build-deb.sh) - but the
+# rsyslog/logrotate config (SI-12) deliberately IS, since no maintainer script
+# ever rewrites either. Assert exactly those two, no more, no fewer.
+CONFFILES_ACTUAL="$(dpkg-deb -I "$DEB" conffiles 2>/dev/null | tr -d ' ' | sort)"
+CONFFILES_EXPECTED="$(printf '%s\n' /etc/logrotate.d/send-to-influx /etc/rsyslog.d/49-send-to-influx.conf | sort)"
+[ "$CONFFILES_ACTUAL" = "$CONFFILES_EXPECTED" ] || fail "package conffiles are '$CONFFILES_ACTUAL', expected '$CONFFILES_EXPECTED'"
 dpkg-deb -f "$DEB" Depends | grep -qw systemd && fail "package Depends on systemd"
+dpkg-deb -f "$DEB" Recommends | grep -qw rsyslog || fail "package does not Recommend rsyslog"
+dpkg-deb -f "$DEB" Recommends | grep -qw logrotate || fail "package does not Recommend logrotate"
+# Captured via command substitution, not a live pipe into `grep -q`: dpkg -L
+# prints thousands of lines, the /etc/... entries sort near the start, and
+# grep -q exits as soon as it finds a match - closing its end of the pipe
+# while dpkg -L is still mid-write. Under this script's `set -o pipefail`,
+# the resulting SIGPIPE on dpkg -L's side registers as a pipeline failure
+# regardless of whether grep actually matched, making `dpkg -L ... | grep -q`
+# fail close to every time for an early match. Capturing first avoids it.
+INSTALLED_FILES="$(dpkg -L send-to-influx)"
+# A here-string, not a pipe from echo - grep reads it as a temp file/fd, with
+# no live producer process on the other end that an early match could SIGPIPE.
+grep -qx /etc/rsyslog.d/49-send-to-influx.conf <<< "$INSTALLED_FILES" || fail "rsyslog config not shipped"
+grep -qx /etc/logrotate.d/send-to-influx <<< "$INSTALLED_FILES" || fail "logrotate config not shipped"
+if command -v rsyslogd >/dev/null 2>&1; then
+    RSYSLOG_CHECK="$(rsyslogd -N1 2>&1)"
+    grep -qi error <<< "$RSYSLOG_CHECK" && fail "shipped rsyslog config fails validation: $RSYSLOG_CHECK"
+else
+    echo "rsyslogd not installed - skipping rsyslog config validation"
+fi
+if command -v logrotate >/dev/null 2>&1; then
+    # logrotate -d -f's *exit code* does not reflect a config error (verified:
+    # it returns 0 even for a genuinely broken directive, printing "error: ..."
+    # to its output instead) - check the output text, not the exit status.
+    touch /var/log/send-to-influx.log
+    logrotate -d -f /etc/logrotate.d/send-to-influx >/tmp/logrotate-check.out 2>&1
+    grep -qi "error" /tmp/logrotate-check.out && fail "shipped logrotate config fails to parse: $(cat /tmp/logrotate-check.out)"
+else
+    echo "logrotate not installed - skipping logrotate config validation"
+fi
 [ "$(stat -c '%U:%G %a' "$SETTINGS")" = "send-to-influx:send-to-influx 644" ] || fail "settings.yaml owner/mode wrong"
 [ "$(stat -c '%U' /opt/send-to-influx)" = root ] || fail "/opt/send-to-influx not root-owned"
 /opt/send-to-influx/venv/bin/python3 - <<PYEOF
@@ -430,6 +465,13 @@ debconf-show send-to-influx 2>/dev/null | grep -q . && fail "debconf answers sur
 # and will not remove them - without postrm's cleanup /opt/send-to-influx survives a
 # purge as a directory of dangling symlinks.
 [ ! -e /opt/send-to-influx ] || fail "/opt/send-to-influx survived purge: $(ls -R /opt/send-to-influx | head -5)"
-pass "purge: config, credentials, drop-in, user, and debconf answers all removed"
+# The rsyslog/logrotate config files themselves are real conffiles, removed by
+# dpkg's own purge handling; the dedicated logfile and any rotated/compressed
+# backups are runtime-created (by rsyslog, not the package) and need postrm's
+# own explicit cleanup (SI-12).
+[ ! -e /etc/rsyslog.d/49-send-to-influx.conf ] || fail "rsyslog conffile survived purge"
+[ ! -e /etc/logrotate.d/send-to-influx ] || fail "logrotate conffile survived purge"
+ls /var/log/send-to-influx.log* >/dev/null 2>&1 && fail "log file/backups survived purge"
+pass "purge: config, credentials, drop-in, user, debconf answers, and log files all removed"
 
 echo "ALL PACKAGING SCENARIOS PASSED"
