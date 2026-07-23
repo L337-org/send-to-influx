@@ -262,7 +262,11 @@ if command -v logrotate >/dev/null 2>&1; then
     # with no fail() message at all. Check the output text, not the status.
     touch /var/log/send-to-influx.log
     logrotate -d -f /etc/logrotate.d/send-to-influx >/tmp/logrotate-check.out 2>&1 || true
-    grep -qi "error" /tmp/logrotate-check.out && fail "shipped logrotate config fails to parse: $(cat /tmp/logrotate-check.out)"
+    # Anchored on the actual "error:" prefix logrotate uses for a genuine
+    # parse/permission failure (verified directly), not a bare substring -
+    # a success run could otherwise false-positive on unrelated text
+    # containing "error" (e.g. a future version's own summary line).
+    grep -q "^error:" /tmp/logrotate-check.out && fail "shipped logrotate config fails to parse: $(cat /tmp/logrotate-check.out)"
 else
     echo "logrotate not installed - skipping logrotate config validation"
 fi

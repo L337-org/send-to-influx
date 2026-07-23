@@ -1,4 +1,4 @@
-# Send send-to-influx's messages to their own dedicated logfile, and stop
+# Redirect this service's log messages to their own dedicated file, and stop
 # further processing so they no longer also land in the shared
 # daemon.log/syslog. Mirrors the real haproxy package's own
 # /etc/rsyslog.d/49-haproxy.conf pattern (startswith rather than an exact
