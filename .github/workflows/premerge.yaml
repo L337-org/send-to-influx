@@ -124,7 +124,24 @@ jobs:
         # than assumed, so the packaging scenario tests below (SI-12's
         # rsyslog/logrotate config) can't be silently skipped by a future
         # runner-image change.
-        run: sudo apt-get update -q && sudo apt-get install -yq rsyslog logrotate
+        #
+        # Retried: the arm64 ports mirror (ports.ubuntu.com) intermittently
+        # advertises a security point-release in its Packages index before the
+        # matching .deb is actually in the pool, so a single install can 404 on
+        # an otherwise-valid version (transient, Ubuntu-side - the amd64/Debian
+        # legs of the same build are unaffected). A plain apt-get update doesn't
+        # help, since the index itself is the stale half; retrying picks up the
+        # pool once it catches up rather than failing the whole run.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if sudo apt-get update -q && sudo apt-get install -yq rsyslog logrotate; then
+              exit 0
+            fi
+            echo "apt install attempt $attempt failed (likely a transient mirror 404); retrying in 15s..."
+            sleep 15
+          done
+          echo "rsyslog/logrotate install still failing after 5 attempts" >&2
+          exit 1
 
       - name: Build .deb package
         run: packaging/deb/build-deb.sh
