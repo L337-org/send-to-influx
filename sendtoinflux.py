@@ -150,7 +150,12 @@ def create_source_worker(source, source_start_delay, args, stopped_sources, last
         next_update = time.time() + source_start_delay
         data_handler = None
         if last_activity is not None:
-            last_activity[source] = time.time()
+            # Stamp with the scheduled first-run time, not now: a large
+            # stagger_seconds (or many sources) can make source_start_delay
+            # itself exceed the stall threshold, which would otherwise flag a
+            # source as stalled while it's still in its intentional initial
+            # delay, before it's ever had a chance to run.
+            last_activity[source] = next_update
         while True:
             try:
                 if data_handler is None:

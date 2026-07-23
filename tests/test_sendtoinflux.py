@@ -471,6 +471,35 @@ class TestStallDetection:
 
         return fake_sleep
 
+    def test_initial_stamp_uses_the_scheduled_start_not_thread_creation_time(self):
+        """A large source_start_delay (a big stagger_seconds, or many sources) can
+        itself exceed the stall threshold - the initial stamp must reflect the
+        scheduled first-run time (next_update), not the moment the thread was
+        created, or the watchdog would flag a source as stalled while it's still
+        in its intentional initial delay, before it's ever had a chance to run."""
+        handler = MagicMock()
+        last_activity = {}
+        large_start_delay = sendtoinflux.STALL_WARNING_SECONDS * 2
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+        ):
+            args = SimpleNamespace(print=False, dump=False, settings=None)
+            worker = sendtoinflux.create_source_worker("speedtest", large_start_delay, args, set(), last_activity)
+            with pytest.raises(SystemExit):
+                worker()
+
+        assert last_activity["speedtest"] == 1000.0 + large_start_delay
+
+        # Confirm the watchdog agrees: right after thread creation, a source with
+        # a delay this large must not be flagged, even though the delay itself
+        # exceeds STALL_WARNING_SECONDS.
+        stalled_sources = set()
+        with patch("sendtoinflux.time.time", return_value=1000.0 + sendtoinflux.STALL_WARNING_SECONDS + 1):
+            sendtoinflux.check_for_stalled_sources(["speedtest"], set(), last_activity, stalled_sources)
+        assert stalled_sources == set()
+
     def test_successful_cycle_stamps_last_activity_again(self):
         """The thread-start stamp alone isn't the interesting case - a completed
         cycle must advance it further, so a thread that's actually looping (not
