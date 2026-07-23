@@ -350,10 +350,12 @@ stdout above. Journald also forwards to syslog as usual, and the package ships r
 logrotate config (`/etc/rsyslog.d/49-send-to-influx.conf`, `/etc/logrotate.d/send-to-influx`,
 `Recommends:`, not `Depends:` - the service works via the journal alone either way) that redirects
 this service's messages out of the shared `daemon.log`/`syslog` into their own
-`/var/log/send-to-influx.log`, rotated daily and kept for 7 days - the same pattern used by
-packages like haproxy. Nothing needs configuring for this; it's on by default whenever rsyslog is
-installed. Edit either file directly (both are real, editable config files, preserved across
-upgrades) to change the retention or filter.
+`/var/log/send-to-influx.log`. Nothing needs configuring for this; the redirect is on by default
+whenever rsyslog is installed, and daily rotation (kept for 7 days) - the same pattern used by
+packages like haproxy - additionally needs logrotate, which runs it automatically once installed;
+without logrotate the file is still written correctly, just not rotated. Edit either file directly
+(both are real, editable config files, preserved across upgrades) to change the retention or
+filter.
 
 ### Configuring during install (debconf)
 
