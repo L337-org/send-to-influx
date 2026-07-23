@@ -238,17 +238,30 @@ INSTALLED_FILES="$(dpkg -L send-to-influx)"
 grep -qx /etc/rsyslog.d/49-send-to-influx.conf <<< "$INSTALLED_FILES" || fail "rsyslog config not shipped"
 grep -qx /etc/logrotate.d/send-to-influx <<< "$INSTALLED_FILES" || fail "logrotate config not shipped"
 if command -v rsyslogd >/dev/null 2>&1; then
-    RSYSLOG_CHECK="$(rsyslogd -N1 2>&1)"
-    grep -qi error <<< "$RSYSLOG_CHECK" && fail "shipped rsyslog config fails validation: $RSYSLOG_CHECK"
+    # Unlike logrotate -d -f below, rsyslogd -N1's exit code is reliable
+    # (verified: 0 for a valid config, 1 for a genuinely broken one) - use
+    # that directly rather than matching output text, which a review
+    # correctly flagged as fragile (a clean run's own summary can legitimately
+    # contain the substring "error", e.g. "0 errors"). The "&& ... || ..."
+    # form (not a bare `rsyslogd -N1`) is required under this script's
+    # `set -e`: a bare nonzero exit here would silently kill the whole
+    # script before reaching fail() at all, exactly like the logrotate bug
+    # below.
+    RSYSLOG_CHECK="$(rsyslogd -N1 2>&1)" && RSYSLOG_OK=1 || RSYSLOG_OK=0
+    [ "$RSYSLOG_OK" = 1 ] || fail "shipped rsyslog config fails validation: $RSYSLOG_CHECK"
 else
     echo "rsyslogd not installed - skipping rsyslog config validation"
 fi
 if command -v logrotate >/dev/null 2>&1; then
-    # logrotate -d -f's *exit code* does not reflect a config error (verified:
-    # it returns 0 even for a genuinely broken directive, printing "error: ..."
-    # to its output instead) - check the output text, not the exit status.
+    # logrotate -d -f's *exit code* is not reliable either way - verified it
+    # returns 0 for a genuinely broken directive (prints "error: ..." instead
+    # of failing), AND observed it return 1 for a perfectly valid config
+    # (varies with logrotate version/prior state) - so the exit status must be
+    # neutralised (|| true) rather than left to run bare under this script's
+    # `set -e`, or a nonzero-on-success run silently kills the whole suite
+    # with no fail() message at all. Check the output text, not the status.
     touch /var/log/send-to-influx.log
-    logrotate -d -f /etc/logrotate.d/send-to-influx >/tmp/logrotate-check.out 2>&1
+    logrotate -d -f /etc/logrotate.d/send-to-influx >/tmp/logrotate-check.out 2>&1 || true
     grep -qi "error" /tmp/logrotate-check.out && fail "shipped logrotate config fails to parse: $(cat /tmp/logrotate-check.out)"
 else
     echo "logrotate not installed - skipping logrotate config validation"
