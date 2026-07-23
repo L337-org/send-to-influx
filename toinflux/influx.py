@@ -110,9 +110,10 @@ class DataHandler:
     # Whether this source is event-driven over a held-open connection rather than
     # polled on a timer. False for every HTTP/API source (they have no persistent
     # connection to hold); set True by MqttDataHandler, whose broker subscription
-    # lets it write a point the instant a message arrives. sendtoinflux.py's worker
-    # branches on this: a streaming source runs the blocking stream loop instead of
-    # the poll-then-sleep cycle. A property of the transport, not a config option.
+    # lets it write a point the instant a message arrives. The worker-integration
+    # slice will branch on this so a streaming source runs its blocking stream loop
+    # instead of the poll-then-sleep cycle; nothing reads it yet. A property of the
+    # transport, not a config option.
     STREAMING = False
 
     # --- MCP read schema (domain knowledge for the read-query tool) ---

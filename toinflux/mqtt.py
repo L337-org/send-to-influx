@@ -52,13 +52,14 @@ class MqttDataHandler(DataHandler):
     Not a selectable source itself: like DataHandler, it has no get_data() and is never
     registered in get_class().
 
-    MQTT sources are event-driven rather than timer-driven (see ``stream_mqtt_messages``):
-    the worker holds the subscription open and writes a point the instant a message
-    arrives, so a transient event (a door opening then closing between two polls) is no
-    longer missed. ``STREAMING = True`` is what makes ``sendtoinflux.py``'s worker take
-    that path instead of the poll-then-sleep loop; it's a property of the transport, not
-    a per-source option (there's no reason a subscribed source would not want it, and no
-    compatibility reason to make it optional).
+    MQTT sources are designed to be event-driven rather than timer-driven (see
+    ``stream_mqtt_messages``): the transport holds the subscription open and surfaces a
+    message the instant it arrives, so a transient event (a door opening then closing
+    between two polls) need no longer be missed. ``STREAMING = True`` is the flag the
+    worker-integration slice will branch on to take that path instead of the
+    poll-then-sleep loop; it's a property of the transport, not a per-source option
+    (there's no reason a subscribed source would not want it, and no compatibility
+    reason to make it optional). ``sendtoinflux.py`` does not consult it yet.
     """
 
     STREAMING = True
