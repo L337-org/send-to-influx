@@ -235,11 +235,15 @@ once it reaches `log_max_bytes` (default 10 MiB), keeping `log_backup_count` old
     # log_max_bytes: 10485760
     # log_backup_count: 3
 
-If you're [using the .deb package](#using-the-deb-package), logs already go to the
-journal, so `logfile` is rarely needed there - and the packaged service's `ProtectSystem=strict`
-sandboxing means `/var/log/...` isn't writable by it. If you do want a file as well under systemd,
-point `logfile` at a path under `/etc/send-to-influx/` (the one directory the service can write to),
-or add your own path to `ReadWritePaths=` in `packaging/send-to-influx.service` and rebuild.
+If you're [using the .deb package](#using-the-deb-package), you shouldn't need this at all: the
+package ships its own separate mechanism for a dedicated logfile, described below, which takes the
+service's messages out of the shared `daemon.log`/`syslog` entirely rather than adding a second copy
+alongside it. Setting `logfile` yourself on a packaged install is possible (the packaged service's
+`ProtectSystem=strict` sandboxing means `/var/log/...` isn't writable by it directly, so point it at
+a path under `/etc/send-to-influx/`, the one directory the service can write to, or add your own path
+to `ReadWritePaths=` in `packaging/send-to-influx.service` and rebuild) - but don't point it at
+`/var/log/send-to-influx.log` itself, since that's the same file the packaging-level mechanism below
+already writes to, and you'd end up with two independent writers to one file.
 
 The log level defaults to `INFO`. Set an optional `loglevel` key in `settings.yaml` (e.g. `DEBUG`, `WARNING`), or
 pass `-v`/`--verbose` on the command line to force `DEBUG` regardless of what's configured:
@@ -342,7 +346,16 @@ package output would never be seen, and the old code would otherwise keep runnin
 reboot. A stopped service is left stopped; an upgrade never starts anything.
 
 Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as
-stdout above.
+stdout above. Journald also forwards to syslog as usual, and the package ships rsyslog and
+logrotate config (`/etc/rsyslog.d/49-send-to-influx.conf`, `/etc/logrotate.d/send-to-influx`,
+`Recommends:`, not `Depends:` - the service works via the journal alone either way) that redirects
+this service's messages out of the shared `daemon.log`/`syslog` into their own
+`/var/log/send-to-influx.log`. Nothing needs configuring for this; the redirect is on by default
+whenever rsyslog is installed, and daily rotation (kept for 7 days) - the same pattern used by
+packages like haproxy - additionally needs logrotate, which runs it automatically once installed;
+without logrotate the file is still written correctly, just not rotated. Edit either file directly
+(both are real, editable config files, preserved across upgrades) to change the retention or
+filter.
 
 ### Configuring during install (debconf)
 

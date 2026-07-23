@@ -118,6 +118,14 @@ jobs:
       - name: Run pytest
         run: pytest -v
 
+      - name: Ensure rsyslog and logrotate are present
+        # Recommends:, not Depends: (see build-deb.sh) - typically present on
+        # a full Ubuntu runner image already, but installed explicitly rather
+        # than assumed, so the packaging scenario tests below (SI-12's
+        # rsyslog/logrotate config) can't be silently skipped by a future
+        # runner-image change.
+        run: sudo apt-get update -q && sudo apt-get install -yq rsyslog logrotate
+
       - name: Build .deb package
         run: packaging/deb/build-deb.sh
 
@@ -184,7 +192,7 @@ jobs:
             debian:12 bash -ec '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -q >/dev/null
-              apt-get install -yq python3 python3-venv python3-pip systemd adduser curl >/dev/null
+              apt-get install -yq python3 python3-venv python3-pip systemd adduser curl rsyslog logrotate >/dev/null
               systemd-creds --version | head -1
               cp -r /src /build && cd /build
               bash packaging/deb/build-deb.sh /tmp/test.deb >/dev/null

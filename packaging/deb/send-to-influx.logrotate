@@ -1,0 +1,20 @@
+/var/log/send-to-influx.log {
+    daily
+    rotate 7
+    missingok
+    notifempty
+    compress
+    delaycompress
+    # Explicit su, rather than relying on logrotate's default permission
+    # heuristic on /var/log's parent directory (which some environments -
+    # confirmed on a GitHub Actions runner - fail with "insecure permissions"
+    # even though the logfile itself is created exactly root:adm 0640, the
+    # standard Debian syslog convention rsyslog itself uses here). The real
+    # haproxy package's own logrotate file doesn't set this, but this is a
+    # strictly more robust way to satisfy the same check regardless of what
+    # a given target's /var/log happens to look like.
+    su root adm
+    postrotate
+        [ ! -x /usr/lib/rsyslog/rsyslog-rotate ] || /usr/lib/rsyslog/rsyslog-rotate
+    endscript
+}

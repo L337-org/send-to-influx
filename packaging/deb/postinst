@@ -627,6 +627,20 @@ WAS_ACTIVE=0
 RESTARTED=0
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
+
+    # Reload rsyslog so a newly-dropped-in or changed
+    # /etc/rsyslog.d/49-send-to-influx.conf takes effect now rather than
+    # needing a manual step or reboot. try-restart (not restart) is a no-op
+    # if rsyslog isn't currently running, so this can't start a service the
+    # operator has deliberately left stopped or never installed (rsyslog is a
+    # Recommends:, not a Depends: - the app logs to stdout/journald either
+    # way, this is purely about the optional dedicated-logfile split). Run on
+    # every configure, not gated on fresh-install/reconfigure like the
+    # debconf-driven settings.yaml block above: the file's *content* can
+    # legitimately change between package versions, unlike settings.yaml
+    # which is deliberately never rewritten by an upgrade.
+    systemctl try-restart rsyslog 2>/dev/null || true
+
     # On an upgrade (or a dpkg-reconfigure that just rewrote configuration),
     # restart the service if - and only if - it's currently running: dpkg has
     # already replaced the code under /opt/send-to-influx, but the running

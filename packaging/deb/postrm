@@ -21,6 +21,16 @@ if [ "$1" = "purge" ]; then
     fi
     rm -rf /etc/send-to-influx
     rm -rf /etc/systemd/system/send-to-influx.service.d
+    # The dedicated logfile and its rotated/compressed backups (SI-12) are
+    # created at runtime by rsyslog, not shipped by the package - dpkg only
+    # knows about (and removes) /etc/rsyslog.d/49-send-to-influx.conf and
+    # /etc/logrotate.d/send-to-influx themselves, via the conffile purge
+    # mechanism, so the log data itself needs explicit cleanup here. Both
+    # separator patterns are matched (not just log.*): an admin who edits the
+    # shipped (conffile) logrotate config to add dateext would rotate to
+    # send-to-influx.log-YYYYMMDD.gz instead of the default log.N[.gz], and
+    # only matching the default pattern would leave those behind on purge.
+    rm -f /var/log/send-to-influx.log /var/log/send-to-influx.log.* /var/log/send-to-influx.log-*
     if getent passwd send-to-influx >/dev/null 2>&1; then
         deluser --system send-to-influx || true
     fi
