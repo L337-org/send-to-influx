@@ -538,6 +538,28 @@ class TestMcpBlockValidation:
         assert any("must be set together" in error for error in errors)
         assert mcp_enabled(settings) is False
 
+    def test_disabled_true_forces_off_even_with_valid_credentials(self):
+        block = dict(self.ENABLED_BLOCK, disabled=True)
+        assert mcp_block_errors({"mcp": block}) == []
+        assert mcp_enabled({"mcp": block}) is False
+
+    @pytest.mark.parametrize("present,absent", [("user", "password"), ("password", "user")])
+    def test_disabled_true_skips_the_incoherent_credential_check(self, present, absent):
+        """The kill switch must work even when credential state alone would be invalid -
+        e.g. a password left behind in systemd-creds after the YAML fields are blanked."""
+        settings = {"mcp": {present: "value", absent: "", "disabled": True}}
+        assert mcp_block_errors(settings) == []
+        assert mcp_enabled(settings) is False
+
+    def test_disabled_false_preserves_existing_behaviour(self):
+        block = dict(self.ENABLED_BLOCK, disabled=False)
+        assert mcp_block_errors({"mcp": block}) == []
+        assert mcp_enabled({"mcp": block}) is True
+
+    def test_disabled_non_bool_is_an_error(self):
+        errors = mcp_block_errors({"mcp": {"disabled": "true"}})
+        assert any("mcp.disabled must be true or false" in error for error in errors)
+
     def test_enabled_requires_public_url(self):
         block = dict(self.ENABLED_BLOCK)
         block["public_url"] = ""

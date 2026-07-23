@@ -257,9 +257,13 @@ MCP_DEFAULT_BIND_ADDRESS = "127.0.0.1:8420"
 
 def mcp_enabled(settings):
     """Return True when the MCP server is enabled - both ``mcp.user`` and
-    ``mcp.password`` set to non-blank strings. There is no separate enabled flag;
-    credentials-present is the enablement mechanism (validated as coherent by
-    ``mcp_block_errors()``).
+    ``mcp.password`` set to non-blank strings, and ``mcp.disabled`` not set to
+    ``true``. Credentials-present is the primary enablement mechanism;
+    ``mcp.disabled`` is a forced-off override on top of it (see
+    ``mcp_block_errors()``) for a source whose password was migrated to
+    systemd-creds - blanking the YAML fields alone doesn't disable it there,
+    since the credential still gets substituted in at load time, so a plain
+    kill switch that doesn't depend on credential state is needed too.
 
     :param settings: parsed settings dictionary (after credential substitution)
     :type settings: dict
@@ -267,6 +271,8 @@ def mcp_enabled(settings):
     """
     mcp = settings.get("mcp")
     if not isinstance(mcp, dict):
+        return False
+    if mcp.get("disabled") is True:
         return False
     user = mcp.get("user")
     password = mcp.get("password")
@@ -371,7 +377,12 @@ def mcp_block_errors(settings):
     ``public_url`` (the external HTTPS address the reverse proxy serves - OAuth
     discovery metadata must advertise it, so there is no default to fall back to).
     One of the pair set without the other is incoherent and reported, mirroring
-    the MQTT username-without-password check.
+    the MQTT username-without-password check - *unless* ``mcp.disabled`` is
+    explicitly ``true``, checked first and short-circuiting every other check:
+    a forced-off override for a source whose password lives in systemd-creds,
+    where blanking the YAML fields alone can't reach a coherent disabled state
+    without also removing the stored credential. This also doubles as a quick
+    kill switch during troubleshooting, independent of credential state.
 
     :param settings: parsed settings dictionary (after credential substitution)
     :type settings: dict
@@ -383,6 +394,11 @@ def mcp_block_errors(settings):
         return []
     if not isinstance(mcp, dict):
         return [f"mcp must be a mapping of MCP server settings (got {type(mcp).__name__})"]
+    disabled = mcp.get("disabled")
+    if disabled is not None and not isinstance(disabled, bool):
+        return [f"mcp.disabled must be true or false (got {disabled!r})"]
+    if disabled is True:
+        return []
     errors = []
     for field in ("user", "password", "public_url", "bind_address", "state_file"):
         value = mcp.get(field)
@@ -399,7 +415,8 @@ def mcp_block_errors(settings):
             "mcp.user and mcp.password must be set together to enable the MCP server "
             "(one without the other is never valid). If the password was migrated to "
             "systemd-creds, check 'send-to-influx-set-credential --list' - a missing "
-            "credential file leaves the password blank here."
+            "credential file leaves the password blank here. Alternatively, set "
+            "mcp.disabled: true to force the server off regardless of credential state."
         )
     if user_set and password_set:
         errors.extend(_mcp_enabled_block_errors(mcp))

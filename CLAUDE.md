@@ -92,9 +92,15 @@ The optional remote MCP server (introduced in 5.0) is *not* a `DataHandler` - it
 first inbound-network-facing component, a Streamable-HTTP server built on the official `mcp` SDK's
 `FastMCP` + built-in OAuth 2.1 authorization server, run in its own daemon thread (`anyio` inside
 the thread; nothing else in the synchronous codebase changes). Enabled iff both `mcp.user` and
-`mcp.password` are set (no separate flag; one without the other is a `ConfigError` - see
-`mcp_block_errors()`/`mcp_enabled()` in `toinflux/general.py`); started from
-`sendtoinflux.py`'s `maybe_start_mcp_server()` (skipped in `--print`/`--dump` modes). Key
+`mcp.password` are set (credentials-present is the primary enablement mechanism; one without the
+other is a `ConfigError` - see `mcp_block_errors()`/`mcp_enabled()` in `toinflux/general.py`) -
+*unless* `mcp.disabled: true` is set, which forces the server off and skips the user/password
+coherence check entirely. That override exists because blanking the YAML fields alone can't reach
+a coherent disabled state once the password has been migrated to systemd-creds (the stored
+credential still gets substituted in at load time regardless of what settings.yaml says), and it
+doubles as a quick, credential-independent kill switch for isolating the server during
+troubleshooting. Started from `sendtoinflux.py`'s `maybe_start_mcp_server()` (skipped in
+`--print`/`--dump` modes). Key
 decisions:
 
 - **Bind vs public**: binds `mcp.bind_address` (default `127.0.0.1:8420`) in plain HTTP;
