@@ -443,6 +443,24 @@ class TestStreamMqttMessages:
             mock_client.loop_stop.assert_called_once()
             mock_client.disconnect.assert_called_once()
 
+    def test_loop_start_failure_still_disconnects(self, sample_settings):
+        """If loop_start() fails (e.g. thread creation under resource pressure) the socket
+        connect() opened is still disconnected rather than leaked, and the error propagates."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.loop_start.side_effect = RuntimeError("can't start new thread")
+            with pytest.raises(RuntimeError, match="can't start new thread"):
+                handler.stream_mqtt_messages(
+                    "nuki/+/+",
+                    on_message=lambda t, p: None,
+                    periodic=lambda: None,
+                    interval=300,
+                    should_stop=_stop_after_iterations(0),
+                )
+            mock_client.disconnect.assert_called_once()
+            mock_client.loop_stop.assert_called_once()
+
     def test_disconnect_before_loop_stop_on_shutdown(self, sample_settings):
         """Clean shutdown disconnects (queuing the DISCONNECT for the still-running
         network thread) before stopping the loop."""

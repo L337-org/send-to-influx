@@ -222,8 +222,12 @@ class MqttDataHandler(DataHandler):
         except (OSError, ValueError) as e:
             logging.error("Error connecting to MQTT broker %s:%s - %s", host, port, e)
             raise SourceConnectionError(str(e)) from e
-        client.loop_start()
+        # loop_start() is inside the try so that if it fails (e.g. thread creation under
+        # resource pressure) the finally still disconnects the socket connect() just
+        # opened, rather than leaking it. loop_stop() is a no-op when no loop is running,
+        # so it's safe on that path too.
         try:
+            client.loop_start()
             self._await_initial_connection(host, port, state["failures"], state["connected"])
             logging.info("Streaming MQTT messages from %s:%s (snapshot every %ss)", host, port, interval)
             self._run_stream_loop(message_queue, on_message, periodic, interval, should_stop)
