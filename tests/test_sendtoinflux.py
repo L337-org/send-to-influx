@@ -619,15 +619,43 @@ class TestStallDetection:
         assert stalled_sources == set()
 
     def test_missing_or_invalid_interval_falls_back_to_the_flat_threshold(self):
-        """No settings, no per-source block, or a non-numeric interval must all
-        degrade to the flat threshold rather than crashing the watchdog."""
+        """No settings, no per-source block, or a non-numeric/non-finite interval
+        must all degrade to the flat threshold rather than crashing the watchdog
+        or (for .inf, which passes a plain '> 0' check) silently raising when the
+        CRITICAL message formats an infinite threshold with %d."""
         now = sendtoinflux.STALL_WARNING_SECONDS + 1
-        for settings in (None, {}, {"hue": {}}, {"hue": {"interval": "not-a-number"}}, {"hue": {"interval": True}}):
+        bad_intervals = (
+            None,
+            {},
+            {"hue": {}},
+            {"hue": {"interval": "not-a-number"}},
+            {"hue": {"interval": True}},
+            {"hue": {"interval": float("inf")}},
+            {"hue": {"interval": float("nan")}},
+            {"hue": {"interval": float("-inf")}},
+        )
+        for settings in bad_intervals:
             last_activity = {"hue": 0.0}
             stalled_sources = set()
             with patch("sendtoinflux.time.time", return_value=now):
                 sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources, settings)
             assert stalled_sources == {"hue"}, f"settings={settings!r}"
+
+    def test_infinite_interval_does_not_break_the_critical_log_message(self, caplog):
+        """A regression test for the specific failure mode: before the finiteness
+        check, an interval of .inf produced an infinite threshold, and formatting
+        that with %d in the CRITICAL log call raised OverflowError."""
+        settings = {"hue": {"interval": float("inf")}}
+        last_activity = {"hue": 0.0}
+        stalled_sources = set()
+        with (
+            caplog.at_level("CRITICAL"),
+            patch("sendtoinflux.time.time", return_value=sendtoinflux.STALL_WARNING_SECONDS + 1),
+        ):
+            sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources, settings)
+
+        assert stalled_sources == {"hue"}
+        assert any(r.levelname == "CRITICAL" for r in caplog.records)
 
 
 class TestSendHeartbeat:

@@ -8,6 +8,7 @@ __license__ = "MIT License"
 import sys
 import time
 import json
+import math
 import signal
 import logging
 import argparse
@@ -494,7 +495,13 @@ def _stall_threshold_seconds(source, settings):
     sleeps for its full interval between cycles, so a flat threshold shorter than
     that would flag every long-interval source (e.g. speedtest's 6-hour default)
     as stalled on every single cycle. Falls back to the flat threshold if
-    ``settings``/the source's ``interval`` isn't available or isn't a usable number.
+    ``settings``/the source's ``interval`` isn't available or isn't a finite positive
+    number. ``.inf`` is valid YAML and passes a plain ``> 0`` check, so without the
+    explicit finiteness check it would produce an infinite threshold - which raises
+    when the CRITICAL log message formats it with ``%d``. (``.nan`` was already
+    harmless here: NaN comparisons are always False, so ``interval > 0`` alone
+    already rejected it - this check is kept for both anyway, since relying on
+    that comparison quirk for NaN specifically would be a fragile thing to depend on.)
 
     :param source: source name
     :type source: str
@@ -503,7 +510,12 @@ def _stall_threshold_seconds(source, settings):
     :rtype: int or float
     """
     interval = ((settings or {}).get(source) or {}).get("interval")
-    if isinstance(interval, (int, float)) and not isinstance(interval, bool) and interval > 0:
+    if (
+        isinstance(interval, (int, float))
+        and not isinstance(interval, bool)
+        and math.isfinite(interval)
+        and interval > 0
+    ):
         return max(STALL_WARNING_SECONDS, interval * STALL_INTERVAL_MULTIPLIER)
     return STALL_WARNING_SECONDS
 
