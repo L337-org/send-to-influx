@@ -397,7 +397,7 @@ The package also ships rsyslog and logrotate config (`packaging/deb/send-to-infl
 `send-to-influx.logrotate`, installed to `/etc/rsyslog.d/49-send-to-influx.conf` and
 `/etc/logrotate.d/send-to-influx`) mirroring the real haproxy Debian package's own pattern
 (confirmed directly off a live install, not reconstructed from memory) rather than having the app
-manage its own dedicated logfile: a rule matching `:programname, startswith, "send-to-influx"`
+manage its own dedicated logfile: a rule matching `:programname, isequal, "send-to-influx"`
 redirects to `/var/log/send-to-influx.log` and `stop`s further processing, so these messages are
 removed from the shared `daemon.log`/`syslog` rather than merely duplicated into a second file -
 zero application code changes needed, since journald already forwards stdout to syslog tagged with
