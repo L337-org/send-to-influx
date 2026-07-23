@@ -25,6 +25,39 @@ class TestSignalHandler:
             sendtoinflux.signal_handler(2, object())
 
 
+class TestRegisterThreadDumpHandler:
+    """Tests for register_thread_dump_handler."""
+
+    def test_registers_on_a_platform_with_sigusr1(self):
+        with patch("sendtoinflux.faulthandler.register") as mock_register:
+            sendtoinflux.register_thread_dump_handler()
+
+        mock_register.assert_called_once_with(signal.SIGUSR1, all_threads=True)
+
+    def test_skips_registration_when_sigusr1_is_unavailable(self):
+        """Windows (and any other platform without SIGUSR1) must not raise
+        AttributeError here - that would take down startup entirely, including
+        plain --version/--help runs, since this is called unconditionally near
+        the top of main()."""
+
+        class _SignalModuleWithoutSigusr1:
+            """A stand-in for the signal module with SIGUSR1 deleted."""
+
+        with (
+            patch("sendtoinflux.signal", _SignalModuleWithoutSigusr1()),
+            patch("sendtoinflux.faulthandler.register") as mock_register,
+        ):
+            sendtoinflux.register_thread_dump_handler()  # must not raise
+
+        mock_register.assert_not_called()
+
+    def test_degrades_to_a_warning_when_register_itself_fails(self):
+        """e.g. stderr has no real file descriptor (observed under pytest's
+        captured output) - an optional diagnostic must not crash the process."""
+        with patch("sendtoinflux.faulthandler.register", side_effect=OSError("no fileno")):
+            sendtoinflux.register_thread_dump_handler()  # must not raise
+
+
 class TestMain:
     """Tests for main."""
 
@@ -540,6 +573,61 @@ class TestStallDetection:
             sendtoinflux.check_for_stalled_sources(["hue"], set(), {}, stalled_sources)
 
         assert stalled_sources == set()
+
+    def test_long_interval_source_is_not_flagged_after_the_flat_threshold(self):
+        """A source that legitimately sleeps for its own configured interval between
+        cycles (e.g. speedtest's 6-hour default) must not be flagged as stalled just
+        because that interval exceeds STALL_WARNING_SECONDS - it would otherwise fire
+        on every single cycle of every long-interval source."""
+        settings = {"speedtest": {"interval": 21600}}
+        last_activity = {"speedtest": 0.0}
+        stalled_sources = set()
+
+        # Well past STALL_WARNING_SECONDS (900s), but well within one configured
+        # interval - a perfectly healthy source sitting in its normal sleep.
+        with patch("sendtoinflux.time.time", return_value=3600.0):
+            sendtoinflux.check_for_stalled_sources(["speedtest"], set(), last_activity, stalled_sources, settings)
+
+        assert stalled_sources == set()
+
+    def test_long_interval_source_is_flagged_after_several_missed_intervals(self):
+        """The threshold still fires eventually - after STALL_INTERVAL_MULTIPLIER
+        missed cycles - so a genuinely stuck long-interval source is still caught,
+        just not on every ordinary sleep."""
+        settings = {"speedtest": {"interval": 21600}}
+        last_activity = {"speedtest": 0.0}
+        stalled_sources = set()
+        past_threshold = 21600 * sendtoinflux.STALL_INTERVAL_MULTIPLIER + 1
+
+        with patch("sendtoinflux.time.time", return_value=past_threshold):
+            sendtoinflux.check_for_stalled_sources(["speedtest"], set(), last_activity, stalled_sources, settings)
+
+        assert stalled_sources == {"speedtest"}
+
+    def test_short_interval_source_keeps_the_flat_floor(self):
+        """A short-interval source (e.g. 300s) should still use the flat
+        STALL_WARNING_SECONDS floor, not a tiny multiple of its own interval -
+        STALL_INTERVAL_MULTIPLIER * 300 (900s) happens to equal the floor exactly,
+        but this pins the behaviour rather than relying on that coincidence."""
+        settings = {"hue": {"interval": 60}}
+        last_activity = {"hue": 0.0}
+        stalled_sources = set()
+
+        with patch("sendtoinflux.time.time", return_value=sendtoinflux.STALL_WARNING_SECONDS - 1):
+            sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources, settings)
+
+        assert stalled_sources == set()
+
+    def test_missing_or_invalid_interval_falls_back_to_the_flat_threshold(self):
+        """No settings, no per-source block, or a non-numeric interval must all
+        degrade to the flat threshold rather than crashing the watchdog."""
+        now = sendtoinflux.STALL_WARNING_SECONDS + 1
+        for settings in (None, {}, {"hue": {}}, {"hue": {"interval": "not-a-number"}}, {"hue": {"interval": True}}):
+            last_activity = {"hue": 0.0}
+            stalled_sources = set()
+            with patch("sendtoinflux.time.time", return_value=now):
+                sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources, settings)
+            assert stalled_sources == {"hue"}, f"settings={settings!r}"
 
 
 class TestSendHeartbeat:

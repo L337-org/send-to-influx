@@ -31,8 +31,14 @@ BACKOFF_MAX_SECONDS = 300
 # If a source's worker thread hasn't logged a successful cycle *or* a retried
 # failure (both already visible) in this long, it isn't merely slow - it's stuck.
 # A hung thread never reaches either branch, so this is the only signal a silent
-# stall produces; see run_multi_source()'s supervisor loop.
+# stall produces; see run_multi_source()'s supervisor loop. The actual threshold
+# used is the larger of this and STALL_INTERVAL_MULTIPLIER times the source's own
+# configured interval (see _stall_threshold_seconds) - a source legitimately
+# sleeps for its full interval between cycles, so a flat threshold shorter than
+# that would flag every long-interval source (e.g. speedtest's 6-hour default)
+# as stalled on every single cycle.
 STALL_WARNING_SECONDS = 900
+STALL_INTERVAL_MULTIPLIER = 3
 
 
 def print_source_data(source, data):
@@ -251,11 +257,17 @@ def register_thread_dump_handler():
 
     A hang produces no exception and therefore no log line of its own, so this
     is the only way to see what every thread is actually blocked on without
-    attaching a debugger. register() needs a real file descriptor for stderr,
-    which isn't guaranteed in every embedding context (e.g. a captured/wrapped
-    stream, as under pytest) - degrade to a warning rather than taking the
-    whole process down over an optional diagnostic.
+    attaching a debugger. SIGUSR1 doesn't exist on every platform (e.g.
+    Windows) - skip registration there rather than letting an AttributeError
+    take down startup, including plain --version/--help runs. register() also
+    needs a real file descriptor for stderr, which isn't guaranteed in every
+    embedding context (e.g. a captured/wrapped stream, as under pytest) -
+    degrade to a warning rather than taking the whole process down over an
+    optional diagnostic.
     """
+    if not hasattr(signal, "SIGUSR1"):
+        logging.debug("SIGUSR1 is not available on this platform; skipping thread-dump handler registration")
+        return
     try:
         faulthandler.register(signal.SIGUSR1, all_threads=True)
     except (ValueError, OSError) as exc:
@@ -368,7 +380,7 @@ def main():
         sys.exit(1)
 
     logging.info("Starting send-to-influx v%s (sources=%s)", __version__, ", ".join(map(str, sources)))
-    run_multi_source(sources, args, settings.get("stagger_seconds", DEFAULT_STAGGER_SECONDS))
+    run_multi_source(sources, args, settings.get("stagger_seconds", DEFAULT_STAGGER_SECONDS), settings)
 
 
 def run_single_source(source, args):
@@ -432,7 +444,7 @@ def run_single_source(source, args):
         time.sleep(sleep_time)
 
 
-def run_multi_source(sources, args, stagger_seconds):
+def run_multi_source(sources, args, stagger_seconds, settings=None):
     """
     Run all configured sources concurrently, with staggered start offsets.
 
@@ -442,6 +454,10 @@ def run_multi_source(sources, args, stagger_seconds):
     :type args: argparse.Namespace
     :param stagger_seconds: delay between source start offsets (coerced to int)
     :type stagger_seconds: int
+    :param settings: parsed settings dict, used to read each source's own
+        ``interval`` for the stall watchdog's threshold; None (the default)
+        falls back to STALL_WARNING_SECONDS for every source
+    :type settings: dict or None
     """
 
     try:
@@ -467,18 +483,40 @@ def run_multi_source(sources, args, stagger_seconds):
             if not thread.is_alive() and sources[idx] not in stopped_sources:
                 logging.warning("Source '%s' worker stopped unexpectedly. Restarting worker thread.", sources[idx])
                 threads[idx] = spawn_source_thread(workers[idx])
-        check_for_stalled_sources(sources, stopped_sources, last_activity, stalled_sources)
+        check_for_stalled_sources(sources, stopped_sources, last_activity, stalled_sources, settings)
         time.sleep(1)
 
 
-def check_for_stalled_sources(sources, stopped_sources, last_activity, stalled_sources):
+def _stall_threshold_seconds(source, settings):
+    """Return how long a source may go without activity before it's flagged as
+    stalled: STALL_WARNING_SECONDS, or STALL_INTERVAL_MULTIPLIER times the
+    source's own configured ``interval`` if that's larger - a source legitimately
+    sleeps for its full interval between cycles, so a flat threshold shorter than
+    that would flag every long-interval source (e.g. speedtest's 6-hour default)
+    as stalled on every single cycle. Falls back to the flat threshold if
+    ``settings``/the source's ``interval`` isn't available or isn't a usable number.
+
+    :param source: source name
+    :type source: str
+    :param settings: parsed settings dict, or None
+    :type settings: dict or None
+    :rtype: int or float
+    """
+    interval = ((settings or {}).get(source) or {}).get("interval")
+    if isinstance(interval, (int, float)) and not isinstance(interval, bool) and interval > 0:
+        return max(STALL_WARNING_SECONDS, interval * STALL_INTERVAL_MULTIPLIER)
+    return STALL_WARNING_SECONDS
+
+
+def check_for_stalled_sources(sources, stopped_sources, last_activity, stalled_sources, settings=None):
     """Warn once per stall about a source whose worker thread is alive but has
-    made no progress (success or failure) in over ``STALL_WARNING_SECONDS`` -
-    the thread-is_alive() check above can't catch this, since a thread stuck
-    mid-instruction (e.g. the GIL-starvation-shaped hang this was added to
-    diagnose) never dies, it just stops making progress silently. Logs once per
-    stall (tracked via ``stalled_sources``) rather than every supervisor tick,
-    and clears the flag once activity resumes so a later recurrence warns again.
+    made no progress (success or failure) in over its stall threshold (see
+    ``_stall_threshold_seconds``) - the thread-is_alive() check above can't
+    catch this, since a thread stuck mid-instruction (e.g. the GIL-starvation-
+    shaped hang this was added to diagnose) never dies, it just stops making
+    progress silently. Logs once per stall (tracked via ``stalled_sources``)
+    rather than every supervisor tick, and clears the flag once activity
+    resumes so a later recurrence warns again.
 
     :param sources: configured source names
     :type sources: list[str]
@@ -490,6 +528,9 @@ def check_for_stalled_sources(sources, stopped_sources, last_activity, stalled_s
     :param stalled_sources: sources already warned about the current stall - mutated
         in place so the caller's loop sees updates
     :type stalled_sources: set
+    :param settings: parsed settings dict, for per-source interval-aware
+        thresholds; None falls back to STALL_WARNING_SECONDS for every source
+    :type settings: dict or None
     :return: None
     """
     now = time.time()
@@ -499,7 +540,8 @@ def check_for_stalled_sources(sources, stopped_sources, last_activity, stalled_s
         last = last_activity.get(source)
         if last is None:
             continue
-        if now - last > STALL_WARNING_SECONDS:
+        threshold = _stall_threshold_seconds(source, settings)
+        if now - last > threshold:
             if source not in stalled_sources:
                 logging.critical(
                     "Source '%s' has not completed a cycle (success or failure) in over %d "
@@ -507,7 +549,7 @@ def check_for_stalled_sources(sources, stopped_sources, last_activity, stalled_s
                     "SIGUSR1 to this process (e.g. 'systemctl kill -s SIGUSR1 send-to-influx') to "
                     "dump every thread's stack trace to the log, and raise this as an issue.",
                     source,
-                    STALL_WARNING_SECONDS,
+                    threshold,
                 )
                 stalled_sources.add(source)
         else:
