@@ -233,8 +233,14 @@ class MqttDataHandler(DataHandler):
                     periodic()
         finally:
             state["stopping"].set()
-            client.loop_stop()
+            # disconnect() before loop_stop(): with paho's loop_start() background
+            # thread, disconnect() queues a clean DISCONNECT that the still-running
+            # network thread transmits; stopping the loop first can tear the thread
+            # down before that packet is sent. (The fixed-window collector only calls
+            # disconnect() because it drives the loop synchronously with no thread to
+            # stop.)
             client.disconnect()
+            client.loop_stop()
 
     def _build_stream_client(self, mqtt_settings, host, port, topic_filter, on_message):
         """
@@ -282,7 +288,7 @@ class MqttDataHandler(DataHandler):
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 # A single failed/odd message must not kill a long-lived stream; if the
                 # handler buffered the point before failing, it flushes on the next write.
-                logging.warning("Error handling MQTT message on topic '%s': %s", message.topic, exc)
+                logging.warning("Error handling MQTT message on topic '%s': %s", message.topic, exc, exc_info=True)
 
         def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
             if not state["stopping"].is_set():
