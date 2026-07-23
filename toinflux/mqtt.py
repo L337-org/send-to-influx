@@ -6,6 +6,8 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 import logging
+import queue
+import threading
 import time
 from paho.mqtt import client as mqtt_client
 from toinflux.influx import DataHandler
@@ -14,8 +16,32 @@ from toinflux.exceptions import ConfigError, SourceConnectionError
 
 # How long each call into paho's network loop blocks waiting for traffic. Small enough
 # that the collection window's deadline (and a failed-CONNACK abort) is honoured
-# promptly, large enough not to busy-spin.
+# promptly, large enough not to busy-spin. Also the poll granularity while waiting for
+# a persistent stream's initial handshake.
 LOOP_INTERVAL = 0.5
+
+# How long stream_mqtt_messages() waits for the initial CONNACK + subscribe before
+# giving up and raising SourceConnectionError, so a broker that accepts TCP but never
+# completes the handshake fails fast (and is retried with backoff by the worker) rather
+# than blocking startup indefinitely. Reconnections *after* a healthy start are handled
+# by paho's own background loop, not this.
+STREAM_CONNECT_TIMEOUT = 10
+
+# Bounds for paho's automatic reconnect backoff once a persistent stream has started
+# (seconds). A dropped connection self-heals in the background - on reconnect the
+# on_connect callback re-subscribes, and because state topics are retained the broker
+# redelivers current state, so every reconnect doubles as a free resync.
+RECONNECT_MIN_DELAY = 1
+RECONNECT_MAX_DELAY = 120
+
+# Upper bound on the number of decoded-but-not-yet-written messages held between the
+# network thread and the worker thread that drains them (see stream_mqtt_messages).
+# Bounded so a write path that can't keep up - a long InfluxDB outage, where each write
+# buffers after a slow failed POST - can't grow memory without limit. On overflow the
+# oldest queued message is dropped (see the enqueue callback): the freshest state is the
+# more useful to keep, and the periodic snapshot resyncs full state anyway. Generous for
+# the low, event-driven message rates these sources produce (lock/door state changes).
+MAX_QUEUED_MESSAGES = 10000
 
 
 class MqttDataHandler(DataHandler):
@@ -35,7 +61,18 @@ class MqttDataHandler(DataHandler):
 
     Not a selectable source itself: like DataHandler, it has no get_data() and is never
     registered in get_class().
+
+    MQTT sources are designed to be event-driven rather than timer-driven (see
+    ``stream_mqtt_messages``): the transport holds the subscription open and surfaces a
+    message the instant it arrives, so a transient event (a door opening then closing
+    between two polls) need no longer be missed. ``STREAMING = True`` is the flag the
+    worker-integration slice will branch on to take that path instead of the
+    poll-then-sleep loop; it's a property of the transport, not a per-source option
+    (there's no reason a subscribed source would not want it, and no compatibility
+    reason to make it optional). ``sendtoinflux.py`` does not consult it yet.
     """
+
+    STREAMING = True
 
     def collect_mqtt_messages(self, topic_filter, timeout):
         """
@@ -128,6 +165,283 @@ class MqttDataHandler(DataHandler):
             client.disconnect()
         self._raise_for_failed_connection(host, port, timeout, failures, connected)
         return messages
+
+    def stream_mqtt_messages(self, topic_filter, on_message, periodic, interval, should_stop):
+        """
+        Hold an MQTT subscription open and react to messages as they arrive.
+
+        Unlike ``collect_mqtt_messages`` (a fixed poll window that connects, drains and
+        disconnects), this keeps a persistent connection: ``on_message`` is invoked for
+        each message the instant it arrives, and ``periodic`` is invoked once every
+        ``interval`` seconds for the timer-based safety net (a full-state snapshot and
+        the collector heartbeat). Both are the caller's callbacks; this method owns only
+        the transport. It blocks until ``should_stop`` is set, then disconnects cleanly.
+
+        Threading: paho's network thread only *enqueues* each decoded message (see
+        ``_build_stream_client``); this method drains that queue and runs both the
+        immediate per-message writes (``on_message``) and the ``periodic`` snapshot on a
+        single worker thread (see ``_run_stream_loop``). Keeping all InfluxDB I/O off the
+        network thread is deliberate: a callback that blocked the network thread on a slow
+        write (a large backlog flush against a sluggish InfluxDB) would hold up keepalives
+        and ACKs, and the broker would drop the connection - losing exactly the transient
+        events the stream exists to capture. Because one consumer thread runs both write
+        paths, they can't overlap, so no lock is needed. ``on_message`` errors are logged
+        and swallowed (one bad message must not tear the stream down; a buffered point
+        flushes on the next write); ``periodic`` errors propagate so the caller's error
+        handling and the worker's backoff apply.
+
+        The initial CONNACK and subscribe are awaited up front and mapped to
+        ``SourceConnectionError`` on failure/timeout - identical semantics to
+        ``collect_mqtt_messages`` - so a bad broker at startup is retried with backoff by
+        the worker. A drop *after* a healthy start is not raised: paho's background loop
+        reconnects (``reconnect_delay_set``), and on_connect re-subscribes, which for
+        retained topics redelivers current state.
+
+        :param topic_filter: MQTT topic filter to subscribe to (e.g. ``nuki/+/+``)
+        :type topic_filter: str
+        :param on_message: called ``on_message(topic, payload)`` for each message, with
+            ``payload`` already UTF-8 decoded; runs on the worker thread, not paho's
+        :type on_message: collections.abc.Callable
+        :param periodic: called with no arguments once every ``interval`` seconds - the
+            timer-based snapshot/heartbeat tick
+        :type periodic: collections.abc.Callable
+        :param interval: seconds between ``periodic`` ticks
+        :type interval: float
+        :param should_stop: set to end the stream and return
+        :type should_stop: threading.Event
+        :return: None
+        :raises ConfigError: if the shared ``mqtt`` block is missing/malformed or
+            ``interval`` isn't a positive number - fatal config shape, not retried
+            (same rationale as ``collect_mqtt_messages``)
+        :raises SourceConnectionError: if the broker is unreachable, refuses the CONNACK
+            (e.g. bad credentials), or never completes the initial handshake
+        """
+        errors = mqtt_block_errors(self.settings)
+        if errors:
+            raise ConfigError("; ".join(errors))
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)) or interval <= 0:
+            raise ConfigError(f"the MQTT snapshot interval must be a positive number of seconds (got {interval!r})")
+        mqtt_settings = self.settings["mqtt"]
+        host = mqtt_settings["broker_host"]
+        port = mqtt_settings.get("broker_port", 1883)
+        message_queue = queue.Queue(maxsize=MAX_QUEUED_MESSAGES)
+        client, state = self._build_stream_client(mqtt_settings, host, port, topic_filter, message_queue)
+        try:
+            client.connect(host, port)
+        except (OSError, ValueError) as e:
+            logging.error("Error connecting to MQTT broker %s:%s - %s", host, port, e)
+            raise SourceConnectionError(str(e)) from e
+        # loop_start() is inside the try so that if it fails (e.g. thread creation under
+        # resource pressure) the finally still disconnects the socket connect() just
+        # opened, rather than leaking it. loop_stop() is a no-op when no loop is running,
+        # so it's safe on that path too.
+        try:
+            client.loop_start()
+            self._await_initial_connection(host, port, state["failures"], state["connected"])
+            logging.info("Streaming MQTT messages from %s:%s (snapshot every %ss)", host, port, interval)
+            self._run_stream_loop(message_queue, on_message, periodic, interval, should_stop)
+        finally:
+            state["stopping"].set()
+            # disconnect() before loop_stop(): with paho's loop_start() background
+            # thread, disconnect() queues a clean DISCONNECT that the still-running
+            # network thread transmits; stopping the loop first can tear the thread
+            # down before that packet is sent. (The fixed-window collector only calls
+            # disconnect() because it drives the loop synchronously with no thread to
+            # stop.)
+            client.disconnect()
+            client.loop_stop()
+
+    def _run_stream_loop(self, message_queue, on_message, periodic, interval, should_stop):
+        """
+        Consume queued messages and run the periodic snapshot, both on this one thread.
+
+        paho's network thread only enqueues (see ``_build_stream_client``), so every
+        InfluxDB write - the immediate per-message write via ``on_message`` and the
+        ``periodic`` snapshot/heartbeat - happens here, off the network loop. That keeps
+        the network thread free to service keepalives and ACKs even while a write is slow
+        (e.g. a large backlog flush against a sluggish InfluxDB), which would otherwise
+        stall the connection and make the broker drop it - losing the very transient
+        events this stream exists to capture. One consumer thread for both write paths
+        also means they never overlap, so no lock is needed.
+
+        The first snapshot is one interval in: the retained state delivered on subscribe
+        is already written immediately as it arrives, so there's nothing to snapshot
+        sooner.
+
+        :param message_queue: (topic, payload) pairs the network thread fills
+        :type message_queue: queue.Queue
+        :param on_message: caller callback invoked ``on_message(topic, payload)`` per message
+        :type on_message: collections.abc.Callable
+        :param periodic: caller callback invoked once every ``interval`` seconds
+        :type periodic: collections.abc.Callable
+        :param interval: seconds between ``periodic`` ticks
+        :type interval: float
+        :param should_stop: checked each iteration; set to end the loop
+        :type should_stop: threading.Event
+        :return: None
+        """
+        next_snapshot = time.monotonic() + interval
+        while not should_stop.is_set():
+            # Block for a message, but never past the next snapshot deadline, and never
+            # longer than LOOP_INTERVAL, so both the snapshot tick and a shutdown are
+            # honoured promptly rather than waiting out a whole interval.
+            wait = max(0, min(next_snapshot - time.monotonic(), LOOP_INTERVAL))
+            try:
+                topic, payload = message_queue.get(timeout=wait)
+            except queue.Empty:
+                pass
+            else:
+                self._dispatch_stream_message(on_message, topic, payload)
+            if time.monotonic() >= next_snapshot:
+                periodic()
+                # Schedule the next tick relative to now (after the snapshot completes),
+                # not next_snapshot += interval: the latter would "catch up" by firing
+                # periodic() back-to-back if a snapshot ever ran long or the loop was
+                # delayed by a message burst - unwanted for a heartbeat/snapshot tick.
+                next_snapshot = time.monotonic() + interval
+
+    @staticmethod
+    def _dispatch_stream_message(on_message, topic, payload):
+        """
+        Invoke the caller's per-message callback, logging and swallowing any error.
+
+        One bad or failed message (e.g. an InfluxDB write failure) must not tear down a
+        long-lived stream - the point, if it was buffered, flushes on the next write - so
+        the exception is logged with its traceback and dropped rather than propagated.
+
+        :param on_message: caller callback invoked ``on_message(topic, payload)``
+        :type on_message: collections.abc.Callable
+        :param topic: the message's MQTT topic
+        :type topic: str
+        :param payload: the message payload, already UTF-8 decoded
+        :type payload: str
+        :return: None
+        """
+        try:
+            on_message(topic, payload)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logging.warning("Error handling MQTT message on topic '%s': %s", topic, exc, exc_info=True)
+
+    @staticmethod
+    def _drop_oldest_and_enqueue(message_queue, item, topic):
+        """
+        Make room in a full stream queue by dropping the oldest entry, then enqueue.
+
+        Runs on paho's network thread when the worker can't drain fast enough (a long
+        InfluxDB outage), so it stays non-blocking: it discards the oldest queued message
+        to keep the freshest state (the periodic snapshot resyncs anyway) and warns. Both
+        the get and the put are best-effort - the sole consumer may have drained an entry
+        in between, which just means there was room after all.
+
+        :param message_queue: the bounded stream queue
+        :type message_queue: queue.Queue
+        :param item: the (topic, payload) pair to enqueue
+        :type item: tuple
+        :param topic: the new message's topic, for the warning
+        :type topic: str
+        :return: None
+        """
+        try:
+            message_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            message_queue.put_nowait(item)
+        except queue.Full:
+            pass
+        logging.warning(
+            "MQTT stream queue full (%d); dropped the oldest message to enqueue '%s' - "
+            "the write path is not keeping up (InfluxDB outage?)",
+            message_queue.maxsize,
+            topic,
+        )
+
+    def _build_stream_client(self, mqtt_settings, host, port, topic_filter, message_queue):
+        """
+        Construct the paho client and callbacks for a persistent stream.
+
+        The message callback only *enqueues* decoded (topic, payload) pairs onto
+        ``message_queue`` - it does no InfluxDB I/O - so paho's network thread stays
+        responsive to keepalives/ACKs however slow a write is; the queue is drained and
+        written on the worker thread (see ``_run_stream_loop``). Returns the client
+        alongside the shared handshake accumulators and the ``stopping`` flag that keeps
+        our own shutdown disconnect from being logged as a fault.
+
+        :param mqtt_settings: the shared ``mqtt`` settings block
+        :type mqtt_settings: dict
+        :param host: broker host (for logging on an unexpected disconnect)
+        :param port: broker port (for logging on an unexpected disconnect)
+        :param topic_filter: filter the on_connect callback (re)subscribes to
+        :type topic_filter: str
+        :param message_queue: queue the message callback puts (topic, payload) onto
+        :type message_queue: queue.Queue
+        :return: (client, state dict with ``failures``/``connected``/``stopping``)
+        :rtype: tuple
+        """
+        state = {
+            "failures": [],
+            "connected": [],
+            # Distinguishes our own disconnect() at shutdown from an unexpected drop.
+            "stopping": threading.Event(),
+        }
+
+        def on_connect(client, userdata, connect_flags, reason_code, properties):
+            # Fires on the initial connect and every reconnect; re-subscribing here
+            # (not once after connect()) is what makes reconnection self-healing, since
+            # paho drops subscriptions on a reconnect.
+            self._subscribe_on_connect(client, reason_code, topic_filter, state["failures"], state["connected"])
+
+        def enqueue_message(client, userdata, message):
+            # Runs on paho's network thread - keep it to decode + a non-blocking enqueue,
+            # never blocking on I/O (nor on a full queue), so keepalives/ACKs aren't held
+            # up. The write happens on the worker thread draining the queue. On overflow
+            # (a write path that can't keep up) drop the oldest to make room for the
+            # freshest state, and warn - a blocking put() here would re-introduce the very
+            # network-thread stall the queue exists to avoid.
+            item = (message.topic, message.payload.decode("utf-8", errors="replace"))
+            try:
+                message_queue.put_nowait(item)
+            except queue.Full:
+                self._drop_oldest_and_enqueue(message_queue, item, message.topic)
+
+        def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+            if not state["stopping"].is_set():
+                logging.warning(
+                    "MQTT connection to %s:%s lost (%s); paho will attempt to reconnect", host, port, reason_code
+                )
+
+        client = mqtt_client.Client(callback_api_version=mqtt_client.CallbackAPIVersion.VERSION2)
+        if mqtt_settings.get("username"):
+            client.username_pw_set(mqtt_settings["username"], mqtt_settings.get("password"))
+        client.on_connect = on_connect
+        client.on_message = enqueue_message
+        client.on_disconnect = on_disconnect
+        client.reconnect_delay_set(min_delay=RECONNECT_MIN_DELAY, max_delay=RECONNECT_MAX_DELAY)
+        return client, state
+
+    def _await_initial_connection(self, host, port, failures, connected):
+        """
+        Block until the initial CONNACK + subscribe resolves, then raise if it failed.
+
+        Polls the ``failures``/``connected`` accumulators the on_connect callback writes
+        from paho's network thread, up to ``STREAM_CONNECT_TIMEOUT`` seconds, then defers
+        to ``_raise_for_failed_connection`` for the same failure mapping the fixed-window
+        collector uses (a rejected CONNACK reported verbatim, or a handshake that never
+        completed).
+
+        :param host: broker host (for the error message)
+        :param port: broker port (for the error message)
+        :param failures: accumulator the on_connect callback records a rejection into
+        :type failures: list
+        :param connected: accumulator the on_connect callback marks on success
+        :type connected: list
+        :return: None
+        :raises SourceConnectionError: if the handshake failed or never completed in time
+        """
+        deadline = time.monotonic() + STREAM_CONNECT_TIMEOUT
+        while time.monotonic() < deadline and not failures and not connected:
+            time.sleep(min(LOOP_INTERVAL, max(0, deadline - time.monotonic())))
+        self._raise_for_failed_connection(host, port, STREAM_CONNECT_TIMEOUT, failures, connected)
 
     @staticmethod
     def _subscribe_on_connect(client, reason_code, topic_filter, failures, connected):
