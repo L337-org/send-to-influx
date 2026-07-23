@@ -34,6 +34,15 @@ STREAM_CONNECT_TIMEOUT = 10
 RECONNECT_MIN_DELAY = 1
 RECONNECT_MAX_DELAY = 120
 
+# Upper bound on the number of decoded-but-not-yet-written messages held between the
+# network thread and the worker thread that drains them (see stream_mqtt_messages).
+# Bounded so a write path that can't keep up - a long InfluxDB outage, where each write
+# buffers after a slow failed POST - can't grow memory without limit. On overflow the
+# oldest queued message is dropped (see the enqueue callback): the freshest state is the
+# more useful to keep, and the periodic snapshot resyncs full state anyway. Generous for
+# the low, event-driven message rates these sources produce (lock/door state changes).
+MAX_QUEUED_MESSAGES = 10000
+
 
 class MqttDataHandler(DataHandler):
     """
@@ -215,7 +224,7 @@ class MqttDataHandler(DataHandler):
         mqtt_settings = self.settings["mqtt"]
         host = mqtt_settings["broker_host"]
         port = mqtt_settings.get("broker_port", 1883)
-        message_queue = queue.Queue()
+        message_queue = queue.Queue(maxsize=MAX_QUEUED_MESSAGES)
         client, state = self._build_stream_client(mqtt_settings, host, port, topic_filter, message_queue)
         try:
             client.connect(host, port)
@@ -285,7 +294,11 @@ class MqttDataHandler(DataHandler):
                 self._dispatch_stream_message(on_message, topic, payload)
             if time.monotonic() >= next_snapshot:
                 periodic()
-                next_snapshot += interval
+                # Schedule the next tick relative to now (after the snapshot completes),
+                # not next_snapshot += interval: the latter would "catch up" by firing
+                # periodic() back-to-back if a snapshot ever ran long or the loop was
+                # delayed by a message burst - unwanted for a heartbeat/snapshot tick.
+                next_snapshot = time.monotonic() + interval
 
     @staticmethod
     def _dispatch_stream_message(on_message, topic, payload):
@@ -308,6 +321,40 @@ class MqttDataHandler(DataHandler):
             on_message(topic, payload)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logging.warning("Error handling MQTT message on topic '%s': %s", topic, exc, exc_info=True)
+
+    @staticmethod
+    def _drop_oldest_and_enqueue(message_queue, item, topic):
+        """
+        Make room in a full stream queue by dropping the oldest entry, then enqueue.
+
+        Runs on paho's network thread when the worker can't drain fast enough (a long
+        InfluxDB outage), so it stays non-blocking: it discards the oldest queued message
+        to keep the freshest state (the periodic snapshot resyncs anyway) and warns. Both
+        the get and the put are best-effort - the sole consumer may have drained an entry
+        in between, which just means there was room after all.
+
+        :param message_queue: the bounded stream queue
+        :type message_queue: queue.Queue
+        :param item: the (topic, payload) pair to enqueue
+        :type item: tuple
+        :param topic: the new message's topic, for the warning
+        :type topic: str
+        :return: None
+        """
+        try:
+            message_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            message_queue.put_nowait(item)
+        except queue.Full:
+            pass
+        logging.warning(
+            "MQTT stream queue full (%d); dropped the oldest message to enqueue '%s' - "
+            "the write path is not keeping up (InfluxDB outage?)",
+            message_queue.maxsize,
+            topic,
+        )
 
     def _build_stream_client(self, mqtt_settings, host, port, topic_filter, message_queue):
         """
@@ -345,10 +392,17 @@ class MqttDataHandler(DataHandler):
             self._subscribe_on_connect(client, reason_code, topic_filter, state["failures"], state["connected"])
 
         def enqueue_message(client, userdata, message):
-            # Runs on paho's network thread - keep it to decode + enqueue, never blocking
-            # on I/O, so keepalives/ACKs aren't held up. The write happens on the worker
-            # thread draining the queue.
-            message_queue.put((message.topic, message.payload.decode("utf-8", errors="replace")))
+            # Runs on paho's network thread - keep it to decode + a non-blocking enqueue,
+            # never blocking on I/O (nor on a full queue), so keepalives/ACKs aren't held
+            # up. The write happens on the worker thread draining the queue. On overflow
+            # (a write path that can't keep up) drop the oldest to make room for the
+            # freshest state, and warn - a blocking put() here would re-introduce the very
+            # network-thread stall the queue exists to avoid.
+            item = (message.topic, message.payload.decode("utf-8", errors="replace"))
+            try:
+                message_queue.put_nowait(item)
+            except queue.Full:
+                self._drop_oldest_and_enqueue(message_queue, item, message.topic)
 
         def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
             if not state["stopping"].is_set():

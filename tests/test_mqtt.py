@@ -529,6 +529,15 @@ class TestRunStreamLoop:
     """Tests for the single-threaded drain loop that processes queued messages and runs
     the periodic snapshot, with no network layer involved."""
 
+    def test_drop_oldest_and_enqueue_makes_room_when_full(self):
+        """On a full queue, the oldest message is dropped to enqueue the newest - the
+        network thread must never block, and the freshest state is the more useful."""
+        message_queue = queue.Queue(maxsize=2)
+        message_queue.put(("nuki/A/state", "1"))
+        message_queue.put(("nuki/A/doorsensorState", "2"))  # queue now full
+        MqttDataHandler._drop_oldest_and_enqueue(message_queue, ("nuki/A/state", "3"), "nuki/A/state")
+        assert list(message_queue.queue) == [("nuki/A/doorsensorState", "2"), ("nuki/A/state", "3")]
+
     def test_dispatches_queued_messages_in_order(self, sample_settings):
         """Queued (topic, payload) pairs are handed to on_message in FIFO order."""
         handler = _handler(_mqtt_settings(sample_settings))
