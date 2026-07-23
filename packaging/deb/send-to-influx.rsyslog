@@ -1,10 +1,15 @@
 # Redirect this service's log messages to their own dedicated file, and stop
 # further processing so they no longer also land in the shared
-# daemon.log/syslog. Mirrors the real haproxy package's own
-# /etc/rsyslog.d/49-haproxy.conf pattern (startswith rather than an exact
-# match, matching that precedent even though this service only ever has the
-# one process name).
-:programname, startswith, "send-to-influx" {
+# daemon.log/syslog. haproxy's own equivalent file uses startswith rather
+# than an exact match, since it legitimately has more than one related
+# program name (haproxy, haproxy-systemd-wrapper) sharing one log - this
+# package only ever has the one service logging via syslog, so an exact
+# match is more precise with no loss of function: it also avoids ever
+# capturing send-to-influx-set-credential (a separate CLI tool shipped by
+# this same package) under this filter, should a future change give that
+# tool its own real logging - it doesn't today, but there's no reason for
+# this rule to be broader than it needs to be.
+:programname, isequal, "send-to-influx" {
   /var/log/send-to-influx.log
   stop
 }
