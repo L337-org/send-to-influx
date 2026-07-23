@@ -1,5 +1,6 @@
 """Unit tests for sendtoinflux (signal_handler, main, helper functions)."""
 
+import itertools
 import signal
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
@@ -22,6 +23,39 @@ class TestSignalHandler:
         """signal_handler accepts frame argument (no crash)."""
         with patch("sendtoinflux.sys.exit"):
             sendtoinflux.signal_handler(2, object())
+
+
+class TestRegisterThreadDumpHandler:
+    """Tests for register_thread_dump_handler."""
+
+    def test_registers_on_a_platform_with_sigusr1(self):
+        with patch("sendtoinflux.faulthandler.register") as mock_register:
+            sendtoinflux.register_thread_dump_handler()
+
+        mock_register.assert_called_once_with(signal.SIGUSR1, all_threads=True)
+
+    def test_skips_registration_when_sigusr1_is_unavailable(self):
+        """Windows (and any other platform without SIGUSR1) must not raise
+        AttributeError here - that would take down startup entirely, including
+        plain --version/--help runs, since this is called unconditionally near
+        the top of main()."""
+
+        class _SignalModuleWithoutSigusr1:
+            """A stand-in for the signal module with SIGUSR1 deleted."""
+
+        with (
+            patch("sendtoinflux.signal", _SignalModuleWithoutSigusr1()),
+            patch("sendtoinflux.faulthandler.register") as mock_register,
+        ):
+            sendtoinflux.register_thread_dump_handler()  # must not raise
+
+        mock_register.assert_not_called()
+
+    def test_degrades_to_a_warning_when_register_itself_fails(self):
+        """e.g. stderr has no real file descriptor (observed under pytest's
+        captured output) - an optional diagnostic must not crash the process."""
+        with patch("sendtoinflux.faulthandler.register", side_effect=OSError("no fileno")):
+            sendtoinflux.register_thread_dump_handler()  # must not raise
 
 
 class TestMain:
@@ -365,8 +399,8 @@ class TestHelpers:
             with pytest.raises(SystemExit):
                 sendtoinflux.run_multi_source(["hue", "zappi"], args, "not-an-int")
 
-        mock_create_source_worker.assert_any_call("hue", 0, args, set())
-        mock_create_source_worker.assert_any_call("zappi", 0, args, set())
+        mock_create_source_worker.assert_any_call("hue", 0, args, set(), {})
+        mock_create_source_worker.assert_any_call("zappi", 0, args, set(), {})
 
     def test_create_source_worker_stops_permanently_on_config_error(self):
         """create_source_worker adds the source to stopped_sources and returns (no retry) on ConfigError."""
@@ -402,7 +436,7 @@ class TestHelpers:
         ):
             # simulate "zappi" having already stopped permanently by the time the
             # supervisor loop runs its first check
-            def fake_create_source_worker(source, delay, worker_args, stopped_sources):
+            def fake_create_source_worker(source, delay, worker_args, stopped_sources, last_activity):
                 if source == "zappi":
                     stopped_sources.add("zappi")
                 return MagicMock()
@@ -415,6 +449,242 @@ class TestHelpers:
         # both threads report dead (2 initial spawns), but only "hue" (not in
         # stopped_sources) should have triggered a respawn attempt (3rd spawn)
         assert mock_spawn.call_count == 3
+
+
+class TestStallDetection:
+    """Tests for create_source_worker's last_activity stamping and
+    check_for_stalled_sources - the watchdog for a thread that's alive but has
+    stopped making any progress (the failure mode a plain thread.is_alive() check
+    can't see, since a hung thread never dies)."""
+
+    @staticmethod
+    def _stop_after_one_full_iteration():
+        """time.sleep side_effect: let the first call through (the scheduling
+        sleep at the top of the loop) and raise on the second (the top of the
+        *next* iteration), so the worker completes exactly one full cycle."""
+        calls = {"n": 0}
+
+        def fake_sleep(_seconds):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise SystemExit(0)
+
+        return fake_sleep
+
+    def test_initial_stamp_uses_the_scheduled_start_not_thread_creation_time(self):
+        """A large source_start_delay (a big stagger_seconds, or many sources) can
+        itself exceed the stall threshold - the initial stamp must reflect the
+        scheduled first-run time (next_update), not the moment the thread was
+        created, or the watchdog would flag a source as stalled while it's still
+        in its intentional initial delay, before it's ever had a chance to run."""
+        handler = MagicMock()
+        last_activity = {}
+        large_start_delay = sendtoinflux.STALL_WARNING_SECONDS * 2
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+        ):
+            args = SimpleNamespace(print=False, dump=False, settings=None)
+            worker = sendtoinflux.create_source_worker("speedtest", large_start_delay, args, set(), last_activity)
+            with pytest.raises(SystemExit):
+                worker()
+
+        assert last_activity["speedtest"] == 1000.0 + large_start_delay
+
+        # Confirm the watchdog agrees: right after thread creation, a source with
+        # a delay this large must not be flagged, even though the delay itself
+        # exceeds STALL_WARNING_SECONDS.
+        stalled_sources = set()
+        with patch("sendtoinflux.time.time", return_value=1000.0 + sendtoinflux.STALL_WARNING_SECONDS + 1):
+            sendtoinflux.check_for_stalled_sources(["speedtest"], set(), last_activity, stalled_sources)
+        assert stalled_sources == set()
+
+    def test_successful_cycle_stamps_last_activity_again(self):
+        """The thread-start stamp alone isn't the interesting case - a completed
+        cycle must advance it further, so a thread that's actually looping (not
+        just recently started) keeps proving it's alive. A monotonically
+        increasing fake clock avoids hardcoding exactly how many time.time()
+        calls happen per iteration - only their relative order matters: the
+        pre-loop stamp is the second call ever made (1001.0), so any later
+        stamp proves the success branch, not just startup, wrote it."""
+        handler = MagicMock()
+        handler.source_settings = {"interval": 60}
+        last_activity = {}
+        clock = itertools.count(1000.0, 1.0)
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", side_effect=lambda: next(clock)),
+            patch("sendtoinflux.time.sleep", side_effect=self._stop_after_one_full_iteration()),
+        ):
+            args = SimpleNamespace(print=False, dump=False, settings=None)
+            worker = sendtoinflux.create_source_worker("hue", 0, args, set(), last_activity)
+            with pytest.raises(SystemExit):
+                worker()
+
+        assert last_activity["hue"] > 1001.0
+
+    def test_failed_cycle_also_stamps_last_activity(self):
+        """A retried failure is already visible via its own WARNING - stamping it too
+        means the watchdog only fires for a source that's stopped producing *either*
+        signal, not one that's actively (and visibly) retrying. Uses a plain retryable
+        exception (not ConfigError, which stops the worker permanently and is excluded
+        from stall-checking entirely via stopped_sources)."""
+        handler = MagicMock()
+        handler.get_data.side_effect = SourceConnectionError("connection reset")
+        last_activity = {}
+        clock = itertools.count(1000.0, 1.0)
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", side_effect=lambda: next(clock)),
+            patch("sendtoinflux.time.sleep", side_effect=self._stop_after_one_full_iteration()),
+        ):
+            args = SimpleNamespace(print=False, dump=False, settings=None)
+            worker = sendtoinflux.create_source_worker("hue", 0, args, set(), last_activity)
+            with pytest.raises(SystemExit):
+                worker()
+
+        assert last_activity["hue"] > 1001.0
+
+    def test_last_activity_none_disables_stamping(self):
+        """The default (no last_activity dict) is a no-op - existing callers that
+        don't care about stall detection (e.g. other tests exercising retry logic
+        in isolation) are unaffected."""
+        handler = MagicMock()
+        handler.get_data.side_effect = ConfigError("bad config")
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.time.time", return_value=3000.0),
+            patch("sendtoinflux.time.sleep"),
+        ):
+            args = SimpleNamespace(print=False, dump=False, settings=None)
+            worker = sendtoinflux.create_source_worker("hue", 0, args, set())
+            worker()  # should not raise despite no last_activity dict provided
+
+    def test_stalled_source_logs_critical_once(self, caplog):
+        now = 1000.0 + sendtoinflux.STALL_WARNING_SECONDS + 1
+        last_activity = {"hue": 0.0, "zappi": now - 1}
+        stalled_sources = set()
+        with (
+            caplog.at_level("CRITICAL"),
+            patch("sendtoinflux.time.time", return_value=now),
+        ):
+            sendtoinflux.check_for_stalled_sources(["hue", "zappi"], set(), last_activity, stalled_sources)
+            sendtoinflux.check_for_stalled_sources(["hue", "zappi"], set(), last_activity, stalled_sources)
+
+        assert stalled_sources == {"hue"}
+        critical_records = [r for r in caplog.records if r.levelname == "CRITICAL"]
+        assert len(critical_records) == 1
+        assert "hue" in critical_records[0].message
+        assert "SIGUSR1" in critical_records[0].message
+
+    def test_recovered_source_clears_the_stalled_flag(self):
+        last_activity = {"hue": 0.0}
+        stalled_sources = {"hue"}
+        with patch("sendtoinflux.time.time", return_value=1.0):
+            sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources)
+
+        assert stalled_sources == set()
+
+    def test_stopped_sources_are_never_flagged(self):
+        last_activity = {"hue": 0.0}
+        stalled_sources = set()
+        with patch("sendtoinflux.time.time", return_value=1_000_000.0):
+            sendtoinflux.check_for_stalled_sources(["hue"], {"hue"}, last_activity, stalled_sources)
+
+        assert stalled_sources == set()
+
+    def test_source_with_no_recorded_activity_is_skipped(self):
+        """A source that hasn't completed even its first stagger delay yet has no
+        last_activity entry - shouldn't be flagged before it's had a chance to run."""
+        stalled_sources = set()
+        with patch("sendtoinflux.time.time", return_value=1_000_000.0):
+            sendtoinflux.check_for_stalled_sources(["hue"], set(), {}, stalled_sources)
+
+        assert stalled_sources == set()
+
+    def test_long_interval_source_is_not_flagged_after_the_flat_threshold(self):
+        """A source that legitimately sleeps for its own configured interval between
+        cycles (e.g. speedtest's 6-hour default) must not be flagged as stalled just
+        because that interval exceeds STALL_WARNING_SECONDS - it would otherwise fire
+        on every single cycle of every long-interval source."""
+        settings = {"speedtest": {"interval": 21600}}
+        last_activity = {"speedtest": 0.0}
+        stalled_sources = set()
+
+        # Well past STALL_WARNING_SECONDS (900s), but well within one configured
+        # interval - a perfectly healthy source sitting in its normal sleep.
+        with patch("sendtoinflux.time.time", return_value=3600.0):
+            sendtoinflux.check_for_stalled_sources(["speedtest"], set(), last_activity, stalled_sources, settings)
+
+        assert stalled_sources == set()
+
+    def test_long_interval_source_is_flagged_after_several_missed_intervals(self):
+        """The threshold still fires eventually - after STALL_INTERVAL_MULTIPLIER
+        missed cycles - so a genuinely stuck long-interval source is still caught,
+        just not on every ordinary sleep."""
+        settings = {"speedtest": {"interval": 21600}}
+        last_activity = {"speedtest": 0.0}
+        stalled_sources = set()
+        past_threshold = 21600 * sendtoinflux.STALL_INTERVAL_MULTIPLIER + 1
+
+        with patch("sendtoinflux.time.time", return_value=past_threshold):
+            sendtoinflux.check_for_stalled_sources(["speedtest"], set(), last_activity, stalled_sources, settings)
+
+        assert stalled_sources == {"speedtest"}
+
+    def test_short_interval_source_keeps_the_flat_floor(self):
+        """A short-interval source (e.g. 300s) should still use the flat
+        STALL_WARNING_SECONDS floor, not a tiny multiple of its own interval -
+        STALL_INTERVAL_MULTIPLIER * 300 (900s) happens to equal the floor exactly,
+        but this pins the behaviour rather than relying on that coincidence."""
+        settings = {"hue": {"interval": 60}}
+        last_activity = {"hue": 0.0}
+        stalled_sources = set()
+
+        with patch("sendtoinflux.time.time", return_value=sendtoinflux.STALL_WARNING_SECONDS - 1):
+            sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources, settings)
+
+        assert stalled_sources == set()
+
+    def test_missing_or_invalid_interval_falls_back_to_the_flat_threshold(self):
+        """No settings, no per-source block, or a non-numeric/non-finite interval
+        must all degrade to the flat threshold rather than crashing the watchdog
+        or (for .inf, which passes a plain '> 0' check) silently raising when the
+        CRITICAL message formats an infinite threshold with %d."""
+        now = sendtoinflux.STALL_WARNING_SECONDS + 1
+        bad_intervals = (
+            None,
+            {},
+            {"hue": {}},
+            {"hue": {"interval": "not-a-number"}},
+            {"hue": {"interval": True}},
+            {"hue": {"interval": float("inf")}},
+            {"hue": {"interval": float("nan")}},
+            {"hue": {"interval": float("-inf")}},
+        )
+        for settings in bad_intervals:
+            last_activity = {"hue": 0.0}
+            stalled_sources = set()
+            with patch("sendtoinflux.time.time", return_value=now):
+                sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources, settings)
+            assert stalled_sources == {"hue"}, f"settings={settings!r}"
+
+    def test_infinite_interval_does_not_break_the_critical_log_message(self, caplog):
+        """A regression test for the specific failure mode: before the finiteness
+        check, an interval of .inf produced an infinite threshold, and formatting
+        that with %d in the CRITICAL log call raised OverflowError."""
+        settings = {"hue": {"interval": float("inf")}}
+        last_activity = {"hue": 0.0}
+        stalled_sources = set()
+        with (
+            caplog.at_level("CRITICAL"),
+            patch("sendtoinflux.time.time", return_value=sendtoinflux.STALL_WARNING_SECONDS + 1),
+        ):
+            sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources, settings)
+
+        assert stalled_sources == {"hue"}
+        assert any(r.levelname == "CRITICAL" for r in caplog.records)
 
 
 class TestSendHeartbeat:

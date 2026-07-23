@@ -414,7 +414,11 @@ Remote MCP server
 send-to-influx can optionally run a remote [MCP](https://modelcontextprotocol.io/) server inside the
 same process, so an MCP client — Claude Desktop or Claude Mobile, or another — can ask
 natural-language questions about your devices via a custom connector. It is disabled unless **both**
-`user` and `password` are set in the `mcp:` settings block - there is no separate enabled flag.
+`user` and `password` are set in the `mcp:` settings block - credentials-present is the primary
+enablement mechanism. Set `mcp.disabled: true` to force it off regardless of user/password state -
+useful if the password was migrated to systemd-creds (blanking the YAML fields alone won't disable
+it there, since the stored credential still gets substituted in at load time) or simply to rule the
+server in or out while troubleshooting something else.
 
 ```yaml
 mcp:

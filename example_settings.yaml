@@ -83,6 +83,12 @@ mqtt:
 # reverse proxy's job, and public_url is the external https:// address it serves
 # (required when enabled - OAuth discovery metadata must advertise it).
 mcp:
+  # Force the server off regardless of user/password state below - a kill switch
+  # independent of credentials, for when the password lives in systemd-creds and
+  # blanking user/password here alone wouldn't reach a coherent disabled state.
+  # Also handy for isolating the MCP server during troubleshooting. Leave false/
+  # absent for normal use (credentials-present is the primary enablement mechanism).
+  disabled: false
   # Any-interface (0.0.0.0/::) and public IPs are refused outright - see the README's MCP section.
   bind_address: "127.0.0.1:8420"
   # e.g. "https://mcp.example.org" - the reverse-proxied address Claude connects to

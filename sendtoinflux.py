@@ -8,10 +8,12 @@ __license__ = "MIT License"
 import sys
 import time
 import json
+import math
 import signal
 import logging
 import argparse
 import threading
+import faulthandler
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
 from toinflux.exceptions import ConfigError, SourceConnectionError
@@ -26,6 +28,18 @@ except PackageNotFoundError:
 DEFAULT_STAGGER_SECONDS = 10
 BACKOFF_BASE_SECONDS = 5
 BACKOFF_MAX_SECONDS = 300
+
+# If a source's worker thread hasn't logged a successful cycle *or* a retried
+# failure (both already visible) in this long, it isn't merely slow - it's stuck.
+# A hung thread never reaches either branch, so this is the only signal a silent
+# stall produces; see run_multi_source()'s supervisor loop. The actual threshold
+# used is the larger of this and STALL_INTERVAL_MULTIPLIER times the source's own
+# configured interval (see _stall_threshold_seconds) - a source legitimately
+# sleeps for its full interval between cycles, so a flat threshold shorter than
+# that would flag every long-interval source (e.g. speedtest's 6-hour default)
+# as stalled on every single cycle.
+STALL_WARNING_SECONDS = 900
+STALL_INTERVAL_MULTIPLIER = 3
 
 
 def print_source_data(source, data):
@@ -113,19 +127,35 @@ def maybe_send_heartbeat(args, data_handler, source, ok, consecutive_failures):
         send_heartbeat(data_handler, source, ok=ok, consecutive_failures=consecutive_failures)
 
 
-def create_source_worker(source, source_start_delay, args, stopped_sources):
+def create_source_worker(source, source_start_delay, args, stopped_sources, last_activity=None):
     """Create a worker function for continuous source collection with retries.
 
     :param stopped_sources: shared set that the worker adds ``source`` to when it
         gives up permanently (a ConfigError), so the multi-source supervisor loop
         knows not to restart it
     :type stopped_sources: set
+    :param last_activity: shared dict the worker stamps with ``source: time.time()``
+        on every successful or failed cycle, so the multi-source supervisor loop can
+        tell a source that's merely retrying (already visible via its own WARNING
+        lines) from one that's stopped making any progress at all - a thread stuck
+        mid-instruction never reaches either branch, so this is the only signal a
+        silent stall produces. None (the default) skips this bookkeeping - used by
+        callers that don't need stall detection (e.g. tests exercising retry logic
+        in isolation).
+    :type last_activity: dict or None
     """
 
     def source_worker():
         failure_count = 0
         next_update = time.time() + source_start_delay
         data_handler = None
+        if last_activity is not None:
+            # Stamp with the scheduled first-run time, not now: a large
+            # stagger_seconds (or many sources) can make source_start_delay
+            # itself exceed the stall threshold, which would otherwise flag a
+            # source as stalled while it's still in its intentional initial
+            # delay, before it's ever had a chance to run.
+            last_activity[source] = next_update
         while True:
             try:
                 if data_handler is None:
@@ -136,6 +166,8 @@ def create_source_worker(source, source_start_delay, args, stopped_sources):
                 next_update += interval
                 failure_count = 0
                 maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
+                if last_activity is not None:
+                    last_activity[source] = time.time()
             except ConfigError as exc:
                 logging.critical("Source '%s' has a configuration problem and will not be retried: %s", source, exc)
                 maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
@@ -154,6 +186,8 @@ def create_source_worker(source, source_start_delay, args, stopped_sources):
                 maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count)
                 data_handler = None
                 next_update = time.time() + restart_delay
+                if last_activity is not None:
+                    last_activity[source] = time.time()
 
     return source_worker
 
@@ -223,6 +257,29 @@ def _configure_logging_or_exit(settings, args):
         sys.exit(1)
 
 
+def register_thread_dump_handler():
+    """Register a SIGUSR1 handler that dumps every thread's live stack trace to
+    stderr (captured by the journal under systemd).
+
+    A hang produces no exception and therefore no log line of its own, so this
+    is the only way to see what every thread is actually blocked on without
+    attaching a debugger. SIGUSR1 doesn't exist on every platform (e.g.
+    Windows) - skip registration there rather than letting an AttributeError
+    take down startup, including plain --version/--help runs. register() also
+    needs a real file descriptor for stderr, which isn't guaranteed in every
+    embedding context (e.g. a captured/wrapped stream, as under pytest) -
+    degrade to a warning rather than taking the whole process down over an
+    optional diagnostic.
+    """
+    if not hasattr(signal, "SIGUSR1"):
+        logging.debug("SIGUSR1 is not available on this platform; skipping thread-dump handler registration")
+        return
+    try:
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
+    except (ValueError, OSError) as exc:
+        logging.warning("Could not register SIGUSR1 thread-dump handler: %s", exc)
+
+
 def main():
     """
     The main function
@@ -230,6 +287,7 @@ def main():
     # register the signal handler for ctrl-c and termination
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    register_thread_dump_handler()
 
     # parse the command line arguments first so --version/--help/--check-config work without a
     # settings.yaml present
@@ -328,7 +386,7 @@ def main():
         sys.exit(1)
 
     logging.info("Starting send-to-influx v%s (sources=%s)", __version__, ", ".join(map(str, sources)))
-    run_multi_source(sources, args, settings.get("stagger_seconds", DEFAULT_STAGGER_SECONDS))
+    run_multi_source(sources, args, settings.get("stagger_seconds", DEFAULT_STAGGER_SECONDS), settings)
 
 
 def run_single_source(source, args):
@@ -392,7 +450,7 @@ def run_single_source(source, args):
         time.sleep(sleep_time)
 
 
-def run_multi_source(sources, args, stagger_seconds):
+def run_multi_source(sources, args, stagger_seconds, settings=None):
     """
     Run all configured sources concurrently, with staggered start offsets.
 
@@ -402,6 +460,10 @@ def run_multi_source(sources, args, stagger_seconds):
     :type args: argparse.Namespace
     :param stagger_seconds: delay between source start offsets (coerced to int)
     :type stagger_seconds: int
+    :param settings: parsed settings dict, used to read each source's own
+        ``interval`` for the stall watchdog's threshold; None (the default)
+        falls back to STALL_WARNING_SECONDS for every source
+    :type settings: dict or None
     """
 
     try:
@@ -413,10 +475,12 @@ def run_multi_source(sources, args, stagger_seconds):
     threads = []
     workers = []
     stopped_sources = set()
+    last_activity = {}
+    stalled_sources = set()
     stagger_step = max(0, stagger_value)
     for index, source in enumerate(sources):
         start_delay = stagger_step * index
-        worker = create_source_worker(source, start_delay, args, stopped_sources)
+        worker = create_source_worker(source, start_delay, args, stopped_sources, last_activity)
         workers.append(worker)
         threads.append(spawn_source_thread(worker))
 
@@ -425,7 +489,88 @@ def run_multi_source(sources, args, stagger_seconds):
             if not thread.is_alive() and sources[idx] not in stopped_sources:
                 logging.warning("Source '%s' worker stopped unexpectedly. Restarting worker thread.", sources[idx])
                 threads[idx] = spawn_source_thread(workers[idx])
+        check_for_stalled_sources(sources, stopped_sources, last_activity, stalled_sources, settings)
         time.sleep(1)
+
+
+def _stall_threshold_seconds(source, settings):
+    """Return how long a source may go without activity before it's flagged as
+    stalled: STALL_WARNING_SECONDS, or STALL_INTERVAL_MULTIPLIER times the
+    source's own configured ``interval`` if that's larger - a source legitimately
+    sleeps for its full interval between cycles, so a flat threshold shorter than
+    that would flag every long-interval source (e.g. speedtest's 6-hour default)
+    as stalled on every single cycle. Falls back to the flat threshold if
+    ``settings``/the source's ``interval`` isn't available or isn't a finite positive
+    number. ``.inf`` is valid YAML and passes a plain ``> 0`` check, so without the
+    explicit finiteness check it would produce an infinite threshold - which raises
+    when the CRITICAL log message formats it with ``%d``. (``.nan`` was already
+    harmless here: NaN comparisons are always False, so ``interval > 0`` alone
+    already rejected it - this check is kept for both anyway, since relying on
+    that comparison quirk for NaN specifically would be a fragile thing to depend on.)
+
+    :param source: source name
+    :type source: str
+    :param settings: parsed settings dict, or None
+    :type settings: dict or None
+    :rtype: int or float
+    """
+    interval = ((settings or {}).get(source) or {}).get("interval")
+    if (
+        isinstance(interval, (int, float))
+        and not isinstance(interval, bool)
+        and math.isfinite(interval)
+        and interval > 0
+    ):
+        return max(STALL_WARNING_SECONDS, interval * STALL_INTERVAL_MULTIPLIER)
+    return STALL_WARNING_SECONDS
+
+
+def check_for_stalled_sources(sources, stopped_sources, last_activity, stalled_sources, settings=None):
+    """Warn once per stall about a source whose worker thread is alive but has
+    made no progress (success or failure) in over its stall threshold (see
+    ``_stall_threshold_seconds``) - the thread-is_alive() check above can't
+    catch this, since a thread stuck mid-instruction (e.g. the GIL-starvation-
+    shaped hang this was added to diagnose) never dies, it just stops making
+    progress silently. Logs once per stall (tracked via ``stalled_sources``)
+    rather than every supervisor tick, and clears the flag once activity
+    resumes so a later recurrence warns again.
+
+    :param sources: configured source names
+    :type sources: list[str]
+    :param stopped_sources: sources that gave up permanently (ConfigError) - excluded
+    :type stopped_sources: set
+    :param last_activity: shared dict from create_source_worker(), source -> last
+        successful-or-failed cycle's time.time()
+    :type last_activity: dict
+    :param stalled_sources: sources already warned about the current stall - mutated
+        in place so the caller's loop sees updates
+    :type stalled_sources: set
+    :param settings: parsed settings dict, for per-source interval-aware
+        thresholds; None falls back to STALL_WARNING_SECONDS for every source
+    :type settings: dict or None
+    :return: None
+    """
+    now = time.time()
+    for source in sources:
+        if source in stopped_sources:
+            continue
+        last = last_activity.get(source)
+        if last is None:
+            continue
+        threshold = _stall_threshold_seconds(source, settings)
+        if now - last > threshold:
+            if source not in stalled_sources:
+                logging.critical(
+                    "Source '%s' has not completed a cycle (success or failure) in over %d "
+                    "seconds - its worker thread is likely stuck rather than merely slow. Send "
+                    "SIGUSR1 to this process (e.g. 'systemctl kill -s SIGUSR1 send-to-influx') to "
+                    "dump every thread's stack trace to the log, and raise this as an issue.",
+                    source,
+                    threshold,
+                )
+                stalled_sources.add(source)
+        else:
+            stalled_sources.discard(source)
 
 
 if __name__ == "__main__":
