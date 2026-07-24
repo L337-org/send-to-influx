@@ -119,8 +119,16 @@ def test_door_state_change_is_written_immediately(streaming_nuki):
     stream = threading.Thread(target=sendtoinflux.stream_source_data, args=("nuki", args, handler, stop), daemon=True)
     stream.start()
     try:
-        # Let the subscription establish and the retained name be delivered/remembered.
-        time.sleep(2)
+        # Actively wait until the retained name has been received and remembered, rather
+        # than sleeping a fixed guess (flaky on a slow/loaded runner): its arrival proves
+        # both that the subscription is established and that the field-key prefix the
+        # assertion below depends on ("Integration_Lock_...") is in place.
+        deadline = time.monotonic() + WRITE_TIMEOUT
+        while time.monotonic() < deadline and handler._device_names.get(DEVICE_ID) != "Integration Lock":
+            time.sleep(0.05)
+        assert (
+            handler._device_names.get(DEVICE_ID) == "Integration Lock"
+        ), "handler did not receive the retained device name within the timeout"
         posts.clear()  # ignore anything redelivered during the initial subscribe
         # Retained, as real Nuki publishes its state topics - so this exercises the
         # retained delivery path, not just a transient live message.
