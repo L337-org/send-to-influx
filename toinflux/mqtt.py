@@ -264,6 +264,9 @@ class MqttDataHandler(DataHandler):
         try:
             client.loop_start()
             self._await_initial_connection(host, port, state["failures"], state["connected"])
+            # Handshake consumed: from here on, reconnects surface via the log, not the
+            # (now-unread) accumulators - see on_connect.
+            state["started"].set()
             logging.info("Streaming MQTT messages from %s:%s (snapshot every %ss)", host, port, interval)
             self._run_stream_loop(message_queue, on_message, periodic, interval, should_stop)
         finally:
@@ -435,13 +438,25 @@ class MqttDataHandler(DataHandler):
             "connected": [],
             # Distinguishes our own disconnect() at shutdown from an unexpected drop.
             "stopping": threading.Event(),
+            # Set once the initial handshake has been consumed by
+            # _await_initial_connection; after that the failures/connected accumulators
+            # are never read again, so reconnects take the log-surfacing path below.
+            "started": threading.Event(),
         }
 
         def on_connect(client, userdata, connect_flags, reason_code, properties):
             # Fires on the initial connect and every reconnect; re-subscribing here
             # (not once after connect()) is what makes reconnection self-healing, since
-            # paho drops subscriptions on a reconnect.
-            self._subscribe_on_connect(client, reason_code, topic_filter, state["failures"], state["connected"])
+            # paho drops subscriptions on a reconnect. During the initial handshake the
+            # outcome feeds the accumulators _await_initial_connection reads; once
+            # started, those are never read again, so a reconnect re-subscribes and
+            # surfaces any failure via the log instead - both to avoid growing the
+            # accumulators unbounded and so a reconnect that silently fails to
+            # re-subscribe (connection up, but no live messages) is at least diagnosable.
+            if state["started"].is_set():
+                self._resubscribe_on_reconnect(client, reason_code, topic_filter, host, port)
+            else:
+                self._subscribe_on_connect(client, reason_code, topic_filter, state["failures"], state["connected"])
 
         def enqueue_message(client, userdata, message):
             # Runs on paho's network thread - keep it to decode + a non-blocking enqueue,
@@ -528,6 +543,43 @@ class MqttDataHandler(DataHandler):
             failures.append(f"could not subscribe to '{topic_filter}' (code {result})")
             return
         connected.append(True)
+
+    @staticmethod
+    def _resubscribe_on_reconnect(client, reason_code, topic_filter, host, port):
+        """
+        Re-subscribe after a reconnect once the stream is past its initial handshake.
+
+        paho drops subscriptions on a reconnect, so this re-issues the subscribe (which is
+        what makes a dropped connection self-heal). Unlike the initial handshake (see
+        _subscribe_on_connect), there's no synchronous waiter reading an accumulator here,
+        so a failure would otherwise be silent - the connection is up, on_disconnect never
+        fires, but no live messages arrive and the stream is quietly subscription-less.
+        Both outcomes are logged at WARNING instead, keeping the failure diagnosable; the
+        per-interval snapshot still covers the source until the next reconnect succeeds.
+
+        :param client: the paho client the callback fired on
+        :param reason_code: CONNACK reason code
+        :param topic_filter: filter to re-subscribe to
+        :type topic_filter: str
+        :param host: broker host, for the log message
+        :param port: broker port, for the log message
+        :return: None
+        """
+        if reason_code.is_failure:
+            logging.warning(
+                "MQTT reconnect to %s:%s was rejected (%s); paho will keep retrying", host, port, reason_code
+            )
+            return
+        result = client.subscribe(topic_filter)[0]
+        if result != mqtt_client.MQTT_ERR_SUCCESS:
+            logging.warning(
+                "MQTT reconnect to %s:%s could not re-subscribe to '%s' (code %s); live updates may be missed "
+                "until the next reconnect - the periodic snapshot still covers this source meanwhile",
+                host,
+                port,
+                topic_filter,
+                result,
+            )
 
     @staticmethod
     def _raise_for_failed_connection(host, port, timeout, failures, connected):

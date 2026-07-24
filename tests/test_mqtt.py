@@ -3,6 +3,7 @@
 import logging
 import queue
 import threading
+import time
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -357,6 +358,49 @@ class TestStreamMqttMessages:
             )
             assert mock_client.subscribe.call_count == 3
 
+    def test_resubscribe_on_reconnect_resubscribes_on_success(self):
+        """A reconnect past the initial handshake re-subscribes (paho drops subscriptions
+        on a reconnect), which is what makes a dropped connection self-heal."""
+        client = MagicMock()
+        client.subscribe.return_value = (mqtt_client.MQTT_ERR_SUCCESS, 1)
+        MqttDataHandler._resubscribe_on_reconnect(client, _FakeReasonCode(False), "nuki/+/+", "h", 1883)
+        client.subscribe.assert_called_once_with("nuki/+/+")
+
+    def test_resubscribe_on_reconnect_warns_when_resubscribe_fails(self, caplog):
+        """A reconnect whose re-subscribe fails (connection up, but no live messages) is
+        surfaced at WARNING - it isn't fed to the one-shot startup accumulators (never read
+        again after start), so it would otherwise be a silent dead stream."""
+        client = MagicMock()
+        client.subscribe.return_value = (7, 1)  # MQTT_ERR_CONN_LOST
+        with caplog.at_level(logging.WARNING):
+            MqttDataHandler._resubscribe_on_reconnect(client, _FakeReasonCode(False), "nuki/+/+", "h", 1883)
+        assert "could not re-subscribe" in caplog.text
+
+    def test_resubscribe_on_reconnect_warns_on_connack_failure(self, caplog):
+        """A rejected reconnect CONNACK is logged and doesn't attempt to subscribe."""
+        client = MagicMock()
+        with caplog.at_level(logging.WARNING):
+            MqttDataHandler._resubscribe_on_reconnect(client, _FakeReasonCode(True), "nuki/+/+", "h", 1883)
+        assert "was rejected" in caplog.text
+        client.subscribe.assert_not_called()
+
+    def test_on_disconnect_warns_only_when_not_shutting_down(self, sample_settings, caplog):
+        """on_disconnect logs an unexpected mid-stream drop, but stays silent during our own
+        shutdown disconnect (state['stopping'] set), so a clean stop isn't logged as a fault."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client"):
+            client, state = handler._build_stream_client(
+                handler.settings["mqtt"], "broker.example", 1883, "nuki/+/+", queue.Queue()
+            )
+        with caplog.at_level(logging.WARNING):
+            client.on_disconnect(client, None, None, _FakeReasonCode(True), None)
+        assert "connection to broker.example:1883 lost" in caplog.text
+        caplog.clear()
+        state["stopping"].set()
+        with caplog.at_level(logging.WARNING):
+            client.on_disconnect(client, None, None, _FakeReasonCode(True), None)
+        assert "lost" not in caplog.text
+
     def test_enables_automatic_reconnect(self, sample_settings):
         """Automatic reconnect backoff is configured so a mid-stream drop self-heals."""
         handler = _handler(_mqtt_settings(sample_settings))
@@ -655,3 +699,32 @@ class TestRunStreamLoop:
                 interval=0.01,
                 should_stop=threading.Event(),
             )
+
+    def test_periodic_does_not_fire_back_to_back_after_a_long_snapshot(self, sample_settings):
+        """The next tick is scheduled relative to *now* after the snapshot completes, not
+        next_snapshot += interval - so a snapshot that runs longer than the interval can't
+        make periodic fire back-to-back to 'catch up'. The first tick deliberately runs
+        long (>> interval); the gap to the next tick must still be about an interval, not
+        near-zero."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        tick_times = []
+        should_stop = threading.Event()
+
+        def periodic():
+            tick_times.append(time.monotonic())
+            if len(tick_times) == 1:
+                time.sleep(0.15)  # a slow snapshot, far longer than the interval below
+            if len(tick_times) >= 3:
+                should_stop.set()
+
+        handler._run_stream_loop(
+            queue.Queue(),
+            on_message=lambda t, p: None,
+            periodic=periodic,
+            interval=0.02,
+            should_stop=should_stop,
+        )
+        # If it re-scheduled with += interval, ticks 2 and 3 would fire immediately after
+        # the long first snapshot (gap ~0). Rescheduling from now keeps them ~interval apart.
+        assert len(tick_times) >= 3
+        assert tick_times[2] - tick_times[1] >= 0.01

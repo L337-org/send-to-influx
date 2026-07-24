@@ -203,7 +203,7 @@ class TestNuki:
 
 
 class TestNukiStreaming:
-    """Tests for decode_stream_message - the per-message interrupt path (slice 3, SI-11)."""
+    """Tests for decode_stream_message - the per-message interrupt path (slice 3)."""
 
     def _handler(self, sample_settings):
         # collect_mqtt_messages is unused by the streaming path, but _nuki mocks it harmlessly.

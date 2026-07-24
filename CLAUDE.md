@@ -86,7 +86,7 @@ with no documented meaning is written through unchanged); see UNITS.md for what 
 source-specific runtime dependency like `speedtest-cli`, pure Python so the `.deb`'s
 `Architecture: all` design holds) is imported only in `toinflux/mqtt.py`.
 
-**Streaming (5.1, SI-11):** MQTT sources are event-driven, not timer-polled. `MqttDataHandler` sets
+**Streaming (5.1):** MQTT sources are event-driven, not timer-polled. `MqttDataHandler` sets
 `STREAMING = True` and `stream_mqtt_messages()` holds the subscription open, so a state change is
 written the instant its (retained) message arrives rather than only when a poll happens to land on
 it. The paho network thread only *enqueues* decoded messages onto a bounded `queue.Queue`; a single

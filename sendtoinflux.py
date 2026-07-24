@@ -392,7 +392,7 @@ def signal_handler(sig, _frame):
     # cleanly. In multi-source mode the streams run on daemon threads and this
     # sys.exit(0) exits the process straight away, so a worker may not observe SHUTDOWN
     # before it's killed - the disconnect is best-effort there, and we lean on the
-    # broker's keepalive/last-will to reap the dropped session.
+    # broker's keepalive to reap the dropped session.
     SHUTDOWN.set()
     sys.exit(0)
 

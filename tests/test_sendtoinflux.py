@@ -1159,7 +1159,7 @@ class TestMaybeStartMcpServer:
 
 class TestStreamSink:
     """Tests for _StreamSink - the bridge from the streaming transport's callbacks to the
-    collector's write, heartbeat and stall-activity behaviour (slice 2, SI-11)."""
+    collector's write, heartbeat and stall-activity behaviour (slice 2)."""
 
     def _sink(self, print_mode=False, on_activity=None):
         handler = MagicMock(STREAMING=True)
@@ -1303,7 +1303,7 @@ class TestShouldStream:
 
 class TestStreamSourceData:
     """stream_source_data hands the transport the source's topic filter, both sink
-    callbacks, the interval and the stop event (slice 2, SI-11)."""
+    callbacks, the interval and the stop event (slice 2)."""
 
     def test_wires_the_transport_with_the_sink_callbacks(self):
         handler = MagicMock(STREAMING=True)
@@ -1322,7 +1322,7 @@ class TestStreamSourceData:
 
 class TestWorkerStreamingBranch:
     """Both worker paths run the blocking stream loop for a STREAMING handler instead of
-    the poll-then-sleep cycle (slice 2, SI-11)."""
+    the poll-then-sleep cycle (slice 2)."""
 
     def _streaming_handler(self):
         handler = MagicMock(STREAMING=True)
@@ -1418,3 +1418,20 @@ class TestWorkerStreamingBranch:
             sendtoinflux.run_single_source("nuki", args)
         stream.assert_called_once_with("nuki", args, handler, sendtoinflux.SHUTDOWN)
         collect.assert_not_called()
+
+    def test_run_single_source_streaming_startup_failure_backs_off(self):
+        """A SourceConnectionError from the stream in single-source mode is caught by the
+        loop's backoff branch and reported unhealthy (ok=0), same as a failed poll, then
+        retried - not left unhandled."""
+        handler = self._streaming_handler()
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.stream_source_data", side_effect=SourceConnectionError("broker down")),
+            patch("sendtoinflux.maybe_send_heartbeat") as heartbeat,
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.run_single_source("nuki", args)
+        assert any(c.kwargs.get("ok") is False for c in heartbeat.call_args_list)
