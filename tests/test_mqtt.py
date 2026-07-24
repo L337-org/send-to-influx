@@ -548,13 +548,20 @@ class TestRunStreamLoop:
         assert list(message_queue.queue) == [("nuki/A/state", "2")]
         assert "dropped the oldest message" in caplog.text
 
-    def test_drop_oldest_and_enqueue_no_warning_when_room_appeared(self, caplog):
-        """If the consumer drained an entry between the caller's full check and here, the
-        message is enqueued with nothing dropped - no misleading 'dropped' warning."""
-        message_queue = queue.Queue(maxsize=2)  # empty: get_nowait raises, put succeeds
+    def test_drop_oldest_and_enqueue_no_drop_when_a_slot_freed_up(self, caplog):
+        """If a slot freed up between the caller's failed put and this helper, the put is
+        retried first and succeeds, so no still-useful message is dropped (and no
+        misleading 'dropped' warning) - the case that matters at maxsize > 1."""
+        message_queue = queue.Queue(maxsize=3)
+        message_queue.put(("nuki/A/state", "1"))
+        message_queue.put(("nuki/A/doorsensorState", "2"))  # room for one more
         with caplog.at_level(logging.WARNING):
             MqttDataHandler._drop_oldest_and_enqueue(message_queue, ("nuki/A/state", "3"), "nuki/A/state")
-        assert list(message_queue.queue) == [("nuki/A/state", "3")]
+        assert list(message_queue.queue) == [
+            ("nuki/A/state", "1"),
+            ("nuki/A/doorsensorState", "2"),
+            ("nuki/A/state", "3"),
+        ]
         assert "dropped" not in caplog.text
 
     def test_drop_oldest_and_enqueue_warns_newest_dropped_when_still_full(self, caplog):

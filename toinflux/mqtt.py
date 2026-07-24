@@ -325,19 +325,20 @@ class MqttDataHandler(DataHandler):
     @staticmethod
     def _drop_oldest_and_enqueue(message_queue, item, topic):
         """
-        Make room in a full stream queue by dropping the oldest entry, then enqueue.
+        Enqueue onto a (was-)full stream queue, dropping the oldest entry only if needed.
 
-        Runs on paho's network thread when the worker can't drain fast enough (a long
-        InfluxDB outage), so it stays non-blocking: it discards the oldest queued message
-        to keep the freshest state (the periodic snapshot resyncs anyway). Both the get
-        and the put are best-effort, so the warning reports what actually happened rather
-        than assuming a drop:
+        The caller (paho's network thread) reaches here after its own ``put_nowait``
+        found the queue full, and must stay non-blocking. The sole consumer may have
+        drained an entry in the meantime, so this **tries the put again first** and only
+        drops the oldest to make room if the queue really is still full - so no
+        still-useful message is discarded when a slot has already freed up (which matters
+        at ``maxsize > 1``). Dropping the oldest keeps the freshest state (the periodic
+        snapshot resyncs full state anyway). The warning reports what actually happened
+        rather than assuming a drop:
 
-        - normally the oldest is dropped and the newest enqueued;
-        - the sole consumer may have drained an entry between the caller's full check and
-          this call, so there was room after all and nothing is dropped (no warning);
-        - if a drop still didn't free room in time, it's the *newest* message that's lost,
-          not the oldest.
+        - room had already freed up, so the put succeeds with nothing dropped (no warning);
+        - still full, so the oldest is dropped and the newest enqueued;
+        - a drop still didn't free room in time, so it's the *newest* message that's lost.
 
         :param message_queue: the bounded stream queue
         :type message_queue: queue.Queue
@@ -347,6 +348,12 @@ class MqttDataHandler(DataHandler):
         :type topic: str
         :return: None
         """
+        try:
+            message_queue.put_nowait(item)
+            return  # a slot freed up between the caller's full check and here - nothing dropped
+        except queue.Full:
+            pass
+        # Genuinely still full: drop the oldest to make room, then retry.
         try:
             message_queue.get_nowait()
             dropped_oldest = True
@@ -372,8 +379,8 @@ class MqttDataHandler(DataHandler):
                 message_queue.maxsize,
                 topic,
             )
-        # else: room appeared between the caller's full check and here (the consumer
-        # drained an entry), so the message was enqueued with nothing dropped - no warning.
+        # else: the queue drained entirely between the failed put and the retry, so the
+        # message was enqueued with nothing dropped - no warning.
 
     def _build_stream_client(self, mqtt_settings, host, port, topic_filter, message_queue):
         """
