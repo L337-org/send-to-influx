@@ -16,6 +16,7 @@ import threading
 import faulthandler
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
+from toinflux.influx import InfluxWriteError
 from toinflux.exceptions import ConfigError, SourceConnectionError
 
 try:
@@ -40,6 +41,13 @@ BACKOFF_MAX_SECONDS = 300
 # as stalled on every single cycle.
 STALL_WARNING_SECONDS = 900
 STALL_INTERVAL_MULTIPLIER = 3
+
+# Set by the signal handler to ask a streaming source's blocking loop to stop and
+# disconnect (see stream_source_data). Timer-driven sources don't consult it - they exit
+# via the SystemExit the handler raises - but a streaming source is blocked inside its
+# network loop, so it needs an explicit stop signal. How cleanly it then disconnects
+# differs between single- and multi-source mode; see signal_handler for the detail.
+SHUTDOWN = threading.Event()
 
 
 def print_source_data(source, data):
@@ -74,6 +82,146 @@ def collect_source_data(source, args, data_handler):
     else:
         data_handler.send_data()
     return data_handler.source_settings["interval"]
+
+
+def stream_source_data(source, args, data_handler, should_stop, on_activity=None):
+    """
+    Run a streaming (event-driven) source, blocking until ``should_stop`` is set.
+
+    Streaming sources (MQTT - see ``MqttDataHandler``) hold their subscription open
+    instead of polling on a timer, so a state change is written the instant it arrives
+    rather than only being caught if a poll happens to land on it. Two write paths run
+    concurrently, serialised by the transport:
+
+    - **Immediate:** each arriving message is decoded (``decode_stream_message``) and
+      its point written straight away. A write failure is buffered by ``send_data`` and
+      swallowed here - the transport would otherwise log a full traceback per message
+      during an InfluxDB outage, and the point is safely queued for the backlog flush.
+    - **Periodic (the timer-based safety net + health probe):** once every ``interval``
+      the source's normal full-state poll still runs, exactly as it did before streaming,
+      so a missed message is caught up from retained state and the heartbeat keeps ticking
+      on an idle source. That poll doubles as an active health probe (see ``periodic``): it
+      hits the same broker as the live stream, so its failure correlates with the stream
+      being down, and drives the heartbeat's ``ok``. A failing poll never tears down the
+      stream (paho reconnects genuine drops); it's folded into the heartbeat instead.
+
+    Only returns on a clean stop; a broker failure at startup raises
+    ``SourceConnectionError`` and a config-shape problem raises ``ConfigError``, both left
+    to the caller's existing retry/stop handling (identical to the polling path).
+
+    :param source: source name
+    :type source: str
+    :param args: parsed CLI arguments (``args.print`` routes writes to stdout)
+    :type args: argparse.Namespace
+    :param data_handler: the source's streaming DataHandler instance
+    :type data_handler: toinflux.mqtt.MqttDataHandler
+    :param should_stop: set to end the stream and return
+    :type should_stop: threading.Event
+    :param on_activity: optional no-arg callback stamped on each write/tick, so the
+        multi-source stall watchdog sees a live stream making progress
+    :type on_activity: collections.abc.Callable or None
+    :return: None
+    """
+    sink = _StreamSink(source, args, data_handler, on_activity)
+    data_handler.stream_mqtt_messages(
+        data_handler.STREAM_TOPIC_FILTER,
+        sink.on_message,
+        sink.periodic,
+        data_handler.source_settings["interval"],
+        should_stop,
+    )
+
+
+class _StreamSink:
+    """
+    Bridges a streaming source's transport callbacks to the collector's write, heartbeat
+    and stall-activity behaviour.
+
+    Holds the per-run context (source, args, handler, activity callback) so the transport's
+    ``on_message``/``periodic`` callbacks are plain bound methods rather than closures. See
+    ``stream_source_data`` for the two write paths and their failure handling.
+    """
+
+    def __init__(self, source, args, data_handler, on_activity):
+        self.source = source
+        self.args = args
+        self.data_handler = data_handler
+        self.on_activity = on_activity
+        # Health state for the periodic heartbeat. Both are only touched from the single
+        # queue-drain thread (on_message and periodic run there, not paho's network
+        # thread), so no lock is needed. _message_since_tick lets a demonstrably-working
+        # stream override a flaky one-off probe; _consecutive_probe_failures carries the
+        # streak so alerting can tolerate transients.
+        self._message_since_tick = False
+        self._consecutive_probe_failures = 0
+
+    def _write(self, data):
+        if self.args.print:
+            print_source_data(self.source, data)
+        else:
+            self.data_handler.send_data(data=data)
+
+    def _stamp_activity(self):
+        if self.on_activity is not None:
+            self.on_activity()
+
+    def on_message(self, topic, payload):
+        """Write the point for one arriving message immediately (the interrupt path), and
+        note that the stream showed life this interval so the next heartbeat counts it
+        healthy even if the periodic probe happens to fail."""
+        data = self.data_handler.decode_stream_message(topic, payload)
+        if not data:
+            return
+        self._message_since_tick = True
+        self._stamp_activity()
+        try:
+            self._write(data)
+        except InfluxWriteError:
+            # Already buffered by send_data (which logged the write error); a failed write
+            # is not a stream failure, so don't let it bubble up and be logged per message
+            # with a full traceback during an InfluxDB outage.
+            pass
+
+    def periodic(self):
+        """Run the periodic tick once per interval: an active full-state probe of the
+        source (its normal poll), the heartbeat, and a stall-activity stamp.
+
+        The probe doubles as the streaming source's health signal. It hits the same broker
+        as the live stream, so its failure correlates with the stream being down - exactly
+        the silent outage (stream dead, no messages arriving) the heartbeat exists to
+        surface. So ``ok`` reflects *any sign of life since the last tick*: the probe
+        succeeded, or a message arrived. A demonstrably-working stream mustn't be marked
+        down by a flaky one-off probe, and an idle-but-healthy source sends no messages for
+        hours so the probe is what proves it alive - only when both go dark is ``ok=0``
+        reported, with ``consecutive_failures`` carrying the streak so alerting tolerates
+        transients (identical meaning to the polling heartbeat).
+
+        A failing probe never tears down the stream (paho reconnects genuine drops); it's
+        logged and folded into the heartbeat. ``last_activity`` is stamped every tick
+        regardless - an unreachable source whose thread is still ticking is not *stuck*, the
+        separate condition the stall watchdog detects.
+        """
+        probe_ok = True
+        try:
+            data = self.data_handler.get_data()
+        except SourceConnectionError as exc:
+            probe_ok = False
+            logging.warning("Health probe for streaming source '%s' failed: %s", self.source, exc)
+        else:
+            try:
+                self._write(data)
+            except InfluxWriteError:
+                # Buffered by send_data; the source itself was reachable, so the probe
+                # succeeded - only the downstream InfluxDB write failed (surfaced by the
+                # heartbeat's own write failing / the gap it leaves, and the backlog flush).
+                pass
+        ok = probe_ok or self._message_since_tick
+        self._consecutive_probe_failures = 0 if ok else self._consecutive_probe_failures + 1
+        maybe_send_heartbeat(
+            self.args, self.data_handler, self.source, ok=ok, consecutive_failures=self._consecutive_probe_failures
+        )
+        self._message_since_tick = False
+        self._stamp_activity()
 
 
 def send_heartbeat(data_handler, source, ok, consecutive_failures):
@@ -127,6 +275,33 @@ def maybe_send_heartbeat(args, data_handler, source, ok, consecutive_failures):
         send_heartbeat(data_handler, source, ok=ok, consecutive_failures=consecutive_failures)
 
 
+def _stamp_activity(last_activity, source):
+    """Stamp ``last_activity[source]`` with the current time for the multi-source stall
+    watchdog, or do nothing when stall detection isn't in use (``last_activity`` is None)."""
+    if last_activity is not None:
+        last_activity[source] = time.time()
+
+
+def _should_stream(data_handler):
+    """
+    Whether to run the event-driven stream loop for this handler rather than polling.
+
+    True only when it's a ``STREAMING`` transport *and* a concrete source has actually
+    given it a topic filter to subscribe to. ``MqttDataHandler`` sets ``STREAMING = True``
+    for the whole transport, but its ``STREAM_TOPIC_FILTER`` defaults to ``None`` until a
+    subclass wires up the per-message decode (the filter and ``decode_stream_message``
+    land together, per source). Gating on the filter means enabling the transport before a
+    source is wired can't strand that source in the stream path subscribing to ``None`` and
+    retrying forever - it keeps polling, exactly as it did before streaming existed.
+
+    :param data_handler: the source's DataHandler instance
+    :type data_handler: toinflux.influx.DataHandler
+    :return: True to take the streaming path, False to poll on the timer
+    :rtype: bool
+    """
+    return bool(data_handler.STREAMING) and getattr(data_handler, "STREAM_TOPIC_FILTER", None) is not None
+
+
 def create_source_worker(source, source_start_delay, args, stopped_sources, last_activity=None):
     """Create a worker function for continuous source collection with retries.
 
@@ -162,12 +337,20 @@ def create_source_worker(source, source_start_delay, args, stopped_sources, last
                     data_handler = toinflux.get_class(source, args.settings)
                 sleep_time = max(0, next_update - time.time())
                 time.sleep(sleep_time)
+                if _should_stream(data_handler):
+                    # Blocks until shutdown, streaming points as they arrive and running
+                    # the interval snapshot/heartbeat itself. It returns only on a clean
+                    # stop; a broker failure at startup raises and is handled by the
+                    # backoff branch below exactly like a failed poll.
+                    stream_source_data(
+                        source, args, data_handler, SHUTDOWN, on_activity=lambda: _stamp_activity(last_activity, source)
+                    )
+                    return
                 interval = collect_source_data(source, args, data_handler)
                 next_update += interval
                 failure_count = 0
                 maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
-                if last_activity is not None:
-                    last_activity[source] = time.time()
+                _stamp_activity(last_activity, source)
             except ConfigError as exc:
                 logging.critical("Source '%s' has a configuration problem and will not be retried: %s", source, exc)
                 maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
@@ -186,8 +369,7 @@ def create_source_worker(source, source_start_delay, args, stopped_sources, last
                 maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count)
                 data_handler = None
                 next_update = time.time() + restart_delay
-                if last_activity is not None:
-                    last_activity[source] = time.time()
+                _stamp_activity(last_activity, source)
 
     return source_worker
 
@@ -204,6 +386,14 @@ def signal_handler(sig, _frame):
     Signal handler to exit gracefully
     """
     logging.info("Exiting on signal %s", sig)
+    # Ask any streaming source to break out of its network loop and disconnect. In
+    # single-source mode the loop runs on this (the main) thread, so the SystemExit
+    # raised below unwinds through stream_mqtt_messages' finally and disconnects
+    # cleanly. In multi-source mode the streams run on daemon threads and this
+    # sys.exit(0) exits the process straight away, so a worker may not observe SHUTDOWN
+    # before it's killed - the disconnect is best-effort there, and we lean on the
+    # broker's keepalive to reap the dropped session.
+    SHUTDOWN.set()
     sys.exit(0)
 
 
@@ -389,6 +579,33 @@ def main():
     run_multi_source(sources, args, settings.get("stagger_seconds", DEFAULT_STAGGER_SECONDS), settings)
 
 
+def _dump_source_and_exit(source, args):
+    """
+    Collect one reading, print it as JSON, and exit - the one-shot ``--dump`` mode.
+
+    A one-shot manual/debugging run has no worker loop to retry it with backoff, so a
+    connection failure exits with a distinct code (2) rather than an unhandled traceback,
+    and a config problem exits 1.
+
+    :param source: source name from settings/get_class mapping
+    :type source: str
+    :param args: parsed CLI arguments
+    :type args: argparse.Namespace
+    :return: never returns - always exits the process
+    """
+    try:
+        data_handler = toinflux.get_class(source, args.settings)
+        data = data_handler.get_data()
+    except ConfigError as exc:
+        logging.critical("Source '%s' has a configuration problem: %s", source, exc)
+        sys.exit(1)
+    except SourceConnectionError as exc:
+        logging.error("Source '%s' failed: %s", source, exc)
+        sys.exit(2)
+    print(json.dumps(data, indent=4))
+    sys.exit(0)
+
+
 def run_single_source(source, args):
     """
     Run a single data source in either dump, print, or send mode.
@@ -402,20 +619,7 @@ def run_single_source(source, args):
 
     # dump the data if required and exit
     if args.dump:
-        try:
-            data_handler = toinflux.get_class(source, args.settings)
-            data = data_handler.get_data()
-        except ConfigError as exc:
-            logging.critical("Source '%s' has a configuration problem: %s", source, exc)
-            sys.exit(1)
-        except SourceConnectionError as exc:
-            # --dump is a one-shot manual/debugging run, so there's no worker loop to
-            # retry it with backoff - report the failure and exit distinctly from a
-            # config problem, rather than an unhandled traceback.
-            logging.error("Source '%s' failed: %s", source, exc)
-            sys.exit(2)
-        print(json.dumps(data, indent=4))
-        sys.exit(0)
+        _dump_source_and_exit(source, args)
 
     failure_count = 0
     next_update = time.time()
@@ -423,6 +627,13 @@ def run_single_source(source, args):
         try:
             if data_handler is None:
                 data_handler = toinflux.get_class(source, args.settings)
+            if _should_stream(data_handler):
+                # Blocks until shutdown, streaming points as they arrive. On a signal the
+                # handler sets SHUTDOWN and raises SystemExit on this thread, which unwinds
+                # through stream_mqtt_messages' finally to disconnect cleanly; a broker
+                # failure at startup raises and is handled by the backoff branch below.
+                stream_source_data(source, args, data_handler, SHUTDOWN)
+                return
             interval = collect_source_data(source, args, data_handler)
             next_update += interval
 

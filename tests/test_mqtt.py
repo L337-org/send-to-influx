@@ -1,5 +1,9 @@
 """Unit tests for toinflux.mqtt (MqttDataHandler, the shared MQTT transport)."""
 
+import logging
+import queue
+import threading
+import time
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -258,3 +262,469 @@ class TestMqttDataHandler:
             result = handler.collect_mqtt_messages("nuki/+/+", WINDOW)
             assert result[0][0] == "nuki/2BB28570/name"
             assert "�" in result[0][1]
+
+
+def _drive_stream(mock_client, messages, connack_failure=False, subscribe_result=0, connects=1):
+    """Make the mocked client's loop_start() synchronously fire on_connect (``connects``
+    times, to exercise reconnect re-subscription) and enqueue the given (topic,
+    payload-bytes) messages via the client's on_message callback, as a real broker would
+    after the CONNACK. Because the mock is synchronous, this all happens before
+    stream_mqtt_messages awaits the handshake, so the await returns immediately and the
+    messages are already queued for the drain loop to process."""
+    mock_client.subscribe.return_value = (subscribe_result, 1)
+
+    def fake_loop_start():
+        for _ in range(connects):
+            mock_client.on_connect(mock_client, None, None, _FakeReasonCode(connack_failure), None)
+        for topic, payload in messages:
+            mock_client.on_message(mock_client, None, MagicMock(topic=topic, payload=payload))
+
+    mock_client.loop_start.side_effect = fake_loop_start
+
+
+def _stop_after_iterations(n):
+    """A stand-in for the should_stop Event whose is_set() returns False ``n`` times (one
+    per drain-loop iteration) then True, so _run_stream_loop runs a known number of
+    iterations without any real waiting or a background thread."""
+    should_stop = MagicMock()
+    should_stop.is_set.side_effect = [False] * n + [True]
+    return should_stop
+
+
+class TestStreamMqttMessages:
+    """Connection/lifecycle tests for stream_mqtt_messages; the drain-loop behaviour is
+    covered separately in TestRunStreamLoop."""
+
+    def test_delivers_each_message_to_on_message_callback(self, sample_settings):
+        """A message arriving over the held-open subscription is passed to the caller's
+        on_message callback with its payload UTF-8 decoded - the interrupt path."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        received = []
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            _drive_stream(mock_client, [("nuki/A/doorsensorState", b"3"), ("nuki/A/state", b"1")])
+            handler.stream_mqtt_messages(
+                "nuki/+/+",
+                on_message=lambda t, p: received.append((t, p)),
+                periodic=lambda: None,
+                interval=300,
+                should_stop=_stop_after_iterations(2),
+            )
+            assert received == [("nuki/A/doorsensorState", "3"), ("nuki/A/state", "1")]
+            mock_client.subscribe.assert_called_with("nuki/+/+")
+            mock_client.loop_stop.assert_called_once()
+            mock_client.disconnect.assert_called_once()
+
+    def test_message_callback_runs_off_the_network_thread(self, sample_settings):
+        """The paho on_message callback only enqueues - it must not call the caller's
+        on_message directly, so a slow write can't block paho's network loop. Firing the
+        client callback delivers nothing to the caller until the drain loop runs."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        received = []
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.subscribe.return_value = (0, 1)
+
+            def fake_loop_start():
+                mock_client.on_connect(mock_client, None, None, _FakeReasonCode(False), None)
+                mock_client.on_message(mock_client, None, MagicMock(topic="nuki/A/state", payload=b"1"))
+                # only the queue has been fed at this point - the caller hasn't been called
+                assert received == []
+
+            mock_client.loop_start.side_effect = fake_loop_start
+            handler.stream_mqtt_messages(
+                "nuki/+/+",
+                on_message=lambda t, p: received.append((t, p)),
+                periodic=lambda: None,
+                interval=300,
+                should_stop=_stop_after_iterations(1),
+            )
+            assert received == [("nuki/A/state", "1")]  # drained on the worker thread
+
+    def test_resubscribes_on_every_connect(self, sample_settings):
+        """on_connect re-subscribes on each (re)connect - paho drops subscriptions on a
+        reconnect, and re-subscribing is what makes a dropped connection self-heal (and,
+        for retained topics, redeliver current state)."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            _drive_stream(mock_client, [], connects=3)
+            handler.stream_mqtt_messages(
+                "nuki/+/+",
+                on_message=lambda t, p: None,
+                periodic=lambda: None,
+                interval=300,
+                should_stop=_stop_after_iterations(0),
+            )
+            assert mock_client.subscribe.call_count == 3
+
+    def test_resubscribe_on_reconnect_resubscribes_on_success(self):
+        """A reconnect past the initial handshake re-subscribes (paho drops subscriptions
+        on a reconnect), which is what makes a dropped connection self-heal."""
+        client = MagicMock()
+        client.subscribe.return_value = (mqtt_client.MQTT_ERR_SUCCESS, 1)
+        MqttDataHandler._resubscribe_on_reconnect(client, _FakeReasonCode(False), "nuki/+/+", "h", 1883)
+        client.subscribe.assert_called_once_with("nuki/+/+")
+
+    def test_resubscribe_on_reconnect_warns_when_resubscribe_fails(self, caplog):
+        """A reconnect whose re-subscribe fails (connection up, but no live messages) is
+        surfaced at WARNING - it isn't fed to the one-shot startup accumulators (never read
+        again after start), so it would otherwise be a silent dead stream."""
+        client = MagicMock()
+        client.subscribe.return_value = (7, 1)  # MQTT_ERR_CONN_LOST
+        with caplog.at_level(logging.WARNING):
+            MqttDataHandler._resubscribe_on_reconnect(client, _FakeReasonCode(False), "nuki/+/+", "h", 1883)
+        assert "could not re-subscribe" in caplog.text
+
+    def test_resubscribe_on_reconnect_warns_on_connack_failure(self, caplog):
+        """A rejected reconnect CONNACK is logged and doesn't attempt to subscribe."""
+        client = MagicMock()
+        with caplog.at_level(logging.WARNING):
+            MqttDataHandler._resubscribe_on_reconnect(client, _FakeReasonCode(True), "nuki/+/+", "h", 1883)
+        assert "was rejected" in caplog.text
+        client.subscribe.assert_not_called()
+
+    def test_on_disconnect_warns_only_when_not_shutting_down(self, sample_settings, caplog):
+        """on_disconnect logs an unexpected mid-stream drop, but stays silent during our own
+        shutdown disconnect (state['stopping'] set), so a clean stop isn't logged as a fault."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client"):
+            client, state = handler._build_stream_client(
+                handler.settings["mqtt"], "broker.example", 1883, "nuki/+/+", queue.Queue()
+            )
+        with caplog.at_level(logging.WARNING):
+            client.on_disconnect(client, None, None, _FakeReasonCode(True), None)
+        assert "connection to broker.example:1883 lost" in caplog.text
+        caplog.clear()
+        state["stopping"].set()
+        with caplog.at_level(logging.WARNING):
+            client.on_disconnect(client, None, None, _FakeReasonCode(True), None)
+        assert "lost" not in caplog.text
+
+    def test_enables_automatic_reconnect(self, sample_settings):
+        """Automatic reconnect backoff is configured so a mid-stream drop self-heals."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            _drive_stream(mock_client, [])
+            handler.stream_mqtt_messages(
+                "nuki/+/+",
+                on_message=lambda t, p: None,
+                periodic=lambda: None,
+                interval=300,
+                should_stop=_stop_after_iterations(0),
+            )
+            mock_client.reconnect_delay_set.assert_called_once()
+
+    def test_connect_failure_raises_source_connection_error(self, sample_settings):
+        """A network-level connect failure maps to SourceConnectionError before the
+        background loop is ever started."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.connect.side_effect = ConnectionRefusedError("connection refused")
+            with pytest.raises(SourceConnectionError):
+                handler.stream_mqtt_messages(
+                    "nuki/+/+",
+                    on_message=lambda t, p: None,
+                    periodic=lambda: None,
+                    interval=300,
+                    should_stop=_stop_after_iterations(0),
+                )
+            mock_client.loop_start.assert_not_called()
+
+    def test_connack_failure_raises_source_connection_error(self, sample_settings):
+        """A failed CONNACK (e.g. bad credentials) at startup surfaces as
+        SourceConnectionError, so the worker retries it with backoff, and the background
+        loop is torn down cleanly."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            _drive_stream(mock_client, [], connack_failure=True)
+            with pytest.raises(SourceConnectionError, match="rejected the connection"):
+                handler.stream_mqtt_messages(
+                    "nuki/+/+",
+                    on_message=lambda t, p: None,
+                    periodic=lambda: None,
+                    interval=300,
+                    should_stop=_stop_after_iterations(0),
+                )
+            mock_client.subscribe.assert_not_called()
+            mock_client.loop_stop.assert_called_once()
+            mock_client.disconnect.assert_called_once()
+
+    def test_subscribe_failure_raises_source_connection_error(self, sample_settings):
+        """A failed subscribe at startup raises rather than silently streaming nothing."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            _drive_stream(mock_client_cls.return_value, [], subscribe_result=1)
+            with pytest.raises(SourceConnectionError, match="could not subscribe"):
+                handler.stream_mqtt_messages(
+                    "nuki/+/+",
+                    on_message=lambda t, p: None,
+                    periodic=lambda: None,
+                    interval=300,
+                    should_stop=_stop_after_iterations(0),
+                )
+
+    def test_no_connack_within_timeout_raises_source_connection_error(self, sample_settings):
+        """TCP up but the MQTT handshake never completing raises after the connect
+        timeout, rather than blocking startup forever."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with (
+            patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls,
+            patch("toinflux.mqtt.STREAM_CONNECT_TIMEOUT", 0.05),
+        ):
+            mock_client = mock_client_cls.return_value
+            mock_client.loop_start.side_effect = lambda: None  # loop runs, no CONNACK ever
+            with pytest.raises(SourceConnectionError, match="handshake"):
+                handler.stream_mqtt_messages(
+                    "nuki/+/+",
+                    on_message=lambda t, p: None,
+                    periodic=lambda: None,
+                    interval=300,
+                    should_stop=_stop_after_iterations(0),
+                )
+            mock_client.loop_stop.assert_called_once()
+            mock_client.disconnect.assert_called_once()
+
+    def test_loop_start_failure_still_disconnects(self, sample_settings):
+        """If loop_start() fails (e.g. thread creation under resource pressure) the socket
+        connect() opened is still disconnected rather than leaked, and the error propagates."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            mock_client.loop_start.side_effect = RuntimeError("can't start new thread")
+            with pytest.raises(RuntimeError, match="can't start new thread"):
+                handler.stream_mqtt_messages(
+                    "nuki/+/+",
+                    on_message=lambda t, p: None,
+                    periodic=lambda: None,
+                    interval=300,
+                    should_stop=_stop_after_iterations(0),
+                )
+            mock_client.disconnect.assert_called_once()
+            mock_client.loop_stop.assert_called_once()
+
+    def test_disconnect_before_loop_stop_on_shutdown(self, sample_settings):
+        """Clean shutdown disconnects (queuing the DISCONNECT for the still-running
+        network thread) before stopping the loop."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        order = []
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            mock_client = mock_client_cls.return_value
+            _drive_stream(mock_client, [])
+            mock_client.disconnect.side_effect = lambda: order.append("disconnect")
+            mock_client.loop_stop.side_effect = lambda: order.append("loop_stop")
+            handler.stream_mqtt_messages(
+                "nuki/+/+",
+                on_message=lambda t, p: None,
+                periodic=lambda: None,
+                interval=300,
+                should_stop=_stop_after_iterations(0),
+            )
+            assert order == ["disconnect", "loop_stop"]
+
+    def test_invalid_interval_raises_config_error(self, sample_settings):
+        """A non-positive/non-numeric snapshot interval is a fatal config-shape problem,
+        not a retryable failure."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client"):
+            for bad in ("300", None, True, 0, -1):
+                with pytest.raises(ConfigError, match="positive number of seconds"):
+                    handler.stream_mqtt_messages(
+                        "nuki/+/+",
+                        on_message=lambda t, p: None,
+                        periodic=lambda: None,
+                        interval=bad,
+                        should_stop=_stop_after_iterations(0),
+                    )
+
+    def test_missing_mqtt_block_raises_config_error(self, sample_settings):
+        """No mqtt block is fatal here too, before any connection is attempted."""
+        settings = _mqtt_settings(sample_settings)
+        del settings["mqtt"]
+        handler = _handler(settings)
+        with patch("toinflux.mqtt.mqtt_client.Client"):
+            with pytest.raises(ConfigError, match="mqtt"):
+                handler.stream_mqtt_messages(
+                    "nuki/+/+",
+                    on_message=lambda t, p: None,
+                    periodic=lambda: None,
+                    interval=300,
+                    should_stop=_stop_after_iterations(0),
+                )
+
+    def test_uses_v2_callback_api(self, sample_settings):
+        """The streaming client is constructed against paho's v2 callback API."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        with patch("toinflux.mqtt.mqtt_client.Client") as mock_client_cls:
+            _drive_stream(mock_client_cls.return_value, [])
+            handler.stream_mqtt_messages(
+                "nuki/+/+",
+                on_message=lambda t, p: None,
+                periodic=lambda: None,
+                interval=300,
+                should_stop=_stop_after_iterations(0),
+            )
+            assert mock_client_cls.call_args.kwargs["callback_api_version"] is mqtt_client.CallbackAPIVersion.VERSION2
+
+
+class TestRunStreamLoop:
+    """Tests for the single-threaded drain loop that processes queued messages and runs
+    the periodic snapshot, with no network layer involved."""
+
+    def test_drop_oldest_and_enqueue_makes_room_when_full(self):
+        """On a full queue, the oldest message is dropped to enqueue the newest - the
+        network thread must never block, and the freshest state is the more useful."""
+        message_queue = queue.Queue(maxsize=2)
+        message_queue.put(("nuki/A/state", "1"))
+        message_queue.put(("nuki/A/doorsensorState", "2"))  # queue now full
+        MqttDataHandler._drop_oldest_and_enqueue(message_queue, ("nuki/A/state", "3"), "nuki/A/state")
+        assert list(message_queue.queue) == [("nuki/A/doorsensorState", "2"), ("nuki/A/state", "3")]
+
+    def test_drop_oldest_and_enqueue_warns_that_oldest_was_dropped(self, caplog):
+        """The normal overflow case warns that the oldest was dropped to make room."""
+        message_queue = queue.Queue(maxsize=1)
+        message_queue.put(("nuki/A/state", "1"))  # full
+        with caplog.at_level(logging.WARNING):
+            MqttDataHandler._drop_oldest_and_enqueue(message_queue, ("nuki/A/state", "2"), "nuki/A/state")
+        assert list(message_queue.queue) == [("nuki/A/state", "2")]
+        assert "dropped the oldest message" in caplog.text
+
+    def test_drop_oldest_and_enqueue_no_drop_when_a_slot_freed_up(self, caplog):
+        """If a slot freed up between the caller's failed put and this helper, the put is
+        retried first and succeeds, so no still-useful message is dropped (and no
+        misleading 'dropped' warning) - the case that matters at maxsize > 1."""
+        message_queue = queue.Queue(maxsize=3)
+        message_queue.put(("nuki/A/state", "1"))
+        message_queue.put(("nuki/A/doorsensorState", "2"))  # room for one more
+        with caplog.at_level(logging.WARNING):
+            MqttDataHandler._drop_oldest_and_enqueue(message_queue, ("nuki/A/state", "3"), "nuki/A/state")
+        assert list(message_queue.queue) == [
+            ("nuki/A/state", "1"),
+            ("nuki/A/doorsensorState", "2"),
+            ("nuki/A/state", "3"),
+        ]
+        assert "dropped" not in caplog.text
+
+    def test_drop_oldest_and_enqueue_warns_newest_dropped_when_still_full(self, caplog):
+        """If a drop still doesn't free room in time (put raises Full), it's the newest
+        message that's lost, and the warning says so rather than claiming a stale drop."""
+
+        class _StillFull:
+            maxsize = 2
+
+            def get_nowait(self):
+                raise queue.Empty
+
+            def put_nowait(self, item):
+                raise queue.Full
+
+        with caplog.at_level(logging.WARNING):
+            MqttDataHandler._drop_oldest_and_enqueue(_StillFull(), ("nuki/A/state", "3"), "nuki/A/state")
+        assert "dropped the newest message 'nuki/A/state'" in caplog.text
+        assert "dropped the oldest" not in caplog.text
+
+    def test_dispatches_queued_messages_in_order(self, sample_settings):
+        """Queued (topic, payload) pairs are handed to on_message in FIFO order."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        message_queue = queue.Queue()
+        message_queue.put(("nuki/A/state", "1"))
+        message_queue.put(("nuki/A/doorsensorState", "3"))
+        received = []
+        handler._run_stream_loop(
+            message_queue,
+            on_message=lambda t, p: received.append((t, p)),
+            periodic=lambda: None,
+            interval=300,
+            should_stop=_stop_after_iterations(2),
+        )
+        assert received == [("nuki/A/state", "1"), ("nuki/A/doorsensorState", "3")]
+
+    def test_runs_periodic_when_the_interval_elapses(self, sample_settings):
+        """With nothing queued, the loop still fires the periodic snapshot once the
+        interval passes."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        ticks = []
+        should_stop = threading.Event()
+
+        def periodic():
+            ticks.append(1)
+            should_stop.set()  # stop after the first snapshot
+
+        handler._run_stream_loop(
+            queue.Queue(),
+            on_message=lambda t, p: None,
+            periodic=periodic,
+            interval=0.01,
+            should_stop=should_stop,
+        )
+        assert ticks == [1]
+
+    def test_failing_on_message_is_logged_and_swallowed(self, sample_settings):
+        """A message whose handler raises is swallowed - the loop survives (if the error
+        propagated, this test would error out instead of asserting)."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        message_queue = queue.Queue()
+        message_queue.put(("nuki/A/state", "1"))
+        processed = []
+
+        def boom(topic, payload):
+            processed.append((topic, payload))
+            raise ValueError("bad message")
+
+        handler._run_stream_loop(
+            message_queue,
+            on_message=boom,
+            periodic=lambda: None,
+            interval=300,
+            should_stop=_stop_after_iterations(1),
+        )
+        assert processed == [("nuki/A/state", "1")]
+
+    def test_periodic_exception_propagates(self, sample_settings):
+        """Unlike on_message, a periodic failure is not swallowed - it propagates so the
+        caller's error handling and the worker's backoff apply."""
+        handler = _handler(_mqtt_settings(sample_settings))
+
+        def boom():
+            raise RuntimeError("snapshot failed")
+
+        with pytest.raises(RuntimeError, match="snapshot failed"):
+            handler._run_stream_loop(
+                queue.Queue(),
+                on_message=lambda t, p: None,
+                periodic=boom,
+                interval=0.01,
+                should_stop=threading.Event(),
+            )
+
+    def test_periodic_does_not_fire_back_to_back_after_a_long_snapshot(self, sample_settings):
+        """The next tick is scheduled relative to *now* after the snapshot completes, not
+        next_snapshot += interval - so a snapshot that runs longer than the interval can't
+        make periodic fire back-to-back to 'catch up'. The first tick deliberately runs
+        long (>> interval); the gap to the next tick must still be about an interval, not
+        near-zero."""
+        handler = _handler(_mqtt_settings(sample_settings))
+        tick_times = []
+        should_stop = threading.Event()
+
+        def periodic():
+            tick_times.append(time.monotonic())
+            if len(tick_times) == 1:
+                time.sleep(0.15)  # a slow snapshot, far longer than the interval below
+            if len(tick_times) >= 3:
+                should_stop.set()
+
+        handler._run_stream_loop(
+            queue.Queue(),
+            on_message=lambda t, p: None,
+            periodic=periodic,
+            interval=0.02,
+            should_stop=should_stop,
+        )
+        # If it re-scheduled with += interval, ticks 2 and 3 would fire immediately after
+        # the long first snapshot (gap ~0). Rescheduling from now keeps them ~interval apart.
+        assert len(tick_times) >= 3
+        assert tick_times[2] - tick_times[1] >= 0.01

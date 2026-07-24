@@ -106,10 +106,18 @@ Nuki Smart Lock (MQTT)
 
 Collects lock state and door-sensor state (plus battery and connectivity fields) from WiFi-connected
 Nuki smart locks via Nuki's local MQTT API (supported by the Smart Lock 3.0 Pro on firmware 3.5.12+
-and all newer WiFi models). Nuki devices publish every state topic with the MQTT retain flag set, so
-each collection cycle simply subscribes briefly and receives the last-known state of every lock
-provisioned to the broker - locks need no per-device configuration in `settings.yaml`, and each
+and all newer WiFi models). send-to-influx holds a persistent subscription open and writes a point
+the **instant** a lock or door-sensor state changes, so a door opening and closing between polls is
+no longer missed. It also takes a full-state snapshot every `interval` seconds as a safety net (and
+to keep an idle lock's status heartbeat ticking); because Nuki publishes every state topic with the
+MQTT retain flag set, that snapshot's brief resubscribe receives the last-known state of every lock
+provisioned to the broker. Locks need no per-device configuration in `settings.yaml`, and each
 lock's fields are prefixed with its own name from the Nuki app (give each lock a distinct name).
+
+> **Behaviour change in 5.1:** MQTT sources (Nuki) now stream state changes as they happen instead
+> of only sampling once per `interval`, so you'll see denser data - more points, at the moments
+> things actually change. The measurement and field names are unchanged, so existing dashboards and
+> queries keep working as-is; there's no new configuration, and nothing to do on upgrade.
 
 This needs an MQTT broker on your LAN, e.g. Mosquitto. Note that Nuki devices only support plain,
 unencrypted MQTT (port 1883) to a private-range LAN address - only use this on a network you trust.
