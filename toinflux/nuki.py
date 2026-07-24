@@ -203,14 +203,60 @@ class Nuki(MqttDataHandler):
             return None
         device_id, field = parts[1], parts[2]
         if field == "name":
-            self._device_names[device_id] = payload
+            self._remember_device_name(device_id, payload)
             return None
         # A per-message write can arrive before the first periodic snapshot's get_data()
         # has set the header, so set it here too (send_data reads influx_header).
         self.influx_header = f"nuki,host={self.settings['mqtt']['broker_host']} "
-        prefix = (self._device_names.get(device_id, "").strip() or device_id).replace(" ", "_")
+        prefix = self._name_prefix(self._device_names.get(device_id, ""), device_id)
         key, value = self._decode_field(field, payload)
         return {f"{prefix}_{key}": value}
+
+    @staticmethod
+    def _name_prefix(name, device_id):
+        """
+        The field-key prefix for a device: its name with spaces underscored, or the device
+        ID when the name is blank/absent (an empty prefix would produce keys like
+        ``_stateValue`` and collide across devices). Matches parse_nuki_data's prefix rule.
+
+        :param name: the device's Nuki-app name (may be blank/whitespace)
+        :type name: str
+        :param device_id: the device's ID, used as the fallback prefix
+        :type device_id: str
+        :return: the field-key prefix
+        :rtype: str
+        """
+        return (name.strip() or device_id).replace(" ", "_")
+
+    def _remember_device_name(self, device_id, name):
+        """
+        Record a device's name for use as its streaming field-key prefix.
+
+        Warns if the name resolves to a prefix already claimed by a *different* device -
+        two locks sharing a Nuki-app name would silently merge their field keys into one
+        ambiguous time series. The snapshot path (parse_nuki_data) warns on the same
+        condition per cycle; this surfaces it on the streaming path too, when the name is
+        set, rather than silently. A device re-sending its own retained name (e.g. on
+        reconnect) is not a collision.
+
+        :param device_id: the device the name belongs to
+        :type device_id: str
+        :param name: the name payload as received (UTF-8 decoded)
+        :type name: str
+        :return: None
+        """
+        prefix = self._name_prefix(name, device_id)
+        for other_id, other_name in self._device_names.items():
+            if other_id != device_id and self._name_prefix(other_name, other_id) == prefix:
+                logging.warning(
+                    "Duplicate Nuki device name '%s' - devices %s and %s share a field-key prefix, so"
+                    " their fields will collide; give each lock a distinct name in the Nuki app",
+                    prefix,
+                    other_id,
+                    device_id,
+                )
+                break
+        self._device_names[device_id] = name
 
     @staticmethod
     def _decode_field(field, raw):

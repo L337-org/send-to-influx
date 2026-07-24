@@ -273,3 +273,21 @@ class TestNukiStreaming:
         nuki.decode_stream_message("nuki/BBBB0002/name", "Back Door")
         assert nuki.decode_stream_message("nuki/AAAA0001/state", "1") == {"Front_Door_stateValue": 1}
         assert nuki.decode_stream_message("nuki/BBBB0002/state", "3") == {"Back_Door_stateValue": 3}
+
+    def test_duplicate_device_name_warns(self, sample_settings, caplog):
+        """Two devices sharing a name (same field-key prefix) would silently merge their
+        series, so setting the second one warns - matching the snapshot path's behaviour."""
+        nuki = self._handler(sample_settings)
+        nuki.decode_stream_message("nuki/AAAA0001/name", "Front Door")
+        with caplog.at_level("WARNING"):
+            nuki.decode_stream_message("nuki/BBBB0002/name", "Front Door")
+        assert any("Duplicate Nuki device name" in r.message for r in caplog.records)
+
+    def test_same_device_resending_its_name_does_not_warn(self, sample_settings, caplog):
+        """A device re-sending its own retained name (e.g. on reconnect) is not a
+        collision and must not warn."""
+        nuki = self._handler(sample_settings)
+        nuki.decode_stream_message("nuki/AAAA0001/name", "Front Door")
+        with caplog.at_level("WARNING"):
+            nuki.decode_stream_message("nuki/AAAA0001/name", "Front Door")
+        assert not any("Duplicate Nuki device name" in r.message for r in caplog.records)
