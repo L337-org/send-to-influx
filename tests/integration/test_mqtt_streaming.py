@@ -52,14 +52,25 @@ def _new_client():
 def _publish(topic, payload, retain=True):
     """Publish one message to the broker and block until it's confirmed sent.
 
-    ``wait_for_publish`` doesn't raise on timeout, so check ``is_published()`` and fail
-    loudly here rather than letting an unsent publish surface later as a misleading
-    "no InfluxDB write" assertion.
+    Waits for the CONNACK (on_connect) before publishing, so the test is deterministic on
+    a slow runner (paho completes the handshake on the network-loop thread) and a rejected
+    connection fails here with a clear message rather than as a later "no InfluxDB write".
+    ``wait_for_publish`` doesn't raise on timeout, so ``is_published()`` is checked too.
     """
     pub = _new_client()
+    connected = threading.Event()
+    outcome = {}
+
+    def on_connect(client, userdata, connect_flags, reason_code, properties):
+        outcome["reason_code"] = reason_code
+        connected.set()
+
+    pub.on_connect = on_connect
     pub.connect(BROKER_HOST, BROKER_PORT)
     pub.loop_start()
     try:
+        assert connected.wait(timeout=5), f"publisher did not connect to {BROKER_HOST}:{BROKER_PORT} within 5s"
+        assert not outcome["reason_code"].is_failure, f"publisher connection rejected: {outcome['reason_code']}"
         info = pub.publish(topic, payload, qos=1, retain=retain)
         info.wait_for_publish(timeout=5)
         assert info.is_published(), f"publish to {topic!r} was not confirmed within 5s"
