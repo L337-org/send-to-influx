@@ -41,6 +41,51 @@ jobs:
       - name: Run pytest with coverage
         run: pytest -v --cov=toinflux --cov=sendtoinflux --cov-report=term-missing
 
+  integration-run:
+    # Runs the marked integration tests (excluded from the default pytest run above)
+    # against a real MQTT broker started on the runner. NON-BLOCKING for now: not in
+    # main's required-checks ruleset, so a failure reports but doesn't block merging -
+    # promote it by adding "Run integration tests (MQTT broker)" to the ruleset once it's
+    # proven stable over a few runs.
+    runs-on: [ubuntu-latest]
+    name: Run integration tests (MQTT broker)
+    steps:
+      - name: Check out source repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python environment
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Start a local MQTT broker (anonymous)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mosquitto mosquitto-clients
+          # Stop the packaged service (its default config isn't anonymous) and run our own
+          # explicit anonymous config instead - 1883 is unprivileged, so no root needed.
+          sudo systemctl stop mosquitto 2>/dev/null || true
+          printf 'listener 1883 0.0.0.0\nallow_anonymous true\n' > /tmp/mosquitto-ci.conf
+          /usr/sbin/mosquitto -c /tmp/mosquitto-ci.conf -d
+          for i in $(seq 1 10); do
+            if mosquitto_pub -h localhost -t ci/health -m ok 2>/dev/null; then
+              echo "broker up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "MQTT broker did not come up on localhost:1883" >&2; exit 1
+
+      - name: Run integration tests
+        env:
+          MQTT_TEST_BROKER_HOST: localhost
+          MQTT_TEST_BROKER_PORT: "1883"
+        run: pytest -m integration -v
+
   flake8-run:
     # Runs flake8 as an alternative, faster(?) linter
 

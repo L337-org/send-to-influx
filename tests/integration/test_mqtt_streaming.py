@@ -122,10 +122,12 @@ def test_door_state_change_is_written_immediately(streaming_nuki):
         # Let the subscription establish and the retained name be delivered/remembered.
         time.sleep(2)
         posts.clear()  # ignore anything redelivered during the initial subscribe
-        _publish(f"nuki/{DEVICE_ID}/doorsensorState", "3", retain=False)
+        # Retained, as real Nuki publishes its state topics - so this exercises the
+        # retained delivery path, not just a transient live message.
+        _publish(f"nuki/{DEVICE_ID}/doorsensorState", "3", retain=True)
         body = _wait_for_write(posts, "Integration_Lock_doorsensorStateValue=3")
         assert body.startswith("nuki,host=")
     finally:
         stop.set()
         stream.join(timeout=WRITE_TIMEOUT)
-    assert not stream.is_alive(), "stream thread did not stop after SHUTDOWN"
+    assert not stream.is_alive(), "stream thread did not stop after should_stop was set"
