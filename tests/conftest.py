@@ -68,7 +68,7 @@ def sample_settings():
 @pytest.fixture
 def mock_main_deps():
     """Patch signal, load_settings, and get_class for main() tests."""
-    mock_handler = MagicMock()
+    mock_handler = MagicMock(STREAMING=False)
     mock_handler.get_data.return_value = {}
     mock_handler.source_settings = {"interval": 60}
     with (
