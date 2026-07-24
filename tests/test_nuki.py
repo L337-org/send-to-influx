@@ -200,3 +200,76 @@ class TestNuki:
         result = nuki.get_data()
         assert result["2BB28570_state"] is True
         assert "2BB28570_stateValue" not in result
+
+
+class TestNukiStreaming:
+    """Tests for decode_stream_message - the per-message interrupt path (slice 3, SI-11)."""
+
+    def _handler(self, sample_settings):
+        # collect_mqtt_messages is unused by the streaming path, but _nuki mocks it harmlessly.
+        return _nuki(_nuki_settings(sample_settings), [])
+
+    def test_stream_topic_filter_matches_the_snapshot_filter(self):
+        """The live subscription uses the same filter as the fixed-window snapshot."""
+        assert Nuki.STREAM_TOPIC_FILTER == "nuki/+/+"
+
+    def test_name_topic_is_remembered_and_yields_no_point(self, sample_settings):
+        """A name message produces no point of its own but is remembered as the prefix for
+        that device's later state messages."""
+        nuki = self._handler(sample_settings)
+        assert nuki.decode_stream_message("nuki/2BB28570/name", "Front Door") is None
+        assert nuki.decode_stream_message("nuki/2BB28570/state", "1") == {"Front_Door_stateValue": 1}
+
+    def test_state_before_any_name_falls_back_to_device_id(self, sample_settings):
+        """Until a name is seen, fields are keyed by the device ID (same fallback as the
+        snapshot path); in practice the retained name arrives first on subscribe."""
+        nuki = self._handler(sample_settings)
+        assert nuki.decode_stream_message("nuki/2BB28570/state", "1") == {"2BB28570_stateValue": 1}
+
+    def test_doorsensor_state_is_renamed(self, sample_settings):
+        nuki = self._handler(sample_settings)
+        result = nuki.decode_stream_message("nuki/2BB28570/doorsensorState", "3")
+        assert result == {"2BB28570_doorsensorStateValue": 3}
+
+    def test_control_and_event_topics_are_ignored(self, sample_settings):
+        nuki = self._handler(sample_settings)
+        assert nuki.decode_stream_message("nuki/2BB28570/lockAction", "2") is None
+        assert nuki.decode_stream_message("nuki/2BB28570/commandResponse", "0") is None
+
+    def test_malformed_topic_is_ignored(self, sample_settings):
+        nuki = self._handler(sample_settings)
+        assert nuki.decode_stream_message("nuki/2BB28570/state/extra", "1") is None
+        assert nuki.decode_stream_message("nuki/oddness", "x") is None
+
+    def test_sets_influx_header_for_the_immediate_write(self, sample_settings):
+        """A message can arrive before the first periodic snapshot has set the header, so
+        decode_stream_message sets it itself (send_data reads influx_header)."""
+        nuki = self._handler(sample_settings)
+        assert nuki.influx_header is None
+        nuki.decode_stream_message("nuki/2BB28570/state", "1")
+        assert nuki.influx_header == "nuki,host=mqtt.example.com "
+
+    def test_name_with_spaces_becomes_underscores(self, sample_settings):
+        nuki = self._handler(sample_settings)
+        nuki.decode_stream_message("nuki/2BB28570/name", "Front Door")
+        result = nuki.decode_stream_message("nuki/2BB28570/batteryChargeState", "85")
+        assert result == {"Front_Door_batteryChargeState": 85}
+
+    def test_blank_name_falls_back_to_device_id(self, sample_settings):
+        nuki = self._handler(sample_settings)
+        assert nuki.decode_stream_message("nuki/2BB28570/name", "   ") is None
+        assert nuki.decode_stream_message("nuki/2BB28570/state", "1") == {"2BB28570_stateValue": 1}
+
+    def test_bool_state_payload_kept_under_original_key(self, sample_settings):
+        """Same guard as the snapshot path: a stray bool state payload isn't renamed into
+        the numeric stateValue field (which InfluxDB would then type-lock as boolean)."""
+        nuki = self._handler(sample_settings)
+        assert nuki.decode_stream_message("nuki/2BB28570/state", "true") == {"2BB28570_state": True}
+
+    def test_name_memory_is_per_device(self, sample_settings):
+        """Each device's remembered name prefixes only its own fields."""
+        nuki = self._handler(sample_settings)
+        nuki.decode_stream_message("nuki/AAAA0001/name", "Front Door")
+        nuki.decode_stream_message("nuki/BBBB0002/name", "Back Door")
+        assert nuki.decode_stream_message("nuki/AAAA0001/state", "1") == {"Front_Door_stateValue": 1}
+        assert nuki.decode_stream_message("nuki/BBBB0002/state", "3") == {"Back_Door_stateValue": 3}

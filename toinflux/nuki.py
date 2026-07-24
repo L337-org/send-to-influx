@@ -98,6 +98,21 @@ class Nuki(MqttDataHandler):
         "batteryChargeState": {"unit": "%"},
     }
 
+    # The live subscription filter for the streaming path - the same topic filter the
+    # fixed-window snapshot uses (see parse_nuki_data). Setting it (with
+    # decode_stream_message below) is what tells the worker this source is wired to
+    # stream rather than poll (see sendtoinflux._should_stream).
+    STREAM_TOPIC_FILTER = "nuki/+/+"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Per-device name memory for the streaming path. Retained `name` topics arrive as
+        # their own messages, so decode_stream_message remembers each device's name to
+        # prefix that device's later state messages with (the snapshot path consumes
+        # `name` inline instead). Keyed by device ID; refreshed whenever a `name` message
+        # arrives, including the retained one redelivered on every (re)subscribe.
+        self._device_names = {}
+
     def get_data(self):
         """
         Get the current state of every Nuki device from the MQTT broker
@@ -156,6 +171,46 @@ class Nuki(MqttDataHandler):
             # warns once per empty cycle - a second warning here would just duplicate it.
             logging.debug("No Nuki device state received from the MQTT broker")
         return data
+
+    def decode_stream_message(self, topic, payload):
+        """
+        Decode one streamed Nuki message into a single InfluxDB field (the interrupt path).
+
+        The event-driven counterpart to parse_nuki_data's per-topic handling: a ``name``
+        topic is remembered as that device's field-key prefix and produces no point of its
+        own; any other known state topic is decoded via ``_decode_field`` and returned as a
+        one-field dict keyed ``<device name or id>_<field>``. Control/event topics
+        (lockAction, ...) and malformed topics are ignored (return None).
+
+        The device-name prefix falls back to the device ID until a ``name`` message has been
+        seen, exactly as parse_nuki_data falls back for a device with no name. Because Nuki
+        publishes ``name`` retained, it's redelivered on every (re)subscribe ahead of the
+        state topics, so in practice the fallback is only ever hit for a device that has no
+        name set at all.
+
+        :param topic: the message's MQTT topic (e.g. ``nuki/2BB28570/state``)
+        :type topic: str
+        :param payload: the payload as received (UTF-8 decoded)
+        :type payload: str
+        :return: a single ``{field_key: value}`` to write immediately, or None to ignore
+            the message (a control/event/malformed topic, or a ``name`` update consumed as
+            a prefix)
+        :rtype: dict or None
+        """
+        parts = topic.split("/")
+        if len(parts) != 3 or parts[2] not in KNOWN_STATE_FIELDS:
+            logging.debug("Ignoring non-state MQTT topic %s", topic)
+            return None
+        device_id, field = parts[1], parts[2]
+        if field == "name":
+            self._device_names[device_id] = payload
+            return None
+        # A per-message write can arrive before the first periodic snapshot's get_data()
+        # has set the header, so set it here too (send_data reads influx_header).
+        self.influx_header = f"nuki,host={self.settings['mqtt']['broker_host']} "
+        prefix = (self._device_names.get(device_id, "").strip() or device_id).replace(" ", "_")
+        key, value = self._decode_field(field, payload)
+        return {f"{prefix}_{key}": value}
 
     @staticmethod
     def _decode_field(field, raw):
