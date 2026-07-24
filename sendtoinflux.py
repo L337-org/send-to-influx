@@ -43,9 +43,10 @@ STALL_WARNING_SECONDS = 900
 STALL_INTERVAL_MULTIPLIER = 3
 
 # Set by the signal handler to ask a streaming source's blocking loop to stop and
-# disconnect cleanly (see stream_source_data). Timer-driven sources don't consult it -
-# they exit via the SystemExit the handler raises - but a streaming source is blocked
-# inside its network loop, so it needs an explicit stop signal to shut down tidily.
+# disconnect (see stream_source_data). Timer-driven sources don't consult it - they exit
+# via the SystemExit the handler raises - but a streaming source is blocked inside its
+# network loop, so it needs an explicit stop signal. How cleanly it then disconnects
+# differs between single- and multi-source mode; see signal_handler for the detail.
 SHUTDOWN = threading.Event()
 
 
@@ -385,11 +386,13 @@ def signal_handler(sig, _frame):
     Signal handler to exit gracefully
     """
     logging.info("Exiting on signal %s", sig)
-    # Ask any streaming source to break out of its network loop and disconnect
-    # cleanly. In single-source mode the loop runs on this (the main) thread, so the
-    # SystemExit raised below unwinds through its finally and disconnects; in
-    # multi-source mode the streams run on daemon threads, so setting the event gives
-    # them the chance to notice before the process exits.
+    # Ask any streaming source to break out of its network loop and disconnect. In
+    # single-source mode the loop runs on this (the main) thread, so the SystemExit
+    # raised below unwinds through stream_mqtt_messages' finally and disconnects
+    # cleanly. In multi-source mode the streams run on daemon threads and this
+    # sys.exit(0) exits the process straight away, so a worker may not observe SHUTDOWN
+    # before it's killed - the disconnect is best-effort there, and we lean on the
+    # broker's keepalive/last-will to reap the dropped session.
     SHUTDOWN.set()
     sys.exit(0)
 
