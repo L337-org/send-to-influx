@@ -329,9 +329,15 @@ class MqttDataHandler(DataHandler):
 
         Runs on paho's network thread when the worker can't drain fast enough (a long
         InfluxDB outage), so it stays non-blocking: it discards the oldest queued message
-        to keep the freshest state (the periodic snapshot resyncs anyway) and warns. Both
-        the get and the put are best-effort - the sole consumer may have drained an entry
-        in between, which just means there was room after all.
+        to keep the freshest state (the periodic snapshot resyncs anyway). Both the get
+        and the put are best-effort, so the warning reports what actually happened rather
+        than assuming a drop:
+
+        - normally the oldest is dropped and the newest enqueued;
+        - the sole consumer may have drained an entry between the caller's full check and
+          this call, so there was room after all and nothing is dropped (no warning);
+        - if a drop still didn't free room in time, it's the *newest* message that's lost,
+          not the oldest.
 
         :param message_queue: the bounded stream queue
         :type message_queue: queue.Queue
@@ -343,18 +349,31 @@ class MqttDataHandler(DataHandler):
         """
         try:
             message_queue.get_nowait()
+            dropped_oldest = True
         except queue.Empty:
-            pass
+            dropped_oldest = False
         try:
             message_queue.put_nowait(item)
+            enqueued = True
         except queue.Full:
-            pass
-        logging.warning(
-            "MQTT stream queue full (%d); dropped the oldest message to enqueue '%s' - "
-            "the write path is not keeping up (InfluxDB outage?)",
-            message_queue.maxsize,
-            topic,
-        )
+            enqueued = False
+
+        if not enqueued:
+            logging.warning(
+                "MQTT stream queue full (%d); dropped the newest message '%s' - the write "
+                "path is not keeping up (InfluxDB outage?)",
+                message_queue.maxsize,
+                topic,
+            )
+        elif dropped_oldest:
+            logging.warning(
+                "MQTT stream queue full (%d); dropped the oldest message to enqueue '%s' - "
+                "the write path is not keeping up (InfluxDB outage?)",
+                message_queue.maxsize,
+                topic,
+            )
+        # else: room appeared between the caller's full check and here (the consumer
+        # drained an entry), so the message was enqueued with nothing dropped - no warning.
 
     def _build_stream_client(self, mqtt_settings, host, port, topic_filter, message_queue):
         """

@@ -1,5 +1,6 @@
 """Unit tests for toinflux.mqtt (MqttDataHandler, the shared MQTT transport)."""
 
+import logging
 import queue
 import threading
 from unittest.mock import MagicMock, patch
@@ -537,6 +538,42 @@ class TestRunStreamLoop:
         message_queue.put(("nuki/A/doorsensorState", "2"))  # queue now full
         MqttDataHandler._drop_oldest_and_enqueue(message_queue, ("nuki/A/state", "3"), "nuki/A/state")
         assert list(message_queue.queue) == [("nuki/A/doorsensorState", "2"), ("nuki/A/state", "3")]
+
+    def test_drop_oldest_and_enqueue_warns_that_oldest_was_dropped(self, caplog):
+        """The normal overflow case warns that the oldest was dropped to make room."""
+        message_queue = queue.Queue(maxsize=1)
+        message_queue.put(("nuki/A/state", "1"))  # full
+        with caplog.at_level(logging.WARNING):
+            MqttDataHandler._drop_oldest_and_enqueue(message_queue, ("nuki/A/state", "2"), "nuki/A/state")
+        assert list(message_queue.queue) == [("nuki/A/state", "2")]
+        assert "dropped the oldest message" in caplog.text
+
+    def test_drop_oldest_and_enqueue_no_warning_when_room_appeared(self, caplog):
+        """If the consumer drained an entry between the caller's full check and here, the
+        message is enqueued with nothing dropped - no misleading 'dropped' warning."""
+        message_queue = queue.Queue(maxsize=2)  # empty: get_nowait raises, put succeeds
+        with caplog.at_level(logging.WARNING):
+            MqttDataHandler._drop_oldest_and_enqueue(message_queue, ("nuki/A/state", "3"), "nuki/A/state")
+        assert list(message_queue.queue) == [("nuki/A/state", "3")]
+        assert "dropped" not in caplog.text
+
+    def test_drop_oldest_and_enqueue_warns_newest_dropped_when_still_full(self, caplog):
+        """If a drop still doesn't free room in time (put raises Full), it's the newest
+        message that's lost, and the warning says so rather than claiming a stale drop."""
+
+        class _StillFull:
+            maxsize = 2
+
+            def get_nowait(self):
+                raise queue.Empty
+
+            def put_nowait(self, item):
+                raise queue.Full
+
+        with caplog.at_level(logging.WARNING):
+            MqttDataHandler._drop_oldest_and_enqueue(_StillFull(), ("nuki/A/state", "3"), "nuki/A/state")
+        assert "dropped the newest message 'nuki/A/state'" in caplog.text
+        assert "dropped the oldest" not in caplog.text
 
     def test_dispatches_queued_messages_in_order(self, sample_settings):
         """Queued (topic, payload) pairs are handed to on_message in FIFO order."""
