@@ -43,10 +43,9 @@ jobs:
 
   integration-run:
     # Runs the marked integration tests (excluded from the default pytest run above)
-    # against a real MQTT broker started on the runner. NON-BLOCKING for now: not in
-    # main's required-checks ruleset, so a failure reports but doesn't block merging -
-    # promote it by adding "Run integration tests (MQTT broker)" to the ruleset once it's
-    # proven stable over a few runs.
+    # against a real MQTT broker started on the runner. A required check on main's ruleset
+    # (a failure blocks merging), so the streaming path is exercised against a real broker
+    # on every PR.
     runs-on: [ubuntu-latest]
     name: Run integration tests (MQTT broker)
     steps:
@@ -166,7 +165,7 @@ jobs:
       - name: Ensure rsyslog and logrotate are present
         # Recommends:, not Depends: (see build-deb.sh) - typically present on
         # a full Ubuntu runner image already, but installed explicitly rather
-        # than assumed, so the packaging scenario tests below (SI-12's
+        # than assumed, so the packaging scenario tests below (the
         # rsyslog/logrotate config) can't be silently skipped by a future
         # runner-image change.
         #

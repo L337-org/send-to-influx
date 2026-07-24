@@ -309,7 +309,7 @@ cp "$REPO_ROOT/packaging/deb/send-to-influx.templates" "$PKG_ROOT/DEBIAN/templat
 chmod 755 "$PKG_ROOT/DEBIAN/preinst" "$PKG_ROOT/DEBIAN/postinst" "$PKG_ROOT/DEBIAN/prerm" "$PKG_ROOT/DEBIAN/postrm" "$PKG_ROOT/DEBIAN/config"
 
 # rsyslog + logrotate config for the packaged install's own dedicated logfile
-# (SI-12) - unlike settings.yaml, no maintainer script ever rewrites either of
+# - unlike settings.yaml, no maintainer script ever rewrites either of
 # these, so the Policy 10.7.3 conflict that rules out conffile treatment for
 # settings.yaml doesn't apply here: they're real dpkg conffiles (see the
 # DEBIAN/conffiles write below), exactly like haproxy's own

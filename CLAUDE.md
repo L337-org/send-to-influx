@@ -30,10 +30,11 @@ CI runs `pytest` (with coverage, matrixed across Python 3.10-3.14), `flake8`, `m
 scenario suite against it - install/upgrade/reconfigure/purge lifecycle, see "Packaging" below), and
 `bookworm-verify` (the same scenario suite inside a `debian:12` container - systemd 252, the oldest
 systemd-creds actually supported; the arm64 runner's systemd 255+ masks pre-254 behaviour
-differences, which let a real systemd-creds decrypt regression reach the 4.1 release) in
-parallel on every push to `main` and every PR (`.github/workflows/premerge.yaml`) - all are required
-status checks on `main`'s ruleset ("Verify .deb on Debian 12 (systemd 252)" needs adding to the
-ruleset when it first appears), so a failure blocks merging rather than only being noticed
+differences, which let a real systemd-creds decrypt regression reach the 4.1 release), plus
+`integration-run` (the marked `integration` tests against a mosquitto broker started on the runner -
+see "Testing" and "Packaging"), in parallel on every push to `main` and every PR
+(`.github/workflows/premerge.yaml`) - all are required status checks on `main`'s ruleset, so a
+failure blocks merging rather than only being noticed
 afterward. Dependency and GitHub Actions updates are managed by Dependabot
 (`.github/dependabot.yml`), weekly.
 
@@ -177,7 +178,7 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     gated per source; a write-enabled source with no registrar is logged and skipped, not a crash.
     The vendor logic lives on the source class (like the read domain knowledge); `mcp_write.py` only
     wires it up and owns the per-call handler lifecycle. (This supersedes the earlier single generic
-    `set_device_state`; SI-7's PID actuation reuses the shared `mcp_common` plumbing, not one tool.)
+    `set_device_state`; a later PID-actuation feature reuses the shared `mcp_common` plumbing, not one tool.)
   - **Hue** (`toinflux/philipshue.py`): tools `hue_list_devices` + `hue_set_light`.
     `mcp_set_device_state()` resolves the target against the live device list
     (`mcp_list_writable_devices()`, the write allowlist which also reports each light's capabilities -
@@ -719,7 +720,7 @@ CI check names:
 - `main`: no force-pushes/deletion, PR required (1 approval, code-owner review, resolved review
   threads, squash-merge only), Copilot auto-review, CodeQL code scanning, and every check from
   `premerge.yaml` required ("Run flake8", "Run mypy", "Run pytest (3.10)"-"Run pytest (3.14)", "Verify
-  .deb build on arm64").
+  .deb build on arm64", "Verify .deb on Debian 12 (systemd 252)", "Run integration tests (MQTT broker)").
 - `release/**/*`: same PR requirements as `main` (1 approval, code-owner review, resolved threads) but
   merge method widened to squash/merge/rebase, and CodeQL and "Verify .deb build on arm64" dropped from
   the required checks (still run, just not a merge-blocking gate at this tier) - kept for longer-lived
