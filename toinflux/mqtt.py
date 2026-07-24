@@ -62,17 +62,43 @@ class MqttDataHandler(DataHandler):
     Not a selectable source itself: like DataHandler, it has no get_data() and is never
     registered in get_class().
 
-    MQTT sources are designed to be event-driven rather than timer-driven (see
-    ``stream_mqtt_messages``): the transport holds the subscription open and surfaces a
-    message the instant it arrives, so a transient event (a door opening then closing
-    between two polls) need no longer be missed. ``STREAMING = True`` is the flag the
-    worker-integration slice will branch on to take that path instead of the
-    poll-then-sleep loop; it's a property of the transport, not a per-source option
-    (there's no reason a subscribed source would not want it, and no compatibility
-    reason to make it optional). ``sendtoinflux.py`` does not consult it yet.
+    MQTT sources are event-driven rather than timer-driven (see ``stream_mqtt_messages``):
+    the transport holds the subscription open and surfaces a message the instant it
+    arrives, so a transient event (a door opening then closing between two polls) is no
+    longer missed. ``STREAMING = True`` is the flag ``sendtoinflux.py``'s worker branches
+    on to take that path (``stream_source_data``) instead of the poll-then-sleep loop;
+    it's a property of the transport, not a per-source option (there's no reason a
+    subscribed source would not want it, and no compatibility reason to make it optional).
     """
 
     STREAMING = True
+
+    # The MQTT topic filter a streaming subclass subscribes to for its live feed
+    # (e.g. Nuki's ``nuki/+/+``). None on this base class - a concrete streaming
+    # source must set it; the worker refuses to stream a source that hasn't.
+    STREAM_TOPIC_FILTER: "str | None" = None
+
+    def decode_stream_message(self, topic, payload):
+        """
+        Decode a single streamed MQTT message into an InfluxDB field dict.
+
+        Called by the worker's streaming path for every message that arrives on the
+        live subscription (``STREAM_TOPIC_FILTER``), to turn one topic/payload into
+        the point written immediately for it. Vendor-specific and implemented by each
+        concrete MQTT source (see ``Nuki``); the base class has no wire format of its
+        own. The implementation **must also ensure** ``self.influx_header`` is set, since
+        the immediate write goes through ``send_data`` which reads it - a per-message
+        write can happen before the first periodic snapshot has set it.
+
+        :param topic: the message's MQTT topic
+        :type topic: str
+        :param payload: the message payload, already UTF-8 decoded
+        :type payload: str
+        :return: field keys/values to write as one point, or None/empty to ignore the
+            message (e.g. a control/metadata topic that isn't a state field)
+        :rtype: dict or None
+        """
+        raise NotImplementedError("streaming MQTT sources must implement decode_stream_message()")
 
     def collect_mqtt_messages(self, topic_filter, timeout):
         """

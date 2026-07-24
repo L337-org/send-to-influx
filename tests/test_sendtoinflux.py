@@ -1,13 +1,15 @@
 """Unit tests for sendtoinflux (signal_handler, main, helper functions)."""
 
 import itertools
+import logging
 import signal
+import threading
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 import pytest
 import sendtoinflux
 from toinflux.exceptions import ConfigError, SourceConnectionError
-from toinflux.influx import DataHandler
+from toinflux.influx import DataHandler, InfluxWriteError
 
 
 class TestSignalHandler:
@@ -374,7 +376,7 @@ class TestHelpers:
 
     def test_collect_source_data_uses_existing_handler(self):
         """collect_source_data uses the supplied handler instead of reloading one."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.get_data.return_value = {"x": 1}
         handler.source_settings = {"interval": 123}
         args = SimpleNamespace(print=False, dump=False, settings=None)
@@ -404,7 +406,7 @@ class TestHelpers:
 
     def test_create_source_worker_stops_permanently_on_config_error(self):
         """create_source_worker adds the source to stopped_sources and returns (no retry) on ConfigError."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.get_data.side_effect = ConfigError("bad config")
         args = SimpleNamespace(print=False, dump=False, settings=None)
         stopped_sources = set()
@@ -477,7 +479,7 @@ class TestStallDetection:
         scheduled first-run time (next_update), not the moment the thread was
         created, or the watchdog would flag a source as stalled while it's still
         in its intentional initial delay, before it's ever had a chance to run."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         last_activity = {}
         large_start_delay = sendtoinflux.STALL_WARNING_SECONDS * 2
         with (
@@ -508,7 +510,7 @@ class TestStallDetection:
         calls happen per iteration - only their relative order matters: the
         pre-loop stamp is the second call ever made (1001.0), so any later
         stamp proves the success branch, not just startup, wrote it."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.source_settings = {"interval": 60}
         last_activity = {}
         clock = itertools.count(1000.0, 1.0)
@@ -530,7 +532,7 @@ class TestStallDetection:
         signal, not one that's actively (and visibly) retrying. Uses a plain retryable
         exception (not ConfigError, which stops the worker permanently and is excluded
         from stall-checking entirely via stopped_sources)."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.get_data.side_effect = SourceConnectionError("connection reset")
         last_activity = {}
         clock = itertools.count(1000.0, 1.0)
@@ -550,7 +552,7 @@ class TestStallDetection:
         """The default (no last_activity dict) is a no-op - existing callers that
         don't care about stall detection (e.g. other tests exercising retry logic
         in isolation) are unaffected."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.get_data.side_effect = ConfigError("bad config")
         with (
             patch("sendtoinflux.toinflux.get_class", return_value=handler),
@@ -696,7 +698,7 @@ class TestSendHeartbeat:
 
     def test_sends_ok_status_and_restores_header(self):
         """send_heartbeat writes ok=1 and restores the handler's original influx_header."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.influx_header = "hue,host=test "
         with patch("sendtoinflux.time.time", return_value=1700000000.0):
             sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
@@ -707,7 +709,7 @@ class TestSendHeartbeat:
 
     def test_sends_failure_status_with_count(self):
         """send_heartbeat writes ok=0 with the current consecutive failure count."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.influx_header = "hue "
         with patch("sendtoinflux.time.time", return_value=1700000000.0):
             sendtoinflux.send_heartbeat(handler, "hue", ok=False, consecutive_failures=3)
@@ -717,7 +719,7 @@ class TestSendHeartbeat:
 
     def test_uses_collector_status_measurement_while_sending(self):
         """send_heartbeat temporarily swaps in the collector_status header for the write."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.influx_header = "hue "
         captured = {}
         handler.send_data.side_effect = lambda data=None, timestamp=None, use_buffer=True: captured.update(
@@ -753,7 +755,7 @@ class TestSendHeartbeat:
 
     def test_swallows_send_failures(self):
         """A heartbeat write failure is logged and swallowed, not raised."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.influx_header = "hue "
         handler.send_data.side_effect = Exception("network error")
 
@@ -767,7 +769,7 @@ class TestMaybeSendHeartbeat:
 
     def test_sends_when_not_in_print_mode(self):
         """maybe_send_heartbeat delegates to send_heartbeat when not in --print mode."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         args = SimpleNamespace(print=False, dump=False)
         with patch("sendtoinflux.send_heartbeat") as mock_heartbeat:
             sendtoinflux.maybe_send_heartbeat(args, handler, "hue", ok=True, consecutive_failures=0)
@@ -775,7 +777,7 @@ class TestMaybeSendHeartbeat:
 
     def test_skips_in_print_mode(self):
         """maybe_send_heartbeat does not touch InfluxDB in --print mode."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         args = SimpleNamespace(print=True, dump=False)
         with patch("sendtoinflux.send_heartbeat") as mock_heartbeat:
             sendtoinflux.maybe_send_heartbeat(args, handler, "hue", ok=True, consecutive_failures=0)
@@ -786,7 +788,7 @@ class TestRunSingleSourceRetry:
     """Tests for retry/backoff behaviour in run_single_source."""
 
     def _make_handler(self):
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.source_settings = {"interval": 60}
         return handler
 
@@ -914,7 +916,7 @@ class TestCreateSourceWorkerHeartbeat:
 
     def test_worker_sends_heartbeat_on_success(self):
         """The multi-source worker sends an ok=1 heartbeat after a successful cycle."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.source_settings = {"interval": 60}
         handler.get_data.return_value = {"x": 1}
         args = SimpleNamespace(print=False, dump=False, settings=None)
@@ -933,7 +935,7 @@ class TestCreateSourceWorkerHeartbeat:
 
     def test_worker_sends_heartbeat_on_failure(self):
         """The multi-source worker sends an ok=0 heartbeat with the failure count on error."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.source_settings = {"interval": 60}
         handler.get_data.side_effect = Exception("network error")
         args = SimpleNamespace(print=False, dump=False, settings=None)
@@ -952,7 +954,7 @@ class TestCreateSourceWorkerHeartbeat:
 
     def test_worker_skips_heartbeat_in_print_mode(self):
         """The multi-source worker does not write heartbeats in --print mode."""
-        handler = MagicMock()
+        handler = MagicMock(STREAMING=False)
         handler.source_settings = {"interval": 60}
         handler.get_data.return_value = {"x": 1}
         args = SimpleNamespace(print=True, dump=False, settings=None)
@@ -1153,3 +1155,220 @@ class TestMaybeStartMcpServer:
             result = sendtoinflux.maybe_start_mcp_server(self.ENABLED_SETTINGS, args)
         start.assert_called_once_with(self.ENABLED_SETTINGS, "/etc/send-to-influx/settings.yaml")
         assert result is start.return_value
+
+
+class TestStreamSink:
+    """Tests for _StreamSink - the bridge from the streaming transport's callbacks to the
+    collector's write, heartbeat and stall-activity behaviour (slice 2, SI-11)."""
+
+    def _sink(self, print_mode=False, on_activity=None):
+        handler = MagicMock(STREAMING=True)
+        handler.source_settings = {"interval": 300}
+        handler.STREAM_TOPIC_FILTER = "nuki/+/+"
+        args = SimpleNamespace(print=print_mode, dump=False, settings=None)
+        return sendtoinflux._StreamSink("nuki", args, handler, on_activity), handler, args
+
+    # --- on_message (the immediate interrupt path) ---
+
+    def test_on_message_writes_decoded_point_and_stamps_activity(self):
+        """A decoded message is written straight away and stamps stall-activity."""
+        activity = []
+        sink, handler, _ = self._sink(on_activity=lambda: activity.append(1))
+        handler.decode_stream_message.return_value = {"x": 1}
+        sink.on_message("nuki/A/state", "3")
+        handler.send_data.assert_called_once_with(data={"x": 1})
+        assert activity == [1]
+
+    def test_on_message_ignores_a_message_that_decodes_to_nothing(self):
+        """A control/metadata topic (decode returns None) writes nothing and doesn't stamp."""
+        activity = []
+        sink, handler, _ = self._sink(on_activity=lambda: activity.append(1))
+        handler.decode_stream_message.return_value = None
+        sink.on_message("nuki/A/name", "Front Door")
+        handler.send_data.assert_not_called()
+        assert activity == []
+
+    def test_on_message_prints_instead_of_sending_in_print_mode(self):
+        """--print routes the immediate point to stdout, never to InfluxDB."""
+        sink, handler, _ = self._sink(print_mode=True)
+        handler.decode_stream_message.return_value = {"x": 1}
+        with patch("sendtoinflux.print_source_data") as mock_print:
+            sink.on_message("nuki/A/state", "3")
+        mock_print.assert_called_once_with("nuki", {"x": 1})
+        handler.send_data.assert_not_called()
+
+    def test_on_message_swallows_influx_write_error(self):
+        """A failed InfluxDB write is buffered by send_data, not a stream failure - it must
+        not propagate out of the network callback (activity is already stamped)."""
+        activity = []
+        sink, handler, _ = self._sink(on_activity=lambda: activity.append(1))
+        handler.decode_stream_message.return_value = {"x": 1}
+        handler.send_data.side_effect = InfluxWriteError("influx down")
+        sink.on_message("nuki/A/state", "3")  # must not raise
+        assert activity == [1]
+
+    # --- periodic (the safety-net probe + heartbeat) ---
+
+    def test_periodic_probe_success_reports_healthy(self):
+        """A successful probe writes the full-state point and reports ok=1, failures=0."""
+        activity = []
+        sink, handler, args = self._sink(on_activity=lambda: activity.append(1))
+        handler.get_data.return_value = {"x": 1}
+        with patch("sendtoinflux.maybe_send_heartbeat") as heartbeat:
+            sink.periodic()
+        handler.send_data.assert_called_once_with(data={"x": 1})
+        heartbeat.assert_called_once_with(args, handler, "nuki", ok=True, consecutive_failures=0)
+        assert activity == [1]
+
+    def test_periodic_probe_failure_without_messages_reports_unhealthy(self, caplog):
+        """A failed probe with no messages since the last tick is the correlated outage we
+        must surface: ok=0, with consecutive_failures climbing, and a WARNING logged."""
+        sink, handler, _ = self._sink()
+        handler.get_data.side_effect = SourceConnectionError("broker down")
+        with patch("sendtoinflux.maybe_send_heartbeat") as heartbeat, caplog.at_level(logging.WARNING):
+            sink.periodic()
+            sink.periodic()
+        assert [c.kwargs["ok"] for c in heartbeat.call_args_list] == [False, False]
+        assert [c.kwargs["consecutive_failures"] for c in heartbeat.call_args_list] == [1, 2]
+        assert "Health probe for streaming source 'nuki' failed" in caplog.text
+
+    def test_periodic_message_since_tick_overrides_a_failed_probe(self):
+        """A demonstrably-working stream (a message arrived) is healthy even if the one-off
+        probe fails - the message is a sign of life, so ok stays True."""
+        sink, handler, args = self._sink()
+        handler.decode_stream_message.return_value = {"x": 1}
+        handler.get_data.side_effect = SourceConnectionError("broker down")
+        sink.on_message("nuki/A/state", "3")  # a message this interval
+        with patch("sendtoinflux.maybe_send_heartbeat") as heartbeat:
+            sink.periodic()
+        heartbeat.assert_called_once_with(args, handler, "nuki", ok=True, consecutive_failures=0)
+
+    def test_periodic_clears_the_message_flag_each_tick(self):
+        """The message-since-tick flag covers only the interval it arrived in: the next
+        tick with a still-failing probe and no new message reports unhealthy."""
+        sink, handler, _ = self._sink()
+        handler.decode_stream_message.return_value = {"x": 1}
+        handler.get_data.side_effect = SourceConnectionError("broker down")
+        sink.on_message("nuki/A/state", "3")
+        with patch("sendtoinflux.maybe_send_heartbeat") as heartbeat:
+            sink.periodic()  # message covers this tick
+            sink.periodic()  # no new message, probe still failing
+        assert [c.kwargs["ok"] for c in heartbeat.call_args_list] == [True, False]
+        assert [c.kwargs["consecutive_failures"] for c in heartbeat.call_args_list] == [0, 1]
+
+    def test_periodic_recovery_resets_the_failure_streak(self):
+        """Once the probe recovers, the consecutive-failure streak resets to zero."""
+        sink, handler, _ = self._sink()
+        handler.get_data.side_effect = [SourceConnectionError("x"), SourceConnectionError("y"), {"ok": 1}]
+        with patch("sendtoinflux.maybe_send_heartbeat") as heartbeat:
+            sink.periodic()
+            sink.periodic()
+            sink.periodic()
+        assert [c.kwargs["ok"] for c in heartbeat.call_args_list] == [False, False, True]
+        assert [c.kwargs["consecutive_failures"] for c in heartbeat.call_args_list] == [1, 2, 0]
+
+    def test_periodic_influx_write_error_still_counts_the_probe_as_reachable(self):
+        """A failed InfluxDB write isn't a probe failure - the source was reachable, so the
+        heartbeat stays healthy and the point is left to the buffer."""
+        sink, handler, args = self._sink()
+        handler.get_data.return_value = {"x": 1}
+        handler.send_data.side_effect = InfluxWriteError("influx down")
+        with patch("sendtoinflux.maybe_send_heartbeat") as heartbeat:
+            sink.periodic()  # must not raise
+        heartbeat.assert_called_once_with(args, handler, "nuki", ok=True, consecutive_failures=0)
+
+
+class TestStreamSourceData:
+    """stream_source_data hands the transport the source's topic filter, both sink
+    callbacks, the interval and the stop event (slice 2, SI-11)."""
+
+    def test_wires_the_transport_with_the_sink_callbacks(self):
+        handler = MagicMock(STREAMING=True)
+        handler.source_settings = {"interval": 300}
+        handler.STREAM_TOPIC_FILTER = "nuki/+/+"
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+        should_stop = threading.Event()
+        sendtoinflux.stream_source_data("nuki", args, handler, should_stop)
+        handler.stream_mqtt_messages.assert_called_once()
+        topic, on_message, periodic, interval, stop = handler.stream_mqtt_messages.call_args.args
+        assert topic == "nuki/+/+"
+        assert callable(on_message) and callable(periodic)
+        assert interval == 300
+        assert stop is should_stop
+
+
+class TestWorkerStreamingBranch:
+    """Both worker paths run the blocking stream loop for a STREAMING handler instead of
+    the poll-then-sleep cycle (slice 2, SI-11)."""
+
+    def _streaming_handler(self):
+        handler = MagicMock(STREAMING=True)
+        handler.source_settings = {"interval": 300}
+        return handler
+
+    def test_create_source_worker_streams_and_returns(self):
+        """A streaming handler takes stream_source_data and returns, never polling."""
+        handler = self._streaming_handler()
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.stream_source_data") as stream,
+            patch("sendtoinflux.collect_source_data") as collect,
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep"),
+        ):
+            worker = sendtoinflux.create_source_worker("nuki", 0, args, set(), {})
+            worker()  # returns cleanly, no infinite poll loop
+        stream.assert_called_once()
+        assert stream.call_args.args[:4] == ("nuki", args, handler, sendtoinflux.SHUTDOWN)
+        collect.assert_not_called()
+
+    def test_create_source_worker_streaming_on_activity_stamps_last_activity(self):
+        """The on_activity callback handed to the stream stamps the stall watchdog's dict."""
+        handler = self._streaming_handler()
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+        last_activity = {}
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.stream_source_data") as stream,
+            patch("sendtoinflux.time.time", return_value=1234.0),
+            patch("sendtoinflux.time.sleep"),
+        ):
+            worker = sendtoinflux.create_source_worker("nuki", 0, args, set(), last_activity)
+            worker()
+            on_activity = stream.call_args.kwargs["on_activity"]
+            last_activity.clear()  # drop the initial scheduled-start stamp
+            on_activity()
+            assert last_activity == {"nuki": 1234.0}
+
+    def test_streaming_startup_failure_is_retried_with_backoff(self):
+        """A SourceConnectionError from the stream (broker down at startup) is caught by the
+        worker's existing backoff branch and reported unhealthy, exactly like a failed poll."""
+        handler = self._streaming_handler()
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.stream_source_data", side_effect=SourceConnectionError("broker down")),
+            patch("sendtoinflux.maybe_send_heartbeat") as heartbeat,
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
+        ):
+            worker = sendtoinflux.create_source_worker("nuki", 0, args, set())
+            with pytest.raises(SystemExit):
+                worker()
+        assert any(c.kwargs.get("ok") is False for c in heartbeat.call_args_list)
+
+    def test_run_single_source_streams_and_returns(self):
+        """The single-source path also runs the stream loop for a streaming handler."""
+        handler = self._streaming_handler()
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.stream_source_data") as stream,
+            patch("sendtoinflux.collect_source_data") as collect,
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep"),
+        ):
+            sendtoinflux.run_single_source("nuki", args)
+        stream.assert_called_once_with("nuki", args, handler, sendtoinflux.SHUTDOWN)
+        collect.assert_not_called()
