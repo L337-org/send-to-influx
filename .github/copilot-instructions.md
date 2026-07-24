@@ -44,7 +44,7 @@ The project uses a plugin-like architecture where each data source is implemente
 - **`toinflux/carbonintensity.py`**: National Grid carbon intensity and generation fuel mix (no API key)
 - **`toinflux/openmeteo.py`**: Open-Meteo weather data (no API key, lat/lon configuration)
 - **`toinflux/octopus.py`**: Octopus Energy electricity/gas consumption and unit rates (API key auth)
-- **`toinflux/nuki.py`**: Nuki smart lock + door sensor state via the local Nuki MQTT API (retained-topic collection through the shared `toinflux/mqtt.py` transport; read-only, never publishes)
+- **`toinflux/nuki.py`**: Nuki smart lock + door sensor state via the local Nuki MQTT API (persistent streaming subscription + retained-topic snapshot through the shared `toinflux/mqtt.py` transport; read-only, never publishes)
 - **`toinflux/speedtest.py`**: Speedtest network performance integration; rejects an implausible `ping` (>= 5000 ms - the ceiling imposed by speedtest-cli's own hardcoded 10s per-probe connection timeout, `(3 * 10 / 6) * 1000`) as a connection error instead of writing it
 
 #### MCP server (`toinflux/mcpserver.py`)
@@ -175,8 +175,8 @@ except requests.exceptions.RequestException as e:
 
 ### Nuki Smart Lock (`toinflux/nuki.py`)
 - **Collects**: lock state and door-sensor state as numeric codes (`stateValue`/`doorsensorStateValue`), battery/keypad/door-sensor battery flags, connectivity flags, per provisioned lock
-- **Transport**: local MQTT broker (shared `mqtt:` settings block) via `MqttDataHandler` (`toinflux/mqtt.py`); all Nuki state topics are retained, so a short subscribe window per cycle gets the full last-known state
-- **Configuration**: `db`, `interval`, `timeout` (collection window); field keys are prefixed with each lock's Nuki-app name
+- **Transport**: local MQTT broker (shared `mqtt:` settings block) via `MqttDataHandler` (`toinflux/mqtt.py`). **Streaming (5.1):** `STREAMING = True` + `STREAM_TOPIC_FILTER = "nuki/+/+"` hold a persistent subscription open, so `Nuki.decode_stream_message()` writes a point the instant a (retained) state message arrives; the per-`interval` poll is kept as a full-state snapshot *and* an active health probe. The paho net thread only enqueues onto a bounded queue; one worker thread drains it and does all writes (immediate + snapshot), so a slow write can't stall keepalives. `sendtoinflux._should_stream()` (STREAMING + a filter) gates it, so an unwired MQTT transport keeps polling. Emitted data unchanged (same measurement/field names) - behaviour change, not breaking; no new config
+- **Configuration**: `db`, `interval` (snapshot/heartbeat cadence), `timeout` (snapshot collection window); field keys are prefixed with each lock's Nuki-app name (remembered from the retained `name` topic; a duplicate-name prefix collision warns)
 - **Note**: read-only - command/event topics are filtered out and never published to; `state`/`doorsensorState` are renamed to `stateValue`/`doorsensorStateValue` and always written as their raw numeric code (Grafana handles numeric fields far better than text) - see UNITS.md for what each code means
 - **InfluxDB measurement**: `nuki`
 

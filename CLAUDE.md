@@ -70,10 +70,10 @@ Nuki is the first MQTT-based source: `MqttDataHandler` (`toinflux/mqtt.py`) owns
 transport (connect, subscribe from inside `on_connect` - a subscription issued before the CONNACK
 completes can be silently lost - collect for a fixed window, disconnect), reading broker config from
 the shared top-level `mqtt:` settings block (mirroring `influx:` - the broker and its `mqtt-password`
-credential are per-install infrastructure, not per-source). The polling-per-interval architecture
-works over MQTT only because Nuki publishes every state topic with the retain flag set, so a short
-subscribe window receives the full last-known state of every provisioned lock - equivalent to an HTTP
-GET. Failure mapping is deliberately strict: bad credentials arrive asynchronously as a failed CONNACK
+credential are per-install infrastructure, not per-source). The per-interval snapshot (see
+streaming below) works over MQTT only because Nuki publishes every state topic with the retain flag
+set, so a short subscribe window receives the full last-known state of every provisioned lock -
+equivalent to an HTTP GET. Failure mapping is deliberately strict: bad credentials arrive asynchronously as a failed CONNACK
 (never as an exception from `connect()`), and a broker that accepts TCP but never completes the MQTT
 handshake raises `SourceConnectionError` rather than returning an empty result - either would
 otherwise masquerade as "no data". `Nuki` (`toinflux/nuki.py`) holds only vendor logic: filtering to
@@ -85,6 +85,33 @@ with no documented meaning is written through unchanged); see UNITS.md for what 
 `paho-mqtt` (a
 source-specific runtime dependency like `speedtest-cli`, pure Python so the `.deb`'s
 `Architecture: all` design holds) is imported only in `toinflux/mqtt.py`.
+
+**Streaming (5.1, SI-11):** MQTT sources are event-driven, not timer-polled. `MqttDataHandler` sets
+`STREAMING = True` and `stream_mqtt_messages()` holds the subscription open, so a state change is
+written the instant its (retained) message arrives rather than only when a poll happens to land on
+it. The paho network thread only *enqueues* decoded messages onto a bounded `queue.Queue`; a single
+worker thread (`_run_stream_loop`) drains it and does *all* InfluxDB I/O - both the immediate
+per-message write and the periodic snapshot - so a slow write can never stall paho's keepalives
+(which would drop the connection and lose exactly the transient events streaming exists to capture).
+On overflow the oldest queued message is dropped (freshest state wins; the snapshot resyncs full
+state anyway). In `sendtoinflux.py`, `_should_stream()` gates the stream path on `STREAMING` *and* a
+non-`None` `STREAM_TOPIC_FILTER`, so an MQTT transport with no concrete source wired yet keeps
+polling rather than subscribing to `None` and retrying forever; when it's eligible the worker runs a
+blocking `stream_source_data()`/`_StreamSink` instead of the poll-then-sleep cycle. The existing
+per-`interval` poll is kept as a full-state safety-net snapshot **and** an active health probe:
+because it hits the same broker as the live stream, its failure correlates with the stream being
+down, so it drives the heartbeat's `ok`/`consecutive_failures` - *unless* a message arrived since the
+last tick (a healthy-but-idle lock sends nothing for hours, so the probe proves it live; a live
+stream with a flaky one-off probe stays healthy on the message). A failing probe never tears the
+stream down (paho reconnects genuine drops, re-subscribing to redelivered retained state); shutdown
+is clean on the main thread (single-source) and best-effort for the daemon workers (multi-source).
+Emitted data is unchanged (same measurement and field names), so it's a behaviour change but not a
+breaking one, and there's no new config - streaming is a property of the transport, not an option.
+`Nuki.decode_stream_message()` (with `STREAM_TOPIC_FILTER = "nuki/+/+"`) is the per-message vendor
+decode: the event-driven counterpart to `parse_nuki_data`, reusing `_decode_field` and remembering
+each device's retained `name` as its field-key prefix (warning on a duplicate-name prefix collision,
+as the snapshot path does). The snapshot path itself is untouched, so existing Grafana panels keep
+working - just denser.
 
 ### MCP server (`toinflux/mcpserver.py`)
 
