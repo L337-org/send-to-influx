@@ -50,12 +50,19 @@ def _new_client():
 
 
 def _publish(topic, payload, retain=True):
-    """Publish one message to the broker and block until it's actually sent."""
+    """Publish one message to the broker and block until it's confirmed sent.
+
+    ``wait_for_publish`` doesn't raise on timeout, so check ``is_published()`` and fail
+    loudly here rather than letting an unsent publish surface later as a misleading
+    "no InfluxDB write" assertion.
+    """
     pub = _new_client()
     pub.connect(BROKER_HOST, BROKER_PORT)
     pub.loop_start()
     try:
-        pub.publish(topic, payload, qos=1, retain=retain).wait_for_publish(timeout=5)
+        info = pub.publish(topic, payload, qos=1, retain=retain)
+        info.wait_for_publish(timeout=5)
+        assert info.is_published(), f"publish to {topic!r} was not confirmed within 5s"
     finally:
         pub.loop_stop()
         pub.disconnect()
