@@ -1278,6 +1278,29 @@ class TestStreamSink:
         heartbeat.assert_called_once_with(args, handler, "nuki", ok=True, consecutive_failures=0)
 
 
+class TestShouldStream:
+    """_should_stream gates the streaming path on both STREAMING and a topic filter."""
+
+    def test_non_streaming_handler_polls(self):
+        assert sendtoinflux._should_stream(MagicMock(STREAMING=False)) is False
+
+    def test_streaming_transport_without_filter_polls(self):
+        """A STREAMING transport not yet wired to a concrete source (STREAM_TOPIC_FILTER
+        still None) polls, so it can't be stranded subscribing to a None filter."""
+        handler = MagicMock(STREAMING=True, STREAM_TOPIC_FILTER=None)
+        assert sendtoinflux._should_stream(handler) is False
+
+    def test_streaming_transport_with_filter_streams(self):
+        handler = MagicMock(STREAMING=True, STREAM_TOPIC_FILTER="nuki/+/+")
+        assert sendtoinflux._should_stream(handler) is True
+
+    def test_non_mqtt_handler_without_the_attribute_polls(self):
+        """A plain HTTP handler has no STREAM_TOPIC_FILTER attribute at all - the getattr
+        fallback keeps it on the poll path rather than raising."""
+        handler = MagicMock(STREAMING=False, spec=["STREAMING"])
+        assert sendtoinflux._should_stream(handler) is False
+
+
 class TestStreamSourceData:
     """stream_source_data hands the transport the source's topic filter, both sink
     callbacks, the interval and the stop event (slice 2, SI-11)."""
@@ -1304,7 +1327,30 @@ class TestWorkerStreamingBranch:
     def _streaming_handler(self):
         handler = MagicMock(STREAMING=True)
         handler.source_settings = {"interval": 300}
+        handler.STREAM_TOPIC_FILTER = "nuki/+/+"  # a wired-up streaming source
         return handler
+
+    def test_streaming_transport_without_a_filter_keeps_polling(self):
+        """A STREAMING transport whose source hasn't set STREAM_TOPIC_FILTER yet (e.g. Nuki
+        before slice 3) must keep polling, not enter the stream path and subscribe to None -
+        that would be a retry-forever regression vs the previous polling collector."""
+        handler = MagicMock(STREAMING=True)
+        handler.source_settings = {"interval": 300}
+        handler.STREAM_TOPIC_FILTER = None
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+        with (
+            patch("sendtoinflux.toinflux.get_class", return_value=handler),
+            patch("sendtoinflux.stream_source_data") as stream,
+            patch("sendtoinflux.collect_source_data", return_value=300) as collect,
+            patch("sendtoinflux.maybe_send_heartbeat"),
+            patch("sendtoinflux.time.time", return_value=1000.0),
+            patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
+        ):
+            worker = sendtoinflux.create_source_worker("nuki", 0, args, set())
+            with pytest.raises(SystemExit):
+                worker()
+        stream.assert_not_called()
+        collect.assert_called()
 
     def test_create_source_worker_streams_and_returns(self):
         """A streaming handler takes stream_source_data and returns, never polling."""

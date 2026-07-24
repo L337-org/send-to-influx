@@ -281,6 +281,26 @@ def _stamp_activity(last_activity, source):
         last_activity[source] = time.time()
 
 
+def _should_stream(data_handler):
+    """
+    Whether to run the event-driven stream loop for this handler rather than polling.
+
+    True only when it's a ``STREAMING`` transport *and* a concrete source has actually
+    given it a topic filter to subscribe to. ``MqttDataHandler`` sets ``STREAMING = True``
+    for the whole transport, but its ``STREAM_TOPIC_FILTER`` defaults to ``None`` until a
+    subclass wires up the per-message decode (the filter and ``decode_stream_message``
+    land together, per source). Gating on the filter means enabling the transport before a
+    source is wired can't strand that source in the stream path subscribing to ``None`` and
+    retrying forever - it keeps polling, exactly as it did before streaming existed.
+
+    :param data_handler: the source's DataHandler instance
+    :type data_handler: toinflux.influx.DataHandler
+    :return: True to take the streaming path, False to poll on the timer
+    :rtype: bool
+    """
+    return bool(data_handler.STREAMING) and getattr(data_handler, "STREAM_TOPIC_FILTER", None) is not None
+
+
 def create_source_worker(source, source_start_delay, args, stopped_sources, last_activity=None):
     """Create a worker function for continuous source collection with retries.
 
@@ -316,7 +336,7 @@ def create_source_worker(source, source_start_delay, args, stopped_sources, last
                     data_handler = toinflux.get_class(source, args.settings)
                 sleep_time = max(0, next_update - time.time())
                 time.sleep(sleep_time)
-                if data_handler.STREAMING:
+                if _should_stream(data_handler):
                     # Blocks until shutdown, streaming points as they arrive and running
                     # the interval snapshot/heartbeat itself. It returns only on a clean
                     # stop; a broker failure at startup raises and is handled by the
@@ -604,7 +624,7 @@ def run_single_source(source, args):
         try:
             if data_handler is None:
                 data_handler = toinflux.get_class(source, args.settings)
-            if data_handler.STREAMING:
+            if _should_stream(data_handler):
                 # Blocks until shutdown, streaming points as they arrive. On a signal the
                 # handler sets SHUTDOWN and raises SystemExit on this thread, which unwinds
                 # through stream_mqtt_messages' finally to disconnect cleanly; a broker
