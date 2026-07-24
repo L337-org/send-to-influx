@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "send-to-influx"
-version = "5.0"
+version = "5.1"
 description = "Collect smart-home and energy device metrics into InfluxDB, with an optional MCP server to query and control them through Claude"
 readme = "README.md"
 license = { file = "LICENSE.md" }
@@ -32,7 +32,14 @@ line-length = 120
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--capture=sys"
+# Integration tests (tests/integration/, marked `integration`) are excluded from the
+# default run - they need a real external dependency (an MQTT broker) and are run
+# explicitly with `pytest -m integration`. They also skip cleanly when the dependency is
+# absent, so an explicit run without a broker is a skip, not a failure.
+addopts = "--capture=sys -m 'not integration'"
+markers = [
+    "integration: exercises a real external dependency (e.g. a live MQTT broker); excluded from the default run",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
