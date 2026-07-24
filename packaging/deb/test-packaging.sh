@@ -217,7 +217,7 @@ cp /usr/share/send-to-influx/example_settings.yaml /tmp/ci-settings.yaml
 [ -f "$SETTINGS" ] || fail "settings.yaml not created"
 [ -f /usr/share/send-to-influx/example_settings.yaml ] || fail "example not shipped under /usr/share"
 # settings.yaml is deliberately NOT a conffile (see build-deb.sh) - but the
-# rsyslog/logrotate config (SI-12) deliberately IS, since no maintainer script
+# rsyslog/logrotate config deliberately IS, since no maintainer script
 # ever rewrites either. Assert exactly those two, no more, no fewer.
 CONFFILES_ACTUAL="$(dpkg-deb -I "$DEB" conffiles 2>/dev/null | tr -d ' ' | sort)"
 CONFFILES_EXPECTED="$(printf '%s\n' /etc/logrotate.d/send-to-influx /etc/rsyslog.d/49-send-to-influx.conf | sort)"
@@ -485,7 +485,7 @@ debconf-show send-to-influx 2>/dev/null | grep -q . && fail "debconf answers sur
 # The rsyslog/logrotate config files themselves are real conffiles, removed by
 # dpkg's own purge handling; the dedicated logfile and any rotated/compressed
 # backups are runtime-created (by rsyslog, not the package) and need postrm's
-# own explicit cleanup (SI-12).
+# own explicit cleanup.
 [ ! -e /etc/rsyslog.d/49-send-to-influx.conf ] || fail "rsyslog conffile survived purge"
 [ ! -e /etc/logrotate.d/send-to-influx ] || fail "logrotate conffile survived purge"
 ls /var/log/send-to-influx.log* >/dev/null 2>&1 && fail "log file/backups survived purge"
