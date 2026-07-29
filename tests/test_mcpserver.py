@@ -686,3 +686,59 @@ class TestTransportOptions:
     def test_bad_bind_address_is_a_config_error(self):
         with pytest.raises(ConfigError):
             app_options({"mcp": {"bind_address": "no-port", "public_url": "https://mcp.example.org"}})
+
+
+class TestPreviousReleaseStateFile:
+    """Upgrade compatibility for the persisted OAuth state.
+
+    The whole point of mcp.state_file is that a service restart - which every
+    packaged upgrade performs - does not force the Claude connector to
+    re-authenticate. A client record is stored as the SDK's own
+    OAuthClientInformationFull.model_dump(), so an SDK model change can silently
+    invalidate every stored registration: get_client() returns None, and the user
+    discovers it as a broken connector rather than as a failed upgrade.
+
+    CLIENT_RECORD_1_28_1 was captured verbatim from mcp 1.28.1 - the release this
+    project shipped before the 2.x port - rather than written to match what the
+    current SDK happens to emit, which would assert nothing about upgrades.
+    """
+
+    CLIENT_RECORD_1_28_1 = {
+        "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+        "token_endpoint_auth_method": "client_secret_post",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "scope": None,
+        "client_name": "Claude",
+        "client_uri": None,
+        "logo_uri": None,
+        "contacts": None,
+        "tos_uri": None,
+        "policy_uri": None,
+        "jwks_uri": None,
+        "jwks": None,
+        "software_id": None,
+        "software_version": None,
+        "client_id": "abc-123",
+        "client_secret": "s3cret",
+        "client_id_issued_at": None,
+        "client_secret_expires_at": None,
+    }
+
+    def test_client_registered_by_the_previous_release_still_resolves(self, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text(
+            json.dumps({"clients": {"abc-123": self.CLIENT_RECORD_1_28_1}, "refresh_tokens": {}}),
+            encoding="utf8",
+        )
+        provider = SendToInfluxOAuthProvider(
+            public_url=MCP_PUBLIC_URL,
+            expected_user=MCP_USER,
+            expected_password=MCP_PASSWORD,
+            state_store=OAuthStateStore(str(state_file)),
+        )
+        client = anyio.run(provider.get_client, "abc-123")
+        assert client is not None, "a client registered under mcp 1.28.1 no longer loads"
+        assert client.client_id == "abc-123"
+        assert client.token_endpoint_auth_method == "client_secret_post"
+        assert [str(u) for u in client.redirect_uris] == ["https://claude.ai/api/mcp/auth_callback"]
