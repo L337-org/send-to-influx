@@ -28,11 +28,11 @@ from toinflux.mcp_read import build_documentation, current_state_result, list_fi
 
 
 def register_resources(server, settings, settings_file=None):
-    """Register the read resources on a FastMCP server: the documentation
+    """Register the read resources on a MCPServer server: the documentation
     reference, plus a schema and a current-state resource per configured source.
     Blocking work runs in a worker thread, mirroring the read tools.
 
-    :param server: the FastMCP instance
+    :param server: the MCPServer instance
     :param settings: parsed settings dict
     :param settings_file: settings path, for re-resolving handlers per read
     :return: the server

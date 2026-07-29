@@ -272,6 +272,40 @@ else
 fi
 [ "$(stat -c '%U:%G %a' "$SETTINGS")" = "send-to-influx:send-to-influx 644" ] || fail "settings.yaml owner/mode wrong"
 [ "$(stat -c '%U' /opt/send-to-influx)" = root ] || fail "/opt/send-to-influx not root-owned"
+# abi3 extensions (cryptography, via the mcp SDK's pyjwt[crypto]) ship one wheel
+# per architecture whose .so name carries no architecture tag, so build-deb.sh
+# stages both as <name>.so.<arch> and postinst links the host's own. Assert the
+# whole chain, because every link in it fails silently: both variants present in
+# the package, the link created, pointing at THIS host's architecture, and - the
+# one that actually matters - the module importable by the venv's interpreter.
+SP=/opt/send-to-influx/venv/lib/python3/site-packages
+RUST_SO="$SP/cryptography/hazmat/bindings/_rust.abi3.so"
+for a in x86_64 aarch64; do
+    [ -f "$RUST_SO.$a" ] || fail "abi3 variant for $a missing from the installed package"
+done
+case "$(dpkg --print-architecture)" in
+    amd64) want=x86_64 ;;
+    arm64) want=aarch64 ;;
+    *) want="" ;;
+esac
+if [ -n "$want" ]; then
+    [ -L "$RUST_SO" ] || fail "postinst did not create the abi3 symlink for $(dpkg --print-architecture)"
+    [ "$(readlink "$RUST_SO")" = "_rust.abi3.so.$want" ] \
+        || fail "abi3 symlink points at $(readlink "$RUST_SO"), expected _rust.abi3.so.$want"
+    /opt/send-to-influx/venv/bin/python3 -c "import cryptography.exceptions" \
+        || fail "cryptography not importable from the installed venv"
+    # The real point of all of it: the mcp SDK imports cryptography unconditionally,
+    # so this is what would have failed at service start.
+    /opt/send-to-influx/venv/bin/python3 -c "import mcp.server.mcpserver" \
+        || fail "mcp SDK not importable from the installed venv"
+    # cffi is per-minor rather than abi3, and only the running interpreter's variant
+    # can be proven here - the build fails if any of the matrix is missing.
+    /opt/send-to-influx/venv/bin/python3 -c "import _cffi_backend" \
+        || fail "_cffi_backend not importable from the installed venv"
+    pass "abi3/compiled extensions: both variants shipped, correct one linked, mcp SDK imports"
+else
+    echo "architecture $(dpkg --print-architecture) has no staged abi3 variant - skipping"
+fi
 /opt/send-to-influx/venv/bin/python3 - <<PYEOF
 import yaml
 with open("$SETTINGS", encoding="utf8") as f:

@@ -439,13 +439,27 @@ class TestResolveSchema:
         assert discover.call_args.args[1]["url"] == "http://FRESH"
 
 
+def _tool_text(result):
+    """Pull the single text block out of a ``call_tool`` result.
+
+    mcp 2.x returns a ``CallToolResult`` model; 1.x returned a bare sequence of
+    content blocks (or a (blocks, structured) tuple). One helper so the shape is
+    asserted in exactly one place.
+
+    :param result: whatever ``MCPServer.call_tool`` returned
+    :return: the text of the first content block
+    :rtype: str
+    """
+    return result.content[0].text
+
+
 class TestRegisterReadTools:
-    """Register the tools on a real FastMCP and drive them with mocked InfluxDB."""
+    """Register the tools on a real MCPServer and drive them with mocked InfluxDB."""
 
     def _server(self):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
-        return FastMCP(name="test")
+        return MCPServer(name="test")
 
     def _settings(self):
         return {
@@ -482,7 +496,7 @@ class TestRegisterReadTools:
         register_read_tools(server, self._settings(), None)
         with patch("toinflux.mcp_common.get_class", return_value=self._handler()):
             result = anyio.run(server.call_tool, "list_sources", {})
-        text = result[0][0].text if isinstance(result, tuple) else result[0].text
+        text = _tool_text(result)
         assert "myenergi" in text and "zappi" in text
 
     def test_query_history_end_to_end(self):
@@ -500,7 +514,7 @@ class TestRegisterReadTools:
                 {"source": "zappi", "field": "gen", "start": "-1h", "end": "now"},
             )
         _ = payload
-        text = result[0][0].text if isinstance(result, tuple) else result[0].text
+        text = _tool_text(result)
         assert '"value": 42' in text
         assert '"unit": "W"' in text
         # The effective limit and truncation flag are surfaced (1 point < 500).
@@ -521,7 +535,7 @@ class TestRegisterReadTools:
                 "query_history",
                 {"source": "zappi", "field": "gen", "start": "-1h", "end": "now", "limit": 3},
             )
-        text = result[0][0].text if isinstance(result, tuple) else result[0].text
+        text = _tool_text(result)
         # 3 points returned at limit 3 -> truncated true (more may exist).
         assert '"limit": 3' in text
         assert '"truncated": true' in text
@@ -592,7 +606,7 @@ class TestRegisterReadTools:
         handler.MCP_FIELD_METADATA = {"sta": {"codes": {3: "charging"}}}
         with patch("toinflux.mcp_common.get_class", return_value=handler):
             result = anyio.run(server.call_tool, "get_current_state", {"source": "zappi"})
-        text = result[0][0].text if isinstance(result, tuple) else result[0].text
+        text = _tool_text(result)
         assert "charging" in text and "live" in text
 
     def test_get_documentation_tool(self):
@@ -603,7 +617,7 @@ class TestRegisterReadTools:
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}}
         with patch("toinflux.mcp_common.get_class", return_value=handler):
             result = anyio.run(server.call_tool, "get_documentation", {})
-        text = result[0][0].text if isinstance(result, tuple) else result[0].text
+        text = _tool_text(result)
         assert "data reference" in text and "zappi" in text
 
 

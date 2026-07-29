@@ -21,11 +21,14 @@ from toinflux.mcpserver import (
     ACCESS_TOKEN_TTL_SECONDS,
     LOGIN_FAILURE_LIMIT,
     LOGIN_TXN_TTL_SECONDS,
+    MCP_HTTP_PATH,
     LoginThrottle,
     OAuthStateStore,
     SendToInfluxOAuthProvider,
+    app_options,
     build_mcp_server,
     resolve_state_path,
+    run_options,
     start_mcp_server_thread,
 )
 
@@ -55,7 +58,7 @@ def http_client(mcp_settings):
     the /mcp session manager) and the public hostname as the Host header (so the
     DNS-rebinding allowlist sees what a reverse-proxied request would carry)."""
     server = build_mcp_server(mcp_settings)
-    with TestClient(server.streamable_http_app(), base_url=MCP_PUBLIC_URL) as client:
+    with TestClient(server.streamable_http_app(**app_options(mcp_settings)), base_url=MCP_PUBLIC_URL) as client:
         yield client
 
 
@@ -457,7 +460,7 @@ class TestHttpSurface:
         Claude connector survives a service restart without re-authenticating."""
         client_id, tokens = _full_token_flow(http_client)
         restarted = build_mcp_server(mcp_settings)
-        with TestClient(restarted.streamable_http_app(), base_url=MCP_PUBLIC_URL) as second:
+        with TestClient(restarted.streamable_http_app(**app_options(mcp_settings)), base_url=MCP_PUBLIC_URL) as second:
             response = second.post(
                 "/token",
                 data={
@@ -593,8 +596,8 @@ class TestPublicUrlWithPort:
                 "state_file": str(tmp_path / "state.json"),
             },
         }
-        server = build_mcp_server(settings)
-        security = server.settings.transport_security
+        build_mcp_server(settings)
+        security = app_options(settings)["transport_security"]
         # Exact-membership checks (these are lists of allowlist entries, not URLs to
         # match a substring against); expressed as set subsets so a static analyser
         # doesn't misread them as incomplete URL-substring sanitisation.
@@ -612,8 +615,8 @@ class TestPublicUrlWithPort:
                 "state_file": str(tmp_path / "state.json"),
             },
         }
-        server = build_mcp_server(settings)
-        security = server.settings.transport_security
+        build_mcp_server(settings)
+        security = app_options(settings)["transport_security"]
         # Exact-membership checks (see test_allowlists_are_well_formed), as set subsets.
         assert {"[2001:db8::5]:8443", "[2001:db8::5]:*"} <= set(security.allowed_hosts)
         assert not any(entry.startswith("2001") for entry in security.allowed_hosts)
@@ -630,7 +633,112 @@ class TestPublicUrlWithPort:
             },
         }
         server = build_mcp_server(settings)
-        with TestClient(server.streamable_http_app(), base_url="https://mcp.example.org:8443") as client:
+        with TestClient(
+            server.streamable_http_app(**app_options(settings)), base_url="https://mcp.example.org:8443"
+        ) as client:
             response = client.get("/.well-known/oauth-authorization-server")
             assert response.status_code == 200
             assert response.json()["issuer"].rstrip("/") == "https://mcp.example.org:8443"
+
+
+class TestTransportOptions:
+    """mcp 2.x takes the transport options per-app/per-run instead of on the
+    server constructor as 1.x did, so nothing about a built server proves the
+    DNS-rebinding allowlist is in effect. These assert the two builders stay in
+    step and keep carrying the security-relevant option."""
+
+    SETTINGS = {
+        "mcp": {
+            "bind_address": "192.168.1.5:9001",
+            "public_url": "https://mcp.example.org",
+            "user": MCP_USER,
+            "password": MCP_PASSWORD,
+        },
+    }
+
+    def test_app_options_carry_transport_security_and_path(self):
+        options = app_options(self.SETTINGS)
+        assert options["transport_security"].enable_dns_rebinding_protection is True
+        assert options["streamable_http_path"] == MCP_HTTP_PATH
+        assert options["host"] == "192.168.1.5"
+
+    def test_run_options_are_app_options_plus_the_port(self):
+        # A new app-level option must reach run() too - run_options() derives from
+        # app_options() precisely so this can't drift, and this fails if it stops.
+        run = run_options(self.SETTINGS)
+        app = app_options(self.SETTINGS)
+        assert set(run) - set(app) == {"port"}
+        assert run["port"] == 9001
+        assert run["streamable_http_path"] == app["streamable_http_path"]
+
+    def test_every_streamable_app_option_is_accepted_by_the_sdk(self):
+        # Guards against a future SDK renaming one of these: a wrong keyword would
+        # otherwise only surface as a TypeError at service start, not in CI.
+        import inspect
+
+        from mcp.server.mcpserver import MCPServer
+
+        accepted = set(inspect.signature(MCPServer.streamable_http_app).parameters)
+        assert set(app_options(self.SETTINGS)) <= accepted
+        run_accepted = set(inspect.signature(MCPServer.run_streamable_http_async).parameters)
+        assert set(run_options(self.SETTINGS)) <= run_accepted
+
+    def test_bad_bind_address_is_a_config_error(self):
+        with pytest.raises(ConfigError):
+            app_options({"mcp": {"bind_address": "no-port", "public_url": "https://mcp.example.org"}})
+
+
+class TestPreviousReleaseStateFile:
+    """Upgrade compatibility for the persisted OAuth state.
+
+    The whole point of mcp.state_file is that a service restart - which every
+    packaged upgrade performs - does not force the Claude connector to
+    re-authenticate. A client record is stored as the SDK's own
+    OAuthClientInformationFull.model_dump(), so an SDK model change can silently
+    invalidate every stored registration: get_client() returns None, and the user
+    discovers it as a broken connector rather than as a failed upgrade.
+
+    CLIENT_RECORD_1_28_1 was captured verbatim from mcp 1.28.1 - the release this
+    project shipped before the 2.x port - rather than written to match what the
+    current SDK happens to emit, which would assert nothing about upgrades.
+    """
+
+    CLIENT_RECORD_1_28_1 = {
+        "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+        "token_endpoint_auth_method": "client_secret_post",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "scope": None,
+        "client_name": "Claude",
+        "client_uri": None,
+        "logo_uri": None,
+        "contacts": None,
+        "tos_uri": None,
+        "policy_uri": None,
+        "jwks_uri": None,
+        "jwks": None,
+        "software_id": None,
+        "software_version": None,
+        "client_id": "abc-123",
+        "client_secret": "s3cret",
+        "client_id_issued_at": None,
+        "client_secret_expires_at": None,
+    }
+
+    def test_client_registered_by_the_previous_release_still_resolves(self, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text(
+            json.dumps({"clients": {"abc-123": self.CLIENT_RECORD_1_28_1}, "refresh_tokens": {}}),
+            encoding="utf8",
+        )
+        provider = SendToInfluxOAuthProvider(
+            public_url=MCP_PUBLIC_URL,
+            expected_user=MCP_USER,
+            expected_password=MCP_PASSWORD,
+            state_store=OAuthStateStore(str(state_file)),
+        )
+        client = anyio.run(provider.get_client, "abc-123")
+        assert client is not None, "a client registered under mcp 1.28.1 no longer loads"
+        assert client.client_id == "abc-123"
+        assert client.token_endpoint_auth_method == "client_secret_post"
+        assert [str(u) for u in client.redirect_uris] == ["https://claude.ai/api/mcp/auth_callback"]

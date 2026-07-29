@@ -3,10 +3,19 @@ urllib3~=2.7.0
 pyyaml~=6.0.3
 speedtest-cli~=2.1.3
 paho-mqtt~=2.1.0
-mcp~=1.28.1
+mcp~=2.0.0
 # rpds-py (pulled in via mcp -> jsonschema -> referencing) switched to CalVer and
 # dropped Python 3.10 wheels in 2026.x; the packaged .deb ships one shared venv for
 # 3.10-3.14, so hold it to the last release with compiled wheels for every supported
 # minor. build-deb.sh's compiled-wheel-matrix step fails the build if coverage
 # regresses, so a bump that breaks this is caught pre-merge, not on a target machine.
 rpds-py~=0.30.0
+# cryptography (pulled in via mcp -> pyjwt[crypto]; mcp/server/request_state.py
+# imports cryptography.exceptions unconditionally, so it is load-bearing, not
+# optional). PyJWT asks only for >=3.4.0, so nothing forces a major - held below
+# 49 because 49.0.0 dropped the macOS universal2 wheel in favour of arm64-only,
+# leaving Intel Macs to compile it from source (silently succeeding wherever a
+# Rust toolchain happens to be installed, and failing everywhere else). Linux
+# wheel coverage is identical between 48 and 49, so the .deb loses nothing.
+# Kept at the same version as the docker-mcp project, which hit this first.
+cryptography~=48.0.1

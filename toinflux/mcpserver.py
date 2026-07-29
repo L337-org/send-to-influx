@@ -57,6 +57,10 @@ LOGIN_LOCKOUT_SECONDS = 300
 # avoid hammering, only local re-binds.
 SERVER_RESTART_SECONDS = 30
 
+# The streamable-http endpoint path. Made explicit rather than left to the SDK
+# default because public_url + this path is what gets configured in Claude.
+MCP_HTTP_PATH = "/mcp"
+
 _LOGIN_FORM_TEMPLATE = """<!DOCTYPE html>
 <html><head><title>send-to-influx MCP login</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -278,44 +282,19 @@ def resolve_state_path(settings, settings_file=None):
     return os.path.join(settings_dir, "mcp-oauth-state.json")
 
 
-def build_mcp_server(settings, settings_file=None):
-    """Construct the FastMCP application for the given settings.
+def _transport_security_settings(public_url):
+    """Build the DNS-rebinding allowlists for the configured public URL.
 
-    Everything SDK-related is imported here, not at module level - see the
-    module docstring. Raises ConfigError for anything that makes the server
-    unbuildable (missing SDK, incoherent settings), which the caller treats as
-    fatal-not-retryable, same contract as every other ConfigError.
+    Keeps the SDK's DNS-rebinding protection enabled, but allowlists the public
+    hostname: behind the reverse proxy every request arrives with the public Host
+    header, which the SDK's localhost-only default would reject.
 
-    :param settings: parsed settings dictionary (validated, post-substitution)
-    :type settings: dict
-    :param settings_file: settings path, for anchoring the default state file
-    :type settings_file: str or None
-    :return: a configured FastMCP instance
-    :raises ConfigError: if the mcp SDK is unavailable or settings are unusable
+    :param public_url: the external HTTPS address, trailing slash already stripped
+    :type public_url: str
+    :return: transport security settings for the streamable-http app
+    :rtype: mcp.server.transport_security.TransportSecuritySettings
     """
-    try:
-        from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
-        from mcp.server.fastmcp import FastMCP
-        from mcp.server.transport_security import TransportSecuritySettings
-        from starlette.requests import Request
-        from starlette.responses import HTMLResponse, RedirectResponse, Response
-    except ImportError as exc:
-        raise ConfigError(
-            f"The MCP server is enabled but the 'mcp' package could not be imported ({exc}). "
-            "On a source checkout, run: .venv/bin/pip install -r requirements.txt"
-        ) from exc
-
-    mcp_settings = settings["mcp"]
-    public_url = mcp_settings["public_url"].strip().rstrip("/")
-    host, port = parse_mcp_bind_address(mcp_settings.get("bind_address"))
-    state_path = resolve_state_path(settings, settings_file)
-
-    provider = SendToInfluxOAuthProvider(
-        public_url=public_url,
-        expected_user=mcp_settings["user"],
-        expected_password=mcp_settings["password"],
-        state_store=OAuthStateStore(state_path),
-    )
+    from mcp.server.transport_security import TransportSecuritySettings
 
     # netloc is the exact Host header a reverse-proxied request carries (including
     # any explicit port); hostname is the port-less form used for the any-port
@@ -328,36 +307,112 @@ def build_mcp_server(settings, settings_file=None):
     public_hostname = parsed_public.hostname or public_host
     if ":" in public_hostname:
         public_hostname = f"[{public_hostname}]"
-    server = FastMCP(
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[public_host, f"{public_hostname}:*", "127.0.0.1:*", "localhost:*", "[::1]:*"],
+        allowed_origins=[
+            f"https://{public_host}",
+            f"https://{public_hostname}",
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+        ],
+    )
+
+
+def app_options(settings):
+    """Build the keyword arguments for ``MCPServer.streamable_http_app()``.
+
+    The single canonical source of the transport options, because mcp 2.x takes
+    them per-app/per-run rather than on the server constructor as 1.x did.
+    Calling ``streamable_http_app()`` without them silently falls back to the
+    SDK's localhost-only DNS-rebinding default, which rejects every
+    reverse-proxied request - so every call site derives them from here.
+
+    :param settings: parsed settings dictionary (validated, post-substitution)
+    :type settings: dict
+    :return: keyword arguments accepted by ``streamable_http_app()``
+    :rtype: dict
+    :raises ConfigError: if ``mcp.bind_address`` is unusable
+    """
+    host, _ = parse_mcp_bind_address((settings.get("mcp") or {}).get("bind_address"))
+    public_url = settings["mcp"]["public_url"].strip().rstrip("/")
+    return {
+        "host": host,
+        "streamable_http_path": MCP_HTTP_PATH,
+        "transport_security": _transport_security_settings(public_url),
+    }
+
+
+def run_options(settings):
+    """Build the keyword arguments for ``MCPServer.run(transport="streamable-http")``.
+
+    The app options plus the bind port, which only the run path needs.
+
+    :param settings: parsed settings dictionary (validated, post-substitution)
+    :type settings: dict
+    :return: keyword arguments accepted by ``run()`` for the streamable-http transport
+    :rtype: dict
+    :raises ConfigError: if ``mcp.bind_address`` is unusable
+    """
+    _, port = parse_mcp_bind_address((settings.get("mcp") or {}).get("bind_address"))
+    return {**app_options(settings), "port": port}
+
+
+def build_mcp_server(settings, settings_file=None):
+    """Construct the MCPServer application for the given settings.
+
+    Everything SDK-related is imported here, not at module level - see the
+    module docstring. Raises ConfigError for anything that makes the server
+    unbuildable (missing SDK, incoherent settings), which the caller treats as
+    fatal-not-retryable, same contract as every other ConfigError.
+
+    The transport options (bind host/port, endpoint path, DNS-rebinding
+    allowlists) are deliberately *not* set here: mcp 2.x takes them on
+    ``run()``/``streamable_http_app()`` instead of the constructor. See
+    ``app_options()``/``run_options()``.
+
+    :param settings: parsed settings dictionary (validated, post-substitution)
+    :type settings: dict
+    :param settings_file: settings path, for anchoring the default state file
+    :type settings_file: str or None
+    :return: a configured MCPServer instance
+    :rtype: mcp.server.mcpserver.MCPServer
+    :raises ConfigError: if the mcp SDK is unavailable or settings are unusable
+    """
+    try:
+        from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
+        from mcp.server.mcpserver import MCPServer
+        from starlette.requests import Request
+        from starlette.responses import HTMLResponse, RedirectResponse, Response
+    except ImportError as exc:
+        raise ConfigError(
+            f"The MCP server is enabled but the 'mcp' package could not be imported ({exc}). "
+            "On a source checkout, run: .venv/bin/pip install -r requirements.txt"
+        ) from exc
+
+    mcp_settings = settings["mcp"]
+    public_url = mcp_settings["public_url"].strip().rstrip("/")
+    state_path = resolve_state_path(settings, settings_file)
+
+    provider = SendToInfluxOAuthProvider(
+        public_url=public_url,
+        expected_user=mcp_settings["user"],
+        expected_password=mcp_settings["password"],
+        state_store=OAuthStateStore(state_path),
+    )
+
+    server = MCPServer(
         name="send-to-influx",
         instructions=(
             "Query the current and historical state of the smart-home and energy devices "
             "this send-to-influx installation collects data from."
         ),
         auth_server_provider=provider,
-        host=host,
-        port=port,
-        # The streamable-http endpoint lives at /mcp (the SDK default, made explicit
-        # because public_url + this path is what gets configured in Claude).
-        streamable_http_path="/mcp",
         auth=AuthSettings(
             issuer_url=public_url,
-            resource_server_url=f"{public_url}/mcp",
+            resource_server_url=f"{public_url}{MCP_HTTP_PATH}",
             client_registration_options=ClientRegistrationOptions(enabled=True),
             revocation_options=RevocationOptions(enabled=True),
-        ),
-        # Keep the SDK's DNS-rebinding protection enabled, but allowlist the public
-        # hostname: behind the reverse proxy every request arrives with the public
-        # Host header, which the SDK's localhost-only default would reject.
-        transport_security=TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=[public_host, f"{public_hostname}:*", "127.0.0.1:*", "localhost:*", "[::1]:*"],
-            allowed_origins=[
-                f"https://{public_host}",
-                f"https://{public_hostname}",
-                "http://127.0.0.1:*",
-                "http://localhost:*",
-            ],
         ),
     )
 
@@ -704,7 +759,7 @@ def start_mcp_server_thread(settings, settings_file=None):
                     port,
                     settings["mcp"]["public_url"],
                 )
-                server.run(transport="streamable-http")
+                server.run(transport="streamable-http", **run_options(settings))
                 logging.error("MCP server exited unexpectedly; restarting in %ss", SERVER_RESTART_SECONDS)
             except ConfigError as exc:
                 logging.critical("MCP server cannot start and will not be retried: %s", exc)

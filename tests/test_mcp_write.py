@@ -357,9 +357,9 @@ class TestHueSetLight:
 
 class TestWriteToolRegistration:
     def _server(self):
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
-        return FastMCP(name="test")
+        return MCPServer(name="test")
 
     def _hue_settings(self):
         return {"sources": ["hue"], "influx": {"url": "http://x", "user": "u", "password": "p"}, "hue": {}}

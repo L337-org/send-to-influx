@@ -171,12 +171,14 @@ VERSION="$(cd / && "$PKG_ROOT/opt/send-to-influx/venv/bin/python" -c \
 # gets installs created under the old scheme onto this one.)
 mv "$VENV_LIB_DIR/python${PYTHON_MAJOR_MINOR}" "$VENV_LIB_DIR/python3"
 
-# ---- compiled-wheel matrix (pydantic_core, rpds-py) ----
-# The mcp SDK's dependency chain needs pydantic_core (via pydantic) and rpds-py
-# (via jsonschema/referencing) - Rust-compiled, no pure-Python fallback, so the
-# blanket .so-strip above removed something load-bearing. Rather than giving up
-# Architecture: all, download the prebuilt manylinux wheels for JUST these two
-# packages across the supported minors and both target architectures, and merge
+# ---- compiled-wheel matrix (pydantic_core, rpds-py, cffi, cryptography) ----
+# The mcp SDK's dependency chain needs pydantic_core (via pydantic), rpds-py
+# (via jsonschema/referencing), and - since mcp 2.x - cffi and cryptography (via
+# pyjwt[crypto], which mcp/server/request_state.py imports unconditionally, so it
+# is load-bearing rather than optional). All are compiled with no pure-Python
+# fallback, so the blanket .so-strip above removed something load-bearing. Rather
+# than giving up Architecture: all, download the prebuilt manylinux wheels for
+# JUST these packages across the supported minors and both target architectures, and merge
 # only their compiled extensions into the shared site-packages (the pure-Python
 # half of each package is already installed by pip above). CPython imports only
 # a .so whose filename carries its own exact ABI tag, so the variants coexist
@@ -191,7 +193,22 @@ mv "$VENV_LIB_DIR/python${PYTHON_MAJOR_MINOR}" "$VENV_LIB_DIR/python3"
 # into the venv, so the .so and its pure-Python half can never disagree - and
 # fails the build (deliberately) if that version doesn't cover every minor
 # here, which is why requirements.txt holds rpds-py to a version that does.
-COMPILED_WHEEL_PACKAGES="pydantic-core rpds-py"
+#
+# Two shapes of wheel need handling, and they are NOT interchangeable:
+#   - COMPILED_WHEEL_PACKAGES build a separate wheel per CPython minor, and their
+#     .so filename carries both the minor and the architecture
+#     (_cffi_backend.cpython-310-aarch64-linux-gnu.so), so every variant can be
+#     dropped into one directory and coexist. That is the mechanism this whole
+#     step relies on.
+#   - COMPILED_WHEEL_ABI3_PACKAGES build one wheel for all minors via the stable
+#     ABI, and their .so filename carries NEITHER
+#     (cryptography/hazmat/bindings/_rust.abi3.so is byte-identically *named* in
+#     the x86_64 and the aarch64 wheel). Merging both architectures would
+#     therefore have one silently overwrite the other, so these are staged
+#     side-by-side with an .<arch> suffix and postinst symlinks the one matching
+#     the host - see the block below and the matching one in postinst.
+COMPILED_WHEEL_PACKAGES="pydantic-core rpds-py cffi"
+COMPILED_WHEEL_ABI3_PACKAGES="cryptography"
 COMPILED_WHEEL_MINORS="10 11 12 13 14"
 COMPILED_WHEEL_PLATFORMS="manylinux2014_x86_64 manylinux2014_aarch64"
 WHEEL_DIR="$BUILD_DIR/compiled-wheels"
@@ -241,16 +258,83 @@ for whl in "$WHEEL_DIR"/*.whl; do
         cp "$so" "$SITE_PACKAGES/$rel"
     done < <(find "$EXTRACT_DIR" -name "*.so" -print0)
 done
+
+# ---- abi3 packages, staged per-architecture ----
+# One wheel per architecture (not per minor), and its .so name carries no
+# architecture tag, so the two cannot share a filename. Stage each as
+# <name>.so.<arch> and let postinst symlink the matching one into place; the
+# un-suffixed name is deliberately never written here, so a package that somehow
+# reached a target without postinst running fails with a clean ImportError
+# (surfaced as the MCP server's "could not be imported" ConfigError, collectors
+# unaffected) rather than loading a foreign-architecture object.
+ABI3_WHEEL_DIR="$BUILD_DIR/compiled-wheels-abi3"
+mkdir -p "$ABI3_WHEEL_DIR"
+for pkg in $COMPILED_WHEEL_ABI3_PACKAGES; do
+    dist_name="${pkg//-/_}"
+    info_dir="$(find "$SITE_PACKAGES" -maxdepth 1 -type d -name "${dist_name}-*.dist-info" | head -n 1)"
+    if [ -z "$info_dir" ]; then
+        echo "error: $pkg is not installed in the venv - did the mcp dependency chain change?" >&2
+        exit 1
+    fi
+    ver="$(basename "$info_dir")"
+    ver="${ver#"${dist_name}"-}"
+    ver="${ver%.dist-info}"
+    for plat in $COMPILED_WHEEL_PLATFORMS; do
+        # Spelled out rather than derived from the tag: "${plat##*_}" looks right
+        # but strips to the LAST underscore, so manylinux2014_x86_64 yields "64".
+        # An unknown platform must fail the build, not stage a mis-named file that
+        # postinst would then never link.
+        case "$plat" in
+            *_x86_64) arch=x86_64 ;;
+            *_aarch64) arch=aarch64 ;;
+            *) echo "error: cannot determine architecture for platform tag $plat" >&2; exit 1 ;;
+        esac
+        rm -rf "$ABI3_WHEEL_DIR"
+        mkdir -p "$ABI3_WHEEL_DIR"
+        # --python-version is still required for the resolve even though the wheel
+        # serves every minor; the floor of the supported range is the right probe.
+        "$BUILD_PYTHON" -m pip download "$pkg==$ver" \
+            --only-binary=:all: --no-deps --quiet \
+            --python-version "3.$PYTHON_MIN_SUPPORTED_MINOR" --implementation cp --platform "$plat" \
+            -d "$ABI3_WHEEL_DIR"
+        rm -rf "$EXTRACT_DIR"
+        mkdir -p "$EXTRACT_DIR"
+        for whl in "$ABI3_WHEEL_DIR"/*.whl; do
+            "$BUILD_PYTHON" -m zipfile -e "$whl" "$EXTRACT_DIR"
+        done
+        while IFS= read -r -d '' so; do
+            rel="${so#"$EXTRACT_DIR"/}"
+            mkdir -p "$SITE_PACKAGES/$(dirname "$rel")"
+            cp "$so" "$SITE_PACKAGES/${rel}.${arch}"
+        done < <(find "$EXTRACT_DIR" -name "*.so" -print0)
+    done
+done
 # Fail the build if the matrix came out incomplete - a runtime ImportError on
 # some target's minor/arch combination is far harder to diagnose than this.
 for minor in $COMPILED_WHEEL_MINORS; do
     for arch in x86_64 aarch64; do
-        for probe in "pydantic_core/_pydantic_core" "rpds/rpds"; do
+        for probe in "pydantic_core/_pydantic_core" "rpds/rpds" "_cffi_backend"; do
             if ! ls "$SITE_PACKAGES/${probe}".cpython-3"${minor}"-"${arch}"-linux-gnu.so >/dev/null 2>&1; then
                 echo "error: missing compiled extension ${probe} for Python 3.${minor}/${arch}" >&2
                 exit 1
             fi
         done
+    done
+done
+# The abi3 half: both architectures staged, and the un-suffixed name absent (its
+# presence would mean one architecture had overwritten the other - the exact
+# failure the .<arch> staging exists to prevent, and one that would otherwise
+# only show up as a wrong-architecture ImportError on half the installs).
+for arch in x86_64 aarch64; do
+    for probe in "cryptography/hazmat/bindings/_rust.abi3.so"; do
+        if [ ! -f "$SITE_PACKAGES/${probe}.${arch}" ]; then
+            echo "error: missing abi3 extension ${probe} for ${arch}" >&2
+            exit 1
+        fi
+        if [ -e "$SITE_PACKAGES/${probe}" ]; then
+            echo "error: ${probe} exists un-suffixed - an architecture variant has overwritten another" >&2
+            exit 1
+        fi
     done
 done
 # The per-minor python3.X -> python3 symlinks are deliberately NOT shipped in the
