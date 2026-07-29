@@ -740,12 +740,12 @@ def _documentation_result(settings, settings_file):
 
 
 def register_read_tools(server, settings, settings_file=None):
-    """Register the read-only MCP tools on a FastMCP server: list the queryable
+    """Register the read-only MCP tools on a MCPServer server: list the queryable
     sources, list a source's fields, and query a field's history. Blocking HTTP
     runs in a worker thread so the async event loop isn't stalled during an
     InfluxDB round trip.
 
-    :param server: the FastMCP instance
+    :param server: the MCPServer instance
     :param settings: the parsed settings dict
     :param settings_file: settings path, for re-resolving handlers per call
     """

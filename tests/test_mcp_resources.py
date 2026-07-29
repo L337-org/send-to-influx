@@ -4,13 +4,13 @@ reference, and per-source schema and current-state resources)."""
 from unittest.mock import MagicMock, patch
 
 import anyio
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from toinflux.mcp_resources import register_resources
 
 
 def _server():
-    return FastMCP(name="test")
+    return MCPServer(name="test")
 
 
 def _settings():

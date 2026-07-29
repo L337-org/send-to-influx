@@ -4,13 +4,13 @@ on write-enablement, and rendered content)."""
 from unittest.mock import patch
 
 import anyio
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from toinflux.mcp_prompts import register_prompts
 
 
 def _server():
-    return FastMCP(name="test")
+    return MCPServer(name="test")
 
 
 def _prompt_names(server):

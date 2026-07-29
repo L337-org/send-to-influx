@@ -23,11 +23,11 @@ from toinflux.mcp_write import writable_enabled_sources
 
 
 def register_prompts(server, settings, settings_file=None, enabled_sources=None):
-    """Register the task prompts on a FastMCP server. ``home_status`` and
+    """Register the task prompts on a MCPServer server. ``home_status`` and
     ``usage_trends`` are always registered; ``control_device`` only when a source
     has writes enabled (so it isn't offered on a read-only install).
 
-    :param server: the FastMCP instance
+    :param server: the MCPServer instance
     :param settings: parsed settings dict
     :param settings_file: settings path, for the write-enabled check
     :param enabled_sources: the pre-computed write-enabled source list, if the

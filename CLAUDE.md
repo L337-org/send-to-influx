@@ -118,7 +118,8 @@ working - just denser.
 
 The optional remote MCP server (introduced in 5.0) is *not* a `DataHandler` - it's the project's
 first inbound-network-facing component, a Streamable-HTTP server built on the official `mcp` SDK's
-`FastMCP` + built-in OAuth 2.1 authorization server, run in its own daemon thread (`anyio` inside
+`MCPServer` (called `FastMCP` before the SDK's 2.0 rename) + built-in OAuth 2.1 authorization
+server, run in its own daemon thread (`anyio` inside
 the thread; nothing else in the synchronous codebase changes). Enabled iff both `mcp.user` and
 `mcp.password` are set (credentials-present is the primary enablement mechanism; one without the
 other is a `ConfigError` - see `mcp_block_errors()`/`mcp_enabled()` in `toinflux/general.py`) -
@@ -150,12 +151,21 @@ decisions:
   connector on every unattended upgrade. Access tokens are in-memory (1 h TTL) - a restart
   invalidates them and the client recovers silently via refresh. The SDK's token endpoint does
   PKCE/expiry/client-binding verification itself; the provider only stores, loads, and issues.
-- **Login page** (`/login`, via `FastMCP.custom_route`): resource-owner step gated on
+- **Login page** (`/login`, via `MCPServer.custom_route`): resource-owner step gated on
   `mcp.user`/`mcp.password` (constant-time comparison), single-use unguessable transaction ids
   minted by `authorize()`. Failed attempts are throttled per client address
   (`LoginThrottle`: 5 failures → 300 s lockout, WARNING-logged) - behind a reverse proxy every
   request carries the proxy's address, so the lockout is effectively global, which is the intended
   behaviour for a single-user login page, not a limitation.
+- **Transport options are per-run, not per-server** (`app_options()`/`run_options()` in
+  `toinflux/mcpserver.py`): mcp 1.x took `host`/`port`/`streamable_http_path`/`transport_security`
+  on the server constructor, so every app derived from a built server inherited the DNS-rebinding
+  allowlist. 2.x takes them on `run()`/`streamable_http_app()` instead, which means a call site
+  that forgets `transport_security=` silently gets the SDK's localhost-only default and rejects
+  every reverse-proxied request. Hence one canonical builder that every call site (including the
+  tests) derives from, plus `TestTransportOptions` asserting the two builders stay in step and
+  that every key they emit is actually accepted by the SDK's signatures - a renamed SDK keyword
+  would otherwise only surface as a `TypeError` at service start, not in CI.
 - `mcp-password` is in `CREDENTIAL_FIELDS` like every other secret; its `PLACEHOLDER_VALUES`
   entry is deliberately the empty string (empty-means-disabled is the block's enablement
   mechanism, and `--remove` reverting to `""` is exactly the disabled state).

@@ -13,7 +13,7 @@ writable source gets its own bespoke, well-described tool(s), wired by a per-sou
 registrar in ``_WRITE_TOOL_REGISTRARS`` and gated per source. The vendor logic
 (name->id resolution, capability checks, the friendly-parameter->API mapping) lives
 on the source class, exactly as the read tools' domain knowledge does; this module
-only wires those methods up as FastMCP tools and owns the per-call handler
+only wires those methods up as MCPServer tools and owns the per-call handler
 lifecycle (shared with the read side via ``mcp_common``).
 """
 
@@ -192,11 +192,11 @@ _WRITE_TOOL_REGISTRARS = {
 
 
 def register_write_tools(server, settings, settings_file=None, enabled_sources=None):
-    """Register each write-enabled source's own write tool(s) on a FastMCP server.
+    """Register each write-enabled source's own write tool(s) on a MCPServer server.
     When no source is enabled for writes, nothing is registered - the write
     capability is entirely absent from the server.
 
-    :param server: the FastMCP instance
+    :param server: the MCPServer instance
     :param settings: parsed settings dict
     :param settings_file: settings path, for re-resolving handlers per call
     :param enabled_sources: the pre-computed write-enabled source list, if the
