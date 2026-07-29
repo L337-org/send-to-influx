@@ -36,6 +36,33 @@ if [ -d /opt/send-to-influx/venv/lib/python3 ]; then
     done
 fi
 
+# Link the architecture-appropriate copy of each abi3 extension into place.
+# cryptography (via the mcp SDK's pyjwt[crypto]) ships one stable-ABI wheel per
+# architecture whose .so filename carries no architecture tag, so build-deb.sh
+# cannot merge both into the shared site-packages the way it does for the
+# per-minor extensions - it stages them as <name>.so.<arch> instead and the
+# correct one is chosen here, at install time, from the host's own architecture.
+# Discovered by pattern rather than hard-coded so a future abi3 dependency needs
+# no change here. On an architecture with no staged variant (armhf, ppc64el - the
+# same two the per-minor matrix covers, no more) nothing is linked: the collectors
+# are pure Python and unaffected, and the optional MCP server reports its usual
+# "could not be imported" ConfigError instead of loading a foreign object.
+# Idempotent, and re-run on every upgrade because the unpack replaces the venv.
+if [ -d /opt/send-to-influx/venv/lib/python3/site-packages ]; then
+    case "$(dpkg --print-architecture 2>/dev/null)" in
+        amd64) so_arch=x86_64 ;;
+        arm64) so_arch=aarch64 ;;
+        *) so_arch="" ;;
+    esac
+    if [ -n "$so_arch" ]; then
+        find /opt/send-to-influx/venv/lib/python3/site-packages \
+            -name "*.so.${so_arch}" -type f | while read -r staged; do
+            # Relative target (basename), so the link survives any prefix move.
+            ln -sfn "$(basename "$staged")" "${staged%".${so_arch}"}"
+        done
+    fi
+fi
+
 if ! getent passwd send-to-influx >/dev/null 2>&1; then
     adduser --system --group --no-create-home --shell /usr/sbin/nologin send-to-influx
 fi

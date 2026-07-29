@@ -10,3 +10,12 @@ mcp~=2.0.0
 # minor. build-deb.sh's compiled-wheel-matrix step fails the build if coverage
 # regresses, so a bump that breaks this is caught pre-merge, not on a target machine.
 rpds-py~=0.30.0
+# cryptography (pulled in via mcp -> pyjwt[crypto]; mcp/server/request_state.py
+# imports cryptography.exceptions unconditionally, so it is load-bearing, not
+# optional). PyJWT asks only for >=3.4.0, so nothing forces a major - held below
+# 49 because 49.0.0 dropped the macOS universal2 wheel in favour of arm64-only,
+# leaving Intel Macs to compile it from source (silently succeeding wherever a
+# Rust toolchain happens to be installed, and failing everywhere else). Linux
+# wheel coverage is identical between 48 and 49, so the .deb loses nothing.
+# Kept at the same version as the docker-mcp project, which hit this first.
+cryptography~=48.0.1
