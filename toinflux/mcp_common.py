@@ -86,7 +86,7 @@ def resolve_handlers(source, settings, settings_file):
     return handlers
 
 
-def resolve_handler(source, settings, settings_file):
+def resolve_handler(source, settings, settings_file, instance=None):
     """Construct the DataHandler for a configured source, or raise
     ``ToolParamError`` if the name isn't one the MCP tools expose. Case-insensitive,
     matching the collector factory. The caller owns the returned handler's session
@@ -95,8 +95,11 @@ def resolve_handler(source, settings, settings_file):
     :param source: source name from a tool argument
     :param settings: parsed settings dict
     :param settings_file: settings path, threaded to the handler's own load
+    :param instance: which instance of the source to construct for - a Hue bridge host, or
+        None for a single-target source (and, for Hue, the first configured bridge)
     :return: a constructed DataHandler subclass instance
-    :raises ToolParamError: source is missing/non-string, unknown, or unusable
+    :raises ToolParamError: source is missing/non-string, unknown, unusable, or named an
+        instance that is not configured
     """
     if not isinstance(source, str) or not source.strip():
         raise ToolParamError(f"source must be a non-empty string (got {source!r})")
@@ -106,8 +109,11 @@ def resolve_handler(source, settings, settings_file):
             f"unknown source {source!r}; available sources: {', '.join(sorted(available)) or '(none)'}"
         )
     try:
-        return get_class(source, settings_file)
+        return get_class(source, settings_file, instance=instance)
     except ConfigError as exc:
+        # Includes an instance that is not configured - Hue.bridge() raises ConfigError
+        # naming the bridges that are, which is a caller mistake rather than a transport
+        # failure, so it surfaces as ToolParamError.
         raise ToolParamError(f"source {source!r} is not usable: {exc}") from exc
 
 

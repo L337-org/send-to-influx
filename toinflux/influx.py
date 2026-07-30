@@ -180,6 +180,22 @@ class DataHandler:
     # registered-and-refusing.
     MCP_WRITABLE = False
 
+    def mcp_tag_filters(self):
+        """Return the tag filters that scope this handler's reads.
+
+        The class's static ``MCP_TAG_FILTERS`` by default (never model input). A subclass
+        with instances overrides this to add a per-instance tag, so a read can be scoped to
+        one target instead of merging them - Hue adds its bridge's ``host``, matching the
+        tag its own writes carry.
+
+        A method rather than the bare class attribute because the answer depends on *which*
+        instance this handler serves, which a class attribute cannot express.
+
+        :return: tag key/value filters for this handler's reads
+        :rtype: dict
+        """
+        return dict(self.MCP_TAG_FILTERS)
+
     def mcp_write_enabled(self):
         """Return True only when this source is writable *and* the operator has
         opted in with ``<source>.mcp_read_write: true`` (strict ``is True``, so a

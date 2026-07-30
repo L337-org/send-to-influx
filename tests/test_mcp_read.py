@@ -405,6 +405,10 @@ class TestResolveSchema:
         handler.source = "zappi"
         handler.MCP_MEASUREMENT = "myenergi"
         handler.MCP_TAG_FILTERS = {"device": "zappi"}
+        # Tag filters now come from a method, so the mock must return the real value -
+        # a MagicMock method call otherwise yields another mock, and any assertion on the
+        # schema's filters would compare against that instead.
+        handler.mcp_tag_filters.return_value = {"device": "zappi"}
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}}
         handler.source_settings = {"db": "zappi_db"}
         handler.session = MagicMock()
@@ -473,6 +477,10 @@ class TestRegisterReadTools:
         handler.source = "zappi"
         handler.MCP_MEASUREMENT = "myenergi"
         handler.MCP_TAG_FILTERS = {"device": "zappi"}
+        # Tag filters now come from a method, so the mock must return the real value -
+        # a MagicMock method call otherwise yields another mock, and any assertion on the
+        # schema's filters would compare against that instead.
+        handler.mcp_tag_filters.return_value = {"device": "zappi"}
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}}
         handler.source_settings = {"db": "zappi_db"}
         handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
@@ -761,3 +769,99 @@ class TestSourceMcpMetadata:
 
         for cls in (Hue, Nuki, Octopus, OpenMeteo, CarbonIntensity, Speedtest, Zappi, Eddi, Harvi):
             assert cls.MCP_DESCRIPTION, f"{cls.__name__} has no MCP_DESCRIPTION"
+
+
+class TestMultiBridgeReads:
+    """The read surface must cover every bridge and say which is which."""
+
+    @staticmethod
+    def _handler(instance, fields=None, fail=None):
+        handler = MagicMock(MCP_LIVE_STATE=True, MCP_DESCRIPTION="Philips Hue", MCP_FIELD_METADATA={})
+        handler.source = "hue"
+        handler.instance = instance
+        handler.worker_label = f"hue@{instance}" if instance else "hue"
+        handler.mcp_tag_filters.return_value = {"host": instance} if instance else {}
+        if fail:
+            handler.get_data.side_effect = SourceConnectionError(fail)
+        else:
+            handler.get_data.return_value = fields or {}
+        handler.session = MagicMock()
+        return handler
+
+    def _settings(self):
+        return {"sources": ["hue"], "influx": {"url": "http://x", "user": "u", "password": "p"}, "hue": {}}
+
+    def test_each_bridge_is_reported_separately(self):
+        """Two bridges can carry the same field name - a "Kitchen" per floor - so a single
+        flat map would silently lose one of them."""
+        handlers = [
+            ("down.example.com", self._handler("down.example.com", {"Kitchen": 40})),
+            ("up.example.com", self._handler("up.example.com", {"Kitchen": 80})),
+        ]
+        with patch("toinflux.mcp_read.resolve_handlers", return_value=handlers):
+            result = current_state_result("hue", self._settings(), None)
+        assert set(result["instances"]) == {"down.example.com", "up.example.com"}
+        assert result["instances"]["down.example.com"]["fields"]["Kitchen"]["value"] == 40
+        assert result["instances"]["up.example.com"]["fields"]["Kitchen"]["value"] == 80
+        assert "fields" not in result  # never a flat map for an instanced source
+
+    def test_a_single_bridge_is_still_grouped(self):
+        """Keyed whenever the source is instanced, even with one bridge, so nothing reading
+        the payload depends on how many are configured."""
+        handlers = [("only.example.com", self._handler("only.example.com", {"Lamp": 1}))]
+        with patch("toinflux.mcp_read.resolve_handlers", return_value=handlers):
+            result = current_state_result("hue", self._settings(), None)
+        assert list(result["instances"]) == ["only.example.com"]
+
+    def test_a_single_target_source_keeps_the_flat_shape(self):
+        """Every non-instanced source is untouched - instance None means no grouping."""
+        handlers = [(None, self._handler(None, {"ping": 12}))]
+        with patch("toinflux.mcp_read.resolve_handlers", return_value=handlers):
+            result = current_state_result("hue", self._settings(), None)
+        assert result["fields"]["ping"]["value"] == 12
+        assert "instances" not in result
+
+    def test_one_failing_bridge_does_not_suppress_the_others(self):
+        """A partial answer WITH its failure status, rather than all-or-nothing."""
+        handlers = [
+            ("down.example.com", self._handler("down.example.com", {"Kitchen": 40})),
+            ("up.example.com", self._handler("up.example.com", fail="bridge unreachable")),
+        ]
+        with patch("toinflux.mcp_read.resolve_handlers", return_value=handlers):
+            result = current_state_result("hue", self._settings(), None)
+        assert result["instances"]["down.example.com"]["fields"]["Kitchen"]["value"] == 40
+        assert result["instances"]["up.example.com"]["error"] == "bridge unreachable"
+
+    def test_every_bridge_failing_raises(self):
+        """Nothing useful to return, so this is a transport failure the caller should retry
+        - not a success payload full of errors."""
+        handlers = [
+            ("down.example.com", self._handler("down.example.com", fail="down")),
+            ("up.example.com", self._handler("up.example.com", fail="also down")),
+        ]
+        with patch("toinflux.mcp_read.resolve_handlers", return_value=handlers):
+            with pytest.raises(SourceConnectionError) as excinfo:
+                current_state_result("hue", self._settings(), None)
+        assert "down.example.com" in str(excinfo.value) and "up.example.com" in str(excinfo.value)
+
+    def test_history_scoped_to_one_bridge_filters_by_its_host_tag(self):
+        """Hue writes every bridge to one measurement, so scoping a query means filtering on
+        the host tag its own writes carry."""
+        schema = make_schema(
+            source="hue",
+            measurement="hue",
+            tag_filters={"host": "up.example.com"},
+            allowed_fields={"Kitchen"},
+            field_metadata={},
+        )
+        query = build_query(schema, field="Kitchen", start="-1h", end="now")
+        assert "\"host\" = 'up.example.com'" in query
+
+    def test_unscoped_history_spans_every_bridge(self):
+        """Deliberate: an unqualified question about the estate gets an answer about the
+        estate. Documented in the tool description rather than left implicit."""
+        schema = make_schema(
+            source="hue", measurement="hue", tag_filters={}, allowed_fields={"Kitchen"}, field_metadata={}
+        )
+        query = build_query(schema, field="Kitchen", start="-1h", end="now")
+        assert "host" not in query

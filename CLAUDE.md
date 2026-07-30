@@ -270,6 +270,21 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     `/api/{user}/lights/{id}/state` over the collector's own session/auth and `hue.insecure` TLS
     policy; the CLIP API returns 200 with a per-key success/error list, so a bridge-reported error is
     surfaced as `SourceConnectionError`.
+  - **Multi-bridge Hue reads** (SI-4): `get_current_state` reports each bridge separately under
+    `instances`, keyed by bridge host, because two bridges can carry the same field name (a "Kitchen" per
+    floor) and one flat map would silently lose one of them. Keyed whenever the source is instanced - even with
+    a single bridge - so nothing reading the payload depends on the bridge count; a single-*target* source keeps
+    the historical flat `fields`/`as_of` shape untouched. One failing bridge gets an `error` entry while the
+    others still report `fields`, a partial answer *with* its failure status; only when every bridge fails is
+    `SourceConnectionError` raised, since then there is nothing useful to return. `query_history` gains an
+    optional `bridge`, which scopes the query by adding that bridge's `host` tag - the same tag Hue's own writes
+    carry - via `DataHandler.mcp_tag_filters()`, a *method* rather than the `MCP_TAG_FILTERS` class attribute
+    precisely because the answer depends on which instance the handler serves. Omitted, the query spans every
+    bridge: deliberate and documented in the tool description, since Hue writes all of them to one measurement
+    and an unqualified question about the estate should get an answer about the estate. The result echoes
+    `bridge` when one was used, so a single-bridge answer is distinguishable from an estate-wide one. The bridge
+    value never reaches a query as given - it is resolved through `Hue.bridge()` first, so an unconfigured
+    bridge is refused as a `ToolParamError`, and the existing tag-filter path then quotes and escapes it.
   - **Multi-bridge Hue** (SI-4): both write tools cover *every* configured bridge, via
     `resolve_handlers()` in `toinflux/mcp_common.py` - one handler per bridge, built from the same
     `expand_sources()` the collectors use so the MCP surface and the collectors cannot disagree about which

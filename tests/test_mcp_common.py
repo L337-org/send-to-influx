@@ -46,7 +46,7 @@ class TestResolveHandler:
         # handed to get_class (itself case-insensitive), not a lowercased one.
         with patch("toinflux.mcp_common.get_class", return_value="HANDLER") as gc:
             assert resolve_handler("Hue", {"sources": ["hue"]}, "cfg.yaml") == "HANDLER"
-        gc.assert_called_once_with("Hue", "cfg.yaml")
+        gc.assert_called_once_with("Hue", "cfg.yaml", instance=None)
 
     def test_unusable_source_wrapped_as_tool_param_error(self):
         # A ConfigError from the factory becomes a (non-retryable) ToolParamError.
