@@ -611,6 +611,23 @@ class TestEnumerateBridges:
         _, errors, _ = enumerate_bridges(self._hue(host=10.0, user="t1"))
         assert len(errors) == 1 and "must be a string" in errors[0]
 
+    def test_absent_section_is_left_to_the_source_block_check(self):
+        """One cause, one message.
+
+        validate_settings' own per-source check already reports "no configuration section
+        found for source 'hue'". Enumerating a missing block on top of that would add
+        "must be a mapping (got NoneType)" - true but misleading, since the problem is
+        that it isn't there rather than that it's the wrong type.
+        """
+        from toinflux.general import validate_settings
+        from toinflux.exceptions import ConfigError
+
+        settings = {"influx": {"url": "http://x", "token": "t", "org": "o"}, "sources": ["hue"]}
+        with pytest.raises(ConfigError) as excinfo:
+            validate_settings(settings)
+        assert "no configuration section found for source 'hue'" in str(excinfo.value)
+        assert "must be a mapping" not in str(excinfo.value)
+
     def test_non_mapping_block_is_an_error(self):
         """A malformed `hue:` section must fail cleanly rather than raise from .get()."""
         bridges, errors, _ = enumerate_bridges("oops")

@@ -260,7 +260,12 @@ def _validate_hue_bridges(settings, sources):
     every ``DataHandler`` construction - logging from here would repeat the same line per
     source at startup and again on every failure-triggered rebuild.
     """
-    if "hue" not in sources:
+    # Absent section: _validate_source_block already reports "no configuration section
+    # found for source 'hue'", which is both accurate and sufficient. Enumerating a
+    # missing block would add a second error saying it "must be a mapping (got NoneType)",
+    # which is true but misleading - the problem is that it isn't there, not that it's the
+    # wrong type. One cause, one message.
+    if "hue" not in sources or "hue" not in settings:
         return ([], [])
     from toinflux.philipshue import enumerate_bridges
 
