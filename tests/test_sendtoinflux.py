@@ -583,7 +583,10 @@ class TestStallDetection:
 
     def test_stalled_source_logs_critical_once(self, caplog):
         now = 1000.0 + sendtoinflux.STALL_WARNING_SECONDS + 1
-        last_activity = {("hue", None): 0.0, "zappi": now - 1}
+        # Both keys must be work-unit tuples: keyed by a bare string, zappi would look
+        # like it had never reported activity at all, so this test would pass while
+        # silently not exercising the healthy-worker branch.
+        last_activity = {("hue", None): 0.0, ("zappi", None): now - 1}
         stalled_sources = set()
         with (
             caplog.at_level("CRITICAL"),
