@@ -214,6 +214,23 @@ dpkg -i "$DEB" >/dev/null 2>&1 || dpkg -i "$DEB"
 cp /usr/share/send-to-influx/example_settings.yaml /tmp/ci-settings.yaml
 /opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml >/dev/null \
     || fail "--check-config smoke test failed on the shipped example settings"
+# Which stream carries diagnostics, asserted against the *installed* artefact rather than a
+# checkout. Deliberately not done via the journal: systemd captures stdout and stderr alike, so
+# a line appearing in journalctl proves it was captured, never which fd it came from. Running
+# the binary directly is what distinguishes them. An invalid config is the cheapest trigger -
+# it must report on stderr and leave stdout empty, since stdout is where --dump/--print put
+# JSON a caller has to parse.
+printf 'sources: [hue]\ninflux: {db: home, user: u, password: p}\nhue: {host: h, user: t, interval: 5, db: home}\n' \
+    > /tmp/ci-bad-settings.yaml
+chmod 600 /tmp/ci-bad-settings.yaml
+stream_out=$(/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-bad-settings.yaml 2>/dev/null || true)
+stream_err=$(/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-bad-settings.yaml 2>&1 >/dev/null || true)
+[ -z "$stream_out" ] || fail "diagnostics reached stdout on the installed package: $stream_out"
+echo "$stream_err" | grep -q "Configuration error" || fail "diagnostics did not reach stderr on the installed package"
+/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml 2>/dev/null \
+    | grep -q "Configuration OK" || fail "the --check-config verdict is not on stdout on the installed package"
+rm -f /tmp/ci-bad-settings.yaml
+pass "installed package: diagnostics on stderr, the --check-config verdict on stdout"
 [ -f "$SETTINGS" ] || fail "settings.yaml not created"
 [ -f /usr/share/send-to-influx/example_settings.yaml ] || fail "example not shipped under /usr/share"
 # settings.yaml is deliberately NOT a conffile (see build-deb.sh) - but the
@@ -385,12 +402,12 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
         [ "$mcp_up" = 1 ] || fail "MCP server did not bind 127.0.0.1:8420 under the hardened systemd unit"
         pass "MCP server bound and served OAuth metadata under the hardened systemd sandbox"
     fi
-    # The collector logs to stderr, not stdout. systemd's defaults send both to the journal
-    # (the unit pins neither StandardOutput nor StandardError) and the rsyslog rule matches on
-    # programname rather than on a stream - but that is reasoning about config files, and the
-    # question is what a real install actually captures. So assert it: the startup banner is
-    # logged at INFO by every run, which makes it the cheapest proof that the stream reaching
-    # the journal is the one the service writes on.
+    # Nothing was *lost* by moving diagnostics to stderr: the journal must still capture them.
+    # This deliberately does not claim to prove *which* stream they came from - systemd captures
+    # stdout and stderr alike, so journalctl cannot distinguish them. The stream itself is
+    # asserted directly against the installed binary in the fresh-install scenario above, and by
+    # unit tests. What this adds is that the service, under its real unit and sandbox, still
+    # reaches the journal at all - which is the half that config-file reasoning cannot settle.
     journal_ok=0
     for _ in $(seq 1 10); do
         if journalctl -u send-to-influx --no-pager 2>/dev/null | grep -q "Starting send-to-influx"; then
@@ -398,11 +415,20 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
         fi
         sleep 1
     done
-    [ "$journal_ok" = 1 ] || fail "journalctl captured no startup line - stderr is not reaching the journal"
-    pass "journal captures the service's stderr logging"
+    [ "$journal_ok" = 1 ] || fail "journalctl captured no startup line from the running service"
+    pass "journal still captures the service's log output"
     # And the same lines must still reach the rsyslog-managed logfile, where present. rsyslog
     # is only a Recommends:, so absence is not a failure - a missing *rule* would be.
+    # rsyslog is only a Recommends:, but both CI legs install it explicitly, so where the binary
+    # exists this must not be skipped - a skipped check reads exactly like a passed one. Start it
+    # if it is installed but idle rather than shrugging.
+    if command -v rsyslogd >/dev/null 2>&1 && ! pgrep -x rsyslogd >/dev/null 2>&1; then
+        systemctl start rsyslog >/dev/null 2>&1 || true
+        sleep 2
+    fi
     if command -v rsyslogd >/dev/null 2>&1 && pgrep -x rsyslogd >/dev/null 2>&1; then
+        # Restart the collector so it logs again with rsyslog now listening.
+        systemctl restart send-to-influx >/dev/null 2>&1 || true
         log_ok=0
         for _ in $(seq 1 10); do
             if grep -q "Starting send-to-influx" /var/log/send-to-influx.log 2>/dev/null; then
@@ -413,7 +439,7 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
         [ "$log_ok" = 1 ] || fail "/var/log/send-to-influx.log captured no startup line via rsyslog"
         pass "rsyslog still routes the service's logging to /var/log/send-to-influx.log"
     else
-        echo "note: rsyslog not running here - skipping the logfile assertion"
+        echo "note: rsyslog not installed here - skipping the logfile assertion"
     fi
     pid_before=$(systemctl show -p MainPID --value send-to-influx)
     upgrade_and_assert_silent "upgrade with running service"

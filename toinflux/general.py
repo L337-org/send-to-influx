@@ -39,9 +39,13 @@ DEFAULT_LOG_BACKUP_COUNT = 3
 def configure_logging(
     logfile=None, loglevel="INFO", log_max_bytes=DEFAULT_LOG_MAX_BYTES, log_backup_count=DEFAULT_LOG_BACKUP_COUNT
 ):
-    """Configure root logger with stdout and an optional rotating file handler.
+    """Configure root logger with a stderr handler and an optional rotating file handler.
 
-    :param logfile: path to log file; if None, logs to stdout only
+    Diagnostics go to **stderr**; stdout is reserved for the program's own output
+    (``--dump``/``--print`` JSON, ``--check-config``'s verdict), so a caller can parse it
+    while failures are still reported. Every level goes to stderr, not just errors.
+
+    :param logfile: path to log file; if None, logs to stderr only
     :type logfile: str or None
     :param loglevel: logging level name (e.g. "INFO", "DEBUG"); falls back to INFO if invalid
     :type loglevel: str
