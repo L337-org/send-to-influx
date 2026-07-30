@@ -10,6 +10,7 @@ import yaml
 from toinflux.general import (
     DEFAULT_SOURCE,
     MCP_DEFAULT_BIND_ADDRESS,
+    expand_sources,
     flatten_dict,
     get_class,
     load_settings,
@@ -390,6 +391,50 @@ class TestValidateSettings:
         sample_settings["sources"] = ["hue", None]
         with pytest.raises(ConfigError, match="must be strings"):
             validate_settings(sample_settings)
+
+
+class TestSourceExpansion:
+    """expand_sources is the one place that decides what actually runs."""
+
+    def test_instanced_sources_is_derived_from_the_registry(self):
+        """The set and the expansion behaviour must be the same structure.
+
+        Regression guard: INSTANCED_SOURCES was originally a hand-maintained frozenset
+        while _source_instances() hard-coded the source name, so listing a source as
+        instanced would not have expanded it - the set could silently drift from what the
+        code does. It is now derived from the enumerator registry.
+        """
+        from toinflux.general import INSTANCED_SOURCES, _INSTANCE_ENUMERATORS
+
+        assert INSTANCED_SOURCES == frozenset(_INSTANCE_ENUMERATORS)
+        for source in INSTANCED_SOURCES:
+            assert callable(_INSTANCE_ENUMERATORS[source]), f"{source} is listed but has no enumerator"
+
+    def test_ordinary_source_expands_to_one_unit(self, sample_settings):
+        """A single-target source yields exactly one (name, None) unit."""
+        assert expand_sources(["speedtest"], sample_settings) == [("speedtest", None)]
+
+    def test_instanced_source_expands_per_target(self, sample_settings):
+        """Hue yields one unit per configured bridge, in slot order."""
+        settings = {
+            **sample_settings,
+            "hue": {
+                **sample_settings["hue"],
+                "host": "a.example.com",
+                "user": "t1",
+                "host2": "b.example.com",
+                "user2": "t2",
+            },
+        }
+        assert expand_sources(["hue"], settings) == [("hue", "a.example.com"), ("hue", "b.example.com")]
+
+    def test_instanced_source_with_no_target_yields_no_unit(self, sample_settings):
+        """An unusable Hue is not collected, and must not stop the other sources."""
+        settings = {
+            **sample_settings,
+            "hue": {**sample_settings["hue"], "host": "a.example.com", "user": "your_hue_user"},
+        }
+        assert expand_sources(["hue", "speedtest"], settings) == [("speedtest", None)]
 
 
 class TestGetClass:

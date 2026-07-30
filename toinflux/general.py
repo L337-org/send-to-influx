@@ -165,6 +165,94 @@ def get_class(source, settings_file=None, instance=None):
 MQTT_SOURCES = frozenset({"nuki"})
 
 
+def _hue_bridge_hosts(settings):
+    """
+    Return the host of every usable configured Hue bridge - one per worker.
+
+    Imported inside the function, like ``get_class()`` does: ``philipshue`` imports
+    ``influx``, which imports this module, so a module-level import would be circular.
+
+    Errors and warnings from enumeration are deliberately dropped: ``validate_settings()``
+    has already reported them (fatally, for the errors), and this function's only job is to
+    say what will actually run. A bridge whose token is missing yields no host, so it is
+    simply not collected - which is exactly the warning validation already emitted.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: bridge hosts, empty when none is usable
+    :rtype: list
+    """
+    from toinflux.philipshue import enumerate_bridges
+
+    bridges, _, _ = enumerate_bridges(settings.get("hue"))
+    return [bridge.host for bridge in bridges]
+
+
+# Sources that can have more than one target behind a single settings block, and so run one
+# worker per target rather than one per source - mapped to the function that enumerates
+# those targets. Only Hue today: one worker per bridge, so that one unreachable bridge
+# cannot stop the others.
+#
+# The mapping *is* the registration: membership and expansion behaviour are the same
+# structure, so a source cannot be listed as instanced while still being expanded as a
+# single unit. Add a source by adding its enumerator here, and nothing else can be
+# forgotten.
+_INSTANCE_ENUMERATORS = {"hue": _hue_bridge_hosts}
+
+# Derived, never hand-maintained - see above.
+INSTANCED_SOURCES = frozenset(_INSTANCE_ENUMERATORS)
+
+
+def _source_instances(source, settings):
+    """
+    Return the instance values a single source expands to.
+
+    ``[None]`` for an ordinary single-target source. For an instanced source, one entry per
+    configured target - and an **empty** list when it has none, which means the source is
+    simply not collected rather than collected against a broken target.
+
+    :param source: source name, already lowercased
+    :type source: str
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: instance values for this source
+    :rtype: list
+    """
+    enumerator = _INSTANCE_ENUMERATORS.get(source)
+    return enumerator(settings) if enumerator is not None else [None]
+
+
+def expand_sources(sources, settings):
+    """
+    Expand configured source names into the work units the runtime actually runs.
+
+    A work unit is ``(source, instance)`` - the same shape as
+    ``DataHandler.worker_key`` - and each one becomes exactly one worker. Most sources
+    yield a single ``(name, None)`` unit; Hue yields one per configured bridge, so that a
+    bridge that is unreachable backs off on its own without stopping the others.
+
+    The single source of truth for "what runs", used by the multi-source supervisor, the
+    single-source path and the one-shot CLI modes alike. If any of those enumerated
+    instances for themselves they would eventually disagree with each other and with
+    ``validate_settings()`` - the failure ``resolve_default_source()`` exists to prevent.
+
+    A source that expands to nothing (Hue with no usable bridge) is absent from the
+    result: it is not collected, validation has already warned why, and every other
+    source is unaffected.
+
+    :param sources: configured source names, already lowercased
+    :type sources: list
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: ``[(source, instance), ...]``, one entry per worker
+    :rtype: list
+    """
+    units = []
+    for source in sources:
+        units.extend((source, instance) for instance in _source_instances(source, settings))
+    return units
+
+
 def resolve_default_source(settings):
     """
     Return the source to run when no ``sources:`` list is configured.
