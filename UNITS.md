@@ -28,8 +28,9 @@ and note that replacing a bridge with one at a different address starts a new se
 the README's "Multiple Hue bridges" section.
 
 The `collector_status` heartbeat for `hue` also carries a `host` tag, so each bridge's
-`ok`/`consecutive_failures` are reported separately. This means a `GROUP BY source` over
-`collector_status` returns one series per bridge rather than one for Hue.
+`ok`/`consecutive_failures` are recorded separately. Grouping by `source` alone aggregates
+across bridges, which can hide a failing one behind a healthy one — group by `source, host`
+(or `*`) for a series per bridge.
 
 ## MyEnergi Zappi (`zappi`)
 

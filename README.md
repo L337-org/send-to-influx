@@ -94,9 +94,17 @@ Settings other than `host`/`user` apply to the whole Hue estate: there is no per
 In InfluxDB, every point carries a `host` tag naming its bridge. **Field names are unchanged
 and unprefixed**, so nothing about your existing dashboards breaks when you add a second
 bridge — but two bridges with a light of the same name write the same field key under
-different `host` tags, so filter or group by `host` to tell them apart. The
-`collector_status` heartbeat carries the same tag, so each bridge's health is separate; a
-`GROUP BY source` over `collector_status` now returns one series per Hue bridge.
+different `host` tags, so filter or group by `host` to tell them apart.
+
+The `collector_status` heartbeat carries the same tag, so each bridge's health is recorded
+separately. **Check any existing alert that groups `collector_status` by `source` alone.**
+With one bridge that was the whole story; with two it aggregates them, so a healthy bridge
+can mask a failing one — `SELECT last(ok) ... GROUP BY source` returns `ok=1` while another
+bridge sits at `0`. Group by `source, host` (or `*`) to get a series per bridge:
+
+```sql
+SELECT last("ok") FROM "collector_status" WHERE "source" = 'hue' GROUP BY "source", "host"
+```
 
 #### Adding an additional Hue bridge
 
