@@ -702,7 +702,7 @@ class TestFormatFieldValue:
 
 
 class TestEscapeKeyOrTagValue:
-    """Tests for the _escape_key_or_tag_value line protocol helper."""
+    """Tests for the escape_key_or_tag_value line protocol helper."""
 
     def test_escapes_comma(self):
         assert escape_key_or_tag_value("a,b") == "a\\,b"

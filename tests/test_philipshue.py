@@ -436,7 +436,10 @@ class TestHueTokenRedaction:
         hue = self._hue(sample_settings, token="")
         with pytest.raises(ConfigError) as excinfo:
             hue.get_data_from_hue_bridge()
-        assert "no Hue bridge is configured" in str(excinfo.value)
+        # The message must name the real cause. "no Hue bridge is configured" would be
+        # wrong here - the host is configured, it is the token that is missing.
+        assert "hue.user is not set" in str(excinfo.value)
+        assert sample_settings["hue"]["host"] in str(excinfo.value)
 
     def test_every_configured_bridges_token_is_redacted(self, sample_settings):
         """Redaction covers the whole configured set, not just this worker's own token.

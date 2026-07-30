@@ -403,11 +403,17 @@ class Hue(DataHandler):
             configuration change). Not retryable - the worker should stop rather than loop
             forever against a bridge that is not there.
         """
-        bridges, errors, _ = enumerate_bridges(self.settings.get("hue"))
+        bridges, errors, unusable = enumerate_bridges(self.settings.get("hue"))
         if errors:
             raise ConfigError("; ".join(errors))
         if not bridges:
-            raise ConfigError("no Hue bridge is configured (hue.host is empty or absent)")
+            # Report what enumeration actually found, rather than a generic "no bridge
+            # configured": the same no-usable-bridges state covers both nothing being
+            # configured at all *and* a host that is configured but whose token is
+            # missing or still a placeholder. Claiming the host is absent when it is
+            # sitting right there sends the reader looking in the wrong place, and the
+            # warnings already name the slot, the host and what to set.
+            raise ConfigError("; ".join(unusable) or "no Hue bridge is configured")
         if self.instance is None:
             return bridges[0]
         for bridge in bridges:
