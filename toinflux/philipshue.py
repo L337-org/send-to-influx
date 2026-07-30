@@ -26,8 +26,11 @@ Bridge = namedtuple("Bridge", "slot host user")
 # The suffix must be canonical: ``host1`` is rejected rather than silently accepted as
 # a synonym for ``host`` (it would be a second way to spell slot 1), and a leading zero
 # is rejected rather than folded onto its unpadded twin (``host02`` vs ``host2``).
+# Note the alternation: a bare ``[2-9]\d*`` looks right but rejects 10-19 (and 100-199,
+# ...) because they start with a 1, so a perfectly valid hue.host10 would have been
+# refused as malformed. Single digit 2-9, or any multi-digit number not starting with 0.
 _SLOT_FIELD_RE = re.compile(r"^host(?P<suffix>\d*)$")
-_CANONICAL_SLOT_SUFFIX_RE = re.compile(r"^[2-9]\d*$")
+_CANONICAL_SLOT_SUFFIX_RE = re.compile(r"^([2-9]|[1-9]\d+)$")
 
 
 def bridge_field_names(slot):
@@ -145,12 +148,12 @@ def _bridge_for_slot(hue_settings, slot):
                 host_field,
                 user_field,
             )
-        return (None, None, None)
+        return (None, None, None, None)
     if not isinstance(host, str):
         # YAML coerces more than you'd expect: `host: 10.0` is a float, `host: yes` is a
         # bool. Neither can address a bridge, and both would otherwise be str()-ed into a
         # doomed URL.
-        return (None, f"hue.{host_field} must be a string (got {host!r})", None)
+        return (None, f"hue.{host_field} must be a string (got {host!r})", None, None)
     if not _usable_token(user):
         return (
             None,
@@ -159,27 +162,39 @@ def _bridge_for_slot(hue_settings, slot):
             f"that bridge will not be collected. Set it with "
             f"'send-to-influx-set-credential hue-{user_field}', or clear hue.{host_field} "
             f"if that bridge is no longer in use",
+            host.strip(),
         )
-    return (Bridge(slot=slot, host=host.strip(), user=user.strip()), None, None)
+    return (Bridge(slot=slot, host=host.strip(), user=user.strip()), None, None, host.strip())
 
 
-def _duplicate_host_errors(bridges):
+def _duplicate_host_errors(configured):
     """
     Return an error for every slot addressing a bridge an earlier slot already addresses.
 
     Compared through ``_comparable_host``, so two spellings of one address are caught.
+
+    Deliberately checked over every slot that *has a host*, not only those with a usable
+    token. A slot whose token is missing spawns no worker, so nothing is double-collected
+    today - but the duplicate is still a mistake, and reporting it only once the missing
+    token is filled in would surface it at the least expected moment, long after the
+    copy-paste that caused it. Two slots naming one bridge cannot be intended either way.
+
+    :param configured: ``(slot, host)`` for every slot with a non-blank string host
+    :type configured: list
+    :return: error strings, empty when every host is distinct
+    :rtype: list
     """
     errors, seen = [], {}
-    for bridge in bridges:
-        first = seen.setdefault(_comparable_host(bridge.host), bridge)
-        if first is bridge:
+    for slot, host in configured:
+        first_slot, first_host = seen.setdefault(_comparable_host(host), (slot, host))
+        if first_slot == slot:
             continue
-        first_host_field, _ = bridge_field_names(first.slot)
-        host_field, _ = bridge_field_names(bridge.slot)
+        first_host_field, _ = bridge_field_names(first_slot)
+        host_field, _ = bridge_field_names(slot)
         errors.append(
-            f"hue.{host_field} ({bridge.host}) is the same bridge as hue.{first_host_field} "
-            f"({first.host}) - each slot must address a different bridge, or both workers would "
-            f"collect it and write two series for one device set"
+            f"hue.{host_field} ({host}) is the same bridge as hue.{first_host_field} "
+            f"({first_host}) - each slot must address a different bridge; once both have tokens it "
+            f"would be collected twice, writing two series for one set of devices"
         )
     return errors
 
@@ -227,24 +242,26 @@ def enumerate_bridges(hue_settings):
     if not isinstance(hue_settings, dict):
         return ([], [f"hue must be a mapping of settings (got {type(hue_settings).__name__})"], [])
 
-    bridges, errors, warnings_out = [], [], []
+    bridges, errors, warnings_out, configured = [], [], [], []
     for field in sorted(hue_settings):
         slot, slot_error = _parse_slot_field(field)
         if slot_error:
             errors.append(slot_error)
         if slot is None:
             continue
-        bridge, error, warning = _bridge_for_slot(hue_settings, slot)
+        bridge, error, warning, host = _bridge_for_slot(hue_settings, slot)
         if bridge is not None:
             bridges.append(bridge)
         if error:
             errors.append(error)
         if warning:
             warnings_out.append(warning)
+        if host is not None:
+            configured.append((slot, host))
 
     if not bridges and not errors and not warnings_out:
         warnings_out.append("no Hue bridge is configured (hue.host is empty or absent) - hue collects nothing")
-    errors.extend(_duplicate_host_errors(bridges))
+    errors.extend(_duplicate_host_errors(configured))
     return (bridges, errors, warnings_out)
 
 

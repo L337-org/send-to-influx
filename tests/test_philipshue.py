@@ -506,6 +506,33 @@ class TestEnumerateBridges:
         )
         assert errors == [] and warnings == [] and len(bridges) == 2
 
+    @pytest.mark.parametrize("slot", [10, 11, 19, 42, 99, 100])
+    def test_two_digit_and_higher_slots_are_valid(self, slot):
+        """There is no cap, so a high slot number must be accepted.
+
+        Regression guard: the canonical-suffix pattern was first written `[2-9]\\d*`,
+        which looks right but rejects 10-19 (and 100-199, ...) because they begin with a
+        1 - so hue.host10 was refused as malformed. The original tests only covered
+        host1/host0/host02 and so never caught it.
+        """
+        host_field, user_field = bridge_field_names(slot)
+        settings = self._hue(host="a.example.com", user="t1", **{host_field: "b.example.com", user_field: "t2"})
+        bridges, errors, warnings = enumerate_bridges(settings)
+        assert errors == [] and warnings == []
+        assert [b.slot for b in bridges] == [1, slot]
+
+    def test_duplicate_is_caught_even_when_one_slot_has_no_token(self):
+        """Duplicate detection covers every slot with a host, not only usable ones.
+
+        A tokenless slot spawns no worker, so nothing is double-collected *yet* - but
+        reporting the duplicate only once the token is filled in would surface it long
+        after the copy-paste that caused it, at the least expected moment.
+        """
+        settings = self._hue(host="dup.example.com", user="t1", host2="dup.example.com", user2="")
+        _, errors, warnings = enumerate_bridges(settings)
+        assert len(errors) == 1 and "same bridge" in errors[0]
+        assert len(warnings) == 1  # the missing token is still reported separately
+
     @pytest.mark.parametrize("field", ["host1", "host0", "host02"])
     def test_non_canonical_slot_fields_are_an_error(self, field):
         """host1 would be a second way to spell slot 1, and host02 a second way to spell
