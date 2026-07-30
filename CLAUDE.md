@@ -270,6 +270,19 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     `/api/{user}/lights/{id}/state` over the collector's own session/auth and `hue.insecure` TLS
     policy; the CLIP API returns 200 with a per-key success/error list, so a bridge-reported error is
     surfaced as `SourceConnectionError`.
+  - **Multi-bridge Hue** (SI-4): both write tools cover *every* configured bridge, via
+    `resolve_handlers()` in `toinflux/mcp_common.py` - one handler per bridge, built from the same
+    `expand_sources()` the collectors use so the MCP surface and the collectors cannot disagree about which
+    bridges exist. `hue_list_devices` labels each device with its `bridge` and reports an unreachable bridge
+    under `unreachable` rather than silently omitting it (a short list must not read as "no such light" when it
+    means "could not ask"). `hue_set_light` gains an optional `bridge`, and `_resolve_hue_target()` does the
+    cross-bridge arbitration: a device matching exactly one light across the estate acts without a bridge; a
+    device matching several is **refused** with every match named, since light ids repeat on every bridge (so a
+    bare id is ambiguous by nature) and names often repeat too, and actuating the wrong light is not
+    recoverable. Arbitration lives in `mcp_write.py` rather than on the class because it is about the *tool's*
+    parameters - each handler already resolves a device within its own bridge, and this only decides which
+    handler to ask. The write opt-in stays per *source* (`hue.mcp_read_write`), not per bridge: one estate,
+    one settings block, one switch.
   - **Speedtest** (`toinflux/speedtest.py`): tool `speedtest_run` (no args) via `mcp_trigger_run()` -
     runs a test *on the local host only* (separate hosts run separate processes with no listener, so
     cross-host triggering isn't possible; kept deliberately simple) and records it to InfluxDB
