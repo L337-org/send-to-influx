@@ -7,7 +7,7 @@ from toinflux.influx import (
     MAX_POINT_REJECTIONS,
     DataHandler,
     InfluxWriteError,
-    _escape_key_or_tag_value,
+    escape_key_or_tag_value,
     _format_field_value,
 )
 from toinflux.exceptions import ConfigError
@@ -702,22 +702,22 @@ class TestFormatFieldValue:
 
 
 class TestEscapeKeyOrTagValue:
-    """Tests for the _escape_key_or_tag_value line protocol helper."""
+    """Tests for the escape_key_or_tag_value line protocol helper."""
 
     def test_escapes_comma(self):
-        assert _escape_key_or_tag_value("a,b") == "a\\,b"
+        assert escape_key_or_tag_value("a,b") == "a\\,b"
 
     def test_escapes_equals(self):
-        assert _escape_key_or_tag_value("a=b") == "a\\=b"
+        assert escape_key_or_tag_value("a=b") == "a\\=b"
 
     def test_escapes_space(self):
-        assert _escape_key_or_tag_value("a b") == "a\\ b"
+        assert escape_key_or_tag_value("a b") == "a\\ b"
 
     def test_escapes_backslash(self):
-        assert _escape_key_or_tag_value("a\\b") == "a\\\\b"
+        assert escape_key_or_tag_value("a\\b") == "a\\\\b"
 
     def test_leaves_clean_value_untouched(self):
-        assert _escape_key_or_tag_value("clean_key") == "clean_key"
+        assert escape_key_or_tag_value("clean_key") == "clean_key"
 
 
 class TestWorkerIdentity:

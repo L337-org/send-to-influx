@@ -99,6 +99,21 @@ step. Warnings are opt-in via `validate_settings(..., warn=True)`, used only by 
 `validate_settings()` runs inside `load_settings()`, so unconditional logging would repeat per source at
 startup and again on every failure-triggered handler rebuild.
 
+**Which bridge a handler collects from.** `Hue.bridge()` resolves `self.instance` (a bridge host) against
+`enumerate_bridges()`. `instance=None` means "the first configured bridge", which is what keeps a
+single-bridge install - and every caller that constructs a handler without an instance, notably the MCP
+tools - behaving exactly as it did before slots existed. `_api_base()` and `get_data()` both build from the
+resolved bridge, so a worker uses *its own* bridge's host and token rather than slot 1's. An instance that
+matches no configured bridge, a malformed block, or no usable bridge at all raises `ConfigError` - not
+`SourceConnectionError` - so a worker whose bridge has gone (or whose token was never set) stops instead of
+authenticating in a loop forever; that is where acceptance criterion 6's intent actually lands, per-worker
+rather than fatally at load time. The `host` tag is `escape_key_or_tag_value()`d but **never normalised**:
+`send_data()` escapes field keys and takes the header verbatim, so a host containing a comma, equals sign or
+space would otherwise end the tag set early and silently write a corrupt point - while rewriting the value
+would change the series identity of an install already running an IPv6 bridge. `_redact()` covers *every*
+configured bridge's token, not just the resolved one, so it stays safe to call from an exception handler
+(enumeration cannot raise) and cannot miss a token that arrived from an unexpected slot.
+
 Because that token sits in the URL path, every Hue error message is passed through `Hue._redact()`
 before it is logged *or* raised - `requests` puts the request URL into its exception messages (both
 "Max retries exceeded with url: /api/&lt;token&gt;" and "503 Server Error ... for url:

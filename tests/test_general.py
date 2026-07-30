@@ -401,7 +401,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 result = get_class("hue")
-                mock_hue.assert_called_once_with("hue", settings_file=None)
+                mock_hue.assert_called_once_with("hue", settings_file=None, instance=None)
                 assert result is mock_hue.return_value
 
     def test_get_class_returns_hue_for_uppercase(self, sample_settings):
@@ -410,7 +410,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 result = get_class("Hue")
-                mock_hue.assert_called_once_with("hue", settings_file=None)
+                mock_hue.assert_called_once_with("hue", settings_file=None, instance=None)
                 assert result is mock_hue.return_value
 
     def test_get_class_returns_zappi_for_lowercase(self, sample_settings):
@@ -419,7 +419,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.myenergi.Zappi") as mock_zappi:
                 result = get_class("zappi")
-                mock_zappi.assert_called_once_with("zappi", settings_file=None)
+                mock_zappi.assert_called_once_with("zappi", settings_file=None, instance=None)
                 assert result is mock_zappi.return_value
 
     def test_get_class_returns_speedtest_for_lowercase(self, sample_settings):
@@ -428,7 +428,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.speedtest.Speedtest") as mock_speedtest:
                 result = get_class("speedtest")
-                mock_speedtest.assert_called_once_with("speedtest", settings_file=None)
+                mock_speedtest.assert_called_once_with("speedtest", settings_file=None, instance=None)
                 assert result is mock_speedtest.return_value
 
     def test_get_class_returns_speedtest_for_uppercase(self, sample_settings):
@@ -437,7 +437,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.speedtest.Speedtest") as mock_speedtest:
                 result = get_class("Speedtest")
-                mock_speedtest.assert_called_once_with("speedtest", settings_file=None)
+                mock_speedtest.assert_called_once_with("speedtest", settings_file=None, instance=None)
                 assert result is mock_speedtest.return_value
 
     def test_get_class_returns_nuki_for_lowercase(self, sample_settings):
@@ -446,7 +446,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.nuki.Nuki") as mock_nuki:
                 result = get_class("nuki")
-                mock_nuki.assert_called_once_with("nuki", settings_file=None)
+                mock_nuki.assert_called_once_with("nuki", settings_file=None, instance=None)
                 assert result is mock_nuki.return_value
 
     def test_get_class_mqtt_data_handler_is_not_selectable(self):
@@ -466,7 +466,9 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 get_class("hue", settings_file="/etc/send-to-influx/settings.yaml")
-                mock_hue.assert_called_once_with("hue", settings_file="/etc/send-to-influx/settings.yaml")
+                mock_hue.assert_called_once_with(
+                    "hue", settings_file="/etc/send-to-influx/settings.yaml", instance=None
+                )
 
     def test_get_class_datahandler_is_not_selectable(self):
         """get_class('DataHandler') raises ConfigError - it's the abstract base, not a real source."""

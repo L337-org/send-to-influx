@@ -105,7 +105,7 @@ def flatten_dict(data, parent_key="", sep="_"):
     return flattened
 
 
-def get_class(source, settings_file=None):
+def get_class(source, settings_file=None, instance=None):
     """
     Create and return a class object for the given data source name
 
@@ -119,6 +119,12 @@ def get_class(source, settings_file=None):
     :type source: str
     :param settings_file: path to the settings file (default: settings.yaml in the project root)
     :type settings_file: str or None
+    :param instance: which instance of the source this handler serves, for a source that
+        can have several targets behind one settings block (only Hue today, whose instance
+        is a bridge host). ``None`` - the default, and what every caller that does not care
+        about instances passes - means the source's single target, or for Hue the first
+        configured bridge, which is what keeps single-bridge installs and the MCP tools
+        behaving exactly as they did before slots existed.
     :return: class object
     :rtype: DataHandler
     """
@@ -146,7 +152,7 @@ def get_class(source, settings_file=None):
     class_name = next((k for k in classes if k.lower() == source.lower()), source)
     source_name = source.lower()
     try:
-        my_class = classes[class_name](source_name, settings_file=settings_file)
+        my_class = classes[class_name](source_name, settings_file=settings_file, instance=instance)
     except KeyError:
         raise ConfigError(f"Source {class_name} not found") from None
     return my_class
