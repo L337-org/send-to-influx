@@ -330,9 +330,16 @@ Running the script
 Alternatively, see [Using the .deb package](#using-the-deb-package) below for a
 `.deb` package that installs and runs it under systemd instead.
 
-Log output goes to stdout with timestamps and log level, e.g.:
+Log output goes to **stderr** with timestamps and log level, e.g.:
 
     2026-06-29 14:23:01 WARNING  Source 'hue' failed: connection timeout. Restarting in 5 seconds (attempt 1).
+
+Diagnostics are on stderr so that stdout carries only the program's own output — `--dump` and
+`--print` JSON, and `--check-config`'s verdict. That is what lets you pipe them: `sendtoinflux.py
+--dump --source hue | jq` works even when a source fails, because the failure is reported on the
+other stream. **If you redirect logs to a file, redirect stderr**: `sendtoinflux.py 2> mylog`, or
+`> mylog 2>&1` to capture both. Watching a terminal or a screen session needs no change, and
+neither does the packaged service — the journal captures both streams.
 
 On startup, an INFO line logs the version and which source(s) will run, so restarts are visible in the logs:
 
@@ -456,7 +463,7 @@ package output would never be seen, and the old code would otherwise keep runnin
 reboot. A stopped service is left stopped; an upgrade never starts anything.
 
 Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as
-stdout above. Journald also forwards to syslog as usual, and the package ships rsyslog and
+above. Journald also forwards to syslog as usual, and the package ships rsyslog and
 logrotate config (`/etc/rsyslog.d/49-send-to-influx.conf`, `/etc/logrotate.d/send-to-influx`,
 `Recommends:`, not `Depends:` - the service works via the journal alone either way) that redirects
 this service's messages out of the shared `daemon.log`/`syslog` into their own

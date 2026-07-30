@@ -66,10 +66,18 @@ def configure_logging(
             root.removeHandler(handler)
             handler.close()
 
-    stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setFormatter(fmt)
-    stdout_handler._send_to_influx_handler = True
-    root.addHandler(stdout_handler)
+    # stderr, not stdout: stdout carries the program's *data* - --dump/--print JSON and
+    # --check-config's verdict - and a caller has to be able to parse it. Sharing the stream
+    # made a partial-failure dump unparseable, since the failure it reports lands in the
+    # middle of the payload it still produces. Every level goes here, not just errors:
+    # diagnostics are diagnostics, and splitting them across two streams by severity would
+    # interleave unpredictably. Under systemd both streams reach the journal (the unit pins
+    # neither), and the rsyslog rule matches on programname rather than stream, so
+    # journalctl and /var/log/send-to-influx.log are unaffected.
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(fmt)
+    stderr_handler._send_to_influx_handler = True
+    root.addHandler(stderr_handler)
 
     if logfile:
         try:

@@ -629,7 +629,7 @@ def main():
         settings = toinflux.load_settings(args.settings)
     except ConfigError as exc:
         if args.check_config:
-            print(f"Configuration error: {exc}")
+            print(f"Configuration error: {exc}", file=sys.stderr)
         sys.exit(1)
 
     if args.check_config:
@@ -648,7 +648,7 @@ def main():
                 settings, source=args.source, settings_path=args.settings or "settings.yaml", warn=True
             )
         except ConfigError as exc:
-            print(f"Configuration error: {exc}")
+            print(f"Configuration error: {exc}", file=sys.stderr)
             sys.exit(1)
         print("Configuration OK")
         sys.exit(0)

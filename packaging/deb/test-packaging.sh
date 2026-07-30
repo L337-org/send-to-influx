@@ -385,6 +385,36 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
         [ "$mcp_up" = 1 ] || fail "MCP server did not bind 127.0.0.1:8420 under the hardened systemd unit"
         pass "MCP server bound and served OAuth metadata under the hardened systemd sandbox"
     fi
+    # The collector logs to stderr, not stdout. systemd's defaults send both to the journal
+    # (the unit pins neither StandardOutput nor StandardError) and the rsyslog rule matches on
+    # programname rather than on a stream - but that is reasoning about config files, and the
+    # question is what a real install actually captures. So assert it: the startup banner is
+    # logged at INFO by every run, which makes it the cheapest proof that the stream reaching
+    # the journal is the one the service writes on.
+    journal_ok=0
+    for _ in $(seq 1 10); do
+        if journalctl -u send-to-influx --no-pager 2>/dev/null | grep -q "Starting send-to-influx"; then
+            journal_ok=1; break
+        fi
+        sleep 1
+    done
+    [ "$journal_ok" = 1 ] || fail "journalctl captured no startup line - stderr is not reaching the journal"
+    pass "journal captures the service's stderr logging"
+    # And the same lines must still reach the rsyslog-managed logfile, where present. rsyslog
+    # is only a Recommends:, so absence is not a failure - a missing *rule* would be.
+    if command -v rsyslogd >/dev/null 2>&1 && pgrep -x rsyslogd >/dev/null 2>&1; then
+        log_ok=0
+        for _ in $(seq 1 10); do
+            if grep -q "Starting send-to-influx" /var/log/send-to-influx.log 2>/dev/null; then
+                log_ok=1; break
+            fi
+            sleep 1
+        done
+        [ "$log_ok" = 1 ] || fail "/var/log/send-to-influx.log captured no startup line via rsyslog"
+        pass "rsyslog still routes the service's logging to /var/log/send-to-influx.log"
+    else
+        echo "note: rsyslog not running here - skipping the logfile assertion"
+    fi
     pid_before=$(systemctl show -p MainPID --value send-to-influx)
     upgrade_and_assert_silent "upgrade with running service"
     echo "$LAST_UPGRADE_OUTPUT" | grep -q "has been restarted" || fail "expected the restarted upgrade message"
