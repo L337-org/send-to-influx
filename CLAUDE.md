@@ -76,7 +76,7 @@ verbatim, because normalising the tag would change the series identity for anyon
 IPv6 bridge. The single shared `_api_base()` matters more than it looks - the bug existed in *two*
 copies of the same f-string, so a second copy is exactly how one path would silently keep it.
 
-**Bridge slots (in progress, `feature/multi-hue-bridges`).** `enumerate_bridges()` in
+**Bridge slots.** `enumerate_bridges()` in
 `toinflux/philipshue.py` is the single source of truth for "which Hue bridges are configured", shared by
 `validate_settings()`, the worker spawner and the CLI modes - two separate implementations would
 eventually disagree about what runs, which is the failure `resolve_default_source()` exists to prevent.
@@ -113,6 +113,13 @@ space would otherwise end the tag set early and silently write a corrupt point -
 would change the series identity of an install already running an IPv6 bridge. `_redact()` covers *every*
 configured bridge's token, not just the resolved one, so it stays safe to call from an exception handler
 (enumeration cannot raise) and cannot miss a token that arrived from an unexpected slot.
+
+One consequence of validating bridges at all: a credential migrated to systemd-creds reads as *unset* when
+`--check-config` is run by hand, because systemd mounts `$CREDENTIALS_DIRECTORY` only for the service. Before
+multi-bridge support `validate_settings()` did not look at the `hue` block, so this confusion is new -
+`_log_config_warnings()` therefore appends an explanatory note, but **only when `CREDENTIALS_DIRECTORY` is
+unset**. Under the service the value really was substituted, so a warning there genuinely means unset and the
+note would be misdirection.
 
 Because that token sits in the URL path, every Hue error message is passed through `Hue._redact()`
 before it is logged *or* raised - `requests` puts the request URL into its exception messages (both
@@ -270,7 +277,7 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     `/api/{user}/lights/{id}/state` over the collector's own session/auth and `hue.insecure` TLS
     policy; the CLIP API returns 200 with a per-key success/error list, so a bridge-reported error is
     surfaced as `SourceConnectionError`.
-  - **Multi-bridge Hue reads** (SI-4): `get_current_state` reports each bridge separately under
+  - **Multi-bridge Hue reads**: `get_current_state` reports each bridge separately under
     `instances`, keyed by bridge host, because two bridges can carry the same field name (a "Kitchen" per
     floor) and one flat map would silently lose one of them. Keyed whenever the source is instanced - even with
     a single bridge - so nothing reading the payload depends on the bridge count; a single-*target* source keeps
@@ -285,7 +292,7 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     `bridge` when one was used, so a single-bridge answer is distinguishable from an estate-wide one. The bridge
     value never reaches a query as given - it is resolved through `Hue.bridge()` first, so an unconfigured
     bridge is refused as a `ToolParamError`, and the existing tag-filter path then quotes and escapes it.
-  - **Multi-bridge Hue** (SI-4): both write tools cover *every* configured bridge, via
+  - **Multi-bridge Hue**: both write tools cover *every* configured bridge, via
     `resolve_handlers()` in `toinflux/mcp_common.py` - one handler per bridge, built from the same
     `expand_sources()` the collectors use so the MCP surface and the collectors cannot disagree about which
     bridges exist. `hue_list_devices` labels each device with its `bridge` and reports an unreachable bridge
@@ -661,7 +668,7 @@ the source-checkout/screen-session path, where `systemd-creds` doesn't apply at 
   every pre-existing `settings.yaml` keeps working with just a warning; `example_settings.yaml` ships
   `true` explicitly, so new installs enforce by default) - `true` additionally raises `ConfigError`
   instead of just warning.
-- **Slot credentials (SI-4).** `hue-user2`, `hue-user3`, … are credentials exactly like the static eight, and
+- **Slot credentials.** `hue-user2`, `hue-user3`, … are credentials exactly like the static eight, and
   are **uncapped**. Every consumer asks one shared predicate in `credentials.py` rather than testing membership
   of `CREDENTIAL_FIELDS` itself: `credential_field(name)` → `(section, field)`, `credential_name_for(section,
   field)` → the inverse, `is_credential_field()`, `placeholder_for(name)` (a slot shares slot 1's placeholder),

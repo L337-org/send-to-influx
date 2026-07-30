@@ -393,6 +393,44 @@ class TestValidateSettings:
             validate_settings(sample_settings)
 
 
+class TestConfigWarningCaveat:
+    """A migrated credential is invisible outside the service, and the warning says so."""
+
+    SETTINGS = {
+        "influx": {"url": "http://x", "token": "t", "org": "o"},
+        "sources": ["hue"],
+        "hue": {"db": "hue_db", "interval": 300, "host": "a.example.com", "user": ""},
+    }
+
+    def test_outside_the_service_the_caveat_is_added(self, monkeypatch, caplog):
+        """Run by hand, systemd-creds is not mounted, so a stored credential reads as unset -
+        alarming and wrong-sounding without an explanation. This check did not exist before
+        multi-bridge support, so the confusion is new and worth heading off."""
+        monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+        with caplog.at_level("WARNING"):
+            validate_settings(dict(self.SETTINGS), warn=True)
+        assert "not visible outside the service" in caplog.text
+
+    def test_under_the_service_the_caveat_is_omitted(self, monkeypatch, caplog):
+        """With the directory present the value was substituted, so a warning really does
+        mean unset - saying otherwise would be misdirection."""
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", "/run/credentials/send-to-influx.service")
+        with caplog.at_level("WARNING"):
+            validate_settings(dict(self.SETTINGS), warn=True)
+        assert "not visible outside the service" not in caplog.text
+
+    def test_no_caveat_when_there_is_nothing_to_explain(self, monkeypatch, caplog):
+        """A clean config must not carry a note about credentials it does not need."""
+        monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+        settings = {
+            **self.SETTINGS,
+            "hue": {**self.SETTINGS["hue"], "user": "a-real-token"},
+        }
+        with caplog.at_level("WARNING"):
+            validate_settings(settings, warn=True)
+        assert "not visible outside the service" not in caplog.text
+
+
 class TestSourceExpansion:
     """expand_sources is the one place that decides what actually runs."""
 

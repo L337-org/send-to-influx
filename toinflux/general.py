@@ -661,10 +661,21 @@ def _log_config_warnings(warnings_found, settings_path, warn):
     :param warn: whether to emit them at all
     :type warn: bool
     """
-    if not warn:
+    if not warn or not warnings_found:
         return
     for warning in warnings_found:
         logging.warning("%s: %s", settings_path, warning)
+    if not os.environ.get("CREDENTIALS_DIRECTORY"):
+        # Run by hand rather than as the service, so systemd-creds is not mounted and a
+        # migrated credential looks unset from here even though the collector will find it.
+        # Only said when it can actually be the explanation: under the service the directory
+        # is present, the value was substituted, and a warning then really does mean unset.
+        logging.warning(
+            "%s: note that a credential stored with send-to-influx-set-credential is not "
+            "visible outside the service, so it reads as unset here - the collector will "
+            "still find it. Run 'systemctl status send-to-influx' to see what the service itself reports",
+            settings_path,
+        )
 
 
 def validate_settings(settings, source=None, settings_path="settings.yaml", warn=False):
