@@ -39,6 +39,7 @@ import requests
 import urllib3
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
+from toinflux.general import INSTANCED_SOURCES
 from toinflux.mcp_common import close_session, configured_sources, resolve_handler, resolve_handlers
 
 # User-facing aggregation name -> InfluxQL selector/aggregator function. "raw"
@@ -609,7 +610,17 @@ def _query_history_result(
     one measurement and an unqualified question about the estate should get an answer about
     the estate. The value never reaches the query as given: it is resolved against the
     configured bridges first, so an unknown one is refused.
+
+    It is rejected outright for a source that has no instances. Such a source would accept
+    the instance, ignore it (its tag filters do not vary), run an unscoped query - and then
+    the result would echo ``bridge`` back, telling the caller the query was scoped when it
+    was not. Refusing is the only honest answer.
     """
+    if bridge is not None and source.lower() not in INSTANCED_SOURCES:
+        raise ToolParamError(
+            f"'bridge' does not apply to source {source!r} - it has a single target. "
+            f"Only these sources have separate targets to scope to: {', '.join(sorted(INSTANCED_SOURCES))}"
+        )
     handler, schema = resolve_schema(source, settings, settings_file, instance=bridge)
     try:
         result = _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit)
@@ -867,7 +878,8 @@ def register_read_tools(server, settings, settings_file=None):
           sum/count/first/last/spread/stddev, which each require a group_by interval.
         - group_by: a bucket interval like '5m'/'1h'/'1d' (only with aggregation).
         - limit: max points returned, 1..5000 (values outside are clamped).
-        - bridge: Hue only, and only with more than one bridge configured. Restricts the
+        - bridge: Hue only - rejected for any other source, which has a single target.
+          Only useful with more than one bridge configured. Restricts the
           query to that bridge; omitted, the query covers every bridge, since they share one
           measurement. Two bridges can hold the same field name (a "Kitchen" per floor), so
           an unqualified query can mix them - pass `bridge` when the answer must be about

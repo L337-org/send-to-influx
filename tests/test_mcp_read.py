@@ -844,6 +844,31 @@ class TestMultiBridgeReads:
                 current_state_result("hue", self._settings(), None)
         assert "down.example.com" in str(excinfo.value) and "up.example.com" in str(excinfo.value)
 
+    def test_bridge_is_rejected_for_a_source_with_one_target(self):
+        """Silently ignoring it would be worse than refusing.
+
+        A non-instanced source accepts any instance, ignores it (its tag filters do not
+        vary), runs an unscoped query - and the result would then echo `bridge` back,
+        telling the caller the query was scoped when it was not.
+        """
+        from toinflux.mcp_read import _query_history_result
+
+        with pytest.raises(ToolParamError) as excinfo:
+            _query_history_result(
+                {"sources": ["speedtest"]},
+                None,
+                source="speedtest",
+                field="ping",
+                start="-1h",
+                end="now",
+                aggregation="raw",
+                group_by=None,
+                limit=10,
+                bridge="made-up",
+            )
+        assert "does not apply" in str(excinfo.value)
+        assert "hue" in str(excinfo.value)  # names the sources it does apply to
+
     def test_history_scoped_to_one_bridge_filters_by_its_host_tag(self):
         """Hue writes every bridge to one measurement, so scoping a query means filtering on
         the host tag its own writes carry."""
