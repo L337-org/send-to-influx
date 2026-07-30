@@ -29,7 +29,12 @@ Bridge = namedtuple("Bridge", "slot host user")
 # Note the alternation: a bare ``[2-9]\d*`` looks right but rejects 10-19 (and 100-199,
 # ...) because they start with a 1, so a perfectly valid hue.host10 would have been
 # refused as malformed. Single digit 2-9, or any multi-digit number not starting with 0.
-_SLOT_FIELD_RE = re.compile(r"^host(?P<suffix>\d*)$")
+#
+# Both halves of a slot are matched, not just the host: otherwise a mistyped ``user02``
+# would be silently ignored (the slot would report its token as unset while the token sat
+# in a key nothing reads), and a token left behind in a slot whose host key was deleted
+# outright would never be noticed at all.
+_SLOT_FIELD_RE = re.compile(r"^(?:host|user)(?P<suffix>\d*)$")
 _CANONICAL_SLOT_SUFFIX_RE = re.compile(r"^([2-9]|[1-9]\d+)$")
 
 
@@ -117,8 +122,9 @@ def _parse_slot_field(field):
     if suffix and not _CANONICAL_SLOT_SUFFIX_RE.match(suffix):
         return (
             None,
-            f"hue.{field} is not a valid bridge slot - the first bridge is hue.host/hue.user, "
-            f"and further bridges are numbered from 2 with no leading zeros (hue.host2, hue.host3, ...)",
+            f"hue.{field} is not a valid bridge slot - the first bridge is hue.host/hue.user, and "
+            f"further bridges are numbered from 2 with no leading zeros (hue.host2/hue.user2, "
+            f"hue.host3/hue.user3, ...)",
         )
     return (int(suffix) if suffix else 1, None)
 
@@ -148,8 +154,9 @@ def _bridge_for_slot(hue_settings, slot):
     user = hue_settings.get(user_field)
 
     if host is None or (isinstance(host, str) and not host.strip()):
-        # Vacant. A token left behind in it is cosmetic - see the module docstring note
-        # on the two-step removal procedure.
+        # Vacant. A token left behind in it is cosmetic - removing a bridge blanks the
+        # token first and clears the host as a separate step, so this is a legitimate
+        # intermediate state, not a fault.
         if _usable_token(user):
             logging.debug(
                 "hue.%s is set but hue.%s is empty - that bridge is not collected; "
@@ -169,9 +176,8 @@ def _bridge_for_slot(hue_settings, slot):
             None,
             None,
             f"hue.{user_field} is not set for the bridge at hue.{host_field} ({host.strip()}) - "
-            f"that bridge will not be collected. Set it with "
-            f"'send-to-influx-set-credential hue-{user_field}', or clear hue.{host_field} "
-            f"if that bridge is no longer in use",
+            f"that bridge will not be collected. Set it to that bridge's whitelist token, or "
+            f"clear hue.{host_field} if that bridge is no longer in use",
             host.strip(),
         )
     return (Bridge(slot=slot, host=host.strip(), user=user.strip()), None, None, host.strip())
@@ -224,13 +230,18 @@ def _slot_numbers(hue_settings):
     :return: (slot numbers in numeric order, errors for malformed slot fields)
     :rtype: tuple
     """
-    slots, errors = [], []
-    for field in sorted(hue_settings):
+    slots, errors = set(), []
+    # key=str because YAML permits non-string mapping keys (`1: x`, `true: y`), and a
+    # mixed-type key set makes a bare sorted() raise TypeError - crashing out of
+    # validation instead of reporting a clean ConfigError. Same reasoning as
+    # validate_settings()'s guard on non-string `sources:` entries.
+    for field in sorted(hue_settings, key=str):
         slot, slot_error = _parse_slot_field(field)
         if slot_error:
             errors.append(slot_error)
         if slot is not None:
-            slots.append(slot)
+            # A set: host and user both name the same slot, so each is seen twice.
+            slots.add(slot)
     return (sorted(slots), errors)
 
 
@@ -262,10 +273,10 @@ def enumerate_bridges(hue_settings):
       unconfigured one, and would break the packaging suite's invariant that the
       example's placeholder values pass validation while workers merely retry.
 
-    A leftover ``userN`` with no ``hostN`` is neither: that is the resting state after
-    ``send-to-influx-set-credential hue-userN --remove``, which blanks the token and
-    leaves clearing the host as a separate step, so treating it as a fault would flag the
-    documented removal procedure mid-way through. Reported at DEBUG only.
+    A leftover ``userN`` with no usable ``hostN`` is neither: a token whose host has been
+    cleared is the resting state part-way through removing a bridge (the token is blanked
+    first, clearing the host is a separate step), so treating it as a fault would report
+    the removal procedure as an error mid-way through. Reported at DEBUG only.
 
     :param hue_settings: the ``hue`` settings block
     :type hue_settings: dict

@@ -562,6 +562,40 @@ class TestEnumerateBridges:
         assert len(errors) == 1 and "same bridge" in errors[0]
         assert len(warnings) == 1  # the missing token is still reported separately
 
+    @pytest.mark.parametrize("field", ["user1", "user0", "user02"])
+    def test_non_canonical_user_fields_are_also_an_error(self, field):
+        """Both halves of a slot are validated, not just the host.
+
+        A mistyped `user02` would otherwise be silently ignored: slot 2 would report its
+        token as unset while the token sat in a key nothing reads.
+        """
+        settings = self._hue(host="a.example.com", user="t1", **{field: "sometoken"})
+        _, errors, _ = enumerate_bridges(settings)
+        assert len(errors) == 1 and f"hue.{field}" in errors[0]
+
+    def test_token_in_a_slot_whose_host_key_is_absent_is_still_seen(self):
+        """A slot is discovered from either half, so a token left behind after the host
+        line was deleted outright is still noticed (at DEBUG) rather than invisible."""
+        bridges, errors, warnings = enumerate_bridges(self._hue(host="a.example.com", user="t1", user3="orphan"))
+        assert errors == [] and warnings == []
+        assert [b.slot for b in bridges] == [1]
+
+    def test_mixed_type_yaml_keys_do_not_crash(self):
+        """YAML permits non-string mapping keys (`1: x`, `true: y`); a mixed-type key set
+        makes a bare sorted() raise TypeError, crashing out of validation rather than
+        reporting a clean ConfigError."""
+        bridges, errors, warnings = enumerate_bridges({1: "x", 2.5: "y", "host": "a.example.com", "user": "t1"})
+        assert errors == [] and warnings == []
+        assert [b.host for b in bridges] == ["a.example.com"]
+
+    def test_warning_does_not_prescribe_an_unavailable_command(self):
+        """The message must not tell the user to run a credential command that doesn't
+        accept numbered slots yet - it names the field to set instead."""
+        _, _, warnings = enumerate_bridges(self._hue(host="a.example.com", user="t1", host2="b.example.com"))
+        assert len(warnings) == 1
+        assert "hue.user2" in warnings[0]
+        assert "set-credential" not in warnings[0]
+
     @pytest.mark.parametrize("field", ["host1", "host0", "host02"])
     def test_non_canonical_slot_fields_are_an_error(self, field):
         """host1 would be a second way to spell slot 1, and host02 a second way to spell
