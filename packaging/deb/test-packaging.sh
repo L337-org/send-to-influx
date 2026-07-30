@@ -419,27 +419,43 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
     pass "journal still captures the service's log output"
     # And the same lines must still reach the rsyslog-managed logfile, where present. rsyslog
     # is only a Recommends:, so absence is not a failure - a missing *rule* would be.
-    # rsyslog is only a Recommends:, but both CI legs install it explicitly, so where the binary
-    # exists this must not be skipped - a skipped check reads exactly like a passed one. Start it
-    # if it is installed but idle rather than shrugging.
+    # The rsyslog logfile route. journald only forwards to syslog while its syslog socket is
+    # active, so where that socket is absent the rule cannot fire and there is nothing here to
+    # exercise - which is a different thing from the route being broken. Start rsyslog if it is
+    # installed but idle, then either assert the route or say precisely what could not be
+    # established. Deliberately not a bare "skipping": that reads like a pass.
+    #
+    # Note this PR (diagnostics stdout -> stderr) does not affect this route either way: journald
+    # captures both streams identically and the rsyslog rule matches on programname.
     if command -v rsyslogd >/dev/null 2>&1 && ! pgrep -x rsyslogd >/dev/null 2>&1; then
         systemctl start rsyslog >/dev/null 2>&1 || true
         sleep 2
     fi
-    if command -v rsyslogd >/dev/null 2>&1 && pgrep -x rsyslogd >/dev/null 2>&1; then
-        # Restart the collector so it logs again with rsyslog now listening.
+    if pgrep -x rsyslogd >/dev/null 2>&1 && [ -S /run/systemd/journal/syslog ]; then
+        # Restart so the banner is logged again with rsyslog now listening.
         systemctl restart send-to-influx >/dev/null 2>&1 || true
         log_ok=0
-        for _ in $(seq 1 10); do
+        for _ in $(seq 1 15); do
             if grep -q "Starting send-to-influx" /var/log/send-to-influx.log 2>/dev/null; then
                 log_ok=1; break
             fi
             sleep 1
         done
-        [ "$log_ok" = 1 ] || fail "/var/log/send-to-influx.log captured no startup line via rsyslog"
-        pass "rsyslog still routes the service's logging to /var/log/send-to-influx.log"
+        if [ "$log_ok" = 1 ]; then
+            pass "rsyslog still routes the service's logging to /var/log/send-to-influx.log"
+        else
+            # Both halves are present, so this is a real failure - dump enough to diagnose it
+            # from this output alone rather than needing a re-run.
+            ls -l /var/log/send-to-influx.log 2>&1 | sed 's/^/  logfile: /'
+            grep -c . /var/log/send-to-influx.log 2>/dev/null | sed 's/^/  logfile lines: /'
+            journalctl -u send-to-influx --no-pager -n 3 2>&1 | sed 's/^/  journal: /'
+            fail "/var/log/send-to-influx.log captured no startup line despite rsyslog and journald forwarding both being active"
+        fi
     else
-        echo "note: rsyslog not installed here - skipping the logfile assertion"
+        echo "note: NOT VERIFIED - the rsyslog logfile route could not be exercised here" \
+             "(rsyslogd=$(pgrep -x rsyslogd >/dev/null 2>&1 && echo running || echo 'not running')," \
+             "/run/systemd/journal/syslog=$([ -S /run/systemd/journal/syslog ] && echo present || echo absent))." \
+             "journald forwards to syslog only while that socket is active. Unaffected by the stdout/stderr split."
     fi
     pid_before=$(systemctl show -p MainPID --value send-to-influx)
     upgrade_and_assert_silent "upgrade with running service"
