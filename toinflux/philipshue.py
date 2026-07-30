@@ -127,10 +127,20 @@ def _bridge_for_slot(hue_settings, slot):
     """
     Resolve one slot into a bridge, an error, or a warning.
 
-    At most one of the three is returned; all three are ``None`` for a vacant slot,
-    which is a legitimate resting state rather than a fault.
+    At most one of ``bridge``/``error``/``warning`` is ever set, and all three are
+    ``None`` for a vacant slot, which is a legitimate resting state rather than a fault.
 
-    :return: ``(bridge, error, warning)``
+    ``host`` is returned separately and independently of the other three: it is the
+    configured host for any slot that has one, *including* a slot whose token is unusable.
+    Duplicate-host detection needs it in that case too - two slots naming one bridge is a
+    mistake whether or not both have tokens yet (see ``_duplicate_host_errors``).
+
+    :param hue_settings: the ``hue`` settings block
+    :type hue_settings: dict
+    :param slot: slot number to resolve
+    :type slot: int
+    :return: ``(bridge, error, warning, host)`` - ``host`` is None only when the slot has
+        no usable host at all
     :rtype: tuple
     """
     host_field, user_field = bridge_field_names(slot)
@@ -199,6 +209,31 @@ def _duplicate_host_errors(configured):
     return errors
 
 
+def _slot_numbers(hue_settings):
+    """
+    Return ``(slots, errors)`` for the slot-shaped fields in a ``hue`` block.
+
+    Slots come back in **numeric** order. The keys are scanned with ``sorted()``, which is
+    lexicographic and so puts ``host10`` before ``host2``; slots are numeric identifiers,
+    and processing them out of numeric order would make the bridge list, the startup log
+    and - most confusingly - the "same bridge as hue.hostN" message name an arbitrary slot
+    as the earlier one. Deterministic either way, but only one of the two reads correctly.
+
+    :param hue_settings: the ``hue`` settings block
+    :type hue_settings: dict
+    :return: (slot numbers in numeric order, errors for malformed slot fields)
+    :rtype: tuple
+    """
+    slots, errors = [], []
+    for field in sorted(hue_settings):
+        slot, slot_error = _parse_slot_field(field)
+        if slot_error:
+            errors.append(slot_error)
+        if slot is not None:
+            slots.append(slot)
+    return (sorted(slots), errors)
+
+
 def enumerate_bridges(hue_settings):
     """
     Enumerate the bridges configured in a ``hue`` settings block.
@@ -242,13 +277,9 @@ def enumerate_bridges(hue_settings):
     if not isinstance(hue_settings, dict):
         return ([], [f"hue must be a mapping of settings (got {type(hue_settings).__name__})"], [])
 
-    bridges, errors, warnings_out, configured = [], [], [], []
-    for field in sorted(hue_settings):
-        slot, slot_error = _parse_slot_field(field)
-        if slot_error:
-            errors.append(slot_error)
-        if slot is None:
-            continue
+    bridges, warnings_out, configured = [], [], []
+    slots, errors = _slot_numbers(hue_settings)
+    for slot in slots:
         bridge, error, warning, host = _bridge_for_slot(hue_settings, slot)
         if bridge is not None:
             bridges.append(bridge)

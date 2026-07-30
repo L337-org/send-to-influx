@@ -521,6 +521,35 @@ class TestEnumerateBridges:
         assert errors == [] and warnings == []
         assert [b.slot for b in bridges] == [1, slot]
 
+    def test_slots_are_processed_in_numeric_order(self):
+        """Slot 10 must come after slot 2, not before it.
+
+        The keys are scanned with sorted(), which is lexicographic - "host10" sorts before
+        "host2". Slots are numeric identifiers, so out-of-order processing would make the
+        bridge list, the startup log and the "same bridge as hue.hostN" message name an
+        arbitrary slot as the earlier one.
+        """
+        settings = self._hue(
+            host="a.example.com",
+            user="t1",
+            host10="j.example.com",
+            user10="t10",
+            host2="b.example.com",
+            user2="t2",
+        )
+        bridges, errors, warnings = enumerate_bridges(settings)
+        assert errors == [] and warnings == []
+        assert [b.slot for b in bridges] == [1, 2, 10]
+
+    def test_duplicate_message_names_the_lower_slot_as_the_original(self):
+        """With slots 2 and 10 duplicating, slot 2 is the one already taken."""
+        settings = self._hue(
+            host="a.example.com", user="t1", host10="dup.example.com", user10="t10", host2="dup.example.com", user2="t2"
+        )
+        _, errors, _ = enumerate_bridges(settings)
+        assert len(errors) == 1
+        assert "hue.host10" in errors[0] and "same bridge as hue.host2" in errors[0]
+
     def test_duplicate_is_caught_even_when_one_slot_has_no_token(self):
         """Duplicate detection covers every slot with a host, not only usable ones.
 
