@@ -15,7 +15,14 @@ import sys
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse
 import yaml
-from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, SENTINEL_PREFIX, apply_credential_substitution
+from toinflux.credentials import (
+    CREDENTIAL_FIELDS,
+    SENTINEL_PREFIX,
+    apply_credential_substitution,
+    credential_field,
+    placeholder_for,
+    slot_credential_names,
+)
 from toinflux.exceptions import ConfigError
 
 # The source sendtoinflux.py runs when neither sources: nor default_source: is
@@ -105,7 +112,7 @@ def flatten_dict(data, parent_key="", sep="_"):
     return flattened
 
 
-def get_class(source, settings_file=None):
+def get_class(source, settings_file=None, instance=None):
     """
     Create and return a class object for the given data source name
 
@@ -119,6 +126,12 @@ def get_class(source, settings_file=None):
     :type source: str
     :param settings_file: path to the settings file (default: settings.yaml in the project root)
     :type settings_file: str or None
+    :param instance: which instance of the source this handler serves, for a source that
+        can have several targets behind one settings block (only Hue today, whose instance
+        is a bridge host). ``None`` - the default, and what every caller that does not care
+        about instances passes - means the source's single target, or for Hue the first
+        configured bridge, which is what keeps single-bridge installs and the MCP tools
+        behaving exactly as they did before slots existed.
     :return: class object
     :rtype: DataHandler
     """
@@ -146,7 +159,7 @@ def get_class(source, settings_file=None):
     class_name = next((k for k in classes if k.lower() == source.lower()), source)
     source_name = source.lower()
     try:
-        my_class = classes[class_name](source_name, settings_file=settings_file)
+        my_class = classes[class_name](source_name, settings_file=settings_file, instance=instance)
     except KeyError:
         raise ConfigError(f"Source {class_name} not found") from None
     return my_class
@@ -157,6 +170,94 @@ def get_class(source, settings_file=None):
 # validate_settings()/--check-config can catch a missing broker config up front rather
 # than letting the collector fail at runtime.
 MQTT_SOURCES = frozenset({"nuki"})
+
+
+def _hue_bridge_hosts(settings):
+    """
+    Return the host of every usable configured Hue bridge - one per worker.
+
+    Imported inside the function, like ``get_class()`` does: ``philipshue`` imports
+    ``influx``, which imports this module, so a module-level import would be circular.
+
+    Errors and warnings from enumeration are deliberately dropped: ``validate_settings()``
+    has already reported them (fatally, for the errors), and this function's only job is to
+    say what will actually run. A bridge whose token is missing yields no host, so it is
+    simply not collected - which is exactly the warning validation already emitted.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: bridge hosts, empty when none is usable
+    :rtype: list
+    """
+    from toinflux.philipshue import enumerate_bridges
+
+    bridges, _, _ = enumerate_bridges(settings.get("hue"))
+    return [bridge.host for bridge in bridges]
+
+
+# Sources that can have more than one target behind a single settings block, and so run one
+# worker per target rather than one per source - mapped to the function that enumerates
+# those targets. Only Hue today: one worker per bridge, so that one unreachable bridge
+# cannot stop the others.
+#
+# The mapping *is* the registration: membership and expansion behaviour are the same
+# structure, so a source cannot be listed as instanced while still being expanded as a
+# single unit. Add a source by adding its enumerator here, and nothing else can be
+# forgotten.
+_INSTANCE_ENUMERATORS = {"hue": _hue_bridge_hosts}
+
+# Derived, never hand-maintained - see above.
+INSTANCED_SOURCES = frozenset(_INSTANCE_ENUMERATORS)
+
+
+def _source_instances(source, settings):
+    """
+    Return the instance values a single source expands to.
+
+    ``[None]`` for an ordinary single-target source. For an instanced source, one entry per
+    configured target - and an **empty** list when it has none, which means the source is
+    simply not collected rather than collected against a broken target.
+
+    :param source: source name, already lowercased
+    :type source: str
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: instance values for this source
+    :rtype: list
+    """
+    enumerator = _INSTANCE_ENUMERATORS.get(source)
+    return enumerator(settings) if enumerator is not None else [None]
+
+
+def expand_sources(sources, settings):
+    """
+    Expand configured source names into the work units the runtime actually runs.
+
+    A work unit is ``(source, instance)`` - the same shape as
+    ``DataHandler.worker_key`` - and each one becomes exactly one worker. Most sources
+    yield a single ``(name, None)`` unit; Hue yields one per configured bridge, so that a
+    bridge that is unreachable backs off on its own without stopping the others.
+
+    The single source of truth for "what runs", used by the multi-source supervisor, the
+    single-source path and the one-shot CLI modes alike. If any of those enumerated
+    instances for themselves they would eventually disagree with each other and with
+    ``validate_settings()`` - the failure ``resolve_default_source()`` exists to prevent.
+
+    A source that expands to nothing (Hue with no usable bridge) is absent from the
+    result: it is not collected, validation has already warned why, and every other
+    source is unaffected.
+
+    :param sources: configured source names, already lowercased
+    :type sources: list
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: ``[(source, instance), ...]``, one entry per worker
+    :rtype: list
+    """
+    units = []
+    for source in sources:
+        units.extend((source, instance) for instance in _source_instances(source, settings))
+    return units
 
 
 def resolve_default_source(settings):
@@ -235,6 +336,42 @@ def mqtt_block_errors(settings, context=""):
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         errors.append(f"mqtt.broker_port must be an integer between 1 and 65535 (got {port!r})")
     return errors
+
+
+def _validate_hue_bridges(settings, sources):
+    """Return ``(errors, warnings)`` for the ``hue`` block's bridge slots, checked only
+    when hue is among the sources being validated.
+
+    Delegates to ``toinflux.philipshue.enumerate_bridges()`` rather than re-deriving the
+    slot rules here: the runtime enumerates bridges with that same function, and two
+    separate implementations would eventually disagree about what is configured - the
+    failure ``resolve_default_source()`` exists to prevent, where ``--check-config``
+    reported OK on a config whose effective source had no settings block at all.
+
+    Imported inside the function, like ``get_class()`` does: ``philipshue`` imports
+    ``influx``, which imports this module, so a module-level import would be circular.
+
+    Only self-contradictory configuration is an error. An unusable bridge - no host, or a
+    host with a placeholder/blank token - is a warning instead, because
+    ``example_settings.yaml`` ships ``hue`` in ``sources:`` next to the placeholder token,
+    so a fresh install is exactly that state: raising would stop every other collector
+    along with the unconfigured one.
+    Returns ``(errors, warnings)``; the caller decides whether to surface the warnings,
+    because ``validate_settings()`` runs inside ``load_settings()`` and therefore on
+    every ``DataHandler`` construction - logging from here would repeat the same line per
+    source at startup and again on every failure-triggered rebuild.
+    """
+    # Absent section: _validate_source_block already reports "no configuration section
+    # found for source 'hue'", which is both accurate and sufficient. Enumerating a
+    # missing block would add a second error saying it "must be a mapping (got NoneType)",
+    # which is true but misleading - the problem is that it isn't there, not that it's the
+    # wrong type. One cause, one message.
+    if "hue" not in sources or "hue" not in settings:
+        return ([], [])
+    from toinflux.philipshue import enumerate_bridges
+
+    _, errors, bridge_warnings = enumerate_bridges(settings.get("hue"))
+    return (errors, bridge_warnings)
 
 
 def _validate_mqtt_block(settings, sources):
@@ -507,7 +644,30 @@ def _validate_source_block(source, settings, is_v2):
     return errors
 
 
-def validate_settings(settings, source=None, settings_path="settings.yaml"):
+def _log_config_warnings(warnings_found, settings_path, warn):
+    """Log non-fatal configuration warnings, but only when the caller asked for them.
+
+    Opt-in because ``validate_settings()`` runs inside ``load_settings()`` and therefore
+    on every ``DataHandler`` construction: logging unconditionally would repeat the same
+    line once per source at startup and again on every failure-triggered rebuild, which
+    the logging policy's bounded-volume rule rules out. ``--check-config`` opts in, since
+    reporting on the configuration is its entire job; at collection time the effective
+    bridge list is reported once by the worker spawner instead.
+
+    :param warnings_found: warning messages collected during validation
+    :type warnings_found: list
+    :param settings_path: settings file path, used to label the message
+    :type settings_path: str
+    :param warn: whether to emit them at all
+    :type warn: bool
+    """
+    if not warn or not warnings_found:
+        return
+    for warning in warnings_found:
+        logging.warning("%s: %s", settings_path, warning)
+
+
+def validate_settings(settings, source=None, settings_path="settings.yaml", warn=False):
     """Validate required keys in a parsed settings dictionary.
 
     :param settings: parsed settings dictionary
@@ -521,6 +681,12 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
         settings can come from a location other than settings.yaml (--settings, or the
         .yml fallback), so this shouldn't be hard-coded in the log output
     :type settings_path: str
+    :param warn: whether to log non-fatal configuration warnings (e.g. a Hue bridge whose
+        token isn't set, so it won't be collected). Off by default because this function
+        runs inside ``load_settings()``, which every ``DataHandler`` construction calls -
+        only ``--check-config`` opts in, so the same line isn't repeated per source and
+        per retry
+    :type warn: bool
     :raises ConfigError: if any required settings are missing or invalid
     """
     influx = settings.get("influx", {})
@@ -563,8 +729,11 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
         sources = [*sources, source]
     for src in sources:
         errors.extend(_validate_source_block(src, settings, is_v2))
+    hue_errors, hue_warnings = _validate_hue_bridges(settings, sources)
+    errors.extend(hue_errors)
     errors.extend(_validate_mqtt_block(settings, sources))
     errors.extend(mcp_block_errors(settings))
+    _log_config_warnings(hue_warnings, settings_path, warn)
     if errors:
         for error in errors:
             logging.critical("%s: %s", settings_path, error)
@@ -580,7 +749,11 @@ def _contains_real_secret(settings):
     :type settings: dict
     :rtype: bool
     """
-    for name, (top_key, field) in CREDENTIAL_FIELDS.items():
+    # Slot credentials are included, not just the static table: a real token hand-written
+    # into hue.user2 must count, or the group/other-readable check below would pass a file
+    # that does contain a secret.
+    for name in [*CREDENTIAL_FIELDS, *slot_credential_names(settings)]:
+        top_key, field = credential_field(name)
         block = settings.get(top_key)
         if not isinstance(block, dict):
             continue
@@ -594,7 +767,7 @@ def _contains_real_secret(settings):
         # the whole set - otherwise a real secret that happens to equal a
         # *different* field's placeholder text (e.g. influx.user == "your_api_key")
         # would be wrongly treated as empty/placeholder and skip the warning.
-        if value == PLACEHOLDER_VALUES[name]:
+        if value == placeholder_for(name):
             continue
         if isinstance(value, str) and value.startswith(SENTINEL_PREFIX):
             continue
@@ -668,7 +841,11 @@ def _clear_unsubstituted_credential_sentinels(settings):
     :raises ConfigError: if influx-token specifically is still a sentinel - see the
         note below on why this one field can't just be blanked like the others
     """
-    for name, (top_key, field) in CREDENTIAL_FIELDS.items():
+    # Slot credentials included for the same reason as the static ones: a hue.user3 left
+    # holding sentinel text with no credential behind it would otherwise pass validation's
+    # truthiness checks and then fail authentication forever.
+    for name in [*CREDENTIAL_FIELDS, *slot_credential_names(settings)]:
+        top_key, field = credential_field(name)
         block = settings.get(top_key)
         if not isinstance(block, dict):
             continue

@@ -10,6 +10,7 @@ import yaml
 from toinflux.general import (
     DEFAULT_SOURCE,
     MCP_DEFAULT_BIND_ADDRESS,
+    expand_sources,
     flatten_dict,
     get_class,
     load_settings,
@@ -392,6 +393,105 @@ class TestValidateSettings:
             validate_settings(sample_settings)
 
 
+class TestConfigWarningCaveat:
+    """A migrated credential is invisible outside the service, and the warning says so."""
+
+    SETTINGS = {
+        "influx": {"url": "http://x", "token": "t", "org": "o"},
+        "sources": ["hue"],
+        "hue": {"db": "hue_db", "interval": 300, "host": "a.example.com", "user": ""},
+    }
+
+    def test_outside_the_service_the_caveat_is_added(self, monkeypatch, caplog):
+        """Run by hand, systemd-creds is not mounted, so a stored credential reads as unset -
+        alarming and wrong-sounding without an explanation. This check did not exist before
+        multi-bridge support, so the confusion is new and worth heading off."""
+        monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+        with caplog.at_level("WARNING"):
+            validate_settings(dict(self.SETTINGS), warn=True)
+        assert "not visible outside the service" in caplog.text
+
+    def test_under_the_service_the_caveat_is_omitted(self, monkeypatch, caplog):
+        """With the directory present the value was substituted, so a warning really does
+        mean unset - saying otherwise would be misdirection."""
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", "/run/credentials/send-to-influx.service")
+        with caplog.at_level("WARNING"):
+            validate_settings(dict(self.SETTINGS), warn=True)
+        assert "not visible outside the service" not in caplog.text
+
+    def test_no_caveat_when_there_is_nothing_to_explain(self, monkeypatch, caplog):
+        """A clean config must not carry a note about credentials it does not need."""
+        monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+        settings = {
+            **self.SETTINGS,
+            "hue": {**self.SETTINGS["hue"], "user": "a-real-token"},
+        }
+        with caplog.at_level("WARNING"):
+            validate_settings(settings, warn=True)
+        assert "not visible outside the service" not in caplog.text
+
+    def test_a_warning_about_something_else_does_not_get_the_caveat(self, monkeypatch, caplog):
+        """An absent *host* is not a credential problem, so the caveat must stay away.
+
+        Review finding: the caveat was originally emitted once per run, alongside whatever
+        warnings there were, gated only on CREDENTIALS_DIRECTORY. So "no Hue bridge is
+        configured" - a missing host, with no credential involved anywhere - came with a
+        note about the credential store, sending the reader to look for something that was
+        never missing. It is now attached to the unset-token warning itself, which is what
+        makes this case structurally impossible rather than merely handled.
+        """
+        monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+        settings = {**self.SETTINGS, "hue": {**self.SETTINGS["hue"], "host": "", "user": ""}}
+        with caplog.at_level("WARNING"):
+            validate_settings(settings, warn=True)
+        assert "no Hue bridge is configured" in caplog.text
+        assert "not visible outside the service" not in caplog.text
+
+
+class TestSourceExpansion:
+    """expand_sources is the one place that decides what actually runs."""
+
+    def test_instanced_sources_is_derived_from_the_registry(self):
+        """The set and the expansion behaviour must be the same structure.
+
+        Regression guard: INSTANCED_SOURCES was originally a hand-maintained frozenset
+        while _source_instances() hard-coded the source name, so listing a source as
+        instanced would not have expanded it - the set could silently drift from what the
+        code does. It is now derived from the enumerator registry.
+        """
+        from toinflux.general import INSTANCED_SOURCES, _INSTANCE_ENUMERATORS
+
+        assert INSTANCED_SOURCES == frozenset(_INSTANCE_ENUMERATORS)
+        for source in INSTANCED_SOURCES:
+            assert callable(_INSTANCE_ENUMERATORS[source]), f"{source} is listed but has no enumerator"
+
+    def test_ordinary_source_expands_to_one_unit(self, sample_settings):
+        """A single-target source yields exactly one (name, None) unit."""
+        assert expand_sources(["speedtest"], sample_settings) == [("speedtest", None)]
+
+    def test_instanced_source_expands_per_target(self, sample_settings):
+        """Hue yields one unit per configured bridge, in slot order."""
+        settings = {
+            **sample_settings,
+            "hue": {
+                **sample_settings["hue"],
+                "host": "a.example.com",
+                "user": "t1",
+                "host2": "b.example.com",
+                "user2": "t2",
+            },
+        }
+        assert expand_sources(["hue"], settings) == [("hue", "a.example.com"), ("hue", "b.example.com")]
+
+    def test_instanced_source_with_no_target_yields_no_unit(self, sample_settings):
+        """An unusable Hue is not collected, and must not stop the other sources."""
+        settings = {
+            **sample_settings,
+            "hue": {**sample_settings["hue"], "host": "a.example.com", "user": "your_hue_user"},
+        }
+        assert expand_sources(["hue", "speedtest"], settings) == [("speedtest", None)]
+
+
 class TestGetClass:
     """Tests for get_class function."""
 
@@ -401,7 +501,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 result = get_class("hue")
-                mock_hue.assert_called_once_with("hue", settings_file=None)
+                mock_hue.assert_called_once_with("hue", settings_file=None, instance=None)
                 assert result is mock_hue.return_value
 
     def test_get_class_returns_hue_for_uppercase(self, sample_settings):
@@ -410,7 +510,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 result = get_class("Hue")
-                mock_hue.assert_called_once_with("hue", settings_file=None)
+                mock_hue.assert_called_once_with("hue", settings_file=None, instance=None)
                 assert result is mock_hue.return_value
 
     def test_get_class_returns_zappi_for_lowercase(self, sample_settings):
@@ -419,7 +519,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.myenergi.Zappi") as mock_zappi:
                 result = get_class("zappi")
-                mock_zappi.assert_called_once_with("zappi", settings_file=None)
+                mock_zappi.assert_called_once_with("zappi", settings_file=None, instance=None)
                 assert result is mock_zappi.return_value
 
     def test_get_class_returns_speedtest_for_lowercase(self, sample_settings):
@@ -428,7 +528,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.speedtest.Speedtest") as mock_speedtest:
                 result = get_class("speedtest")
-                mock_speedtest.assert_called_once_with("speedtest", settings_file=None)
+                mock_speedtest.assert_called_once_with("speedtest", settings_file=None, instance=None)
                 assert result is mock_speedtest.return_value
 
     def test_get_class_returns_speedtest_for_uppercase(self, sample_settings):
@@ -437,7 +537,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.speedtest.Speedtest") as mock_speedtest:
                 result = get_class("Speedtest")
-                mock_speedtest.assert_called_once_with("speedtest", settings_file=None)
+                mock_speedtest.assert_called_once_with("speedtest", settings_file=None, instance=None)
                 assert result is mock_speedtest.return_value
 
     def test_get_class_returns_nuki_for_lowercase(self, sample_settings):
@@ -446,7 +546,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.nuki.Nuki") as mock_nuki:
                 result = get_class("nuki")
-                mock_nuki.assert_called_once_with("nuki", settings_file=None)
+                mock_nuki.assert_called_once_with("nuki", settings_file=None, instance=None)
                 assert result is mock_nuki.return_value
 
     def test_get_class_mqtt_data_handler_is_not_selectable(self):
@@ -466,7 +566,9 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 get_class("hue", settings_file="/etc/send-to-influx/settings.yaml")
-                mock_hue.assert_called_once_with("hue", settings_file="/etc/send-to-influx/settings.yaml")
+                mock_hue.assert_called_once_with(
+                    "hue", settings_file="/etc/send-to-influx/settings.yaml", instance=None
+                )
 
     def test_get_class_datahandler_is_not_selectable(self):
         """get_class('DataHandler') raises ConfigError - it's the abstract base, not a real source."""

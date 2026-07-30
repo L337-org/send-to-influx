@@ -1,12 +1,13 @@
 """Unit tests for toinflux.credential_cli (send-to-influx-set-credential)."""
 
+import argparse
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 import requests
 import yaml
 from toinflux import credential_cli
-from toinflux.credentials import CREDENTIAL_FIELDS, sentinel_for
+from toinflux.credentials import CREDENTIAL_FIELDS, placeholder_for, sentinel_for
 from toinflux.credential_cli import (
     CredentialCliError,
     _atomic_write,
@@ -513,6 +514,44 @@ class TestCmdSet:
         result_yaml = yaml.safe_load(settings_path.read_text())
         assert "stored in systemd-creds" in result_yaml["influx"]["token"]
 
+    def test_stores_a_slot_credential_and_creates_its_field(self, tmp_path, monkeypatch):
+        """The whole "add a bridge" command, end to end.
+
+        _cmd_set indexed CREDENTIAL_FIELDS directly, so `send-to-influx-set-credential
+        hue-user2` raised KeyError - the primary documented command for adding a bridge could
+        not run. It also has to *create* hue.user2, since a config written from the shipped
+        example has no such key.
+        """
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(
+            'hue:\n  # a comment that must survive\n  host: "a.example.com"\n  user: "t1"\n'
+            '  host2: "b.example.com"\n'
+        )
+        credstore = tmp_path / "credstore"
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+        monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(tmp_path / "dropin.conf"))
+        monkeypatch.setattr(credential_cli.sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr(credential_cli.sys.stdin, "read", lambda: "UPSTAIRS_TOKEN\n")
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["systemd-creds", "--version"]:
+                return MagicMock(stdout="systemd 257\n")
+            if cmd[:2] == ["systemd-creds", "encrypt"]:
+                credstore.mkdir(parents=True, exist_ok=True)
+                (credstore / "hue-user2.cred").write_text("ciphertext")
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=fake_run):
+            _cmd_set("hue-user2", str(settings_path))
+
+        text = settings_path.read_text()
+        assert "# a comment that must survive" in text
+        result = yaml.safe_load(text)
+        assert "stored in systemd-creds" in result["hue"]["user2"]
+        assert result["hue"]["user"] == "t1"  # the other bridge untouched
+        assert (credstore / "hue-user2.cred").exists()
+
     def test_settings_diff_is_only_the_one_line(self, tmp_path, monkeypatch):
         original = 'influx:\n  # a comment that must survive\n  token: "your_influx_token"\n  org: "myorg"\n'
         settings_path = tmp_path / "settings.yaml"
@@ -597,6 +636,34 @@ class TestCmdRemove:
         assert not (credstore / "influx-token.cred").exists()
         result_yaml = yaml.safe_load(settings_path.read_text())
         assert result_yaml["influx"]["token"] == "your_influx_token"
+
+    def test_removes_a_slot_credential(self, tmp_path, monkeypatch):
+        """The command entry point, not just the plumbing under it.
+
+        _cmd_remove indexed CREDENTIAL_FIELDS directly, so `send-to-influx-set-credential
+        hue-user2 --remove` raised KeyError - the command for removing a bridge could not
+        remove one. My tests exercised _rewrite_settings_field and _cmd_set_field and passed
+        throughout, which is exactly why this goes through _cmd_remove instead.
+        """
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(
+            'hue:\n  host: "a.example.com"\n  user: "t1"\n'
+            '  host2: "b.example.com"\n  user2: "<stored in systemd-creds - x>"\n'
+        )
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "hue-user2.cred").write_text("ciphertext")
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+        monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(tmp_path / "dropin.conf"))
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+            _cmd_remove("hue-user2", str(settings_path))
+
+        assert not (credstore / "hue-user2.cred").exists()
+        result = yaml.safe_load(settings_path.read_text())
+        assert result["hue"]["user2"] == "your_hue_user"
+        # The other bridge is untouched - removing one must not disturb another's credential.
+        assert result["hue"]["user"] == "t1"
 
     def test_cred_file_removal_failure_raises_credential_cli_error(self, tmp_path, monkeypatch):
         """os.remove() on the .cred file must surface as CredentialCliError, not a
@@ -1311,3 +1378,100 @@ class TestEnsureSection:
         settings.write_text("influx:\n  url: 'http://x'\n", encoding="utf8")
         with pytest.raises(credential_cli.CredentialCliError, match="no 'nosuch:' section"):
             credential_cli._ensure_section(str(settings), "nosuch", self._example(tmp_path))
+
+
+class TestSlotFieldCreation:
+    """A bridge is added without hand-editing settings.yaml (acceptance criterion 12)."""
+
+    def _example(self, tmp_path):
+        target = tmp_path / "settings.yaml"
+        target.write_text(Path("example_settings.yaml").read_text(encoding="utf8"), encoding="utf8")
+        return str(target)
+
+    def test_a_slot_host_is_created_when_absent(self, tmp_path):
+        """settings.yaml is written once at install time from an example that has no host2,
+        so creating the key is the difference between the documented procedure working and
+        requiring a hand edit."""
+        path = self._example(tmp_path)
+        credential_cli._cmd_set_field("hue.host2", "upstairs.example.com", path)
+        assert yaml.safe_load(Path(path).read_text(encoding="utf8"))["hue"]["host2"] == "upstairs.example.com"
+
+    def test_creation_preserves_every_existing_byte(self, tmp_path):
+        """The same property that makes _ensure_section safe: appending never rewrites what
+        is already there. Comments and ordering are the whole point of the surgical editor."""
+        path = self._example(tmp_path)
+        before = Path(path).read_text(encoding="utf8").split("\n")
+        credential_cli._cmd_set_field("hue.host2", "upstairs.example.com", path)
+        after = Path(path).read_text(encoding="utf8").split("\n")
+        assert [line for line in before if line not in after] == []
+        assert [line for line in after if line not in before] == ['  host2: "upstairs.example.com"']
+
+    def test_creation_lands_inside_the_section_not_under_the_next_ones_comment(self, tmp_path):
+        """A block mapping's end mark sits at the *next token*, which in this comment-dense
+        file is past the blank line and the following section's leading comment. Inserting
+        there would put the field under the wrong section."""
+        path = self._example(tmp_path)
+        credential_cli._cmd_set_field("hue.host2", "upstairs.example.com", path)
+        lines = Path(path).read_text(encoding="utf8").split("\n")
+        inserted = next(i for i, line in enumerate(lines) if line.strip().startswith("host2:"))
+        next_section = next(i for i, line in enumerate(lines) if i > inserted and line and not line[0].isspace())
+        assert next_section > inserted
+        assert lines[inserted].startswith("  ")  # still indented inside hue:
+
+    def test_created_values_are_quoted_and_escaped(self, tmp_path):
+        """Written as a double-quoted scalar, exactly as the replace path writes a value.
+        Unquoted would parse for a hostname and then break on a value containing '#'."""
+        path = self._example(tmp_path)
+        credential_cli._rewrite_settings_field(path, "hue", "user2", 'tok#with"quote')
+        text = Path(path).read_text(encoding="utf8")
+        assert '  user2: "tok#with\\"quote"' in text
+        assert yaml.safe_load(text)["hue"]["user2"] == 'tok#with"quote'
+
+    @pytest.mark.parametrize("field", ["hsot2", "host1", "host02", "hostX", "nonsense"])
+    def test_an_unrecognised_field_is_still_refused(self, tmp_path, field):
+        """The refusal is what catches a typo. Creating any field on request would leave a
+        mistyped key nothing reads, and a bridge uncollected with nothing complaining."""
+        path = self._example(tmp_path)
+        with pytest.raises(credential_cli.CredentialCliError, match="could not safely rewrite"):
+            credential_cli._cmd_set_field(f"hue.{field}", "x", path)
+
+    def test_a_slot_username_is_still_refused_as_a_plaintext_write(self, tmp_path):
+        """Creatable does not mean writable in plaintext: hue.user2 is a secret, so
+        --set-field must refuse it and name the credential command instead."""
+        path = self._example(tmp_path)
+        with pytest.raises(credential_cli.CredentialCliError) as excinfo:
+            credential_cli._cmd_set_field("hue.user2", "TOKEN", path)
+        assert "hue-user2" in str(excinfo.value)
+
+    def test_a_slot_credential_is_accepted_by_the_name_argument(self):
+        """A fixed choices= list could not express unbounded slots; the validator still
+        refuses a typo."""
+        assert credential_cli._credential_name_arg("hue-user2") == "hue-user2"
+        assert credential_cli._credential_name_arg("influx-token") == "influx-token"
+        with pytest.raises(argparse.ArgumentTypeError, match="unknown credential"):
+            credential_cli._credential_name_arg("hue-user1")
+        with pytest.raises(argparse.ArgumentTypeError):
+            credential_cli._credential_name_arg("hue-usr2")
+
+    def test_remove_reverts_a_slot_to_the_placeholder(self, tmp_path):
+        """--remove indexed PLACEHOLDER_VALUES directly and would have died with a KeyError
+        on a slot."""
+        path = self._example(tmp_path)
+        credential_cli._rewrite_settings_field(path, "hue", "user2", "REALTOKEN")
+        credential_cli._rewrite_settings_field(path, "hue", "user2", placeholder_for("hue-user2"))
+        assert yaml.safe_load(Path(path).read_text(encoding="utf8"))["hue"]["user2"] == "your_hue_user"
+
+    def test_list_reports_slots_from_settings_and_flags_an_orphan(self, tmp_path, capsys):
+        """Slots cannot be enumerated - there is no cap - so they are discovered from
+        settings, and a credential with no matching field is surfaced rather than hidden."""
+        path = self._example(tmp_path)
+        credential_cli._rewrite_settings_field(path, "hue", "user2", "tok")
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "hue-user2.cred").write_text("x", encoding="utf8")
+        (credstore / "hue-user7.cred").write_text("x", encoding="utf8")
+        credential_cli._cmd_list(credstore_dir=str(credstore), settings_path=path)
+        out = capsys.readouterr().out
+        assert "hue-user2: configured" in out
+        assert "hue-user7: configured, but no matching field" in out
+        assert "influx-token: not set" in out

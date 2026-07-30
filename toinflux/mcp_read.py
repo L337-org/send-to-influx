@@ -39,7 +39,8 @@ import requests
 import urllib3
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
-from toinflux.mcp_common import close_session, configured_sources, resolve_handler
+from toinflux.general import INSTANCED_SOURCES
+from toinflux.mcp_common import close_session, configured_sources, resolve_handler, resolve_handlers
 
 # User-facing aggregation name -> InfluxQL selector/aggregator function. "raw"
 # is handled separately (no function, no GROUP BY) and is the default.
@@ -151,7 +152,7 @@ def build_schema(handler, discovered_fields, db):
         source=handler.source,
         measurement=measurement,
         db=db,
-        tag_filters=dict(handler.MCP_TAG_FILTERS),
+        tag_filters=handler.mcp_tag_filters(),
         allowed_fields=set(discovered_fields),
         field_metadata=dict(handler.MCP_FIELD_METADATA),
     )
@@ -522,15 +523,22 @@ def run_query(session, influx_settings, db, query):
     return [], []
 
 
-def resolve_schema(source, settings, settings_file):
+def resolve_schema(source, settings, settings_file, instance=None):
     """Build a fully-populated ReadSchema for a source: its static class metadata
     plus the live field allowlist discovered from InfluxDB. Constructs a handler
     from current settings each call, so a live settings edit is picked up.
 
-    :raises ToolParamError: for an unknown/unusable source
+    ``instance`` scopes the schema to one target of an instanced source, which shows up as
+    an extra tag filter (a Hue bridge's ``host``) - see ``DataHandler.mcp_tag_filters()``.
+    ``None`` leaves the read unscoped, spanning every target, which is the right answer when
+    the caller did not name one.
+
+    :param instance: the instance to scope to, or None for all of them
+    :raises ToolParamError: for an unknown/unusable source, or an instance that is not
+        configured
     :raises SourceConnectionError: if field discovery fails
     """
-    handler = resolve_handler(source, settings, settings_file)
+    handler = resolve_handler(source, settings, settings_file, instance=instance)
     measurement = handler.MCP_MEASUREMENT or handler.source
     # Use the handler's own freshly-loaded influx block, not the server's startup
     # snapshot - the handler was constructed from current settings, so an edit to
@@ -592,11 +600,42 @@ def list_fields_result(source, settings, settings_file):
         close_session(handler.session)
 
 
-def _query_history_result(settings, settings_file, *, source, field, start, end, aggregation, group_by, limit):
-    """Build the query_history tool payload (runs in a worker thread)."""
-    handler, schema = resolve_schema(source, settings, settings_file)
+def _query_history_result(
+    settings, settings_file, *, source, field, start, end, aggregation, group_by, limit, bridge=None
+):
+    """Build the query_history tool payload (runs in a worker thread).
+
+    ``bridge`` scopes the query to one Hue bridge by adding its ``host`` tag to the filter.
+    Left out, the query spans every bridge - deliberately, since Hue writes all of them to
+    one measurement and an unqualified question about the estate should get an answer about
+    the estate. The value never reaches the query as given: it is resolved against the
+    configured bridges first, so an unknown one is refused.
+
+    It is rejected outright for a source that has no instances. Such a source would accept
+    the instance, ignore it (its tag filters do not vary), run an unscoped query - and then
+    the result would echo ``bridge`` back, telling the caller the query was scoped when it
+    was not. Refusing is the only honest answer.
+    """
+    # Only judge 'bridge' once the source is a usable name. A non-string would raise
+    # AttributeError from .lower() here, escaping the ToolParamError/SourceConnectionError
+    # contract the MCP layer uses to tell a caller mistake from a transport failure; a blank
+    # one would be reported as a 'bridge' problem when the source is what is wrong. Either way
+    # the condition matches resolve_handler()'s, so skipping the guard hands the value to that
+    # validation and the message names the parameter actually at fault.
+    usable_source = isinstance(source, str) and source.strip()
+    if bridge is not None and usable_source and source.lower() not in INSTANCED_SOURCES:
+        raise ToolParamError(
+            f"'bridge' does not apply to source {source!r} - it has a single target. "
+            f"Only these sources have separate targets to scope to: {', '.join(sorted(INSTANCED_SOURCES))}"
+        )
+    handler, schema = resolve_schema(source, settings, settings_file, instance=bridge)
     try:
-        return _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit)
+        result = _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit)
+        # Say what was actually queried: without this the model cannot tell a single-bridge
+        # answer from an estate-wide one, and the two mean different things.
+        if bridge is not None:
+            result["bridge"] = bridge
+        return result
     finally:
         close_session(handler.session)
 
@@ -636,7 +675,7 @@ def _latest_recorded(handler):
     fields = discover_fields(handler.session, influx_settings, db, measurement)
     if not fields:
         return {}, None
-    query = build_latest_query(measurement, handler.MCP_TAG_FILTERS, fields)
+    query = build_latest_query(measurement, handler.mcp_tag_filters(), fields)
     columns, values = run_query(handler.session, influx_settings, db, query)
     if not values:
         return {}, None
@@ -659,31 +698,77 @@ def current_state_result(source, settings, settings_file):
     as the history tool, so a coded value reads back as its label ("locked"), not
     a bare number.
 
+    A source with several instances (a Hue install with more than one bridge) reports each
+    one separately, under ``instances`` keyed by instance, because two bridges can carry
+    the same field name - one "Kitchen" per floor - and a single flat map would silently
+    lose one of them. The grouping is used whenever the source is instanced, even with a
+    single bridge, so nothing reading the payload depends on how many are configured.
+
+    A failing instance does not suppress the others: its entry carries ``error`` while the
+    rest carry ``fields``, so a partial answer arrives *with* its failure status. Only when
+    every instance fails is a ``SourceConnectionError`` raised, since then there is nothing
+    useful to return.
+
     :raises ToolParamError: unknown/unusable source
-    :raises SourceConnectionError: a live get_data() or InfluxDB read failed
+    :raises SourceConnectionError: a live get_data() or InfluxDB read failed for every
+        instance
     """
-    handler = resolve_handler(source, settings, settings_file)
+    handlers = resolve_handlers(source, settings, settings_file)
     try:
-        if handler.MCP_LIVE_STATE:
-            data = handler.get_data() or {}
-            as_of = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
-            state_kind = "live"
-        else:
-            data, as_of = _latest_recorded(handler)
-            state_kind = "last_recorded"
-        field_metadata = handler.MCP_FIELD_METADATA
-        fields = {name: _annotate_state_field(field_metadata, name, value) for name, value in sorted(data.items())}
-        result = {
-            "source": handler.source,
-            "state": state_kind,
-            "as_of": as_of,
-            "fields": fields,
-        }
-        if handler.MCP_DESCRIPTION:
-            result["description"] = handler.MCP_DESCRIPTION
+        first = handlers[0][1]
+        result = {"source": first.source, "state": "live" if first.MCP_LIVE_STATE else "last_recorded"}
+        if first.MCP_DESCRIPTION:
+            result["description"] = first.MCP_DESCRIPTION
+
+        if len(handlers) == 1 and handlers[0][0] is None:
+            # Single-target source: the historical flat shape, unchanged.
+            fields, as_of = _instance_state(first)
+            result["fields"] = fields
+            result["as_of"] = as_of
+            return result
+
+        instances, failures = {}, 0
+        for instance, handler in handlers:
+            try:
+                fields, as_of = _instance_state(handler)
+                instances[instance] = {"fields": fields, "as_of": as_of}
+            except SourceConnectionError as exc:
+                logging.warning("Could not read current state for %s: %s", handler.worker_label, exc)
+                instances[instance] = {"error": str(exc)}
+                failures += 1
+        if failures == len(handlers):
+            raise SourceConnectionError(
+                f"could not read current state for any configured target of {source!r}: "
+                + "; ".join(f"{instance}: {entry['error']}" for instance, entry in instances.items())
+            )
+        result["instances"] = instances
         return result
     finally:
-        close_session(handler.session)
+        for _, handler in handlers:
+            close_session(handler.session)
+
+
+def _instance_state(handler):
+    """Read one handler's current state as ``(annotated fields, as_of)``.
+
+    Live sources report from their own ``get_data()``; a non-live source (Speedtest,
+    Octopus) reads the latest recorded point instead and never calls ``get_data()``.
+
+    :param handler: a constructed DataHandler subclass instance
+    :return: (field name -> annotated value, unix seconds the state is as of)
+    :rtype: tuple
+    :raises SourceConnectionError: the live read or the InfluxDB read failed
+    """
+    if handler.MCP_LIVE_STATE:
+        data = handler.get_data() or {}
+        as_of = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    else:
+        data, as_of = _latest_recorded(handler)
+    field_metadata = handler.MCP_FIELD_METADATA
+    return (
+        {name: _annotate_state_field(field_metadata, name, value) for name, value in sorted(data.items())},
+        as_of,
+    )
 
 
 def build_documentation(settings, settings_file):
@@ -783,6 +868,7 @@ def register_read_tools(server, settings, settings_file=None):
         aggregation: str = "raw",
         group_by: "str | None" = None,
         limit: int = DEFAULT_RESULT_POINTS,
+        bridge: "str | None" = None,
     ) -> dict:
         """Query a field's history for a source from InfluxDB. Reads only; to
         change a device use that source's control tool, e.g. `hue_set_light`
@@ -799,6 +885,14 @@ def register_read_tools(server, settings, settings_file=None):
           sum/count/first/last/spread/stddev, which each require a group_by interval.
         - group_by: a bucket interval like '5m'/'1h'/'1d' (only with aggregation).
         - limit: max points returned, 1..5000 (values outside are clamped).
+        - bridge: Hue only - rejected for any other source, which has a single target.
+          Only useful with more than one bridge configured. Restricts the
+          query to that bridge; omitted, the query covers every bridge, since they share one
+          measurement. Two bridges can hold the same field name (a "Kitchen" per floor), so
+          an unqualified query can mix them - pass `bridge` when the answer must be about
+          one. `get_current_state` lists the configured bridges. The result echoes `bridge`
+          when one was used, so a single-bridge answer is distinguishable from an
+          estate-wide one.
 
         Points come back newest-first, each with a unix-seconds `time` and
         `value`; coded fields (e.g. Nuki lock state) also carry a decoded `label`.
@@ -818,6 +912,7 @@ def register_read_tools(server, settings, settings_file=None):
                 aggregation=aggregation,
                 group_by=group_by,
                 limit=limit,
+                bridge=bridge,
             )
         )
 

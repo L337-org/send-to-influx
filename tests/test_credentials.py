@@ -4,12 +4,24 @@ load_settings()-integrated permission check / sentinel clearing in toinflux.gene
 
 import copy
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
 import pytest
 import yaml
-from toinflux.credentials import CREDENTIAL_FIELDS, apply_credential_substitution, sentinel_for
+from toinflux.credentials import (
+    CREDENTIAL_FIELDS,
+    apply_credential_substitution,
+    credential_field,
+    credential_name_for,
+    is_credential_field,
+    is_credential_name,
+    PLACEHOLDER_VALUES,
+    placeholder_for,
+    sentinel_for,
+    slot_credential_names,
+)
 from toinflux.general import load_settings
 from toinflux.exceptions import ConfigError
 
@@ -131,6 +143,27 @@ class TestSettingsFilePermissionCheck:
         finally:
             Path(path).unlink(missing_ok=True)
 
+    def test_0644_warns_when_the_only_real_secret_is_in_a_bridge_slot(self, sample_settings, caplog):
+        """A token hand-written into hue.user2 makes the file secret-bearing.
+
+        The permission check sweeps the static credential table plus whatever slots the
+        settings actually declare; if it swept only the table, a file whose sole real
+        secret lives in a numbered slot would read as placeholder-only and 0644 would be
+        passed as safe.
+        """
+        for block, field in (("influx", "user"), ("influx", "password"), ("myenergi", "apikey")):
+            sample_settings[block][field] = placeholder_for(f"{block}-{field}")
+        sample_settings["hue"]["user"] = placeholder_for("hue-user")
+        sample_settings["hue"]["host2"] = "bridge2.example.com"
+        sample_settings["hue"]["user2"] = "a-real-looking-token"
+        path = self._write_settings(sample_settings, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
+        try:
+            with caplog.at_level("WARNING"):
+                load_settings(settings_file=path)
+            assert "readable by group/other" in caplog.text
+        finally:
+            Path(path).unlink(missing_ok=True)
+
     def test_0644_with_only_placeholders_loads_clean(self, sample_settings, caplog):
         """A 0644 file containing only placeholder/sentinel values doesn't warn - this
         is what makes 644 safe as the fresh-install default mode."""
@@ -246,6 +279,26 @@ class TestClearUnsubstitutedCredentialSentinels:
     """Integration tests via load_settings(): a sentinel left in place without a
     matching systemd credential file must not pass validation as if it were real."""
 
+    def test_bridge_slot_sentinel_is_blanked_too(self, sample_settings, monkeypatch):
+        """A slot sentinel with no credential behind it is blanked like a static one.
+
+        Left in place it is a non-empty string, so it satisfies every truthiness check
+        downstream and the bridge is treated as configured - then fails authentication on
+        every cycle instead of being reported as unset once.
+        """
+        monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+        sample_settings["hue"]["host2"] = "bridge2.example.com"
+        sample_settings["hue"]["user2"] = sentinel_for("hue-user2")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(sample_settings, f)
+            path = f.name
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        try:
+            result = load_settings(settings_file=path)
+        finally:
+            Path(path).unlink(missing_ok=True)
+        assert result["hue"]["user2"] == ""
+
     def test_sentinel_without_substitution_fails_validation(self, sample_settings, monkeypatch):
         """A sentinel-valued required field, with CREDENTIALS_DIRECTORY unset (so it's
         never replaced), is blanked before validate_settings() runs and so is
@@ -288,3 +341,137 @@ class TestClearUnsubstitutedCredentialSentinels:
                 load_settings(settings_file=path)
         finally:
             Path(path).unlink(missing_ok=True)
+
+
+class TestSlotCredentials:
+    """Numbered Hue bridge usernames are credentials like any other.
+
+    Before this, every consumer asked "is it in CREDENTIAL_FIELDS?" - a static table that
+    cannot express an unbounded number of slots. The two security-relevant consequences were
+    that `--set-field hue.user2 <token>` would write a real token into settings.yaml in
+    plaintext, and that the settings-file permissions check could not see it.
+    """
+
+    @pytest.mark.parametrize(
+        "name, expected",
+        [
+            ("influx-token", ("influx", "token")),
+            ("hue-user", ("hue", "user")),
+            ("hue-user2", ("hue", "user2")),
+            ("hue-user10", ("hue", "user10")),
+            ("hue-user99", ("hue", "user99")),
+        ],
+    )
+    def test_recognised_names_map_to_their_field(self, name, expected):
+        assert credential_field(name) == expected
+        assert is_credential_name(name)
+
+    @pytest.mark.parametrize("name", ["hue-user1", "hue-user0", "hue-user02", "hue-userX", "hue-host2", "nope"])
+    def test_non_canonical_or_unknown_names_are_not_credentials(self, name):
+        """hue-user1 would be a second way to spell slot 1, hue-user02 a second way to spell
+        slot 2, and hue-host2 is not a secret at all."""
+        assert credential_field(name) is None
+        assert not is_credential_name(name)
+
+    @pytest.mark.parametrize(
+        "section, field, expected",
+        [
+            ("hue", "user", "hue-user"),
+            ("hue", "user3", "hue-user3"),
+            ("influx", "token", "influx-token"),
+            ("hue", "user1", None),
+            ("hue", "host2", None),
+            ("speedtest", "user2", None),
+        ],
+    )
+    def test_settings_paths_map_back_to_their_credential(self, section, field, expected):
+        """The inverse direction is what lets --set-field refuse a secret field and name the
+        right command in the refusal."""
+        assert credential_name_for(section, field) == expected
+        assert is_credential_field(section, field) is (expected is not None)
+
+    def test_a_slot_shares_slot_ones_placeholder(self):
+        """Every Hue username field carries the same example text, and --remove needs a
+        placeholder for a slot - it used to index PLACEHOLDER_VALUES directly and would have
+        died with a KeyError."""
+        assert placeholder_for("hue-user2") == placeholder_for("hue-user")
+        assert placeholder_for("nope") is None
+
+    def test_slots_are_discovered_from_settings_in_slot_order(self):
+        """Discovered, not enumerated - which is what removes the cap. Numeric order, so
+        user10 comes after user2 rather than sorting before it as a string."""
+        settings = {"hue": {"host": "a", "user": "t", "user2": "t2", "user10": "t10", "host3": "c"}}
+        assert slot_credential_names(settings) == ["hue-user2", "hue-user10"]
+
+    @pytest.mark.parametrize("settings", [{}, {"hue": None}, {"hue": "oops"}, {"hue": {}}, None])
+    def test_slot_discovery_survives_a_malformed_block(self, settings):
+        assert slot_credential_names(settings) == []
+
+    def test_substitution_applies_a_slot_credential(self, monkeypatch, tmp_path):
+        """The directory listing drives substitution now, so an unbounded slot works where
+        iterating the static table could not reach it."""
+        creds = tmp_path / "creds"
+        creds.mkdir()
+        (creds / "hue-user2").write_text("UPSTAIRS_TOKEN", encoding="utf8")
+        (creds / "hue-user99").write_text("FAR_TOKEN", encoding="utf8")
+        (creds / "not-ours").write_text("ignored", encoding="utf8")
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(creds))
+        settings = {"hue": {"host": "a", "user": "t1", "host2": "b", "user2": "placeholder"}}
+        apply_credential_substitution(settings)
+        assert settings["hue"]["user2"] == "UPSTAIRS_TOKEN"
+        assert settings["hue"]["user99"] == "FAR_TOKEN"
+        assert "not-ours" not in settings["hue"]
+
+    def test_substitution_ignores_a_non_credential_filename(self, monkeypatch, tmp_path):
+        """LoadCredentialEncrypted= is not exclusive to this tool, so an unrelated credential
+        in the directory must not be written anywhere."""
+        creds = tmp_path / "creds"
+        creds.mkdir()
+        (creds / "hue-user1").write_text("non-canonical", encoding="utf8")
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(creds))
+        settings = {"hue": {"host": "a", "user": "t1"}}
+        apply_credential_substitution(settings)
+        assert "user1" not in settings["hue"]
+
+    def test_unreadable_credentials_directory_does_not_crash(self, monkeypatch, tmp_path):
+        """A missing directory must leave load_settings() working, not raise."""
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path / "nope"))
+        settings = {"hue": {"host": "a", "user": "t1"}}
+        assert apply_credential_substitution(settings) is settings
+
+
+class TestExamplePlaceholdersAreRecognised:
+    """Every placeholder-looking value shipped in example_settings.yaml must actually be a
+    placeholder the code recognises.
+
+    Regression guard for a real defect: the commented multi-bridge example offered
+    ``user2: "your_second_hue_user"``, which is not in PLACEHOLDER_VALUES. Uncommenting it
+    as-is made slot 2 enumerate as a *usable* bridge holding a fake token - so a worker
+    started and authenticated in a loop forever - and made the group/other-readable check
+    report a real secret that was not one. Prose telling the next person to reuse the
+    existing placeholder text would not fail CI; this does.
+    """
+
+    def test_every_credential_placeholder_in_the_example_is_a_known_placeholder(self):
+        example = Path(__file__).resolve().parent.parent / "example_settings.yaml"
+        # Credential-bearing field names, from the table itself - plus numbered bridge slots,
+        # which are credentials too. Identity fields (an MPAN, a device serial) are excluded
+        # deliberately: they are not secrets and nothing treats their values as placeholders.
+        credential_fields = {field for _, field in CREDENTIAL_FIELDS.values()}
+        offenders = []
+        for line in example.read_text().splitlines():
+            # Commented lines included on purpose: the commented slot example is exactly
+            # where this went wrong, and it is copy-paste-ready by design.
+            match = re.match(r'\s*#?\s*([a-z0-9_]+):\s*"([^"]*)"\s*$', line)
+            if not match:
+                continue
+            key, value = match.group(1), match.group(2)
+            is_slot = re.fullmatch(r"user\d+", key)
+            if (key in credential_fields or is_slot) and value not in PLACEHOLDER_VALUES.values():
+                offenders.append(f"{key}: {value!r}")
+        assert not offenders, (
+            f"example_settings.yaml gives credential field(s) a value the code does not treat as a "
+            f"placeholder: {offenders}. Reuse one of {sorted(v for v in PLACEHOLDER_VALUES.values() if v)} "
+            f"- otherwise it is read as a real credential the moment anyone uncomments it, which starts a "
+            f"worker that authenticates in a loop and trips the real-secret permissions check."
+        )

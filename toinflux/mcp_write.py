@@ -23,11 +23,11 @@ __license__ = "MIT License"
 
 import logging
 
-from toinflux.exceptions import ToolParamError
+from toinflux.exceptions import SourceConnectionError, ToolParamError
 
 # Shared per-call handler lifecycle (construct from current settings, close the
 # session afterwards) - writes use the same plumbing as reads, from one place.
-from toinflux.mcp_common import close_session, configured_sources, resolve_handler
+from toinflux.mcp_common import close_session, configured_sources, resolve_handler, resolve_handlers
 
 
 def writable_enabled_sources(settings, settings_file=None):
@@ -54,6 +54,25 @@ def writable_enabled_sources(settings, settings_file=None):
     return enabled
 
 
+def _resolve_writable_handlers(source, settings, settings_file):
+    """Construct a handler per instance of a source and confirm it is enabled for writes.
+
+    The opt-in is per *source* (``<source>.mcp_read_write``), not per instance - one
+    setting covers every bridge, since they are one estate behind one settings block. The
+    caller owns every session and must close them all.
+
+    :raises ToolParamError: unknown source, no usable target, or not opted in for writes
+    """
+    handlers = resolve_handlers(source, settings, settings_file)
+    if not handlers[0][1].mcp_write_enabled():
+        for _, handler in handlers:
+            close_session(handler.session)
+        raise ToolParamError(
+            f"source {source!r} is not enabled for device writes; set {source}.mcp_read_write: true to allow it"
+        )
+    return handlers
+
+
 def _resolve_writable_handler(source, settings, settings_file):
     """Construct a handler for a source and confirm it's enabled for writes, or
     raise ToolParamError. The caller owns the returned handler's session and must
@@ -71,25 +90,172 @@ def _resolve_writable_handler(source, settings, settings_file):
 
 
 def _hue_list_devices_result(settings, settings_file):
-    """Build the hue_list_devices payload (runs in a worker thread)."""
-    handler = _resolve_writable_handler("hue", settings, settings_file)
-    try:
-        return {"source": "hue", "devices": handler.mcp_list_writable_devices()}
-    finally:
-        close_session(handler.session)
+    """Build the hue_list_devices payload (runs in a worker thread).
 
+    Covers every configured bridge, each device carrying the bridge it lives on. Light ids
+    are per-bridge, so the same id - and often the same name - exists on more than one
+    bridge; ``bridge`` is what makes an entry unambiguous, and what ``hue_set_light``
+    needs when a name or id is not unique across the estate.
 
-def _hue_set_light_result(settings, settings_file, *, device, on, brightness_pct, color_temp_k, color):
-    """Build the hue_set_light payload (runs in a worker thread)."""
-    handler = _resolve_writable_handler("hue", settings, settings_file)
+    A bridge that cannot be reached does not suppress the others: its devices are absent
+    and the failure is reported in ``unreachable``, so the model sees a partial list *and*
+    knows it is partial rather than concluding those lights do not exist.
+    """
+    handlers = _resolve_writable_handlers("hue", settings, settings_file)
     try:
-        result = handler.mcp_set_device_state(
-            device, on=on, brightness_pct=brightness_pct, color_temp_k=color_temp_k, color=color
-        )
-        logging.info("MCP write applied to hue device %r: %s", result.get("device"), result.get("applied"))
+        devices, unreachable = [], []
+        for instance, handler in handlers:
+            try:
+                for device in handler.mcp_list_writable_devices():
+                    devices.append({**device, "bridge": instance})
+            except SourceConnectionError as exc:
+                logging.warning("Could not list devices on Hue bridge %s: %s", instance, exc)
+                unreachable.append({"bridge": instance, "error": str(exc)})
+        result = {"source": "hue", "devices": devices}
+        if unreachable:
+            result["unreachable"] = unreachable
         return result
     finally:
-        close_session(handler.session)
+        for _, handler in handlers:
+            close_session(handler.session)
+
+
+def _hue_matches_across_bridges(handlers, device, bridge):
+    """Search every given bridge for ``device``, returning ``(matches, unreachable)``.
+
+    Split out of :func:`_resolve_hue_target` to keep that function's decision logic readable
+    - this half is the I/O, that half is the arbitration.
+
+    A bridge that cannot be answered is collected rather than fatal *only* when it was being
+    consulted to arbitrate. If the caller named a bridge, or it is the only one configured,
+    the failure is against the target itself and is propagated as the transport error it is.
+
+    Searches ``mcp_list_writable_devices()`` - the source's public write allowlist - rather
+    than the bridge response directly, so what ``hue_set_light`` will act on is by
+    construction what ``hue_list_devices`` advertises, instead of two paths that happen to
+    derive the same answer.
+
+    :param handlers: ``[(instance, handler), ...]`` to search
+    :param device: light id or exact name to match
+    :param bridge: the bridge the caller named, or None
+    :return: ``([(instance, handler, light_id, name), ...], [(instance, exc), ...])``
+    :raises SourceConnectionError: the named or only bridge could not be reached
+    """
+    matches, unreachable = [], []
+    for instance, handler in handlers:
+        try:
+            names = {entry["id"]: entry["name"] for entry in handler.mcp_list_writable_devices()}
+        except SourceConnectionError as exc:
+            if bridge is not None or len(handlers) == 1:
+                raise
+            logging.warning("Could not list lights on Hue bridge %s while resolving %r: %s", instance, device, exc)
+            unreachable.append((instance, exc))
+            continue
+        for light_id, name in names.items():
+            if device == light_id or device == name:
+                matches.append((instance, handler, light_id, name))
+    return matches, unreachable
+
+
+def _resolve_hue_target(handlers, device, bridge):
+    """Resolve ``device`` (and optional ``bridge``) to exactly one light on one bridge.
+
+    Cross-bridge arbitration lives here rather than on the Hue class because it is about
+    the *tool's* parameters: each handler already resolves a device within its own bridge,
+    and this decides which handler should be asked.
+
+    Refuses rather than guesses whenever the answer is not unique - actuating the wrong
+    light is not recoverable, and with several bridges non-uniqueness is the normal case
+    for ids (every bridge has a light ``1``) and common for names (``Kitchen`` on each
+    floor). The error names the bridges involved and how to disambiguate.
+
+    One bridge being unreachable does not make every write impossible. If ``bridge`` was
+    given, that bridge is the only one consulted and a connection failure against it is
+    propagated. If it was not, an unreachable bridge means the estate cannot be searched
+    completely, so the result is a ``ToolParamError`` naming the missing bridge and pointing
+    at ``bridge`` - a refusal the caller can act on, rather than a transport error inviting
+    an identical retry. Acting on a lone match found elsewhere is deliberately *not* the
+    behaviour: the silent bridge may carry the same name.
+
+    :param handlers: ``[(instance, handler), ...]`` from _resolve_writable_handlers
+    :param device: light id or exact name, from the tool call
+    :param bridge: bridge host to restrict to, or None to search every bridge
+    :return: ``(instance, handler, light_id, name)`` for the single match
+    :raises ToolParamError: unknown bridge, unknown device, an ambiguous device, or a bridge
+        that could not be reached while arbitrating across several
+    :raises SourceConnectionError: the bridge named in ``bridge`` is unreachable, or the only
+        configured bridge is
+    """
+    if not isinstance(device, str) or not device.strip():
+        raise ToolParamError(f"device must be a non-empty light id or name (got {device!r})")
+
+    known = [instance for instance, _ in handlers]
+    if bridge is not None:
+        if bridge not in known:
+            raise ToolParamError(f"unknown bridge {bridge!r}; configured bridges: {', '.join(known)}")
+        handlers = [(instance, handler) for instance, handler in handlers if instance == bridge]
+
+    matches, unreachable = _hue_matches_across_bridges(handlers, device, bridge)
+
+    if unreachable:
+        # Refuse, but *actionably*. Acting on the single match found would risk actuating the
+        # wrong light: the bridge that did not answer may carry that name too, and this
+        # function exists precisely because that mistake is not recoverable. Equally, one
+        # bridge being down must not make every write impossible - so say which bridge went
+        # missing and that 'bridge' proceeds without consulting it. Raised as a
+        # ToolParamError, not the underlying SourceConnectionError: the caller has something
+        # different to do, whereas a transient-transport error invites an identical retry.
+        missing = ", ".join(f"{instance} ({exc})" for instance, exc in unreachable)
+        found = (
+            ", ".join(f"{name!r} (id {light_id}) on bridge {instance}" for instance, _, light_id, name in matches)
+            or "none"
+        )
+        raise ToolParamError(
+            f"cannot determine which light {device!r} refers to: bridge {missing} could not be reached, so "
+            f"the estate could not be searched completely. Matches on the bridges that answered: {found}. "
+            f"Pass 'bridge' to act on one bridge without consulting the others"
+        )
+
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        where = ", ".join(f"{name!r} (id {light_id}) on bridge {instance}" for instance, _, light_id, name in matches)
+        # The hint has to follow the actual cause. Hue allows two lights to share a name on
+        # a *single* bridge, and there 'bridge' cannot disambiguate anything - only the id
+        # can. Suggesting it would send the caller down a dead end, and calling the
+        # ambiguity cross-bridge would be simply untrue.
+        if len({instance for instance, _, _, _ in matches}) == 1:
+            hint = "Use the light id instead of the name"
+        else:
+            hint = "Pass 'bridge' to say which one, and use the light id if the name repeats on that bridge too"
+        raise ToolParamError(f"device {device!r} is ambiguous - it matches {where}. {hint}")
+    scope = f" on bridge {bridge}" if bridge is not None else ""
+    raise ToolParamError(
+        f"unknown device {device!r}{scope}; call hue_list_devices for the ids, names and bridges available"
+    )
+
+
+def _hue_set_light_result(settings, settings_file, *, device, on, brightness_pct, color_temp_k, color, bridge=None):
+    """Build the hue_set_light payload (runs in a worker thread)."""
+    handlers = _resolve_writable_handlers("hue", settings, settings_file)
+    try:
+        instance, handler, light_id, _ = _resolve_hue_target(handlers, device, bridge)
+        # Act by light id on the bridge that owns it: the name may repeat elsewhere, and
+        # only this handler is bound to that bridge's host and token.
+        result = handler.mcp_set_device_state(
+            light_id, on=on, brightness_pct=brightness_pct, color_temp_k=color_temp_k, color=color
+        )
+        result["bridge"] = instance
+        logging.info(
+            "MCP write applied to hue device %r on bridge %s: %s",
+            result.get("device"),
+            instance,
+            result.get("applied"),
+        )
+        return result
+    finally:
+        for _, handler in handlers:
+            close_session(handler.session)
 
 
 def _speedtest_run_result(settings, settings_file):
@@ -107,13 +273,17 @@ def _register_hue_write_tools(server, settings, settings_file):
 
     @server.tool()
     async def hue_list_devices() -> dict:
-        """List the controllable Hue lights and plugs, each with its id, name and
-        the controls it supports (on/off, brightness, colour temperature, colour),
-        plus the kelvin range for colour-temperature lights.
+        """List the controllable Hue lights and plugs across every configured bridge, each
+        with its id, name, the bridge it is on, and the controls it supports (on/off,
+        brightness, colour temperature, colour), plus the kelvin range for
+        colour-temperature lights.
 
-        Call this before `hue_set_light` to get exact ids/names and see what a
-        given light can do - an unknown/ambiguous name, or a control the light
-        lacks, is rejected there."""
+        Call this before `hue_set_light` to get exact ids/names and see what a given light
+        can do - an unknown or ambiguous device, or a control the light lacks, is rejected
+        there. Light ids are per-bridge, so the same id (and often the same name) appears on
+        more than one bridge: use the `bridge` value to tell them apart. If a bridge is
+        unreachable its lights are absent and it is listed under `unreachable`, so a short
+        list means "could not ask", not "no such light"."""
         return await anyio.to_thread.run_sync(_hue_list_devices_result, settings, settings_file)
 
     @server.tool()
@@ -123,6 +293,7 @@ def _register_hue_write_tools(server, settings, settings_file):
         brightness_pct: "float | None" = None,
         color_temp_k: "float | None" = None,
         color: "str | None" = None,
+        bridge: "str | None" = None,
     ) -> dict:
         """Set a Hue light or plug's state. This changes a real device; to read its
         state use `get_current_state`, or `query_history` for history.
@@ -136,6 +307,10 @@ def _register_hue_write_tools(server, settings, settings_file):
         change already took effect - re-read to confirm.
 
         - device: the light id or its exact name (from `hue_list_devices`).
+        - bridge: which bridge the light is on, when more than one is configured. Only
+          needed if `device` is not unique across them - light ids repeat on every bridge,
+          and names often do too, so an ambiguous device is refused with the bridges listed
+          rather than guessed at.
         - on: turn on (true) / off (false); omit to leave unchanged.
         - brightness_pct: 0-100 for dimmable lights; 0 is the lowest on-brightness,
           not off (use on=false). Omit to leave unchanged.
@@ -155,6 +330,7 @@ def _register_hue_write_tools(server, settings, settings_file):
                 brightness_pct=brightness_pct,
                 color_temp_k=color_temp_k,
                 color=color,
+                bridge=bridge,
             )
         )
 

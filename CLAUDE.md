@@ -61,7 +61,7 @@ DataHandler      (toinflux/influx.py)          — base; owns send_data() → In
 
 Each subclass implements `get_data()` which populates `self.data` (dict) and `self.influx_header` (InfluxDB measurement/tag string); `send_data()` in the base class takes it from there. Points are written with an explicit unix-epoch-seconds timestamp: `self.timestamp` if `get_data()` set it (e.g. Octopus uses the reading's own `interval_start` so re-writes of the same reading overwrite rather than duplicate), otherwise the time `send_data()` is called. Field keys are escaped per line protocol rules (commas, `=`, spaces).
 
-If a write to InfluxDB fails, `send_data()` buffers the point in memory instead of dropping it (raising `InfluxWriteError` either way, so the worker's existing backoff/retry is unaffected) - see `DataHandler._write_buffers`: a per-source `deque(maxlen=MAX_BUFFERED_POINTS)` of `[line, rejection_count]` entries, class-level rather than an instance attribute because the worker loop in `sendtoinflux.py` discards and reconstructs the `DataHandler` instance after every failure, so only a buffer that outlives the instance survives to be flushed. Every buffered-path `send_data()` call flushes the backlog first - including calls with no data of their own (an empty reading still delivers the backlog; only an empty-buffer-and-empty-data call skips the HTTP round trip entirely) - in newline-joined chunks of `FLUSH_CHUNK_SIZE` per POST (InfluxDB's write endpoints accept multi-point bodies natively, so a 500-point recovery costs ~5 requests, not 500). If a source's outage runs long enough to fill its buffer, the oldest buffered point is dropped to make room, logged as a warning; an identical line already in the buffer is never added twice (Octopus re-serves the same reading/timestamp for ~30 min, and duplicates would only waste capacity since flushing is an idempotent overwrite). Not persisted across a process restart, and flushed to whatever destination the *current* settings resolve to (editing `influx.url`/bucket/db mid-backlog re-routes the backlog - accepted limitation, documented in the `_write_buffers` comment).
+If a write to InfluxDB fails, `send_data()` buffers the point in memory instead of dropping it (raising `InfluxWriteError` either way, so the worker's existing backoff/retry is unaffected) - see `DataHandler._write_buffers`: a per-*worker* `deque(maxlen=MAX_BUFFERED_POINTS)` of `[line, rejection_count]` entries, class-level rather than an instance attribute because the worker loop in `sendtoinflux.py` discards and reconstructs the `DataHandler` instance after every failure, so only a buffer that outlives the instance survives to be flushed. Keyed by `DataHandler.worker_key` - the `(source, instance)` tuple - not by source name alone: a source with several instances (a Hue install with more than one bridge) runs one worker per instance, and they must not share a deque, since `_flush_buffer`/`_flush_head` do read-then-`popleft` sequences that are not atomic across threads. `instance` is `None` for every single-target source, so their key is `(source, None)` and their behaviour is unchanged. Note the `maxlen` bound is therefore per worker, so N instances can hold up to N × `MAX_BUFFERED_POINTS` between them. `worker_key` is a tuple rather than a joined `source@instance` string for two reasons: an instance may be an IPv6 literal (so any delimiter is ambiguous to a later split), and callers that need the settings-block name back out - the stall watchdog reads `settings[source]["interval"]` - must not have to re-parse it. `worker_label` (`source` or `source@instance`) is the display-only counterpart, used in log messages and never as a key or an emitted tag value. Every buffered-path `send_data()` call flushes the backlog first - including calls with no data of their own (an empty reading still delivers the backlog; only an empty-buffer-and-empty-data call skips the HTTP round trip entirely) - in newline-joined chunks of `FLUSH_CHUNK_SIZE` per POST (InfluxDB's write endpoints accept multi-point bodies natively, so a 500-point recovery costs ~5 requests, not 500). If a source's outage runs long enough to fill its buffer, the oldest buffered point is dropped to make room, logged as a warning; an identical line already in the buffer is never added twice (Octopus re-serves the same reading/timestamp for ~30 min, and duplicates would only waste capacity since flushing is an idempotent overwrite). Not persisted across a process restart, and flushed to whatever destination the *current* settings resolve to (editing `influx.url`/bucket/db mid-backlog re-routes the backlog - accepted limitation, documented in the `_write_buffers` comment).
 
 Failure classification is deliberately **not** trusted per-status-code as a verdict: `InfluxWriteError.status_code` carries the HTTP status (or `None` for a connection failure), and `_flush_buffer()`/`_flush_head()` count how many times the server has *rejected* (a non-transient 4xx - 408/429 are excluded via `TRANSIENT_CLIENT_ERRORS`, since rate-limiting/timeouts say nothing about the point) each specific point, dropping it with a warning only after `MAX_POINT_REJECTIONS` separate rejections. Connection failures, 5xx, 408, and 429 never count, so an arbitrarily long outage or rate-limit burst can't age points out - only a point the server itself keeps refusing (malformed → 400, outside the retention window → 422 on InfluxDB v2, oversized → 413) is given up on, and a middlebox transiently answering 4xx for a down InfluxDB can't mass-discard the backlog (each point survives `MAX_POINT_REJECTIONS` attempts). When a batched chunk is rejected, the flush falls back to per-point posting for that chunk to isolate the offender(s). Heartbeat writes pass `use_buffer=False` - a heartbeat is a live signal with no replay value, so it neither consumes buffer capacity nor triggers a redundant second flush per failed cycle. `validate_settings()` rejects duplicate entries in `sources:` (`ConfigError`) - two workers for one source name would share (and race on) one buffer.
 
@@ -75,6 +75,56 @@ URL-construction concern only: `get_data()` still tags the point with `self.sett
 verbatim, because normalising the tag would change the series identity for anyone already running an
 IPv6 bridge. The single shared `_api_base()` matters more than it looks - the bug existed in *two*
 copies of the same f-string, so a second copy is exactly how one path would silently keep it.
+
+**Bridge slots.** `enumerate_bridges()` in
+`toinflux/philipshue.py` is the single source of truth for "which Hue bridges are configured", shared by
+`validate_settings()`, the worker spawner and the CLI modes - two separate implementations would
+eventually disagree about what runs, which is the failure `resolve_default_source()` exists to prevent.
+Slot 1 is the unnumbered `host`/`user` pair every install has always had; further bridges are
+`hostN`/`userN`, uncapped. **Slot numbers carry no ordering, need not be contiguous, and nothing ever
+renumbers** - the slot number *is* the binding between a host and its token, so a vacated slot stays
+vacant rather than shifting the ones above it down onto the wrong credentials (which fails silently:
+the surviving bridge authenticates with the departed bridge's token and presents as a bad token, not a
+config error). `bridge_field_names()` is the only place that knows the numbering, so callers never
+build `f"host{n}"` themselves. **The severity split is load-bearing:** self-contradictory config is a
+fatal `ConfigError` (a non-canonical slot field like `host1`/`host02`, a non-string host, two slots
+addressing the same bridge - compared via `_comparable_host()`, which normalises IPv6 spelling and
+hostname case *for comparison only*), while "not usable yet" - no host, or a host with a blank/
+placeholder/unsubstituted-sentinel token - is only a **warning**, because `example_settings.yaml` ships
+`hue` in `sources:` next to the placeholder token, so a fresh install is exactly that state and raising
+would stop *every* collector and break the packaging suite's invariant that the example's placeholders
+pass validation while workers merely retry. A leftover `userN` with no `hostN` is DEBUG only - that is
+the resting state after `--remove`, which blanks the token and leaves clearing the host as a separate
+step. Warnings are opt-in via `validate_settings(..., warn=True)`, used only by `--check-config`:
+`validate_settings()` runs inside `load_settings()`, so unconditional logging would repeat per source at
+startup and again on every failure-triggered handler rebuild.
+
+**Which bridge a handler collects from.** `Hue.bridge()` resolves `self.instance` (a bridge host) against
+`enumerate_bridges()`. `instance=None` means "the first configured bridge", which is what keeps a
+single-bridge install - and every caller that constructs a handler without an instance, notably the MCP
+tools - behaving exactly as it did before slots existed. `_api_base()` and `get_data()` both build from the
+resolved bridge, so a worker uses *its own* bridge's host and token rather than slot 1's. An instance that
+matches no configured bridge, a malformed block, or no usable bridge at all raises `ConfigError` - not
+`SourceConnectionError` - so a worker whose bridge has gone (or whose token was never set) stops instead of
+authenticating in a loop forever; that is where acceptance criterion 6's intent actually lands, per-worker
+rather than fatally at load time. The `host` tag is `escape_key_or_tag_value()`d but **never normalised**:
+`send_data()` escapes field keys and takes the header verbatim, so a host containing a comma, equals sign or
+space would otherwise end the tag set early and silently write a corrupt point - while rewriting the value
+would change the series identity of an install already running an IPv6 bridge. `_redact()` covers *every*
+configured bridge's token, not just the resolved one, so it stays safe to call from an exception handler
+(enumeration cannot raise) and cannot miss a token that arrived from an unexpected slot.
+
+One consequence of validating bridges at all: a credential migrated to systemd-creds reads as *unset* when
+`--check-config` is run by hand, because systemd mounts `$CREDENTIALS_DIRECTORY` only for the service. Before
+multi-bridge support `validate_settings()` did not look at the `hue` block, so this confusion is new - the
+unset-token warning therefore carries an explanatory caveat (`_credstore_caveat()`), added **only when
+`CREDENTIALS_DIRECTORY` is unset** (under the service the value really was substituted, so an unset token is
+genuinely unset and the note would be misdirection). It is appended to *that warning* rather than reported
+once per run, which is the point: emitted per-run it also landed next to "no Hue bridge is configured" - an
+absent host, no credential involved - sending the reader to the credential store to look for something that
+was never missing. Attaching it to the finding it explains makes that structurally impossible rather than
+merely handled, and it reaches the runtime `ConfigError` from `Hue.bridge()` for free, since that reuses the
+same warning text.
 
 Because that token sits in the URL path, every Hue error message is passed through `Hue._redact()`
 before it is logged *or* raised - `requests` puts the request URL into its exception messages (both
@@ -232,6 +282,34 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     `/api/{user}/lights/{id}/state` over the collector's own session/auth and `hue.insecure` TLS
     policy; the CLIP API returns 200 with a per-key success/error list, so a bridge-reported error is
     surfaced as `SourceConnectionError`.
+  - **Multi-bridge Hue reads**: `get_current_state` reports each bridge separately under
+    `instances`, keyed by bridge host, because two bridges can carry the same field name (a "Kitchen" per
+    floor) and one flat map would silently lose one of them. Keyed whenever the source is instanced - even with
+    a single bridge - so nothing reading the payload depends on the bridge count; a single-*target* source keeps
+    the historical flat `fields`/`as_of` shape untouched. One failing bridge gets an `error` entry while the
+    others still report `fields`, a partial answer *with* its failure status; only when every bridge fails is
+    `SourceConnectionError` raised, since then there is nothing useful to return. `query_history` gains an
+    optional `bridge`, which scopes the query by adding that bridge's `host` tag - the same tag Hue's own writes
+    carry - via `DataHandler.mcp_tag_filters()`, a *method* rather than the `MCP_TAG_FILTERS` class attribute
+    precisely because the answer depends on which instance the handler serves. Omitted, the query spans every
+    bridge: deliberate and documented in the tool description, since Hue writes all of them to one measurement
+    and an unqualified question about the estate should get an answer about the estate. The result echoes
+    `bridge` when one was used, so a single-bridge answer is distinguishable from an estate-wide one. The bridge
+    value never reaches a query as given - it is resolved through `Hue.bridge()` first, so an unconfigured
+    bridge is refused as a `ToolParamError`, and the existing tag-filter path then quotes and escapes it.
+  - **Multi-bridge Hue**: both write tools cover *every* configured bridge, via
+    `resolve_handlers()` in `toinflux/mcp_common.py` - one handler per bridge, built from the same
+    `expand_sources()` the collectors use so the MCP surface and the collectors cannot disagree about which
+    bridges exist. `hue_list_devices` labels each device with its `bridge` and reports an unreachable bridge
+    under `unreachable` rather than silently omitting it (a short list must not read as "no such light" when it
+    means "could not ask"). `hue_set_light` gains an optional `bridge`, and `_resolve_hue_target()` does the
+    cross-bridge arbitration: a device matching exactly one light across the estate acts without a bridge; a
+    device matching several is **refused** with every match named, since light ids repeat on every bridge (so a
+    bare id is ambiguous by nature) and names often repeat too, and actuating the wrong light is not
+    recoverable. Arbitration lives in `mcp_write.py` rather than on the class because it is about the *tool's*
+    parameters - each handler already resolves a device within its own bridge, and this only decides which
+    handler to ask. The write opt-in stays per *source* (`hue.mcp_read_write`), not per bridge: one estate,
+    one settings block, one switch.
   - **Speedtest** (`toinflux/speedtest.py`): tool `speedtest_run` (no args) via `mcp_trigger_run()` -
     runs a test *on the local host only* (separate hosts run separate processes with no listener, so
     cross-host triggering isn't possible; kept deliberately simple) and records it to InfluxDB
@@ -351,7 +429,22 @@ computation costs isn't done twice at startup.
 ### Entry point (`sendtoinflux.py`)
 
 - **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source. Connection failures (`SourceConnectionError`) are retried with exponential backoff (base 5 s, max 300 s); a `ConfigError` is not retried — it exits the process immediately with code 1.
-- **Multi-source mode** (no `--source`): reads `sources` list from `settings.yaml`, spawns one daemon thread per source with a configurable startup stagger (`stagger_seconds`, default 10). Dead threads are detected and restarted with the same exponential backoff — unless the source's worker stopped because of a `ConfigError`, in which case it is logged and left stopped (other sources keep running).
+- **Work units.** Every mode expands the requested source names into `(source, instance)` work units via
+  `expand_sources()` (`toinflux/general.py`) - one unit per worker, the same shape as `DataHandler.worker_key`.
+  Most sources expand to a single `(name, None)`; a source in `INSTANCED_SOURCES` (only `hue`) expands to one
+  unit per *configured bridge*, so each bridge gets its own thread, its own backoff and its own write buffer -
+  an unreachable bridge delays only itself. One function serves `--source`, the supervisor and `--dump` alike,
+  so they cannot disagree about what runs (the `resolve_default_source()` lesson). A source that expands to
+  nothing (Hue with no usable bridge) simply has no worker; if *every* requested source expands to nothing the
+  process logs "Nothing to collect" and exits 1 rather than idling while appearing healthy. The startup INFO
+  line reports `workers=` (labelled per bridge), not `sources=`, because with an instanced source the two
+  differ. `run_workers()` staggers across the *expanded* list, so two bridges are spread apart exactly as two
+  sources are; the supervisor's restart/stall bookkeeping is keyed by unit, and `--dump` emits a JSON object
+  keyed by instance whenever the source is instanced (even with one bridge, so nothing reading the output
+  depends on the operator's bridge count), printing what succeeded and exiting 2 if any bridge failed.
+  `run_one_worker()` keeps the main-thread path when there is exactly one unit, which is what lets a streaming
+  source shut down cleanly on a signal.
+- **Multi-source mode** (no `--source`): reads `sources` list from `settings.yaml`, expands it into work units (above) and spawns one daemon thread **per unit** — one per source for most, one per bridge for Hue — with a configurable startup stagger (`stagger_seconds`, default 10) applied across the expanded list. Dead threads are detected and restarted with the same exponential backoff — unless that worker stopped because of a `ConfigError`, in which case it is logged and left stopped (every other worker keeps running, including the other bridges of the same source). The restart, stall and stopped bookkeeping is all keyed by work unit, not by source name, so two workers on one source name stay distinguishable.
 - `--dump`: one-time raw JSON to stdout, then exit (single source only).
 - `--print`: parsed data to stdout instead of InfluxDB.
 - `--settings <path>`: use a settings file at a path other than `settings.yaml` in the project root (e.g. `/etc/send-to-influx/settings.yaml` for a packaged install). Threaded through `toinflux.get_class()`/`load_settings()`.
@@ -580,6 +673,31 @@ the source-checkout/screen-session path, where `systemd-creds` doesn't apply at 
   every pre-existing `settings.yaml` keeps working with just a warning; `example_settings.yaml` ships
   `true` explicitly, so new installs enforce by default) - `true` additionally raises `ConfigError`
   instead of just warning.
+- **Slot credentials.** `hue-user2`, `hue-user3`, … are credentials exactly like the static eight, and
+  are **uncapped**. Every consumer asks one shared predicate in `credentials.py` rather than testing membership
+  of `CREDENTIAL_FIELDS` itself: `credential_field(name)` → `(section, field)`, `credential_name_for(section,
+  field)` → the inverse, `is_credential_field()`, `placeholder_for(name)` (a slot shares slot 1's placeholder),
+  and `slot_credential_names(settings)` which *discovers* slots from the config rather than enumerating them -
+  that discovery is what removes the cap. `CANONICAL_SLOT_SUFFIX_RE` lives there too, not in `philipshue.py`,
+  because the settings side (which slot fields exist) and the credential side (which credential names exist)
+  must agree and a second copy would drift. Two of the six consumers were security-relevant: `_cmd_set_field`'s
+  refusal (without it, `--set-field hue.user2 <token>` writes a real token into settings.yaml in **plaintext**)
+  and `_contains_real_secret` (without it, that token is invisible to the group/other-readable check). The
+  others: `--remove`'s placeholder lookup (it indexed `PLACEHOLDER_VALUES` directly and would have died with a
+  `KeyError`), `apply_credential_substitution` (now driven by a listing of `$CREDENTIALS_DIRECTORY`, since an
+  unbounded set has no table to iterate), the CLI's name argument (a validator, since `choices=` cannot express
+  unbounded names - it still refuses a typo), and `--list` (static names always, plus slots from settings, plus
+  any stored credential with no matching field, reported as a probable leftover rather than cleaned up).
+- **Creating a missing field.** `_rewrite_settings_field()` will now *create* `hue.hostN`/`hue.userN` when
+  absent, which is what lets a bridge be added without hand-editing `settings.yaml` - `settings.yaml` is written
+  once at install time from an example that has no `host2`. Gated to recognised slot names by
+  `_is_creatable_field()`: creating any field on request would destroy the refusal's other job, which is
+  catching a typo (`--set-field hue.hsot2 <address>` must stay an error, not become a key nothing reads).
+  Slot 1's unnumbered `host`/`user` are excluded, since they ship in the example. The insertion point is
+  `_last_scalar_line()`, **not** the section node's `end_mark`: a block mapping's end mark sits at the next
+  token, which in this comment-dense file is past the blank line *and* the following section's leading comment,
+  so inserting there would put the field under the wrong section. Values are written double-quoted like every
+  other value this tool writes - unquoted would parse for a hostname and then break on one containing `#`.
 - `toinflux/credential_cli.py` (`send-to-influx-set-credential`, a second `pyproject.toml` entry point):
   `<name>` encrypts a secret (read from stdin if piped, else an interactive masked prompt) via
   `systemd-creds encrypt`, writes it to `/etc/send-to-influx/credstore.encrypted/<name>.cred`,

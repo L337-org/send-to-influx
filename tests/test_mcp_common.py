@@ -46,7 +46,63 @@ class TestResolveHandler:
         # handed to get_class (itself case-insensitive), not a lowercased one.
         with patch("toinflux.mcp_common.get_class", return_value="HANDLER") as gc:
             assert resolve_handler("Hue", {"sources": ["hue"]}, "cfg.yaml") == "HANDLER"
-        gc.assert_called_once_with("Hue", "cfg.yaml")
+        gc.assert_called_once_with("Hue", "cfg.yaml", instance=None)
+
+    def test_unknown_instance_is_refused_immediately_and_closes_the_session(self):
+        """An unconfigured bridge must be refused here, not deep inside schema building.
+
+        Construction does not touch the instance, so without this the bogus value is
+        accepted and only surfaces later as a raw ConfigError - bypassing the
+        ToolParamError wrapping that tells a caller mistake from a transport failure, and
+        leaking the handler's session because the caller never receives the handler.
+        """
+        from unittest.mock import MagicMock
+
+        settings = {
+            "sources": ["hue"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "hue": {"db": "hue_db", "interval": 300, "host": "real.example.com", "user": "tok"},
+        }
+        handler = MagicMock()
+        handler.mcp_tag_filters.side_effect = ConfigError("no Hue bridge configured at 'bogus'")
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            with pytest.raises(ToolParamError, match="not usable"):
+                resolve_handler("hue", settings, None, instance="bogus")
+        handler.session.close.assert_called_once()
+
+    def test_no_instance_skips_the_resolution_probe(self):
+        """A single-target source has nothing to resolve, so it must not be probed."""
+        from unittest.mock import MagicMock
+
+        handler = MagicMock()
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            assert resolve_handler("hue", {"sources": ["hue"]}, None) is handler
+        handler.mcp_tag_filters.assert_not_called()
+
+    def test_instance_is_refused_for_a_single_target_source(self):
+        """Accepting it would silently return an unscoped read the caller thinks is narrowed.
+
+        A single-target source never consults its instance - ``mcp_tag_filters()`` does not
+        look at it - so the resolution probe below cannot catch this: there is nothing to
+        resolve and nothing raises. The value was therefore accepted, the read ran across
+        everything, and the answer came back looking scoped.
+
+        Guarded here rather than in each tool because this is the one function every read
+        and write tool constructs through, so a future tool that grows an instance-shaped
+        parameter inherits the refusal instead of having to remember it.
+        """
+        with patch("toinflux.mcp_common.get_class") as gc:
+            with pytest.raises(ToolParamError, match="single target"):
+                resolve_handler("octopus", {"sources": ["octopus"]}, None, instance="bogus")
+        # Refused before construction, so there is no session to leak.
+        gc.assert_not_called()
+
+    def test_instance_is_still_accepted_for_an_instanced_source(self):
+        """The guard must not block the case it exists to protect."""
+        handler = MagicMock()
+        handler.mcp_tag_filters.return_value = {"host": "a.example.com"}
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            assert resolve_handler("hue", {"sources": ["hue"]}, None, instance="a.example.com") is handler
 
     def test_unusable_source_wrapped_as_tool_param_error(self):
         # A ConfigError from the factory becomes a (non-retryable) ToolParamError.

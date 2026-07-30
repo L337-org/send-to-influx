@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from toinflux.philipshue import Hue, _url_host
+from toinflux.philipshue import Hue, _url_host, Bridge, bridge_field_names, enumerate_bridges
 from toinflux.exceptions import SourceConnectionError
 
 
@@ -411,11 +411,366 @@ class TestHueTokenRedaction:
 
     @pytest.mark.parametrize("token", ["", None, 12345])
     def test_absent_or_non_string_token_leaves_the_message_intact(self, sample_settings, token):
-        """No token to hide must mean no rewriting - a naive ""-replace would
-        splice the marker between every character of the message."""
+        """No token to hide must mean no rewriting - a naive ""-replace would splice the
+        marker between every character of the message.
+
+        Exercised directly rather than through a request, because a bridge with no usable
+        token no longer reaches the request path at all - bridge() raises ConfigError
+        first (see test_host_without_a_token_is_a_config_error_not_a_retry).
+        """
         hue = self._hue(sample_settings, token=token)
-        boom = requests.exceptions.ConnectionError("Max retries exceeded with url: /api/whatever")
-        with patch.object(hue.session, "get", side_effect=boom):
-            with pytest.raises(SourceConnectionError) as excinfo:
-                hue.get_data_from_hue_bridge()
-        assert str(excinfo.value) == "Max retries exceeded with url: /api/whatever"
+        assert hue._redact("Max retries exceeded with url: /api/whatever") == (
+            "Max retries exceeded with url: /api/whatever"
+        )
+
+    def test_host_without_a_token_is_a_config_error_not_a_retry(self, sample_settings):
+        """A bridge whose token is unusable must fail fast, not authenticate forever.
+
+        ConfigError stops that worker permanently (the worker loop does not retry it) while
+        leaving every other source running - which is the outcome acceptance criterion 6
+        was after, without the fatal-at-load-time behaviour that would have taken the whole
+        service down on a fresh install.
+        """
+        from toinflux.exceptions import ConfigError
+
+        hue = self._hue(sample_settings, token="")
+        with pytest.raises(ConfigError) as excinfo:
+            hue.get_data_from_hue_bridge()
+        # The message must name the real cause. "no Hue bridge is configured" would be
+        # wrong here - the host is configured, it is the token that is missing.
+        assert "hue.user is not set" in str(excinfo.value)
+        assert sample_settings["hue"]["host"] in str(excinfo.value)
+
+    def test_every_configured_bridges_token_is_redacted(self, sample_settings):
+        """Redaction covers the whole configured set, not just this worker's own token.
+
+        Enumeration cannot raise, so this stays safe to call from an exception handler, and
+        a message can never carry a token merely because it came from a different slot than
+        the one expected.
+        """
+        settings = {
+            **sample_settings,
+            "hue": {
+                **sample_settings["hue"],
+                "host": "a.example.com",
+                "user": "TOKEN_A",
+                "host2": "b.example.com",
+                "user2": "TOKEN_B",
+            },
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            hue = Hue(source="hue", instance="a.example.com")
+        cleaned = hue._redact("url /api/TOKEN_A failed, and /api/TOKEN_B also failed")
+        assert "TOKEN_A" not in cleaned and "TOKEN_B" not in cleaned
+        assert cleaned.count("<redacted>") == 2
+
+
+class TestEnumerateBridges:
+    """enumerate_bridges is the single source of truth for "which bridges are
+    configured" - shared by validate_settings, the worker spawner and the CLI modes, so
+    they cannot disagree about what runs (the failure resolve_default_source exists to
+    prevent).
+    """
+
+    @staticmethod
+    def _hue(**fields):
+        return {"db": "hue_db", "interval": 300, **fields}
+
+    def test_legacy_single_bridge(self):
+        """The unnumbered host/user pair is slot 1 - every existing install."""
+        bridges, errors, warnings = enumerate_bridges(self._hue(host="hue.example.com", user="token1"))
+        assert errors == [] and warnings == []
+        assert bridges == [Bridge(slot=1, host="hue.example.com", user="token1")]
+
+    def test_non_contiguous_slots(self):
+        """Slot numbers carry no ordering and need not be contiguous - a vacated slot 2
+        must not stop slot 3 being collected, and nothing renumbers."""
+        settings = self._hue(host="a.example.com", user="t1", host2="", user2="", host3="c.example.com", user3="t3")
+        bridges, errors, warnings = enumerate_bridges(settings)
+        assert errors == [] and warnings == []
+        assert [(b.slot, b.host) for b in bridges] == [(1, "a.example.com"), (3, "c.example.com")]
+
+    def test_host_without_a_token_warns_and_is_not_collected(self):
+        """A warning, not an error: example_settings.yaml ships hue in sources: next to
+        the placeholder token, so a fresh install is exactly this state and raising would
+        stop every other collector too."""
+        bridges, errors, warnings = enumerate_bridges(self._hue(host="hue.example.com", user="your_hue_user"))
+        assert errors == []
+        assert bridges == []
+        assert len(warnings) == 1
+        assert "hue.user is not set for the bridge at hue.host (hue.example.com)" in warnings[0]
+
+    @pytest.mark.parametrize("token", ["", "   ", None, 12345, "<stored in systemd-creds - run x>"])
+    def test_unusable_tokens_warn_rather_than_collect(self, token):
+        """Blank, absent, non-string and unsubstituted-sentinel tokens are all unusable.
+
+        The sentinel case matters: settings.yaml says the value lives in the credstore but
+        no credential was found, so it must not be handed to the bridge as a doomed login.
+        """
+        bridges, errors, warnings = enumerate_bridges(self._hue(host="hue.example.com", user=token))
+        assert bridges == [] and errors == [] and len(warnings) == 1
+
+    def test_token_without_a_host_is_not_an_error(self):
+        """The resting state after `--remove`, which blanks the token and leaves clearing
+        the host as a separate step - treating it as fatal would break the documented
+        removal procedure. Cosmetic only."""
+        settings = self._hue(host="a.example.com", user="t1", host2="", user2="leftover-token")
+        bridges, errors, warnings = enumerate_bridges(settings)
+        assert errors == [] and warnings == []
+        assert [b.slot for b in bridges] == [1]
+
+    def test_no_bridge_at_all_warns(self):
+        """Nothing to collect, but still not fatal - other sources must keep running."""
+        bridges, errors, warnings = enumerate_bridges(self._hue(host="", user=""))
+        assert bridges == [] and errors == []
+        assert len(warnings) == 1 and "no Hue bridge is configured" in warnings[0]
+
+    @pytest.mark.parametrize(
+        "pair",
+        [
+            ("2001:db8::1", "2001:0db8:0000:0000:0000:0000:0000:0001"),  # same address, two spellings
+            ("[2001:db8::1]", "2001:db8::1"),  # bracketed vs bare
+            ("HUE1.local", "hue1.local"),  # hostname case
+            ("hue.example.com", "hue.example.com"),  # identical
+        ],
+    )
+    def test_duplicate_hosts_are_an_error(self, pair):
+        """Two slots addressing one bridge is self-contradictory, so it IS fatal: both
+        workers would collect the same devices and write two series for one device set."""
+        first, second = pair
+        bridges, errors, _ = enumerate_bridges(self._hue(host=first, user="t1", host2=second, user2="t2"))
+        assert len(errors) == 1
+        assert "same bridge" in errors[0]
+        assert len(bridges) == 2  # still enumerated, so every problem is reportable at once
+
+    def test_distinct_hosts_are_not_flagged(self):
+        """Different addresses in the same family must not trip the normaliser."""
+        bridges, errors, warnings = enumerate_bridges(
+            self._hue(host="2001:db8::1", user="t1", host2="2001:db8::2", user2="t2")
+        )
+        assert errors == [] and warnings == [] and len(bridges) == 2
+
+    @pytest.mark.parametrize("slot", [10, 11, 19, 42, 99, 100])
+    def test_two_digit_and_higher_slots_are_valid(self, slot):
+        """There is no cap, so a high slot number must be accepted.
+
+        Regression guard: the canonical-suffix pattern was first written `[2-9]\\d*`,
+        which looks right but rejects 10-19 (and 100-199, ...) because they begin with a
+        1 - so hue.host10 was refused as malformed. The original tests only covered
+        host1/host0/host02 and so never caught it.
+        """
+        host_field, user_field = bridge_field_names(slot)
+        settings = self._hue(host="a.example.com", user="t1", **{host_field: "b.example.com", user_field: "t2"})
+        bridges, errors, warnings = enumerate_bridges(settings)
+        assert errors == [] and warnings == []
+        assert [b.slot for b in bridges] == [1, slot]
+
+    def test_slots_are_processed_in_numeric_order(self):
+        """Slot 10 must come after slot 2, not before it.
+
+        The keys are scanned with sorted(), which is lexicographic - "host10" sorts before
+        "host2". Slots are numeric identifiers, so out-of-order processing would make the
+        bridge list, the startup log and the "same bridge as hue.hostN" message name an
+        arbitrary slot as the earlier one.
+        """
+        settings = self._hue(
+            host="a.example.com",
+            user="t1",
+            host10="j.example.com",
+            user10="t10",
+            host2="b.example.com",
+            user2="t2",
+        )
+        bridges, errors, warnings = enumerate_bridges(settings)
+        assert errors == [] and warnings == []
+        assert [b.slot for b in bridges] == [1, 2, 10]
+
+    def test_duplicate_message_names_the_lower_slot_as_the_original(self):
+        """With slots 2 and 10 duplicating, slot 2 is the one already taken."""
+        settings = self._hue(
+            host="a.example.com", user="t1", host10="dup.example.com", user10="t10", host2="dup.example.com", user2="t2"
+        )
+        _, errors, _ = enumerate_bridges(settings)
+        assert len(errors) == 1
+        assert "hue.host10" in errors[0] and "same bridge as hue.host2" in errors[0]
+
+    def test_duplicate_is_caught_even_when_one_slot_has_no_token(self):
+        """Duplicate detection covers every slot with a host, not only usable ones.
+
+        A tokenless slot spawns no worker, so nothing is double-collected *yet* - but
+        reporting the duplicate only once the token is filled in would surface it long
+        after the copy-paste that caused it, at the least expected moment.
+        """
+        settings = self._hue(host="dup.example.com", user="t1", host2="dup.example.com", user2="")
+        _, errors, warnings = enumerate_bridges(settings)
+        assert len(errors) == 1 and "same bridge" in errors[0]
+        assert len(warnings) == 1  # the missing token is still reported separately
+
+    @pytest.mark.parametrize("field", ["user1", "user0", "user02"])
+    def test_non_canonical_user_fields_are_also_an_error(self, field):
+        """Both halves of a slot are validated, not just the host.
+
+        A mistyped `user02` would otherwise be silently ignored: slot 2 would report its
+        token as unset while the token sat in a key nothing reads.
+        """
+        settings = self._hue(host="a.example.com", user="t1", **{field: "sometoken"})
+        _, errors, _ = enumerate_bridges(settings)
+        assert len(errors) == 1 and f"hue.{field}" in errors[0]
+
+    def test_token_in_a_slot_whose_host_key_is_absent_is_still_seen(self):
+        """A slot is discovered from either half, so a token left behind after the host
+        line was deleted outright is still noticed (at DEBUG) rather than invisible."""
+        bridges, errors, warnings = enumerate_bridges(self._hue(host="a.example.com", user="t1", user3="orphan"))
+        assert errors == [] and warnings == []
+        assert [b.slot for b in bridges] == [1]
+
+    def test_mixed_type_yaml_keys_do_not_crash(self):
+        """YAML permits non-string mapping keys (`1: x`, `true: y`); a mixed-type key set
+        makes a bare sorted() raise TypeError, crashing out of validation rather than
+        reporting a clean ConfigError."""
+        bridges, errors, warnings = enumerate_bridges({1: "x", 2.5: "y", "host": "a.example.com", "user": "t1"})
+        assert errors == [] and warnings == []
+        assert [b.host for b in bridges] == ["a.example.com"]
+
+    def test_warning_names_the_field_to_set(self):
+        """The message must name the exact field, since that is what the reader has to edit.
+
+        This previously also asserted that `set-credential` was *absent*, because at the time
+        that command could not accept a numbered slot, so naming it would have sent the reader
+        to a tool that would refuse them. It handles slots now, and the warning carries a
+        credential-store caveat when run outside the service - so the original reason is gone.
+        What still matters, and is asserted here, is that the field name is present.
+        """
+        _, _, warnings = enumerate_bridges(self._hue(host="a.example.com", user="t1", host2="b.example.com"))
+        assert len(warnings) == 1
+        assert "hue.user2" in warnings[0]
+
+    def test_caveat_is_absent_under_the_service(self, monkeypatch):
+        """Under systemd the value really was substituted, so an unset token is genuinely
+        unset - the credential-store caveat would be misdirection."""
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", "/run/credentials/send-to-influx.service")
+        _, _, warnings = enumerate_bridges(self._hue(host="a.example.com", user="t1", host2="b.example.com"))
+        assert len(warnings) == 1
+        assert "set-credential" not in warnings[0]
+
+    @pytest.mark.parametrize("field", ["host1", "host0", "host02"])
+    def test_non_canonical_slot_fields_are_an_error(self, field):
+        """host1 would be a second way to spell slot 1, and host02 a second way to spell
+        slot 2 - both ambiguous, so they're rejected rather than silently folded in."""
+        settings = self._hue(host="a.example.com", user="t1", **{field: "b.example.com"})
+        _, errors, _ = enumerate_bridges(settings)
+        assert len(errors) == 1
+        assert f"hue.{field}" in errors[0]
+
+    def test_non_string_host_is_an_error(self):
+        """YAML coerces `host: 10.0` to a float; it cannot address a bridge and must not
+        be str()-ed into a doomed URL."""
+        _, errors, _ = enumerate_bridges(self._hue(host=10.0, user="t1"))
+        assert len(errors) == 1 and "must be a string" in errors[0]
+
+    def test_absent_section_is_left_to_the_source_block_check(self):
+        """One cause, one message.
+
+        validate_settings' own per-source check already reports "no configuration section
+        found for source 'hue'". Enumerating a missing block on top of that would add
+        "must be a mapping (got NoneType)" - true but misleading, since the problem is
+        that it isn't there rather than that it's the wrong type.
+        """
+        from toinflux.general import validate_settings
+        from toinflux.exceptions import ConfigError
+
+        settings = {"influx": {"url": "http://x", "token": "t", "org": "o"}, "sources": ["hue"]}
+        with pytest.raises(ConfigError) as excinfo:
+            validate_settings(settings)
+        assert "no configuration section found for source 'hue'" in str(excinfo.value)
+        assert "must be a mapping" not in str(excinfo.value)
+
+    def test_non_mapping_block_is_an_error(self):
+        """A malformed `hue:` section must fail cleanly rather than raise from .get()."""
+        bridges, errors, _ = enumerate_bridges("oops")
+        assert bridges == [] and len(errors) == 1 and "must be a mapping" in errors[0]
+
+    def test_unrelated_fields_are_ignored(self):
+        """Only host/hostN name a slot - hostname-ish neighbours must not be mistaken for one."""
+        settings = self._hue(host="a.example.com", user="t1", hostname="x", insecure=True, temperature_units="C")
+        bridges, errors, warnings = enumerate_bridges(settings)
+        assert errors == [] and warnings == [] and [b.slot for b in bridges] == [1]
+
+    def test_field_names_are_derived_in_one_place(self):
+        """Callers never build f"host{n}" themselves - slot 1 is the unnumbered pair."""
+        assert bridge_field_names(1) == ("host", "user")
+        assert bridge_field_names(2) == ("host2", "user2")
+        assert bridge_field_names(99) == ("host99", "user99")
+
+
+class TestBridgeResolution:
+    """Which bridge a handler collects from, and what it emits for it."""
+
+    @staticmethod
+    def _hue(instance=None, **hue_fields):
+        settings = {
+            "hue": {"db": "hue_db", "interval": 300, "host": "a.example.com", "user": "tok-a", **hue_fields},
+            "influx": {"url": "http://influx", "token": "t", "org": "o"},
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            return Hue(source="hue", instance=instance)
+
+    def test_no_instance_resolves_to_the_first_configured_bridge(self):
+        """The single-bridge case, and every caller that doesn't care about instances
+        (the MCP tools construct handlers without one) - must behave as it always has."""
+        hue = self._hue()
+        assert hue.bridge() == Bridge(slot=1, host="a.example.com", user="tok-a")
+
+    def test_instance_selects_its_own_bridge(self):
+        """Each worker collects from its own bridge, with that bridge's own token."""
+        hue = self._hue(instance="b.example.com", host2="b.example.com", user2="tok-b")
+        assert hue.bridge() == Bridge(slot=2, host="b.example.com", user="tok-b")
+
+    def test_url_uses_the_instance_bridges_host_and_token(self):
+        """The request URL is built from the resolved bridge, not from slot 1."""
+        hue = self._hue(instance="b.example.com", host2="b.example.com", user2="tok-b")
+        assert hue._api_base() == "https://b.example.com/api/tok-b"
+
+    def test_header_tags_the_instance_bridges_host(self):
+        """Each bridge's points carry its own host tag - which is what keeps field names
+        identical to the single-bridge era instead of needing per-bridge prefixes."""
+        hue = self._hue(instance="b.example.com", host2="b.example.com", user2="tok-b")
+        with patch.object(Hue, "parse_hue_data", return_value={}):
+            hue.get_data()
+        assert hue.influx_header == "hue,host=b.example.com "
+
+    def test_header_escapes_a_host_containing_line_protocol_specials(self):
+        """send_data() escapes field keys but takes the header verbatim, so a host with a
+        space/comma/equals would end the tag set early and silently corrupt the point."""
+        hue = self._hue(instance="my bridge,x", host2="my bridge,x", user2="tok-b")
+        with patch.object(Hue, "parse_hue_data", return_value={}):
+            hue.get_data()
+        assert hue.influx_header == "hue,host=my\\ bridge\\,x "
+
+    def test_header_does_not_normalise_the_host(self):
+        """Escaped, but never rewritten: normalising would change the series identity of
+        an install that is already running an IPv6 bridge."""
+        hue = self._hue(instance="2001:0db8::1", host2="2001:0db8::1", user2="tok-b")
+        with patch.object(Hue, "parse_hue_data", return_value={}):
+            hue.get_data()
+        assert hue.influx_header == "hue,host=2001:0db8::1 "
+
+    def test_unknown_instance_is_a_config_error(self):
+        """A worker outliving a configuration change must stop, not loop against a bridge
+        that is no longer configured."""
+        from toinflux.exceptions import ConfigError
+
+        hue = self._hue(instance="gone.example.com")
+        with pytest.raises(ConfigError) as excinfo:
+            hue.bridge()
+        assert "no Hue bridge configured at 'gone.example.com'" in str(excinfo.value)
+        assert "configured: a.example.com" in str(excinfo.value)
+
+    def test_malformed_block_is_a_config_error(self):
+        """Enumeration errors surface as a ConfigError rather than being collected from."""
+        from toinflux.exceptions import ConfigError
+
+        hue = self._hue(host2="a.example.com", user2="tok-b")  # duplicate of slot 1
+        with pytest.raises(ConfigError) as excinfo:
+            hue.bridge()
+        assert "same bridge" in str(excinfo.value)

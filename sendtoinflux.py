@@ -16,7 +16,7 @@ import threading
 import faulthandler
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
-from toinflux.influx import InfluxWriteError
+from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
 
 try:
@@ -75,10 +75,15 @@ def get_backoff_delay(
 
 
 def collect_source_data(source, args, data_handler):
-    """Collect one data point for a source and either print or send it."""
+    """Collect one data point for a source and either print or send it.
+
+    Printed output is labelled with the handler's ``worker_label`` rather than the bare
+    source name, so a source running several workers (a multi-bridge Hue install) says
+    which one each block came from.
+    """
     data = data_handler.get_data()
     if args.print:
-        print_source_data(source, data)
+        print_source_data(data_handler.worker_label, data)
     else:
         data_handler.send_data()
     return data_handler.source_settings["interval"]
@@ -256,7 +261,15 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
     if data_handler is None:
         return
     original_header = data_handler.influx_header
-    data_handler.influx_header = f"collector_status,source={source} "
+    # An instanced source tags its own instance too, so per-bridge health is visible
+    # instead of several workers overwriting one another's ok/consecutive_failures at
+    # second precision. This adds a tag to an existing series for Hue - a deliberate
+    # emitted-data change, noted in the release notes: `GROUP BY source` now returns one
+    # series per bridge. Every single-target source has instance None and is untouched.
+    tags = f"source={source}"
+    if data_handler.instance is not None:
+        tags += f",host={escape_key_or_tag_value(data_handler.instance)}"
+    data_handler.influx_header = f"collector_status,{tags} "
     try:
         data_handler.send_data(
             data={"ok": 1 if ok else 0, "consecutive_failures": consecutive_failures},
@@ -264,7 +277,7 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
             use_buffer=False,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        logging.warning("Failed to write heartbeat for source '%s': %s", source, exc)
+        logging.warning("Failed to write heartbeat for '%s': %s", data_handler.worker_label, exc)
     finally:
         data_handler.influx_header = original_header
 
@@ -275,11 +288,14 @@ def maybe_send_heartbeat(args, data_handler, source, ok, consecutive_failures):
         send_heartbeat(data_handler, source, ok=ok, consecutive_failures=consecutive_failures)
 
 
-def _stamp_activity(last_activity, source):
-    """Stamp ``last_activity[source]`` with the current time for the multi-source stall
-    watchdog, or do nothing when stall detection isn't in use (``last_activity`` is None)."""
+def _stamp_activity(last_activity, unit):
+    """Stamp ``last_activity[unit]`` with the current time for the multi-source stall
+    watchdog, or do nothing when stall detection isn't in use (``last_activity`` is None).
+
+    Keyed by work unit, not source name: a source running several workers needs the
+    watchdog to tell which one stopped making progress."""
     if last_activity is not None:
-        last_activity[source] = time.time()
+        last_activity[unit] = time.time()
 
 
 def _should_stream(data_handler):
@@ -302,15 +318,22 @@ def _should_stream(data_handler):
     return bool(data_handler.STREAMING) and getattr(data_handler, "STREAM_TOPIC_FILTER", None) is not None
 
 
-def create_source_worker(source, source_start_delay, args, stopped_sources, last_activity=None):
-    """Create a worker function for continuous source collection with retries.
+def create_source_worker(unit, source_start_delay, args, stopped_sources, last_activity=None):
+    """Create a worker function for continuous collection of one work unit, with retries.
 
-    :param stopped_sources: shared set that the worker adds ``source`` to when it
-        gives up permanently (a ConfigError), so the multi-source supervisor loop
-        knows not to restart it
+    :param unit: the ``(source, instance)`` work unit this worker serves - the same shape
+        as ``DataHandler.worker_key``. ``instance`` is None for a single-target source, and
+        a bridge host for a Hue worker. One worker per unit is what gives each bridge its
+        own backoff, so an unreachable one cannot stall the others.
+    :type unit: tuple
+    :param stopped_sources: shared set that the worker adds its ``unit`` to when it
+        gives up permanently (a ConfigError), so the supervisor loop knows not to restart
+        it. Holds work units, not source names, so one bridge giving up does not stop the
+        others being restarted.
     :type stopped_sources: set
-    :param last_activity: shared dict the worker stamps with ``source: time.time()``
-        on every successful or failed cycle, so the multi-source supervisor loop can
+    :param last_activity: shared dict the worker stamps with ``unit: time.time()``
+        on every successful or failed cycle - keyed by work unit, so two workers on one
+        source name stay distinguishable to the watchdog - so the supervisor loop can
         tell a source that's merely retrying (already visible via its own WARNING
         lines) from one that's stopped making any progress at all - a thread stuck
         mid-instruction never reaches either branch, so this is the only signal a
@@ -320,21 +343,24 @@ def create_source_worker(source, source_start_delay, args, stopped_sources, last
     :type last_activity: dict or None
     """
 
+    source, instance = unit
+    label = worker_label(source, instance)
+
     def source_worker():
         failure_count = 0
         next_update = time.time() + source_start_delay
         data_handler = None
         if last_activity is not None:
             # Stamp with the scheduled first-run time, not now: a large
-            # stagger_seconds (or many sources) can make source_start_delay
+            # stagger_seconds (or many workers) can make source_start_delay
             # itself exceed the stall threshold, which would otherwise flag a
-            # source as stalled while it's still in its intentional initial
+            # worker as stalled while it's still in its intentional initial
             # delay, before it's ever had a chance to run.
-            last_activity[source] = next_update
+            last_activity[unit] = next_update
         while True:
             try:
                 if data_handler is None:
-                    data_handler = toinflux.get_class(source, args.settings)
+                    data_handler = toinflux.get_class(source, args.settings, instance=instance)
                 sleep_time = max(0, next_update - time.time())
                 time.sleep(sleep_time)
                 if _should_stream(data_handler):
@@ -343,25 +369,25 @@ def create_source_worker(source, source_start_delay, args, stopped_sources, last
                     # stop; a broker failure at startup raises and is handled by the
                     # backoff branch below exactly like a failed poll.
                     stream_source_data(
-                        source, args, data_handler, SHUTDOWN, on_activity=lambda: _stamp_activity(last_activity, source)
+                        source, args, data_handler, SHUTDOWN, on_activity=lambda: _stamp_activity(last_activity, unit)
                     )
                     return
                 interval = collect_source_data(source, args, data_handler)
                 next_update += interval
                 failure_count = 0
                 maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
-                _stamp_activity(last_activity, source)
+                _stamp_activity(last_activity, unit)
             except ConfigError as exc:
-                logging.critical("Source '%s' has a configuration problem and will not be retried: %s", source, exc)
+                logging.critical("'%s' has a configuration problem and will not be retried: %s", label, exc)
                 maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
-                stopped_sources.add(source)
+                stopped_sources.add(unit)
                 return
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 failure_count += 1
                 restart_delay = get_backoff_delay(failure_count)
                 logging.warning(
-                    "Source '%s' failed: %s. Restarting in %s seconds (attempt %s).",
-                    source,
+                    "'%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                    label,
                     exc,
                     restart_delay,
                     failure_count,
@@ -369,7 +395,7 @@ def create_source_worker(source, source_start_delay, args, stopped_sources, last
                 maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count)
                 data_handler = None
                 next_update = time.time() + restart_delay
-                _stamp_activity(last_activity, source)
+                _stamp_activity(last_activity, unit)
 
     return source_worker
 
@@ -470,6 +496,69 @@ def register_thread_dump_handler():
         logging.warning("Could not register SIGUSR1 thread-dump handler: %s", exc)
 
 
+def _exit_if_nothing_to_collect(units, requested, settings, args):
+    """
+    Stop with a clear message when no worker could be started at all.
+
+    Today this is only reachable when every requested source is instanced and none has a
+    usable target - a Hue-only install whose bridges have no tokens. Spinning a supervisor
+    over an empty list would look healthy while collecting nothing, which is the worst of
+    the available outcomes.
+
+    Re-runs validation with warnings enabled purely to *explain* the failure: those
+    warnings name the slot, the host and what to set, which "nothing to collect" on its own
+    does not. Deliberately only on this path - validating an explicit ``--source`` on every
+    run would reject configurations that work today, because ``--dump`` needs neither
+    ``interval`` nor ``db`` while ``validate_settings()`` requires both. Any error it raises
+    has already been logged by validate_settings itself, so it is swallowed here rather
+    than replacing the message above.
+
+    :param units: work units from ``expand_sources()``
+    :type units: list
+    :param requested: the source names that were asked for
+    :type requested: list
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :param args: parsed CLI arguments, for the settings path used in log labels
+    :type args: argparse.Namespace
+    :return: None - exits the process when there is nothing to run
+    """
+    if units:
+        return
+    logging.critical("Nothing to collect: no worker could be started for %s.", ", ".join(requested) or "any source")
+    try:
+        toinflux.validate_settings(settings, settings_path=args.settings or "settings.yaml", warn=True)
+    except ConfigError:
+        pass
+    sys.exit(1)
+
+
+def _requested_sources(settings, args):
+    """
+    Return ``(source names, came_from_sources_list)`` for this run.
+
+    ``--source`` wins; otherwise the ``sources:`` list; otherwise the deprecated
+    ``default_source`` fallback. The flag is only used to label the startup line, so an
+    operator can see whether the fallback was taken.
+
+    These are *source names*, not work units - ``expand_sources()`` turns them into
+    workers, and is the one place that knows a source may have several instances.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :param args: parsed CLI arguments
+    :type args: argparse.Namespace
+    :return: (lowercased source names, whether they came from the sources list)
+    :rtype: tuple
+    """
+    if args.source:
+        return ([args.source.lower()], False)
+    configured = settings.get("sources")
+    if isinstance(configured, list) and configured:
+        return ([src.lower() for src in configured if isinstance(src, str)], True)
+    return ([str(toinflux.resolve_default_source(settings)).lower()], False)
+
+
 def main():
     """
     The main function
@@ -548,8 +637,16 @@ def main():
         # also validate args.source specifically, since a user checking config for a
         # particular --source shouldn't get a false "OK" if that source isn't part of
         # the sources/default_source list load_settings() already checked.
+        #
+        # warn=True only here: this is the one mode whose whole job is reporting on the
+        # configuration, so non-fatal findings (a Hue bridge with no token, say) belong in
+        # its output. Everywhere else validate_settings() runs via load_settings() on every
+        # DataHandler construction, where the same warning would repeat per source and per
+        # retry.
         try:
-            toinflux.validate_settings(settings, source=args.source, settings_path=args.settings or "settings.yaml")
+            toinflux.validate_settings(
+                settings, source=args.source, settings_path=args.settings or "settings.yaml", warn=True
+            )
         except ConfigError as exc:
             print(f"Configuration error: {exc}")
             sys.exit(1)
@@ -558,75 +655,102 @@ def main():
 
     _configure_logging_or_exit(settings, args)
     maybe_start_mcp_server(settings, args)
-    default_source = toinflux.resolve_default_source(settings)
 
-    if args.source:
-        logging.info("Starting send-to-influx v%s (source=%s)", __version__, args.source)
-        run_single_source(args.source, args)
-        return
+    requested, from_sources_list = _requested_sources(settings, args)
+    units = toinflux.expand_sources(requested, settings)
 
-    sources = settings.get("sources")
-    if not isinstance(sources, list) or not sources:
-        logging.info("Starting send-to-influx v%s (source=%s, from default_source)", __version__, default_source)
-        run_single_source(default_source, args)
-        return
-
+    _exit_if_nothing_to_collect(units, requested, settings, args)
     if args.dump:
-        logging.error("The --dump option requires --source when running in multi-source mode.")
-        sys.exit(1)
+        if len(requested) > 1:
+            logging.error("The --dump option requires --source when running in multi-source mode.")
+            sys.exit(1)
+        _dump_source_and_exit(units, args)
 
-    logging.info("Starting send-to-influx v%s (sources=%s)", __version__, ", ".join(map(str, sources)))
-    run_multi_source(sources, args, settings.get("stagger_seconds", DEFAULT_STAGGER_SECONDS), settings)
+    # "workers=", not "sources=": with an instanced source the two differ, and the useful
+    # thing to see at startup is what will actually run - one entry per bridge, labelled.
+    logging.info(
+        "Starting send-to-influx v%s (workers=%s%s)",
+        __version__,
+        ", ".join(worker_label(*unit) for unit in units),
+        "" if args.source or from_sources_list else ", from default_source",
+    )
+    if len(units) == 1:
+        # One worker runs on this thread, which is what lets a streaming source shut down
+        # cleanly on a signal (see run_one_worker).
+        run_one_worker(units[0], args)
+        return
+    run_workers(units, args, settings.get("stagger_seconds", DEFAULT_STAGGER_SECONDS), settings)
 
 
-def _dump_source_and_exit(source, args):
+def _dump_source_and_exit(units, args):
     """
-    Collect one reading, print it as JSON, and exit - the one-shot ``--dump`` mode.
+    Collect one reading per work unit, print it as JSON, and exit - the ``--dump`` mode.
 
     A one-shot manual/debugging run has no worker loop to retry it with backoff, so a
     connection failure exits with a distinct code (2) rather than an unhandled traceback,
     and a config problem exits 1.
 
-    :param source: source name from settings/get_class mapping
-    :type source: str
+    A source with several instances (a multi-bridge Hue install) dumps every one, as a
+    JSON object keyed by instance. That shape is used whenever the source is instanced -
+    including when it has only one bridge - rather than switching between a bare object and
+    a keyed one depending on how many are configured, which would make anything reading the
+    output depend on the operator's bridge count.
+
+    One unreachable instance does not suppress the others: what succeeded is still printed,
+    the failure is reported, and the exit code is 2 - a partial result *with* its failure
+    status, rather than silence.
+
+    :param units: the ``(source, instance)`` work units to dump
+    :type units: list
     :param args: parsed CLI arguments
     :type args: argparse.Namespace
     :return: never returns - always exits the process
     """
-    try:
-        data_handler = toinflux.get_class(source, args.settings)
-        data = data_handler.get_data()
-    except ConfigError as exc:
-        logging.critical("Source '%s' has a configuration problem: %s", source, exc)
-        sys.exit(1)
-    except SourceConnectionError as exc:
-        logging.error("Source '%s' failed: %s", source, exc)
-        sys.exit(2)
-    print(json.dumps(data, indent=4))
-    sys.exit(0)
+    instanced = any(instance is not None for _, instance in units)
+    collected, failed = {}, []
+    for source, instance in units:
+        try:
+            data_handler = toinflux.get_class(source, args.settings, instance=instance)
+            collected[instance] = data_handler.get_data()
+        except ConfigError as exc:
+            logging.critical("'%s' has a configuration problem: %s", worker_label(source, instance), exc)
+            sys.exit(1)
+        except SourceConnectionError as exc:
+            logging.error("'%s' failed: %s", worker_label(source, instance), exc)
+            failed.append(instance)
+
+    if instanced:
+        print(json.dumps(collected, indent=4))
+    elif collected:
+        # A single-target source keeps its historical bare-object output.
+        print(json.dumps(next(iter(collected.values())), indent=4))
+    sys.exit(2 if failed else 0)
 
 
-def run_single_source(source, args):
+def run_one_worker(unit, args):
     """
-    Run a single data source in either dump, print, or send mode.
+    Run a single work unit on this thread, in either print or send mode.
 
-    :param source: source name from settings/get_class mapping
-    :type source: str
+    Used when exactly one worker is needed, which keeps the streaming path's clean
+    shutdown: a signal raises SystemExit on this thread and unwinds through the MQTT
+    transport's ``finally`` to disconnect properly, which the daemon-thread path can only
+    do best-effort. Several units go to ``run_workers()`` instead.
+
+    :param unit: the ``(source, instance)`` work unit to run
+    :type unit: tuple
     :param args: parsed CLI arguments
     :type args: argparse.Namespace
     """
+    source, instance = unit
+    label = worker_label(source, instance)
     data_handler = None
-
-    # dump the data if required and exit
-    if args.dump:
-        _dump_source_and_exit(source, args)
 
     failure_count = 0
     next_update = time.time()
     while True:
         try:
             if data_handler is None:
-                data_handler = toinflux.get_class(source, args.settings)
+                data_handler = toinflux.get_class(source, args.settings, instance=instance)
             if _should_stream(data_handler):
                 # Blocks until shutdown, streaming points as they arrive. On a signal the
                 # handler sets SHUTDOWN and raises SystemExit on this thread, which unwinds
@@ -640,15 +764,15 @@ def run_single_source(source, args):
             failure_count = 0
             maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
         except ConfigError as exc:
-            logging.critical("Source '%s' has a configuration problem and will not be retried: %s", source, exc)
+            logging.critical("'%s' has a configuration problem and will not be retried: %s", label, exc)
             maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
             sys.exit(1)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             failure_count += 1
             restart_delay = get_backoff_delay(failure_count)
             logging.warning(
-                "Source '%s' failed: %s. Restarting in %s seconds (attempt %s).",
-                source,
+                "'%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                label,
                 exc,
                 restart_delay,
                 failure_count,
@@ -661,19 +785,24 @@ def run_single_source(source, args):
         time.sleep(sleep_time)
 
 
-def run_multi_source(sources, args, stagger_seconds, settings=None):
+def run_workers(units, args, stagger_seconds, settings=None):
     """
-    Run all configured sources concurrently, with staggered start offsets.
+    Run every work unit concurrently, with staggered start offsets.
 
-    :param sources: list of source names to run
-    :type sources: list[str]
+    One thread per unit, so a source with several instances (a multi-bridge Hue install)
+    gets one worker per bridge, each with its own backoff - an unreachable bridge delays
+    only itself. The stagger runs across the *expanded* list, so bridges are spread out
+    exactly as separate sources are, rather than all hitting their bridges at once.
+
+    :param units: ``[(source, instance), ...]`` from ``expand_sources()``
+    :type units: list
     :param args: parsed CLI arguments
     :type args: argparse.Namespace
-    :param stagger_seconds: delay between source start offsets (coerced to int)
+    :param stagger_seconds: delay between worker start offsets (coerced to int)
     :type stagger_seconds: int
     :param settings: parsed settings dict, used to read each source's own
         ``interval`` for the stall watchdog's threshold; None (the default)
-        falls back to STALL_WARNING_SECONDS for every source
+        falls back to STALL_WARNING_SECONDS for every worker
     :type settings: dict or None
     """
 
@@ -685,22 +814,24 @@ def run_multi_source(sources, args, stagger_seconds, settings=None):
 
     threads = []
     workers = []
-    stopped_sources = set()
+    stopped_units = set()
     last_activity = {}
-    stalled_sources = set()
+    stalled_units = set()
     stagger_step = max(0, stagger_value)
-    for index, source in enumerate(sources):
+    for index, unit in enumerate(units):
         start_delay = stagger_step * index
-        worker = create_source_worker(source, start_delay, args, stopped_sources, last_activity)
+        worker = create_source_worker(unit, start_delay, args, stopped_units, last_activity)
         workers.append(worker)
         threads.append(spawn_source_thread(worker))
 
     while True:
         for idx, thread in enumerate(threads):
-            if not thread.is_alive() and sources[idx] not in stopped_sources:
-                logging.warning("Source '%s' worker stopped unexpectedly. Restarting worker thread.", sources[idx])
+            if not thread.is_alive() and units[idx] not in stopped_units:
+                logging.warning(
+                    "'%s' worker stopped unexpectedly. Restarting worker thread.", worker_label(*units[idx])
+                )
                 threads[idx] = spawn_source_thread(workers[idx])
-        check_for_stalled_sources(sources, stopped_sources, last_activity, stalled_sources, settings)
+        check_for_stalled_sources(units, stopped_units, last_activity, stalled_units, settings)
         time.sleep(1)
 
 
@@ -736,52 +867,58 @@ def _stall_threshold_seconds(source, settings):
     return STALL_WARNING_SECONDS
 
 
-def check_for_stalled_sources(sources, stopped_sources, last_activity, stalled_sources, settings=None):
-    """Warn once per stall about a source whose worker thread is alive but has
+def check_for_stalled_sources(units, stopped_units, last_activity, stalled_units, settings=None):
+    """Warn once per stall about a worker whose thread is alive but has
     made no progress (success or failure) in over its stall threshold (see
     ``_stall_threshold_seconds``) - the thread-is_alive() check above can't
     catch this, since a thread stuck mid-instruction (e.g. the GIL-starvation-
     shaped hang this was added to diagnose) never dies, it just stops making
-    progress silently. Logs once per stall (tracked via ``stalled_sources``)
+    progress silently. Logs once per stall (tracked via ``stalled_units``)
     rather than every supervisor tick, and clears the flag once activity
     resumes so a later recurrence warns again.
 
-    :param sources: configured source names
-    :type sources: list[str]
-    :param stopped_sources: sources that gave up permanently (ConfigError) - excluded
-    :type stopped_sources: set
-    :param last_activity: shared dict from create_source_worker(), source -> last
+    Everything here is keyed by **work unit**, not source name: a source running several
+    workers (a multi-bridge Hue install) needs the watchdog to say *which* one stopped, and
+    to keep one stalled bridge from being mistaken for the whole source. The threshold is
+    still per source, since the interval is a property of the settings block.
+
+    :param units: the work units being supervised, ``[(source, instance), ...]``
+    :type units: list
+    :param stopped_units: units that gave up permanently (ConfigError) - excluded
+    :type stopped_units: set
+    :param last_activity: shared dict from create_source_worker(), unit -> last
         successful-or-failed cycle's time.time()
     :type last_activity: dict
-    :param stalled_sources: sources already warned about the current stall - mutated
+    :param stalled_units: units already warned about the current stall - mutated
         in place so the caller's loop sees updates
-    :type stalled_sources: set
+    :type stalled_units: set
     :param settings: parsed settings dict, for per-source interval-aware
-        thresholds; None falls back to STALL_WARNING_SECONDS for every source
+        thresholds; None falls back to STALL_WARNING_SECONDS for every worker
     :type settings: dict or None
     :return: None
     """
     now = time.time()
-    for source in sources:
-        if source in stopped_sources:
+    for unit in units:
+        if unit in stopped_units:
             continue
-        last = last_activity.get(source)
+        last = last_activity.get(unit)
         if last is None:
             continue
+        source, _ = unit
         threshold = _stall_threshold_seconds(source, settings)
         if now - last > threshold:
-            if source not in stalled_sources:
+            if unit not in stalled_units:
                 logging.critical(
-                    "Source '%s' has not completed a cycle (success or failure) in over %d "
+                    "'%s' has not completed a cycle (success or failure) in over %d "
                     "seconds - its worker thread is likely stuck rather than merely slow. Send "
                     "SIGUSR1 to this process (e.g. 'systemctl kill -s SIGUSR1 send-to-influx') to "
                     "dump every thread's stack trace to the log, and raise this as an issue.",
-                    source,
+                    worker_label(*unit),
                     threshold,
                 )
-                stalled_sources.add(source)
+                stalled_units.add(unit)
         else:
-            stalled_sources.discard(source)
+            stalled_units.discard(unit)
 
 
 if __name__ == "__main__":

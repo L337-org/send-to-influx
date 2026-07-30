@@ -453,7 +453,7 @@ class TestWriteToolRegistration:
 
     def test_hue_set_light_on_disabled_source_is_rejected(self):
         handler = make_hue(mcp_read_write=False)
-        with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=[(None, handler)]):
             with pytest.raises(ToolParamError, match="not enabled for device writes"):
                 _hue_set_light_result(
                     self._hue_settings(),
@@ -468,7 +468,7 @@ class TestWriteToolRegistration:
     def test_hue_set_light_dispatches_and_closes_session(self):
         handler = make_hue(mcp_read_write=True)
         _wire_bridge(handler)
-        with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=[("hue.local", handler)]):
             result = _hue_set_light_result(
                 self._hue_settings(),
                 None,
@@ -485,7 +485,7 @@ class TestWriteToolRegistration:
         handler = make_hue(mcp_read_write=True)
         _wire_bridge(handler)
         handler.session.put.side_effect = requests.exceptions.ConnectionError("down")
-        with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=[("hue.local", handler)]):
             with pytest.raises(SourceConnectionError):
                 _hue_set_light_result(
                     self._hue_settings(),
@@ -501,7 +501,7 @@ class TestWriteToolRegistration:
     def test_hue_list_devices_dispatches_and_closes_session(self):
         handler = make_hue(mcp_read_write=True)
         _wire_bridge(handler)
-        with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=[("hue.local", handler)]):
             result = _hue_list_devices_result(self._hue_settings(), None)
         assert result["source"] == "hue" and any(d["name"] == "Kitchen" for d in result["devices"])
         handler.session.close.assert_called_once()
@@ -513,3 +513,280 @@ class TestWriteToolRegistration:
             result = _speedtest_run_result(self._speedtest_settings(), None)
         assert result["source"] == "speedtest"
         handler.session.close.assert_called_once()
+
+
+class TestHueMultiBridgeWrites:
+    """The write tools must see every bridge, and must never guess which one."""
+
+    @staticmethod
+    def _two_bridges(same_name=False, second_fails=False):
+        """Two handlers, each with its own lights. Both bridges have a light id "1" -
+        ids are per-bridge, so that collision is the normal case, not a contrivance."""
+        downstairs = make_hue(mcp_read_write=True)
+        upstairs = make_hue(mcp_read_write=True)
+        _wire_bridge(downstairs, lights={"1": {"name": "Kitchen", "state": {"on": False, "bri": 10}}})
+        upstairs_name = "Kitchen" if same_name else "Landing"
+        _wire_bridge(upstairs, lights={"1": {"name": upstairs_name, "state": {"on": False, "bri": 10}}})
+        if second_fails:
+            upstairs.session.get.side_effect = requests.exceptions.ConnectionError("upstairs down")
+        return [("downstairs.example.com", downstairs), ("upstairs.example.com", upstairs)]
+
+    def _settings(self):
+        return {"sources": ["hue"], "influx": {"url": "http://x", "user": "u", "password": "p"}, "hue": {}}
+
+    def test_list_covers_every_bridge_and_labels_each_device(self):
+        """Without the bridge on each entry, two lights sharing an id are indistinguishable."""
+        handlers = self._two_bridges()
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            result = _hue_list_devices_result(self._settings(), None)
+        assert [(d["bridge"], d["id"], d["name"]) for d in result["devices"]] == [
+            ("downstairs.example.com", "1", "Kitchen"),
+            ("upstairs.example.com", "1", "Landing"),
+        ]
+        assert "unreachable" not in result
+
+    def test_list_reports_an_unreachable_bridge_rather_than_omitting_it_silently(self):
+        """A short list must not read as "no such light" when it means "could not ask"."""
+        handlers = self._two_bridges(second_fails=True)
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            result = _hue_list_devices_result(self._settings(), None)
+        assert [d["bridge"] for d in result["devices"]] == ["downstairs.example.com"]
+        assert result["unreachable"] == [{"bridge": "upstairs.example.com", "error": "upstairs down"}]
+
+    def test_an_unreachable_other_bridge_is_an_actionable_refusal_not_a_transport_error(self):
+        """One bridge being down must not make every write impossible.
+
+        Reported by review and reproduced: the arbitration loop had no error handling, so a
+        light uniquely resolvable on a *healthy* bridge could not be written to while some
+        other bridge was unreachable - the raw SourceConnectionError propagated. That reads
+        as transient, so a caller retries and fails identically.
+
+        Acting on the lone match anyway is deliberately not the fix: the silent bridge may
+        carry that name too, and actuating the wrong light is not recoverable. So it still
+        refuses - but as a ToolParamError that names the missing bridge and says 'bridge'
+        proceeds without it, which is something the caller can actually do.
+        """
+        handlers = self._two_bridges(second_fails=True)
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            with pytest.raises(ToolParamError) as excinfo:
+                _hue_set_light_result(
+                    self._settings(),
+                    None,
+                    device="Kitchen",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
+                )
+        message = str(excinfo.value)
+        assert "bridge upstairs.example.com" in message and "could not be reached" in message
+        assert "Pass 'bridge'" in message
+        # The match that *was* found is reported, so the caller knows what naming a bridge
+        # would get them rather than having to guess.
+        assert "'Kitchen' (id 1) on bridge downstairs.example.com" in message
+
+    def test_naming_a_healthy_bridge_writes_while_another_is_down(self):
+        """The escape hatch the refusal above points at has to actually work."""
+        handlers = self._two_bridges(second_fails=True)
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            result = _hue_set_light_result(
+                self._settings(),
+                None,
+                device="Kitchen",
+                on=True,
+                brightness_pct=None,
+                color_temp_k=None,
+                color=None,
+                bridge="downstairs.example.com",
+            )
+        assert result["bridge"] == "downstairs.example.com"
+        assert result["device"] == "Kitchen"
+
+    def test_naming_the_unreachable_bridge_stays_a_transport_error(self):
+        """Then the failure is against the target itself, and a retry is the right response -
+        so it must not be flattened into a caller-mistake error."""
+        handlers = self._two_bridges(second_fails=True)
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            with pytest.raises(SourceConnectionError):
+                _hue_set_light_result(
+                    self._settings(),
+                    None,
+                    device="Landing",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
+                    bridge="upstairs.example.com",
+                )
+
+    def test_a_single_unreachable_bridge_stays_a_transport_error(self):
+        """With one bridge configured there is nothing to arbitrate, so an unreachable bridge
+        is simply down - not an ambiguity the caller can resolve by naming it."""
+        handlers = self._two_bridges(second_fails=True)[1:]
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            with pytest.raises(SourceConnectionError):
+                _hue_set_light_result(
+                    self._settings(),
+                    None,
+                    device="Landing",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
+                )
+
+    def test_a_unique_name_needs_no_bridge(self):
+        """The common case stays simple: one match across the estate, act on it."""
+        handlers = self._two_bridges()
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            result = _hue_set_light_result(
+                self._settings(),
+                None,
+                device="Landing",
+                on=True,
+                brightness_pct=None,
+                color_temp_k=None,
+                color=None,
+            )
+        assert result["bridge"] == "upstairs.example.com"
+        assert result["device"] == "Landing"
+
+    def test_a_name_on_both_bridges_is_refused_not_guessed(self):
+        """Acceptance criterion 15. Actuating the wrong light is not recoverable, so an
+        ambiguous name must be refused - with the bridges named, so it can be resolved."""
+        handlers = self._two_bridges(same_name=True)
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            with pytest.raises(ToolParamError) as excinfo:
+                _hue_set_light_result(
+                    self._settings(),
+                    None,
+                    device="Kitchen",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
+                )
+        message = str(excinfo.value)
+        assert "ambiguous" in message
+        assert "on bridge downstairs.example.com" in message and "on bridge upstairs.example.com" in message
+        # Cross-bridge ambiguity IS resolvable with 'bridge', so that is the hint here -
+        # unlike two lights sharing a name on one bridge (see the test above).
+        assert "Pass 'bridge'" in message
+        # Nothing was actuated on either bridge.
+        for _, handler in handlers:
+            handler.session.put.assert_not_called()
+
+    def test_duplicate_names_on_one_bridge_advise_the_id_not_the_bridge(self):
+        """Hue allows two lights to share a name on a single bridge, and there 'bridge'
+        cannot disambiguate anything - only the id can.
+
+        A test gap the review found: every earlier case had the two matches on different
+        bridges, so the cross-bridge wording and the 'pass bridge' hint were never checked
+        against an ambiguity that is not cross-bridge.
+        """
+        handler = make_hue(mcp_read_write=True)
+        _wire_bridge(
+            handler,
+            lights={
+                "1": {"name": "Kitchen", "state": {"on": False, "bri": 10}},
+                "2": {"name": "Kitchen", "state": {"on": False, "bri": 10}},
+            },
+        )
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=[("only.example.com", handler)]):
+            with pytest.raises(ToolParamError) as excinfo:
+                _hue_set_light_result(
+                    self._settings(),
+                    None,
+                    device="Kitchen",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
+                )
+        message = str(excinfo.value)
+        assert "ambiguous" in message
+        assert "Use the light id" in message
+        # Must not send the caller down a dead end, or misdescribe the cause.
+        assert "bridge" not in message.replace("on bridge only.example.com", "")
+        handler.session.put.assert_not_called()
+
+    def test_an_id_alone_is_ambiguous_across_bridges(self):
+        """Every bridge has a light "1", so a bare id is ambiguous by nature."""
+        handlers = self._two_bridges()
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            with pytest.raises(ToolParamError, match="ambiguous"):
+                _hue_set_light_result(
+                    self._settings(),
+                    None,
+                    device="1",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
+                )
+
+    def test_bridge_disambiguates_a_repeated_name(self):
+        """Passing bridge resolves what would otherwise be refused."""
+        handlers = self._two_bridges(same_name=True)
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            result = _hue_set_light_result(
+                self._settings(),
+                None,
+                device="Kitchen",
+                on=True,
+                brightness_pct=None,
+                color_temp_k=None,
+                color=None,
+                bridge="upstairs.example.com",
+            )
+        assert result["bridge"] == "upstairs.example.com"
+        handlers[0][1].session.put.assert_not_called()  # downstairs untouched
+        handlers[1][1].session.put.assert_called_once()
+
+    def test_unknown_bridge_is_refused_with_the_configured_ones_listed(self):
+        handlers = self._two_bridges()
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            with pytest.raises(ToolParamError) as excinfo:
+                _hue_set_light_result(
+                    self._settings(),
+                    None,
+                    device="Kitchen",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
+                    bridge="nosuch.example.com",
+                )
+        assert "unknown bridge" in str(excinfo.value)
+        assert "configured bridges: downstairs.example.com" in str(excinfo.value)
+
+    def test_unknown_device_names_the_discovery_tool(self):
+        handlers = self._two_bridges()
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            with pytest.raises(ToolParamError, match="hue_list_devices"):
+                _hue_set_light_result(
+                    self._settings(),
+                    None,
+                    device="Nowhere",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
+                )
+
+    def test_every_session_is_closed(self):
+        """A partial failure part-way through must not leak earlier bridges' sessions."""
+        handlers = self._two_bridges()
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
+            with pytest.raises(ToolParamError):
+                _hue_set_light_result(
+                    self._settings(),
+                    None,
+                    device="1",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
+                )
+        for _, handler in handlers:
+            handler.session.close.assert_called_once()

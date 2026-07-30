@@ -1,9 +1,11 @@
 """Unit tests for sendtoinflux (signal_handler, main, helper functions)."""
 
 import itertools
+import json
 import logging
 import signal
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 import pytest
@@ -128,7 +130,7 @@ class TestMain:
         ):
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
-            mock_get_class.assert_called_once_with("zappi", None)
+            mock_get_class.assert_called_once_with("zappi", None, instance=None)
 
     def test_main_uses_settings_arg(self, mock_main_deps):
         """main with --settings passes the path through to load_settings and get_class."""
@@ -142,7 +144,7 @@ class TestMain:
         ):
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
-            mock_get_class.assert_called_once_with("zappi", "/etc/send-to-influx/settings.yaml")
+            mock_get_class.assert_called_once_with("zappi", "/etc/send-to-influx/settings.yaml", instance=None)
 
     def test_main_registers_sigterm_handler(self, mock_main_deps):
         """main registers signal_handler for both SIGINT and SIGTERM."""
@@ -162,18 +164,22 @@ class TestMain:
         with (
             patch("sendtoinflux.signal.signal"),
             patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
-            patch("sendtoinflux.run_multi_source") as mock_run_multi_source,
+            patch("sendtoinflux.run_workers") as mock_run_workers,
             patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
         ):
             mock_load_settings.return_value = {
                 "default_source": "hue",
                 "sources": ["hue", "zappi", "speedtest"],
                 "stagger_seconds": 3,
+                # A real bridge: hue expands to one worker per *configured* bridge, so a
+                # hue with no block at all would correctly expand to no worker and drop
+                # out of the list these tests are checking.
+                "hue": {"db": "hue_db", "interval": 60, "host": "hue.example.com", "user": "tok"},
             }
             sendtoinflux.main()
-            mock_run_multi_source.assert_called_once()
-            call_args = mock_run_multi_source.call_args[0]
-            assert call_args[0] == ["hue", "zappi", "speedtest"]
+            mock_run_workers.assert_called_once()
+            call_args = mock_run_workers.call_args[0]
+            assert call_args[0] == [("hue", "hue.example.com"), ("zappi", None), ("speedtest", None)]
             assert call_args[2] == 3
 
     def test_main_logs_sources_on_multi_source_startup(self, caplog):
@@ -181,7 +187,7 @@ class TestMain:
         with (
             patch("sendtoinflux.signal.signal"),
             patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
-            patch("sendtoinflux.run_multi_source"),
+            patch("sendtoinflux.run_workers"),
             patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
             caplog.at_level("INFO"),
         ):
@@ -189,9 +195,13 @@ class TestMain:
                 "default_source": "hue",
                 "sources": ["hue", "zappi", "speedtest"],
                 "stagger_seconds": 3,
+                # A real bridge: hue expands to one worker per *configured* bridge, so a
+                # hue with no block at all would correctly expand to no worker and drop
+                # out of the list these tests are checking.
+                "hue": {"db": "hue_db", "interval": 60, "host": "hue.example.com", "user": "tok"},
             }
             sendtoinflux.main()
-            assert any("hue, zappi, speedtest" in record.message for record in caplog.records)
+            assert any("workers=hue@hue.example.com, zappi, speedtest" in record.message for record in caplog.records)
 
     def test_main_logs_source_on_single_source_startup(self, mock_main_deps, caplog):
         """main logs the source name when started with -s/--source."""
@@ -202,7 +212,7 @@ class TestMain:
         ):
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
-            assert any("source=zappi" in record.message for record in caplog.records)
+            assert any("workers=zappi" in record.message for record in caplog.records)
 
     def test_main_logs_default_source_on_startup(self, mock_main_deps, caplog):
         """main logs the default_source when no --source or settings sources list is given."""
@@ -213,7 +223,9 @@ class TestMain:
         ):
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
-            assert any("source=hue, from default_source" in record.message for record in caplog.records)
+            assert any(
+                "workers=hue@hue.example.com, from default_source" in record.message for record in caplog.records
+            )
 
     def test_main_version_flag_prints_version_and_exits_zero(self, capsys):
         """main with --version prints the version string and exits 0, without needing settings."""
@@ -238,8 +250,11 @@ class TestMain:
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
             mock_exit.assert_called_once_with(0)
+            # warn=True: --check-config is the one mode whose job is reporting on the
+            # configuration, so non-fatal findings belong in its output. Everywhere else
+            # validate_settings() runs via load_settings() on every handler construction.
             mock_validate_settings.assert_called_once_with(
-                {"default_source": "hue"}, source=None, settings_path="settings.yaml"
+                {"default_source": "hue"}, source=None, settings_path="settings.yaml", warn=True
             )
             mock_print.assert_called_once_with("Configuration OK")
 
@@ -376,7 +391,7 @@ class TestHelpers:
 
     def test_collect_source_data_uses_existing_handler(self):
         """collect_source_data uses the supplied handler instead of reloading one."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.get_data.return_value = {"x": 1}
         handler.source_settings = {"interval": 123}
         args = SimpleNamespace(print=False, dump=False, settings=None)
@@ -387,8 +402,8 @@ class TestHelpers:
         handler.get_data.assert_called_once()
         handler.send_data.assert_called_once()
 
-    def test_run_multi_source_coerces_invalid_stagger_to_zero(self):
-        """run_multi_source falls back to zero stagger when value is invalid."""
+    def test_run_workers_coerces_invalid_stagger_to_zero(self):
+        """run_workers falls back to zero stagger when value is invalid."""
         args = SimpleNamespace(print=False, dump=False, settings=None)
         fake_thread = MagicMock()
         fake_thread.is_alive.return_value = True
@@ -399,14 +414,14 @@ class TestHelpers:
             patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_multi_source(["hue", "zappi"], args, "not-an-int")
+                sendtoinflux.run_workers([("hue", None), ("zappi", None)], args, "not-an-int")
 
-        mock_create_source_worker.assert_any_call("hue", 0, args, set(), {})
-        mock_create_source_worker.assert_any_call("zappi", 0, args, set(), {})
+        mock_create_source_worker.assert_any_call(("hue", None), 0, args, set(), {})
+        mock_create_source_worker.assert_any_call(("zappi", None), 0, args, set(), {})
 
     def test_create_source_worker_stops_permanently_on_config_error(self):
         """create_source_worker adds the source to stopped_sources and returns (no retry) on ConfigError."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.get_data.side_effect = ConfigError("bad config")
         args = SimpleNamespace(print=False, dump=False, settings=None)
         stopped_sources = set()
@@ -416,14 +431,14 @@ class TestHelpers:
             patch("sendtoinflux.time.time", return_value=1000.0),
             patch("sendtoinflux.time.sleep"),
         ):
-            worker = sendtoinflux.create_source_worker("hue", 0, args, stopped_sources)
+            worker = sendtoinflux.create_source_worker(("hue", None), 0, args, stopped_sources)
             worker()  # should return normally, not raise or loop forever
 
-        assert stopped_sources == {"hue"}
+        assert stopped_sources == {("hue", None)}
         handler.get_data.assert_called_once()
 
-    def test_run_multi_source_does_not_restart_stopped_source(self):
-        """run_multi_source does not restart a thread whose source gave up with a ConfigError."""
+    def test_run_workers_does_not_restart_stopped_source(self):
+        """run_workers does not restart a thread whose source gave up with a ConfigError."""
         args = SimpleNamespace(print=False, dump=False, settings=None)
 
         def make_dead_thread():
@@ -438,15 +453,16 @@ class TestHelpers:
         ):
             # simulate "zappi" having already stopped permanently by the time the
             # supervisor loop runs its first check
-            def fake_create_source_worker(source, delay, worker_args, stopped_sources, last_activity):
+            def fake_create_source_worker(unit, delay, worker_args, stopped_sources, last_activity):
+                source, _ = unit
                 if source == "zappi":
-                    stopped_sources.add("zappi")
+                    stopped_sources.add(("zappi", None))
                 return MagicMock()
 
             mock_create_source_worker.side_effect = fake_create_source_worker
 
             with pytest.raises(SystemExit):
-                sendtoinflux.run_multi_source(["hue", "zappi"], args, 0)
+                sendtoinflux.run_workers([("hue", None), ("zappi", None)], args, 0)
 
         # both threads report dead (2 initial spawns), but only "hue" (not in
         # stopped_sources) should have triggered a respawn attempt (3rd spawn)
@@ -479,7 +495,7 @@ class TestStallDetection:
         scheduled first-run time (next_update), not the moment the thread was
         created, or the watchdog would flag a source as stalled while it's still
         in its intentional initial delay, before it's ever had a chance to run."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         last_activity = {}
         large_start_delay = sendtoinflux.STALL_WARNING_SECONDS * 2
         with (
@@ -488,18 +504,20 @@ class TestStallDetection:
             patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
         ):
             args = SimpleNamespace(print=False, dump=False, settings=None)
-            worker = sendtoinflux.create_source_worker("speedtest", large_start_delay, args, set(), last_activity)
+            worker = sendtoinflux.create_source_worker(
+                ("speedtest", None), large_start_delay, args, set(), last_activity
+            )
             with pytest.raises(SystemExit):
                 worker()
 
-        assert last_activity["speedtest"] == 1000.0 + large_start_delay
+        assert last_activity[("speedtest", None)] == 1000.0 + large_start_delay
 
         # Confirm the watchdog agrees: right after thread creation, a source with
         # a delay this large must not be flagged, even though the delay itself
         # exceeds STALL_WARNING_SECONDS.
         stalled_sources = set()
         with patch("sendtoinflux.time.time", return_value=1000.0 + sendtoinflux.STALL_WARNING_SECONDS + 1):
-            sendtoinflux.check_for_stalled_sources(["speedtest"], set(), last_activity, stalled_sources)
+            sendtoinflux.check_for_stalled_sources([("speedtest", None)], set(), last_activity, stalled_sources)
         assert stalled_sources == set()
 
     def test_successful_cycle_stamps_last_activity_again(self):
@@ -510,7 +528,7 @@ class TestStallDetection:
         calls happen per iteration - only their relative order matters: the
         pre-loop stamp is the second call ever made (1001.0), so any later
         stamp proves the success branch, not just startup, wrote it."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.source_settings = {"interval": 60}
         last_activity = {}
         clock = itertools.count(1000.0, 1.0)
@@ -520,11 +538,11 @@ class TestStallDetection:
             patch("sendtoinflux.time.sleep", side_effect=self._stop_after_one_full_iteration()),
         ):
             args = SimpleNamespace(print=False, dump=False, settings=None)
-            worker = sendtoinflux.create_source_worker("hue", 0, args, set(), last_activity)
+            worker = sendtoinflux.create_source_worker(("hue", None), 0, args, set(), last_activity)
             with pytest.raises(SystemExit):
                 worker()
 
-        assert last_activity["hue"] > 1001.0
+        assert last_activity[("hue", None)] > 1001.0
 
     def test_failed_cycle_also_stamps_last_activity(self):
         """A retried failure is already visible via its own WARNING - stamping it too
@@ -532,7 +550,7 @@ class TestStallDetection:
         signal, not one that's actively (and visibly) retrying. Uses a plain retryable
         exception (not ConfigError, which stops the worker permanently and is excluded
         from stall-checking entirely via stopped_sources)."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.get_data.side_effect = SourceConnectionError("connection reset")
         last_activity = {}
         clock = itertools.count(1000.0, 1.0)
@@ -542,17 +560,17 @@ class TestStallDetection:
             patch("sendtoinflux.time.sleep", side_effect=self._stop_after_one_full_iteration()),
         ):
             args = SimpleNamespace(print=False, dump=False, settings=None)
-            worker = sendtoinflux.create_source_worker("hue", 0, args, set(), last_activity)
+            worker = sendtoinflux.create_source_worker(("hue", None), 0, args, set(), last_activity)
             with pytest.raises(SystemExit):
                 worker()
 
-        assert last_activity["hue"] > 1001.0
+        assert last_activity[("hue", None)] > 1001.0
 
     def test_last_activity_none_disables_stamping(self):
         """The default (no last_activity dict) is a no-op - existing callers that
         don't care about stall detection (e.g. other tests exercising retry logic
         in isolation) are unaffected."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.get_data.side_effect = ConfigError("bad config")
         with (
             patch("sendtoinflux.toinflux.get_class", return_value=handler),
@@ -560,39 +578,46 @@ class TestStallDetection:
             patch("sendtoinflux.time.sleep"),
         ):
             args = SimpleNamespace(print=False, dump=False, settings=None)
-            worker = sendtoinflux.create_source_worker("hue", 0, args, set())
+            worker = sendtoinflux.create_source_worker(("hue", None), 0, args, set())
             worker()  # should not raise despite no last_activity dict provided
 
     def test_stalled_source_logs_critical_once(self, caplog):
         now = 1000.0 + sendtoinflux.STALL_WARNING_SECONDS + 1
-        last_activity = {"hue": 0.0, "zappi": now - 1}
+        # Both keys must be work-unit tuples: keyed by a bare string, zappi would look
+        # like it had never reported activity at all, so this test would pass while
+        # silently not exercising the healthy-worker branch.
+        last_activity = {("hue", None): 0.0, ("zappi", None): now - 1}
         stalled_sources = set()
         with (
             caplog.at_level("CRITICAL"),
             patch("sendtoinflux.time.time", return_value=now),
         ):
-            sendtoinflux.check_for_stalled_sources(["hue", "zappi"], set(), last_activity, stalled_sources)
-            sendtoinflux.check_for_stalled_sources(["hue", "zappi"], set(), last_activity, stalled_sources)
+            sendtoinflux.check_for_stalled_sources(
+                [("hue", None), ("zappi", None)], set(), last_activity, stalled_sources
+            )
+            sendtoinflux.check_for_stalled_sources(
+                [("hue", None), ("zappi", None)], set(), last_activity, stalled_sources
+            )
 
-        assert stalled_sources == {"hue"}
+        assert stalled_sources == {("hue", None)}
         critical_records = [r for r in caplog.records if r.levelname == "CRITICAL"]
         assert len(critical_records) == 1
         assert "hue" in critical_records[0].message
         assert "SIGUSR1" in critical_records[0].message
 
     def test_recovered_source_clears_the_stalled_flag(self):
-        last_activity = {"hue": 0.0}
-        stalled_sources = {"hue"}
+        last_activity = {("hue", None): 0.0}
+        stalled_sources = {("hue", None)}
         with patch("sendtoinflux.time.time", return_value=1.0):
-            sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources)
+            sendtoinflux.check_for_stalled_sources([("hue", None)], set(), last_activity, stalled_sources)
 
         assert stalled_sources == set()
 
     def test_stopped_sources_are_never_flagged(self):
-        last_activity = {"hue": 0.0}
+        last_activity = {("hue", None): 0.0}
         stalled_sources = set()
         with patch("sendtoinflux.time.time", return_value=1_000_000.0):
-            sendtoinflux.check_for_stalled_sources(["hue"], {"hue"}, last_activity, stalled_sources)
+            sendtoinflux.check_for_stalled_sources([("hue", None)], {("hue", None)}, last_activity, stalled_sources)
 
         assert stalled_sources == set()
 
@@ -601,7 +626,7 @@ class TestStallDetection:
         last_activity entry - shouldn't be flagged before it's had a chance to run."""
         stalled_sources = set()
         with patch("sendtoinflux.time.time", return_value=1_000_000.0):
-            sendtoinflux.check_for_stalled_sources(["hue"], set(), {}, stalled_sources)
+            sendtoinflux.check_for_stalled_sources([("hue", None)], set(), {}, stalled_sources)
 
         assert stalled_sources == set()
 
@@ -611,13 +636,15 @@ class TestStallDetection:
         because that interval exceeds STALL_WARNING_SECONDS - it would otherwise fire
         on every single cycle of every long-interval source."""
         settings = {"speedtest": {"interval": 21600}}
-        last_activity = {"speedtest": 0.0}
+        last_activity = {("speedtest", None): 0.0}
         stalled_sources = set()
 
         # Well past STALL_WARNING_SECONDS (900s), but well within one configured
         # interval - a perfectly healthy source sitting in its normal sleep.
         with patch("sendtoinflux.time.time", return_value=3600.0):
-            sendtoinflux.check_for_stalled_sources(["speedtest"], set(), last_activity, stalled_sources, settings)
+            sendtoinflux.check_for_stalled_sources(
+                [("speedtest", None)], set(), last_activity, stalled_sources, settings
+            )
 
         assert stalled_sources == set()
 
@@ -626,14 +653,16 @@ class TestStallDetection:
         missed cycles - so a genuinely stuck long-interval source is still caught,
         just not on every ordinary sleep."""
         settings = {"speedtest": {"interval": 21600}}
-        last_activity = {"speedtest": 0.0}
+        last_activity = {("speedtest", None): 0.0}
         stalled_sources = set()
         past_threshold = 21600 * sendtoinflux.STALL_INTERVAL_MULTIPLIER + 1
 
         with patch("sendtoinflux.time.time", return_value=past_threshold):
-            sendtoinflux.check_for_stalled_sources(["speedtest"], set(), last_activity, stalled_sources, settings)
+            sendtoinflux.check_for_stalled_sources(
+                [("speedtest", None)], set(), last_activity, stalled_sources, settings
+            )
 
-        assert stalled_sources == {"speedtest"}
+        assert stalled_sources == {("speedtest", None)}
 
     def test_short_interval_source_keeps_the_flat_floor(self):
         """A short-interval source (e.g. 300s) should still use the flat
@@ -641,11 +670,11 @@ class TestStallDetection:
         STALL_INTERVAL_MULTIPLIER * 300 (900s) happens to equal the floor exactly,
         but this pins the behaviour rather than relying on that coincidence."""
         settings = {"hue": {"interval": 60}}
-        last_activity = {"hue": 0.0}
+        last_activity = {("hue", None): 0.0}
         stalled_sources = set()
 
         with patch("sendtoinflux.time.time", return_value=sendtoinflux.STALL_WARNING_SECONDS - 1):
-            sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources, settings)
+            sendtoinflux.check_for_stalled_sources([("hue", None)], set(), last_activity, stalled_sources, settings)
 
         assert stalled_sources == set()
 
@@ -666,26 +695,26 @@ class TestStallDetection:
             {"hue": {"interval": float("-inf")}},
         )
         for settings in bad_intervals:
-            last_activity = {"hue": 0.0}
+            last_activity = {("hue", None): 0.0}
             stalled_sources = set()
             with patch("sendtoinflux.time.time", return_value=now):
-                sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources, settings)
-            assert stalled_sources == {"hue"}, f"settings={settings!r}"
+                sendtoinflux.check_for_stalled_sources([("hue", None)], set(), last_activity, stalled_sources, settings)
+            assert stalled_sources == {("hue", None)}, f"settings={settings!r}"
 
     def test_infinite_interval_does_not_break_the_critical_log_message(self, caplog):
         """A regression test for the specific failure mode: before the finiteness
         check, an interval of .inf produced an infinite threshold, and formatting
         that with %d in the CRITICAL log call raised OverflowError."""
         settings = {"hue": {"interval": float("inf")}}
-        last_activity = {"hue": 0.0}
+        last_activity = {("hue", None): 0.0}
         stalled_sources = set()
         with (
             caplog.at_level("CRITICAL"),
             patch("sendtoinflux.time.time", return_value=sendtoinflux.STALL_WARNING_SECONDS + 1),
         ):
-            sendtoinflux.check_for_stalled_sources(["hue"], set(), last_activity, stalled_sources, settings)
+            sendtoinflux.check_for_stalled_sources([("hue", None)], set(), last_activity, stalled_sources, settings)
 
-        assert stalled_sources == {"hue"}
+        assert stalled_sources == {("hue", None)}
         assert any(r.levelname == "CRITICAL" for r in caplog.records)
 
 
@@ -698,7 +727,7 @@ class TestSendHeartbeat:
 
     def test_sends_ok_status_and_restores_header(self):
         """send_heartbeat writes ok=1 and restores the handler's original influx_header."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.influx_header = "hue,host=test "
         with patch("sendtoinflux.time.time", return_value=1700000000.0):
             sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
@@ -709,7 +738,7 @@ class TestSendHeartbeat:
 
     def test_sends_failure_status_with_count(self):
         """send_heartbeat writes ok=0 with the current consecutive failure count."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.influx_header = "hue "
         with patch("sendtoinflux.time.time", return_value=1700000000.0):
             sendtoinflux.send_heartbeat(handler, "hue", ok=False, consecutive_failures=3)
@@ -719,7 +748,7 @@ class TestSendHeartbeat:
 
     def test_uses_collector_status_measurement_while_sending(self):
         """send_heartbeat temporarily swaps in the collector_status header for the write."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.influx_header = "hue "
         captured = {}
         handler.send_data.side_effect = lambda data=None, timestamp=None, use_buffer=True: captured.update(
@@ -755,7 +784,7 @@ class TestSendHeartbeat:
 
     def test_swallows_send_failures(self):
         """A heartbeat write failure is logged and swallowed, not raised."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.influx_header = "hue "
         handler.send_data.side_effect = Exception("network error")
 
@@ -769,7 +798,7 @@ class TestMaybeSendHeartbeat:
 
     def test_sends_when_not_in_print_mode(self):
         """maybe_send_heartbeat delegates to send_heartbeat when not in --print mode."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         args = SimpleNamespace(print=False, dump=False)
         with patch("sendtoinflux.send_heartbeat") as mock_heartbeat:
             sendtoinflux.maybe_send_heartbeat(args, handler, "hue", ok=True, consecutive_failures=0)
@@ -777,7 +806,7 @@ class TestMaybeSendHeartbeat:
 
     def test_skips_in_print_mode(self):
         """maybe_send_heartbeat does not touch InfluxDB in --print mode."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         args = SimpleNamespace(print=True, dump=False)
         with patch("sendtoinflux.send_heartbeat") as mock_heartbeat:
             sendtoinflux.maybe_send_heartbeat(args, handler, "hue", ok=True, consecutive_failures=0)
@@ -785,15 +814,15 @@ class TestMaybeSendHeartbeat:
 
 
 class TestRunSingleSourceRetry:
-    """Tests for retry/backoff behaviour in run_single_source."""
+    """Tests for retry/backoff behaviour in run_one_worker."""
 
     def _make_handler(self):
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.source_settings = {"interval": 60}
         return handler
 
     def test_exception_is_caught_and_loop_continues(self):
-        """run_single_source catches Exception, resets handler, and retries."""
+        """run_one_worker catches Exception, resets handler, and retries."""
         handler = self._make_handler()
         handler.get_data.side_effect = [Exception("network error"), Exception("break")]
 
@@ -803,12 +832,12 @@ class TestRunSingleSourceRetry:
             patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False, settings=None))
+                sendtoinflux.run_one_worker(("hue", None), SimpleNamespace(print=False, dump=False, settings=None))
 
         assert handler.get_data.call_count >= 1
 
     def test_config_error_exits_immediately_without_retry(self):
-        """run_single_source exits with code 1 on ConfigError instead of retrying."""
+        """run_one_worker exits with code 1 on ConfigError instead of retrying."""
         handler = self._make_handler()
         handler.get_data.side_effect = ConfigError("bad config")
 
@@ -817,13 +846,13 @@ class TestRunSingleSourceRetry:
             patch("sendtoinflux.time.time", return_value=1000.0),
         ):
             with pytest.raises(SystemExit) as exc_info:
-                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False, settings=None))
+                sendtoinflux.run_one_worker(("hue", None), SimpleNamespace(print=False, dump=False, settings=None))
 
         assert exc_info.value.code == 1
         handler.get_data.assert_called_once()
 
     def test_handler_is_recreated_after_failure(self):
-        """run_single_source calls get_class again after a failure resets the handler."""
+        """run_one_worker calls get_class again after a failure resets the handler."""
         handler = self._make_handler()
         handler.get_data.side_effect = [Exception("fail"), Exception("break")]
 
@@ -833,13 +862,13 @@ class TestRunSingleSourceRetry:
             patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False, settings=None))
+                sendtoinflux.run_one_worker(("hue", None), SimpleNamespace(print=False, dump=False, settings=None))
 
         # Called once before the loop, then again after the failure reset
         assert mock_get_class.call_count == 2
 
     def test_failure_count_increments_backoff(self):
-        """run_single_source passes increasing failure_count to get_backoff_delay."""
+        """run_one_worker passes increasing failure_count to get_backoff_delay."""
         handler = self._make_handler()
         handler.get_data.side_effect = Exception("always fails")
         delays = []
@@ -857,13 +886,13 @@ class TestRunSingleSourceRetry:
             patch("sendtoinflux.time.sleep", side_effect=[None, None, SystemExit(0)]),
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False, settings=None))
+                sendtoinflux.run_one_worker(("hue", None), SimpleNamespace(print=False, dump=False, settings=None))
 
         assert len(delays) >= 2
         assert delays == list(range(1, len(delays) + 1))
 
     def test_sends_heartbeat_on_success(self):
-        """run_single_source sends an ok=1 heartbeat after a successful cycle."""
+        """run_one_worker sends an ok=1 heartbeat after a successful cycle."""
         handler = self._make_handler()
         handler.get_data.side_effect = [{"x": 1}, Exception("break")]
 
@@ -874,12 +903,12 @@ class TestRunSingleSourceRetry:
             patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False, settings=None))
+                sendtoinflux.run_one_worker(("hue", None), SimpleNamespace(print=False, dump=False, settings=None))
 
         mock_heartbeat.assert_any_call(handler, "hue", ok=True, consecutive_failures=0)
 
     def test_sends_heartbeat_on_failure_with_failure_count(self):
-        """run_single_source sends an ok=0 heartbeat with the failure count after a failed cycle."""
+        """run_one_worker sends an ok=0 heartbeat with the failure count after a failed cycle."""
         handler = self._make_handler()
         handler.get_data.side_effect = [Exception("network error"), Exception("break")]
 
@@ -890,12 +919,12 @@ class TestRunSingleSourceRetry:
             patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_single_source("hue", SimpleNamespace(print=False, dump=False, settings=None))
+                sendtoinflux.run_one_worker(("hue", None), SimpleNamespace(print=False, dump=False, settings=None))
 
         mock_heartbeat.assert_any_call(handler, "hue", ok=False, consecutive_failures=1)
 
     def test_skips_heartbeat_in_print_mode(self):
-        """run_single_source does not write heartbeats in --print mode."""
+        """run_one_worker does not write heartbeats in --print mode."""
         handler = self._make_handler()
         handler.get_data.side_effect = [{"x": 1}, Exception("break")]
 
@@ -906,7 +935,7 @@ class TestRunSingleSourceRetry:
             patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_single_source("hue", SimpleNamespace(print=True, dump=False, settings=None))
+                sendtoinflux.run_one_worker(("hue", None), SimpleNamespace(print=True, dump=False, settings=None))
 
         mock_heartbeat.assert_not_called()
 
@@ -916,7 +945,7 @@ class TestCreateSourceWorkerHeartbeat:
 
     def test_worker_sends_heartbeat_on_success(self):
         """The multi-source worker sends an ok=1 heartbeat after a successful cycle."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.source_settings = {"interval": 60}
         handler.get_data.return_value = {"x": 1}
         args = SimpleNamespace(print=False, dump=False, settings=None)
@@ -927,7 +956,7 @@ class TestCreateSourceWorkerHeartbeat:
             patch("sendtoinflux.time.sleep", side_effect=[None, KeyboardInterrupt()]),
             patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
         ):
-            worker = sendtoinflux.create_source_worker("hue", 0, args, set())
+            worker = sendtoinflux.create_source_worker(("hue", None), 0, args, set())
             with pytest.raises(KeyboardInterrupt):
                 worker()
 
@@ -935,7 +964,7 @@ class TestCreateSourceWorkerHeartbeat:
 
     def test_worker_sends_heartbeat_on_failure(self):
         """The multi-source worker sends an ok=0 heartbeat with the failure count on error."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.source_settings = {"interval": 60}
         handler.get_data.side_effect = Exception("network error")
         args = SimpleNamespace(print=False, dump=False, settings=None)
@@ -946,7 +975,7 @@ class TestCreateSourceWorkerHeartbeat:
             patch("sendtoinflux.time.sleep", side_effect=[None, KeyboardInterrupt()]),
             patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
         ):
-            worker = sendtoinflux.create_source_worker("hue", 0, args, set())
+            worker = sendtoinflux.create_source_worker(("hue", None), 0, args, set())
             with pytest.raises(KeyboardInterrupt):
                 worker()
 
@@ -954,7 +983,7 @@ class TestCreateSourceWorkerHeartbeat:
 
     def test_worker_skips_heartbeat_in_print_mode(self):
         """The multi-source worker does not write heartbeats in --print mode."""
-        handler = MagicMock(STREAMING=False)
+        handler = MagicMock(STREAMING=False, instance=None)
         handler.source_settings = {"interval": 60}
         handler.get_data.return_value = {"x": 1}
         args = SimpleNamespace(print=True, dump=False, settings=None)
@@ -966,7 +995,7 @@ class TestCreateSourceWorkerHeartbeat:
             patch("sendtoinflux.print_source_data"),
             patch("sendtoinflux.send_heartbeat") as mock_heartbeat,
         ):
-            worker = sendtoinflux.create_source_worker("hue", 0, args, set())
+            worker = sendtoinflux.create_source_worker(("hue", None), 0, args, set())
             with pytest.raises(KeyboardInterrupt):
                 worker()
 
@@ -1346,7 +1375,7 @@ class TestWorkerStreamingBranch:
             patch("sendtoinflux.time.time", return_value=1000.0),
             patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
         ):
-            worker = sendtoinflux.create_source_worker("nuki", 0, args, set())
+            worker = sendtoinflux.create_source_worker(("nuki", None), 0, args, set())
             with pytest.raises(SystemExit):
                 worker()
         stream.assert_not_called()
@@ -1363,7 +1392,7 @@ class TestWorkerStreamingBranch:
             patch("sendtoinflux.time.time", return_value=1000.0),
             patch("sendtoinflux.time.sleep"),
         ):
-            worker = sendtoinflux.create_source_worker("nuki", 0, args, set(), {})
+            worker = sendtoinflux.create_source_worker(("nuki", None), 0, args, set(), {})
             worker()  # returns cleanly, no infinite poll loop
         stream.assert_called_once()
         assert stream.call_args.args[:4] == ("nuki", args, handler, sendtoinflux.SHUTDOWN)
@@ -1380,12 +1409,12 @@ class TestWorkerStreamingBranch:
             patch("sendtoinflux.time.time", return_value=1234.0),
             patch("sendtoinflux.time.sleep"),
         ):
-            worker = sendtoinflux.create_source_worker("nuki", 0, args, set(), last_activity)
+            worker = sendtoinflux.create_source_worker(("nuki", None), 0, args, set(), last_activity)
             worker()
             on_activity = stream.call_args.kwargs["on_activity"]
             last_activity.clear()  # drop the initial scheduled-start stamp
             on_activity()
-            assert last_activity == {"nuki": 1234.0}
+            assert last_activity == {("nuki", None): 1234.0}
 
     def test_streaming_startup_failure_is_retried_with_backoff(self):
         """A SourceConnectionError from the stream (broker down at startup) is caught by the
@@ -1399,12 +1428,12 @@ class TestWorkerStreamingBranch:
             patch("sendtoinflux.time.time", return_value=1000.0),
             patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
         ):
-            worker = sendtoinflux.create_source_worker("nuki", 0, args, set())
+            worker = sendtoinflux.create_source_worker(("nuki", None), 0, args, set())
             with pytest.raises(SystemExit):
                 worker()
         assert any(c.kwargs.get("ok") is False for c in heartbeat.call_args_list)
 
-    def test_run_single_source_streams_and_returns(self):
+    def test_run_one_worker_streams_and_returns(self):
         """The single-source path also runs the stream loop for a streaming handler."""
         handler = self._streaming_handler()
         args = SimpleNamespace(print=False, dump=False, settings=None)
@@ -1415,11 +1444,11 @@ class TestWorkerStreamingBranch:
             patch("sendtoinflux.time.time", return_value=1000.0),
             patch("sendtoinflux.time.sleep"),
         ):
-            sendtoinflux.run_single_source("nuki", args)
+            sendtoinflux.run_one_worker(("nuki", None), args)
         stream.assert_called_once_with("nuki", args, handler, sendtoinflux.SHUTDOWN)
         collect.assert_not_called()
 
-    def test_run_single_source_streaming_startup_failure_backs_off(self):
+    def test_run_one_worker_streaming_startup_failure_backs_off(self):
         """A SourceConnectionError from the stream in single-source mode is caught by the
         loop's backoff branch and reported unhealthy (ok=0), same as a failed poll, then
         retried - not left unhandled."""
@@ -1433,5 +1462,171 @@ class TestWorkerStreamingBranch:
             patch("sendtoinflux.time.sleep", side_effect=[None, SystemExit(0)]),
         ):
             with pytest.raises(SystemExit):
-                sendtoinflux.run_single_source("nuki", args)
+                sendtoinflux.run_one_worker(("nuki", None), args)
         assert any(c.kwargs.get("ok") is False for c in heartbeat.call_args_list)
+
+
+class TestMultiBridgeWorkers:
+    """A source with several instances runs one worker per instance."""
+
+    HUE = {
+        "db": "hue_db",
+        "interval": 300,
+        "host": "a.example.com",
+        "user": "tok-a",
+        "host3": "b.example.com",
+        "user3": "tok-b",
+    }
+
+    def _settings(self, **extra):
+        return {"influx": {"url": "http://x", "token": "t", "org": "o"}, "hue": dict(self.HUE), **extra}
+
+    def test_each_bridge_gets_its_own_worker_staggered(self):
+        """One thread per bridge, and the stagger runs across the expanded list - so two
+        bridges are spread apart just as two separate sources are, rather than both
+        hitting their bridges at the same instant."""
+        settings = self._settings(
+            sources=["hue", "speedtest"], speedtest={"db": "s", "interval": 60}, stagger_seconds=5
+        )
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings", return_value=settings),
+            patch("sendtoinflux.create_source_worker") as mock_worker,
+            patch("sendtoinflux.spawn_source_thread"),
+            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+        units_and_delays = [(c[0][0], c[0][1]) for c in mock_worker.call_args_list]
+        assert units_and_delays == [
+            (("hue", "a.example.com"), 0),
+            (("hue", "b.example.com"), 5),
+            (("speedtest", None), 10),
+        ]
+
+    def test_a_single_bridge_still_runs_on_the_main_thread(self):
+        """One worker keeps the main-thread path, which is what lets a streaming source
+        shut down cleanly on a signal."""
+        settings = self._settings(
+            sources=["hue"], hue={"db": "d", "interval": 300, "host": "only.example.com", "user": "tok"}
+        )
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings", return_value=settings),
+            patch("sendtoinflux.run_one_worker") as mock_one,
+            patch("sendtoinflux.run_workers") as mock_many,
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+        ):
+            sendtoinflux.main()
+        mock_one.assert_called_once()
+        assert mock_one.call_args[0][0] == ("hue", "only.example.com")
+        mock_many.assert_not_called()
+
+    def test_source_flag_collects_every_bridge(self):
+        """--source hue must collect all bridges, not just the first."""
+        settings = self._settings(sources=["hue"])
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings", return_value=settings),
+            patch("sendtoinflux.run_workers") as mock_many,
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "-s", "hue"]),
+        ):
+            sendtoinflux.main()
+        assert mock_many.call_args[0][0] == [("hue", "a.example.com"), ("hue", "b.example.com")]
+
+    def test_nothing_to_collect_exits_rather_than_idling(self):
+        """Every requested source expanding to nothing must say so and stop - not spin a
+        supervisor over an empty list, and not look healthy while collecting nothing."""
+        settings = self._settings(
+            sources=["hue"], hue={"db": "d", "interval": 300, "host": "a.example.com", "user": "your_hue_user"}
+        )
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings", return_value=settings),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(1)) as mock_exit,
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+        mock_exit.assert_called_once_with(1)
+
+    def test_heartbeat_identifies_the_bridge(self):
+        """Per-bridge health, rather than several workers overwriting one another's
+        ok/consecutive_failures on the same series at second precision."""
+        captured = {}
+        handler = MagicMock(STREAMING=False, instance="b.example.com")
+        handler.influx_header = "hue,host=b.example.com "
+        handler.send_data.side_effect = lambda **kw: captured.update(header=handler.influx_header)
+        sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
+        assert captured["header"] == "collector_status,source=hue,host=b.example.com "
+
+    def test_heartbeat_escapes_the_instance(self):
+        """The heartbeat header is written verbatim, so an instance carrying a
+        line-protocol special must be escaped or the point is silently corrupt."""
+        captured = {}
+        handler = MagicMock(STREAMING=False, instance="odd host,x")
+        handler.influx_header = "hue "
+        handler.send_data.side_effect = lambda **kw: captured.update(header=handler.influx_header)
+        sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
+        assert captured["header"] == "collector_status,source=hue,host=odd\\ host\\,x "
+
+    def test_dump_emits_every_bridge_keyed_by_host(self):
+        """--dump covers all bridges, keyed by host even for one bridge, so nothing
+        reading the output depends on the operator's bridge count."""
+        settings = self._settings(sources=["hue"])
+        handlers = {}
+
+        def fake_get_class(source, settings_file=None, instance=None):
+            handler = MagicMock(STREAMING=False, instance=instance)
+            handler.get_data.return_value = {"lamp": 1 if instance == "a.example.com" else 2}
+            handlers[instance] = handler
+            return handler
+
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings", return_value=settings),
+            patch("sendtoinflux.toinflux.get_class", side_effect=fake_get_class),
+            patch("sendtoinflux.print") as mock_print,
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "-s", "hue", "-d"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(0)),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+        dumped = json.loads(mock_print.call_args[0][0])
+        assert dumped == {"a.example.com": {"lamp": 1}, "b.example.com": {"lamp": 2}}
+
+    def test_dump_reports_a_failing_bridge_but_still_emits_the_others(self):
+        """A partial result WITH its failure status, rather than silence - exit 2."""
+        settings = self._settings(sources=["hue"])
+
+        def fake_get_class(source, settings_file=None, instance=None):
+            handler = MagicMock(STREAMING=False, instance=instance)
+            if instance == "b.example.com":
+                handler.get_data.side_effect = SourceConnectionError("bridge down")
+            else:
+                handler.get_data.return_value = {"lamp": 1}
+            return handler
+
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings", return_value=settings),
+            patch("sendtoinflux.toinflux.get_class", side_effect=fake_get_class),
+            patch("sendtoinflux.print") as mock_print,
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "-s", "hue", "-d"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(2)) as mock_exit,
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+        assert json.loads(mock_print.call_args[0][0]) == {"a.example.com": {"lamp": 1}}
+        mock_exit.assert_called_once_with(2)
+
+    def test_stall_watchdog_names_the_stalled_bridge(self):
+        """Two workers on one source name must be distinguishable when one stalls."""
+        stalled = set()
+        last_activity = {("hue", "a.example.com"): 0.0, ("hue", "b.example.com"): time.time()}
+        units = [("hue", "a.example.com"), ("hue", "b.example.com")]
+        with patch("sendtoinflux.logging.critical") as mock_critical:
+            sendtoinflux.check_for_stalled_sources(units, set(), last_activity, stalled, self._settings())
+        assert stalled == {("hue", "a.example.com")}
+        assert mock_critical.call_args[0][1] == "hue@a.example.com"
