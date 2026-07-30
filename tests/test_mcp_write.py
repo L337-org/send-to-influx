@@ -585,17 +585,54 @@ class TestHueMultiBridgeWrites:
                     color=None,
                 )
         message = str(excinfo.value)
-        assert "not unique" in message
+        assert "ambiguous" in message
         assert "downstairs.example.com" in message and "upstairs.example.com" in message
+        # Cross-bridge ambiguity IS resolvable with 'bridge', so that is the hint here -
+        # unlike two lights sharing a name on one bridge (see the test above).
+        assert "Pass 'bridge'" in message
         # Nothing was actuated on either bridge.
         for _, handler in handlers:
             handler.session.put.assert_not_called()
+
+    def test_duplicate_names_on_one_bridge_advise_the_id_not_the_bridge(self):
+        """Hue allows two lights to share a name on a single bridge, and there 'bridge'
+        cannot disambiguate anything - only the id can.
+
+        A test gap the review found: every earlier case had the two matches on different
+        bridges, so the cross-bridge wording and the 'pass bridge' hint were never checked
+        against an ambiguity that is not cross-bridge.
+        """
+        handler = make_hue(mcp_read_write=True)
+        _wire_bridge(
+            handler,
+            lights={
+                "1": {"name": "Kitchen", "state": {"on": False, "bri": 10}},
+                "2": {"name": "Kitchen", "state": {"on": False, "bri": 10}},
+            },
+        )
+        with patch("toinflux.mcp_write.resolve_handlers", return_value=[("only.example.com", handler)]):
+            with pytest.raises(ToolParamError) as excinfo:
+                _hue_set_light_result(
+                    self._settings(),
+                    None,
+                    device="Kitchen",
+                    on=True,
+                    brightness_pct=None,
+                    color_temp_k=None,
+                    color=None,
+                )
+        message = str(excinfo.value)
+        assert "ambiguous" in message
+        assert "Use the light id" in message
+        # Must not send the caller down a dead end, or misdescribe the cause.
+        assert "bridge" not in message.replace("on bridge only.example.com", "")
+        handler.session.put.assert_not_called()
 
     def test_an_id_alone_is_ambiguous_across_bridges(self):
         """Every bridge has a light "1", so a bare id is ambiguous by nature."""
         handlers = self._two_bridges()
         with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
-            with pytest.raises(ToolParamError, match="not unique"):
+            with pytest.raises(ToolParamError, match="ambiguous"):
                 _hue_set_light_result(
                     self._settings(),
                     None,

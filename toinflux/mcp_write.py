@@ -159,10 +159,15 @@ def _resolve_hue_target(handlers, device, bridge):
         return matches[0]
     if matches:
         where = ", ".join(f"{name!r} (id {light_id}) on bridge {instance}" for instance, _, light_id, name in matches)
-        raise ToolParamError(
-            f"device {device!r} is not unique across your bridges - it matches {where}. "
-            f"Pass 'bridge' to say which one, and use the light id if the name repeats on that bridge too"
-        )
+        # The hint has to follow the actual cause. Hue allows two lights to share a name on
+        # a *single* bridge, and there 'bridge' cannot disambiguate anything - only the id
+        # can. Suggesting it would send the caller down a dead end, and calling the
+        # ambiguity cross-bridge would be simply untrue.
+        if len({instance for instance, _, _, _ in matches}) == 1:
+            hint = "Use the light id instead of the name"
+        else:
+            hint = "Pass 'bridge' to say which one, and use the light id if the name repeats on that bridge too"
+        raise ToolParamError(f"device {device!r} is ambiguous - it matches {where}. {hint}")
     scope = f" on bridge {bridge}" if bridge is not None else ""
     raise ToolParamError(
         f"unknown device {device!r}{scope}; call hue_list_devices for the ids, names and bridges available"
