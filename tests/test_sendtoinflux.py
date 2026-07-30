@@ -1664,28 +1664,6 @@ class TestOutputStreams:
             },
         }
 
-    @pytest.fixture(autouse=True)
-    def _restore_root_logger(self):
-        """Put the root logger back exactly as it was.
-
-        These tests deliberately let real logging happen - that is the point, since patching it
-        would hide which stream it reaches - so they install handlers and change the level for
-        real, and one of them does so indirectly through main(). Without this, the level and a
-        stderr handler leak into every later test in the session, which makes log-capture
-        assertions elsewhere depend on execution order. Measured before fixing: root went from
-        WARNING/0 handlers to INFO/1. Autouse so a test added here later inherits it rather than
-        having to remember.
-        """
-        root = logging.getLogger()
-        level, handlers = root.level, list(root.handlers)
-        try:
-            yield
-        finally:
-            for handler in [h for h in root.handlers if h not in handlers]:
-                root.removeHandler(handler)
-                handler.close()
-            root.setLevel(level)
-
     @pytest.mark.parametrize("level", ["debug", "info", "warning", "error", "critical"])
     def test_every_level_goes_to_stderr(self, level, capsys):
         """Every level, not just errors - splitting diagnostics across two streams by

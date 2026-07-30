@@ -469,15 +469,22 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
         else
             # Both halves are present, so this is a real failure - dump enough to diagnose it
             # from this output alone rather than needing a re-run.
-            ls -l /var/log/send-to-influx.log 2>&1 | sed 's/^/  logfile: /'
-            grep -c . /var/log/send-to-influx.log 2>/dev/null | sed 's/^/  logfile lines: /'
-            journalctl -u send-to-influx --no-pager -n 3 2>&1 | sed 's/^/  journal: /'
+            # Every line here is guarded. This block only runs when something is already wrong,
+            # so a diagnostic that can abort the script is worse than no diagnostic at all: under
+            # `set -euo pipefail`, `grep -c` on an empty file and `grep -o` with no match both
+            # exit 1 and take the whole run down mid-dump - which is precisely what happened, so
+            # the output stopped before reaching the useful part.
+            echo "  logfile: $(ls -l /var/log/send-to-influx.log 2>&1 || true)"
+            echo "  logfile lines: $(wc -l < /var/log/send-to-influx.log 2>/dev/null || echo 0)"
+            echo "  journal (last 3):"
+            journalctl -u send-to-influx --no-pager -n 3 2>&1 | sed 's/^/    /' || true
             # The discriminator: forwarding is proven working by the probe above, so if the
             # service's own lines are not in syslog either, the programname tag is wrong; if they
             # are there but not in our file, the rule or its conffile is.
-            journalctl -u send-to-influx -o json --no-pager -n 1 2>/dev/null \
-                | grep -o '"SYSLOG_IDENTIFIER":"[^"]*"' | sed 's/^/  identifier: /'
-            grep -c "send-to-influx" /var/log/syslog 2>/dev/null | sed 's/^/  lines in syslog: /'
+            journal_json="$(journalctl -u send-to-influx -o json --no-pager -n 1 2>/dev/null || true)"
+            echo "  identifier: $(grep -o '"SYSLOG_IDENTIFIER":"[^"]*"' <<< "$journal_json" | head -1 || true)"
+            echo "  lines mentioning us in syslog: $(grep -c 'send-to-influx' /var/log/syslog 2>/dev/null || echo 0)"
+            echo "  rsyslog rule: $(cat /etc/rsyslog.d/49-send-to-influx.conf 2>/dev/null | tr '\n' ' ' || true)"
             fail "/var/log/send-to-influx.log captured no startup line although journald->syslog forwarding was proven working"
         fi
     else
