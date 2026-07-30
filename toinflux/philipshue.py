@@ -5,12 +5,49 @@ __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT License"
 __version__ = "1.0"
 
+import ipaddress
 import logging
 import warnings
 import urllib3
 import requests
 from toinflux.influx import DataHandler
 from toinflux.exceptions import SourceConnectionError, ToolParamError
+
+
+def _url_host(host):
+    """
+    Format a configured host for use in the authority part of a URL.
+
+    A bare IPv6 literal has to be bracketed - ``https://2001:db8::1/...`` is
+    ambiguous, because everything from the first colon onward parses as a port,
+    so an unbracketed address fails every request. Hostnames and IPv4 addresses
+    are returned unchanged, and a value the user already bracketed is left
+    alone, which makes this safe to apply unconditionally and idempotent.
+
+    This is a URL-construction concern only. The value written as the InfluxDB
+    ``host`` tag is deliberately left exactly as configured (see ``get_data``) -
+    normalising it there would change the tag value for existing installs.
+
+    :param host: host as configured in settings.yaml - a hostname, an IPv4
+        literal, or an IPv6 literal with or without brackets
+    :type host: str
+    :return: the host, bracketed if it is a bare IPv6 literal
+    :rtype: str
+    """
+    text = str(host).strip()
+    if text.startswith("[") and text.endswith("]"):
+        return text
+    try:
+        # A zone id (fe80::1%eth0) parses here too, and is bracketed like any
+        # other IPv6 literal rather than percent-encoded per RFC 6874 - requests
+        # does not accept that form anyway, and a link-local bridge address is
+        # not a case this has to serve.
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        # A hostname, or anything else not to be second-guessed (a hand-written
+        # host:port, say) - passed through untouched.
+        return text
+    return f"[{text}]" if address.version == 6 else text
 
 
 class Hue(DataHandler):
@@ -62,6 +99,21 @@ class Hue(DataHandler):
         self.data = self.parse_hue_data()
         return self.data
 
+    def _api_base(self):
+        """
+        Return the bridge's authenticated API base URL, ``https://<host>/api/<user>``.
+
+        Shared by the read path (``get_data_from_hue_bridge``) and the MCP write
+        path (``_put_light_state``) so that both bracket an IPv6 host
+        identically - see ``_url_host``. A second copy of this construction is how
+        one of the two paths would silently keep the bug.
+
+        :return: API base URL for this bridge
+        :rtype: str
+        """
+        host = _url_host(self.settings["hue"]["host"])
+        return f"https://{host}/api/{self.settings['hue']['user']}"
+
     def get_data_from_hue_bridge(self):
         """
         Connect to the Hue bridge and get the sensor data
@@ -77,7 +129,7 @@ class Hue(DataHandler):
                 if insecure:
                     warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
                 response = self.session.get(
-                    f"https://{self.settings['hue']['host']}/api/{self.settings['hue']['user']}",
+                    self._api_base(),
                     timeout=self.settings["hue"].get("timeout", 5),
                     verify=not insecure,
                 )
@@ -442,7 +494,7 @@ class Hue(DataHandler):
             (the CLIP API returns 200 with a list of per-key success/error items)
         """
         insecure = self.settings["hue"].get("insecure", True)
-        url = f"https://{self.settings['hue']['host']}/api/{self.settings['hue']['user']}/lights/{light_id}/state"
+        url = f"{self._api_base()}/lights/{light_id}/state"
         try:
             with warnings.catch_warnings():
                 if insecure:

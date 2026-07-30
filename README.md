@@ -56,6 +56,11 @@ Hue bridges are commonly reached over `https` with a self-signed local certifica
 verification is skipped by default (`insecure: true`). If your bridge has a valid certificate,
 set `insecure: false` in the `hue` settings block to enable verification.
 
+The `host` setting accepts a hostname, an IPv4 address, or an IPv6 address. Write an IPv6
+address plainly (`host: "2001:db8::1"`) — the square brackets a URL needs are added
+internally, so you do not have to. Brackets are accepted too if you prefer them, and the
+value you configure is what appears as the `host` tag in InfluxDB either way.
+
 MyEnergi Zappi / Eddi / Harvi
 -----------------------------
 

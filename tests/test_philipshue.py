@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from toinflux.philipshue import Hue
+from toinflux.philipshue import Hue, _url_host
 from toinflux.exceptions import SourceConnectionError
 
 
@@ -254,3 +254,90 @@ class TestHue:
             with patch.object(Hue, "get_data_from_hue_bridge", return_value=hue_data):
                 result = hue.parse_hue_data()
                 assert result["Lamp"] == 0
+
+
+class TestUrlHost:
+    """Tests for _url_host - bracketing a bare IPv6 literal for use in a URL."""
+
+    @pytest.mark.parametrize(
+        "host, expected",
+        [
+            # A bare IPv6 literal must be bracketed, or everything from its first
+            # colon parses as a port and every request fails.
+            ("2001:db8::1", "[2001:db8::1]"),
+            ("fe80::1", "[fe80::1]"),
+            ("::1", "[::1]"),
+            # Fully-expanded form is still IPv6, and is bracketed as written -
+            # never rewritten to the compressed form.
+            ("2001:0db8:0000:0000:0000:0000:0000:0001", "[2001:0db8:0000:0000:0000:0000:0000:0001]"),
+            # Idempotent: a host the user already bracketed is left alone rather
+            # than double-bracketed.
+            ("[2001:db8::1]", "[2001:db8::1]"),
+            # Unaffected: IPv4 literals and hostnames.
+            ("192.168.1.2", "192.168.1.2"),
+            ("hue.example.com", "hue.example.com"),
+            ("hue", "hue"),
+            # Not second-guessed: a hand-written host:port keeps working exactly
+            # as it does today (it is not a parseable address, so it passes through).
+            ("hue.example.com:8443", "hue.example.com:8443"),
+        ],
+    )
+    def test_url_host(self, host, expected):
+        """_url_host brackets a bare IPv6 literal and leaves everything else alone."""
+        assert _url_host(host) == expected
+
+    def test_url_host_strips_surrounding_whitespace(self):
+        """_url_host tolerates stray whitespace around a configured value."""
+        assert _url_host("  2001:db8::1  ") == "[2001:db8::1]"
+
+    def test_url_host_passes_through_a_non_string(self):
+        """A YAML-coerced non-string (e.g. `host: 10.0` is a float) must not raise."""
+        assert _url_host(10.0) == "10.0"
+
+
+class TestHueIpv6Host:
+    """A bridge configured with a bare IPv6 address must be reachable (SI-17)."""
+
+    @staticmethod
+    def _hue_with_host(sample_settings, host):
+        settings = {**sample_settings, "hue": {**sample_settings["hue"], "host": host}}
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            return Hue(source="hue")
+
+    def test_read_path_brackets_a_bare_ipv6_host(self, sample_settings):
+        """get_data_from_hue_bridge requests a bracketed URL for a bare IPv6 host."""
+        hue = self._hue_with_host(sample_settings, "2001:db8::1")
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"sensors": {}, "lights": {}}
+        with patch.object(hue.session, "get", return_value=mock_response) as mock_get:
+            hue.get_data_from_hue_bridge()
+            assert mock_get.call_args[0][0] == f"https://[2001:db8::1]/api/{sample_settings['hue']['user']}"
+
+    def test_read_path_leaves_a_hostname_alone(self, sample_settings):
+        """The URL for a hostname is unchanged - no brackets, no rewriting."""
+        hue = self._hue_with_host(sample_settings, "hue.example.com")
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"sensors": {}, "lights": {}}
+        with patch.object(hue.session, "get", return_value=mock_response) as mock_get:
+            hue.get_data_from_hue_bridge()
+            assert mock_get.call_args[0][0] == f"https://hue.example.com/api/{sample_settings['hue']['user']}"
+
+    def test_read_path_does_not_double_bracket(self, sample_settings):
+        """A host the user already bracketed is requested as-is."""
+        hue = self._hue_with_host(sample_settings, "[2001:db8::1]")
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"sensors": {}, "lights": {}}
+        with patch.object(hue.session, "get", return_value=mock_response) as mock_get:
+            hue.get_data_from_hue_bridge()
+            assert mock_get.call_args[0][0].startswith("https://[2001:db8::1]/api/")
+
+    def test_influx_host_tag_is_the_configured_value_not_the_url_form(self, sample_settings):
+        """The InfluxDB host tag keeps the configured value verbatim.
+
+        Bracketing is a URL concern only: normalising the tag would change the
+        series identity for anyone already running an IPv6 bridge.
+        """
+        hue = self._hue_with_host(sample_settings, "2001:db8::1")
+        with patch.object(Hue, "parse_hue_data", return_value={}):
+            hue.get_data()
+        assert hue.influx_header == "hue,host=2001:db8::1 "
