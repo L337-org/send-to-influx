@@ -16,7 +16,7 @@ __license__ = "MIT License"
 import logging
 
 from toinflux.exceptions import ConfigError, ToolParamError
-from toinflux.general import get_class, resolve_default_source
+from toinflux.general import expand_sources, get_class, resolve_default_source
 
 
 def configured_sources(settings):
@@ -36,6 +36,54 @@ def configured_sources(settings):
     # source.lower(), and a non-string would crash the error-message join.
     default = resolve_default_source(settings)
     return [default.lower()] if isinstance(default, str) else []
+
+
+def resolve_handlers(source, settings, settings_file):
+    """Construct one handler per *instance* of a configured source.
+
+    Most sources have a single target and yield one handler with ``instance=None`` -
+    identical to ``resolve_handler()``. An instanced source (a Hue install with more than
+    one bridge) yields one handler per bridge, so a tool can report on or act against all
+    of them rather than silently seeing only the first.
+
+    Uses ``expand_sources()``, the same function the collectors use to decide what runs, so
+    the MCP surface and the collectors cannot disagree about which bridges exist.
+
+    The caller owns every returned handler's session and must close them all (see
+    :func:`close_session`) - typically in a ``finally``, since a partial failure part-way
+    through the list still leaves earlier sessions open.
+
+    :param source: source name from a tool argument
+    :param settings: parsed settings dict
+    :param settings_file: settings path, threaded to each handler's own load
+    :return: list of ``(instance, handler)``, instance None for a single-target source
+    :raises ToolParamError: source is missing/non-string, unknown, unusable, or - for an
+        instanced source - has no usable target at all (a Hue install whose bridges have no
+        tokens), which would otherwise return an empty result that looks like "no devices"
+        rather than "not configured"
+    """
+    if not isinstance(source, str) or not source.strip():
+        raise ToolParamError(f"source must be a non-empty string (got {source!r})")
+    available = configured_sources(settings)
+    if source.lower() not in available:
+        raise ToolParamError(
+            f"unknown source {source!r}; available sources: {', '.join(sorted(available)) or '(none)'}"
+        )
+    units = expand_sources([source.lower()], settings)
+    if not units:
+        raise ToolParamError(
+            f"source {source!r} has no usable target configured - nothing to report on. "
+            f"Run 'send-to-influx --check-config' for the details"
+        )
+    handlers = []
+    try:
+        for _, instance in units:
+            handlers.append((instance, get_class(source, settings_file, instance=instance)))
+    except ConfigError as exc:
+        for _, handler in handlers:
+            close_session(handler.session)
+        raise ToolParamError(f"source {source!r} is not usable: {exc}") from exc
+    return handlers
 
 
 def resolve_handler(source, settings, settings_file):
