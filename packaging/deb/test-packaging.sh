@@ -425,13 +425,65 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
     pass "journal still captures the service's log output"
     # And the same lines must still reach the rsyslog-managed logfile, where present. rsyslog
     # is only a Recommends:, so absence is not a failure - a missing *rule* would be.
-    # The rsyslog-to-logfile route is deliberately NOT asserted here. It is independent of which
-    # stream diagnostics use - verified in a systemd container that stdout and stderr both reach a
-    # programname rule identically - and an attempt to assert it here found a separate, pre-existing
-    # question about whether the rule is live at all on a fresh install: on the arm64 runner the
-    # service's lines carried the correct SYSLOG_IDENTIFIER and reached /var/log/syslog (19 of them),
-    # while /var/log/send-to-influx.log stayed empty and the rule's `stop` never fired. That belongs
-    # to the packaging behaviour, not to logging streams, and is tracked separately.
+    # The rsyslog-to-logfile route. postinst does `systemctl try-restart rsyslog` on every
+    # configure, which is deliberately a no-op when rsyslog is stopped - so in this suite, which
+    # installs, upgrades and purges the package repeatedly, rsyslogd can legitimately be running
+    # from *before* the current conffile was laid down and will not have read it. The test has to
+    # establish its own precondition: restart rsyslog, not merely start it, so the shipped rule is
+    # certainly loaded before asserting anything about it.
+    if command -v rsyslogd >/dev/null 2>&1; then
+        systemctl restart rsyslog >/dev/null 2>&1 || true
+        sleep 2
+    fi
+    # Then prove journald -> syslog forwarding empirically rather than reading it out of config:
+    # the socket can exist while ForwardToSyslog=no leaves it unused. systemd-cat puts a line in
+    # the journal under a unique tag; if that reaches syslog, forwarding works here and any
+    # subsequent failure of our own rule is ours.
+    journald_forward=no
+    if pgrep -x rsyslogd >/dev/null 2>&1; then
+        probe_tag="stiprobe$$"
+        systemd-cat -t "$probe_tag" echo "forwarding probe" 2>/dev/null || true
+        for _ in $(seq 1 10); do
+            # -r over files, no pipe, so no SIGPIPE hazard.
+            if grep -rqs "$probe_tag" /var/log/syslog /var/log/messages 2>/dev/null; then
+                journald_forward=yes; break
+            fi
+            sleep 1
+        done
+    fi
+    if [ "$journald_forward" = "yes" ]; then
+        systemctl restart send-to-influx >/dev/null 2>&1 || true
+        log_ok=0
+        for _ in $(seq 1 15); do
+            if grep -q "Starting send-to-influx" /var/log/send-to-influx.log 2>/dev/null; then
+                log_ok=1; break
+            fi
+            sleep 1
+        done
+        if [ "$log_ok" = 1 ]; then
+            pass "rsyslog routes the service's logging to /var/log/send-to-influx.log"
+        else
+            # Every line guarded: this block only runs when something is already wrong, and under
+            # `set -euo pipefail` an unguarded `grep -c` on an empty file or `grep -o` with no match
+            # exits 1 and takes the run down mid-dump - which previously stopped the output before
+            # the useful part.
+            echo "  logfile: $(ls -l /var/log/send-to-influx.log 2>&1 || true)"
+            echo "  logfile lines: $(wc -l < /var/log/send-to-influx.log 2>/dev/null || echo 0)"
+            journal_json="$(journalctl -u send-to-influx -o json --no-pager -n 1 2>/dev/null || true)"
+            echo "  identifier: $(grep -o '"SYSLOG_IDENTIFIER":"[^"]*"' <<< "$journal_json" | head -1 || true)"
+            # Count OUR lines specifically - syslog renders them as "send-to-influx[pid]:" - not any
+            # line merely mentioning the string, which also matches systemd's own unit messages and
+            # made an earlier version of this dump misleading.
+            echo "  our lines in syslog: $(grep -c 'send-to-influx\[' /var/log/syslog 2>/dev/null || echo 0)"
+            echo "  any mention in syslog: $(grep -c 'send-to-influx' /var/log/syslog 2>/dev/null || echo 0)"
+            echo "  rsyslog loaded our rule: $(pgrep -x rsyslogd >/dev/null 2>&1 && echo 'rsyslogd running' || echo 'rsyslogd absent')"
+            fail "/var/log/send-to-influx.log captured no startup line although journald->syslog forwarding was proven working"
+        fi
+    else
+        echo "note: NOT VERIFIED - journald->syslog forwarding is not active here" \
+             "(rsyslogd=$(pgrep -x rsyslogd >/dev/null 2>&1 && echo running || echo 'not running'))," \
+             "so the logfile route cannot be exercised. Independent of the stdout/stderr split."
+    fi
     pid_before=$(systemctl show -p MainPID --value send-to-influx)
     upgrade_and_assert_silent "upgrade with running service"
     echo "$LAST_UPGRADE_OUTPUT" | grep -q "has been restarted" || fail "expected the restarted upgrade message"
