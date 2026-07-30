@@ -20,8 +20,8 @@ so those class attributes - not this file - are what the model actually reads.
 | Smart plugs | boolean (0/1) | 1 = on |
 | Dimmable lights | % (0-100) | Brightness percentage |
 
-Every point carries a `host` tag holding the bridge it came from, exactly as written in
-`settings.yaml`. With more than one bridge configured, that tag is what separates them:
+Every **Hue** point carries a `host` tag holding the bridge it came from, exactly as written
+in `settings.yaml` (this tag is specific to Hue - other sources are unaffected). With more than one bridge configured, that tag is what separates them:
 field names are unchanged and unprefixed, so two bridges with a light of the same name write
 the same field key under different `host` tags. Filter or group by `host` to separate them,
 and note that replacing a bridge with one at a different address starts a new series - see

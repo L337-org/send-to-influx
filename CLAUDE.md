@@ -116,10 +116,15 @@ configured bridge's token, not just the resolved one, so it stays safe to call f
 
 One consequence of validating bridges at all: a credential migrated to systemd-creds reads as *unset* when
 `--check-config` is run by hand, because systemd mounts `$CREDENTIALS_DIRECTORY` only for the service. Before
-multi-bridge support `validate_settings()` did not look at the `hue` block, so this confusion is new -
-`_log_config_warnings()` therefore appends an explanatory note, but **only when `CREDENTIALS_DIRECTORY` is
-unset**. Under the service the value really was substituted, so a warning there genuinely means unset and the
-note would be misdirection.
+multi-bridge support `validate_settings()` did not look at the `hue` block, so this confusion is new - the
+unset-token warning therefore carries an explanatory caveat (`_credstore_caveat()`), added **only when
+`CREDENTIALS_DIRECTORY` is unset** (under the service the value really was substituted, so an unset token is
+genuinely unset and the note would be misdirection). It is appended to *that warning* rather than reported
+once per run, which is the point: emitted per-run it also landed next to "no Hue bridge is configured" - an
+absent host, no credential involved - sending the reader to the credential store to look for something that
+was never missing. Attaching it to the finding it explains makes that structurally impossible rather than
+merely handled, and it reaches the runtime `ConfigError` from `Hue.bridge()` for free, since that reuses the
+same warning text.
 
 Because that token sits in the URL path, every Hue error message is passed through `Hue._redact()`
 before it is logged *or* raised - `requests` puts the request URL into its exception messages (both

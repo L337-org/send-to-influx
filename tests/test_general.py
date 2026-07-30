@@ -430,6 +430,23 @@ class TestConfigWarningCaveat:
             validate_settings(settings, warn=True)
         assert "not visible outside the service" not in caplog.text
 
+    def test_a_warning_about_something_else_does_not_get_the_caveat(self, monkeypatch, caplog):
+        """An absent *host* is not a credential problem, so the caveat must stay away.
+
+        Review finding: the caveat was originally emitted once per run, alongside whatever
+        warnings there were, gated only on CREDENTIALS_DIRECTORY. So "no Hue bridge is
+        configured" - a missing host, with no credential involved anywhere - came with a
+        note about the credential store, sending the reader to look for something that was
+        never missing. It is now attached to the unset-token warning itself, which is what
+        makes this case structurally impossible rather than merely handled.
+        """
+        monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+        settings = {**self.SETTINGS, "hue": {**self.SETTINGS["hue"], "host": "", "user": ""}}
+        with caplog.at_level("WARNING"):
+            validate_settings(settings, warn=True)
+        assert "no Hue bridge is configured" in caplog.text
+        assert "not visible outside the service" not in caplog.text
+
 
 class TestSourceExpansion:
     """expand_sources is the one place that decides what actually runs."""

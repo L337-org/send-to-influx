@@ -7,6 +7,7 @@ __version__ = "1.0"
 
 import ipaddress
 import logging
+import os
 import re
 import warnings
 from collections import namedtuple
@@ -176,10 +177,42 @@ def _bridge_for_slot(hue_settings, slot):
             None,
             f"hue.{user_field} is not set for the bridge at hue.{host_field} ({host.strip()}) - "
             f"that bridge will not be collected. Set it to that bridge's whitelist token, or "
-            f"clear hue.{host_field} if that bridge is no longer in use",
+            f"clear hue.{host_field} if that bridge is no longer in use" + _credstore_caveat(),
             host.strip(),
         )
     return (Bridge(slot=slot, host=host.strip(), user=user.strip()), None, None, host.strip())
+
+
+def _credstore_caveat():
+    """
+    Return the systemd-creds caveat to append to an unset-token warning, or ``""``.
+
+    A credential migrated with ``send-to-influx-set-credential`` is mounted by systemd for
+    the service alone, so from any other context it reads as unset and this warning is a
+    false alarm. Before multi-bridge support nothing validated the ``hue`` block, so the
+    confusion is new and worth pre-empting.
+
+    Attached to *this* warning rather than reported once per run, so it can only accompany
+    the finding it explains: said alongside "no Hue bridge is configured", where the problem
+    is an absent host and no credential is involved, it would send the reader to the
+    credential store to look for something that was never missing.
+
+    Empty when ``CREDENTIALS_DIRECTORY`` is set, because that means we *are* the service:
+    the value really was substituted, so an unset token is genuinely unset and the caveat
+    would be misdirection just the same. Being unset does not prove the credential store is
+    in use - a source checkout never migrated anything - so the wording stays conditional
+    rather than asserting that the value is stored there.
+
+    :return: the caveat, prefixed with a separator, or an empty string
+    :rtype: str
+    """
+    if os.environ.get("CREDENTIALS_DIRECTORY"):
+        return ""
+    return (
+        ". If it is stored with send-to-influx-set-credential, it is not visible outside the "
+        "service and reads as unset here - run 'systemctl status send-to-influx' to see what "
+        "the service itself reports"
+    )
 
 
 def _duplicate_host_errors(configured):

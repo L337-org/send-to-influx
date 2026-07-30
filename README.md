@@ -79,8 +79,9 @@ hue:
 
 Each bridge is collected by its own worker, started `stagger_seconds` apart, with its own
 retry backoff — so a bridge that is switched off or unreachable delays only itself and the
-others keep recording. `send-to-influx --check-config` lists any problems, and a bridge whose
-username is missing is reported and skipped rather than stopping the rest.
+others keep recording. `send-to-influx --check-config` lists any problems — from a source
+checkout that is `sendtoinflux.py --check-config` — and a bridge whose username is missing is
+reported and skipped rather than stopping the rest.
 
 The numbers are **labels, not an order**. They need not be consecutive, and nothing renumbers
 them. That matters when removing a bridge: leave the gap. The number is what ties a host to

@@ -632,12 +632,25 @@ class TestEnumerateBridges:
         assert errors == [] and warnings == []
         assert [b.host for b in bridges] == ["a.example.com"]
 
-    def test_warning_does_not_prescribe_an_unavailable_command(self):
-        """The message must not tell the user to run a credential command that doesn't
-        accept numbered slots yet - it names the field to set instead."""
+    def test_warning_names_the_field_to_set(self):
+        """The message must name the exact field, since that is what the reader has to edit.
+
+        This previously also asserted that `set-credential` was *absent*, because at the time
+        that command could not accept a numbered slot, so naming it would have sent the reader
+        to a tool that would refuse them. It handles slots now, and the warning carries a
+        credential-store caveat when run outside the service - so the original reason is gone.
+        What still matters, and is asserted here, is that the field name is present.
+        """
         _, _, warnings = enumerate_bridges(self._hue(host="a.example.com", user="t1", host2="b.example.com"))
         assert len(warnings) == 1
         assert "hue.user2" in warnings[0]
+
+    def test_caveat_is_absent_under_the_service(self, monkeypatch):
+        """Under systemd the value really was substituted, so an unset token is genuinely
+        unset - the credential-store caveat would be misdirection."""
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", "/run/credentials/send-to-influx.service")
+        _, _, warnings = enumerate_bridges(self._hue(host="a.example.com", user="t1", host2="b.example.com"))
+        assert len(warnings) == 1
         assert "set-credential" not in warnings[0]
 
     @pytest.mark.parametrize("field", ["host1", "host0", "host02"])
