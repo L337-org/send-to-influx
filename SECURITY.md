@@ -61,6 +61,17 @@ being deliberate about are credential storage and TLS verification:
   reached over a self-signed local certificate. Set `hue.insecure: false` if your bridge has a
   valid certificate. Don't set `insecure: true` for InfluxDB unless you understand the exposure
   (typically only reasonable for a same-host or same-LAN instance).
+- **Hue bridge token in logs written before 5.2**: the Hue CLIP v1 API carries its whitelist token in
+  the URL path, and `requests` includes the request URL in its exception messages. Versions before 5.2
+  logged that message verbatim, so **any log recording a Hue connection failure contains the bridge
+  token** - in the journal, in `/var/log/send-to-influx.log` on a packaged install, in rotated copies,
+  and anywhere those logs were shipped or attached to a bug report. The same message was also returned
+  to connected MCP clients as a tool error. From 5.2 the token is replaced with `<redacted>` before the
+  message is logged or raised, with the rest of the error preserved so failures stay diagnosable. If
+  you ran an earlier version and your logs may have been read, copied or shared, treat the token as
+  exposed: delete that whitelist user on the bridge, generate a new one, and store it with
+  `send-to-influx-set-credential hue-user`. Revoking on the bridge is what actually ends the exposure -
+  rotating the stored copy alone does not.
 - **Packaged (`.deb`/systemd) deployments** run as a dedicated unprivileged system user with
   `NoNewPrivileges=true` and `ProtectSystem=strict` (mounts the filesystem read-only except for
   paths explicitly listed). `/etc/send-to-influx` is the only path granted read-write access via

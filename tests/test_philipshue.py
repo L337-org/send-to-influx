@@ -341,3 +341,79 @@ class TestHueIpv6Host:
         with patch.object(Hue, "parse_hue_data", return_value={}):
             hue.get_data()
         assert hue.influx_header == "hue,host=2001:db8::1 "
+
+
+class TestHueTokenRedaction:
+    """The bridge token must never reach the log or a raised error.
+
+    The CLIP v1 API carries the token in the URL path and requests puts the URL
+    into its exception messages, so without redaction one unreachable bridge
+    writes the token to the journal/logfile, again via the worker's own "Source
+    failed" line, and out to any connected MCP client (a SourceConnectionError
+    from a read/write tool is returned to the caller).
+    """
+
+    TOKEN = "SUPERSECRETHUETOKEN123"
+
+    def _hue(self, sample_settings, token=None):
+        hue_cfg = {**sample_settings["hue"], "host": "hue.example.com"}
+        if token is None:
+            hue_cfg["user"] = self.TOKEN
+        else:
+            hue_cfg["user"] = token
+        settings = {**sample_settings, "hue": hue_cfg}
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            return Hue(source="hue")
+
+    def test_connection_error_redacts_the_token_from_log_and_exception(self, sample_settings, caplog):
+        """A connection failure must not put the token in the log or the error."""
+        hue = self._hue(sample_settings)
+        # The shape requests actually produces - the URL, and therefore the token,
+        # is inside the message (verified against requests, not assumed).
+        boom = requests.exceptions.ConnectionError(
+            f"HTTPSConnectionPool(host='hue.example.com', port=443): Max retries "
+            f"exceeded with url: /api/{self.TOKEN} (Caused by ConnectTimeoutError())"
+        )
+        with patch.object(hue.session, "get", side_effect=boom):
+            with caplog.at_level("ERROR"):
+                with pytest.raises(SourceConnectionError) as excinfo:
+                    hue.get_data_from_hue_bridge()
+
+        assert self.TOKEN not in caplog.text
+        assert "<redacted>" in caplog.text
+        assert self.TOKEN not in str(excinfo.value)
+        assert "<redacted>" in str(excinfo.value)
+        # Still diagnosable: the host and the underlying cause survive verbatim.
+        assert "hue.example.com" in str(excinfo.value)
+        assert "ConnectTimeoutError" in str(excinfo.value)
+
+    def test_unparseable_response_redacts_the_token(self, sample_settings):
+        """The JSON-decode path is redacted too, not just the transport one."""
+        hue = self._hue(sample_settings)
+        mock_response = MagicMock()
+        mock_response.json.side_effect = ValueError(f"Expecting value for url /api/{self.TOKEN}")
+        with patch.object(hue.session, "get", return_value=mock_response):
+            with pytest.raises(SourceConnectionError) as excinfo:
+                hue.get_data_from_hue_bridge()
+        assert self.TOKEN not in str(excinfo.value)
+
+    def test_every_occurrence_is_replaced(self, sample_settings):
+        """A message repeating the token (URL plus 'Caused by' clause) is fully cleaned."""
+        hue = self._hue(sample_settings)
+        boom = requests.exceptions.ConnectionError(f"url: /api/{self.TOKEN} (Caused by /api/{self.TOKEN})")
+        with patch.object(hue.session, "get", side_effect=boom):
+            with pytest.raises(SourceConnectionError) as excinfo:
+                hue.get_data_from_hue_bridge()
+        assert self.TOKEN not in str(excinfo.value)
+        assert str(excinfo.value).count("<redacted>") == 2
+
+    @pytest.mark.parametrize("token", ["", None, 12345])
+    def test_absent_or_non_string_token_leaves_the_message_intact(self, sample_settings, token):
+        """No token to hide must mean no rewriting - a naive ""-replace would
+        splice the marker between every character of the message."""
+        hue = self._hue(sample_settings, token=token)
+        boom = requests.exceptions.ConnectionError("Max retries exceeded with url: /api/whatever")
+        with patch.object(hue.session, "get", side_effect=boom):
+            with pytest.raises(SourceConnectionError) as excinfo:
+                hue.get_data_from_hue_bridge()
+        assert str(excinfo.value) == "Max retries exceeded with url: /api/whatever"

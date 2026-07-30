@@ -189,6 +189,27 @@ class TestHueSetLight:
         assert put.url.endswith("/lights/2/state")
         assert put.body == {"on": False}
 
+    def test_write_error_does_not_leak_the_bridge_token_to_the_caller(self):
+        """A failed write must not return the bridge token to the MCP client.
+
+        A SourceConnectionError from a write tool is handed back to whatever
+        client is attached, so an unreachable bridge would otherwise send the Hue
+        token off the machine - the most serious of this leak's paths.
+        """
+        handler = make_hue()
+        handler.settings["hue"]["user"] = "SUPERSECRETHUETOKEN123"
+        _wire_bridge(handler)
+        handler.session.put.side_effect = requests.exceptions.HTTPError(
+            "503 Server Error: Service Unavailable for url: "
+            "https://hue.local/api/SUPERSECRETHUETOKEN123/lights/2/state"
+        )
+        with pytest.raises(SourceConnectionError) as excinfo:
+            handler.mcp_set_device_state("2", on=False)
+        assert "SUPERSECRETHUETOKEN123" not in str(excinfo.value)
+        assert "<redacted>" in str(excinfo.value)
+        # The diagnosable part survives: status text and host.
+        assert "503" in str(excinfo.value) and "hue.local" in str(excinfo.value)
+
     def test_write_path_brackets_a_bare_ipv6_host(self):
         """The write PUT brackets an IPv6 host exactly as the read GET does (SI-17).
 

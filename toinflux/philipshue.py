@@ -114,6 +114,40 @@ class Hue(DataHandler):
         host = _url_host(self.settings["hue"]["host"])
         return f"https://{host}/api/{self.settings['hue']['user']}"
 
+    def _redact(self, message):
+        """
+        Replace the bridge token with a marker before a message is logged or raised.
+
+        The CLIP v1 API carries the whitelist token in the URL path, and requests
+        puts the request URL into its exception messages - both for a connection
+        failure ("Max retries exceeded with url: /api/<token>") and for an error
+        status ("503 Server Error ... for url: https://host/api/<token>/..."),
+        confirmed by reproduction. Without this, one unreachable bridge writes the
+        token to the journal and to /var/log/send-to-influx.log, again via the
+        worker loop's own "Source '%s' failed" line, and - worst of the three -
+        hands it to any connected MCP client, since a SourceConnectionError from a
+        read or write tool is returned to the caller as the tool's error.
+
+        Everything but the token is preserved verbatim, so a failure stays
+        diagnosable from the log alone: host, status and underlying cause survive.
+
+        Note the wrapped cause (``raise ... from e``) still holds the unredacted
+        message. That is deliberate - the cause chain has to be preserved - and is
+        only exposed by printing a traceback, which no code path does for these
+        errors.
+
+        :param message: message that may contain the token
+        :type message: str
+        :return: the message with any occurrence of the token replaced
+        :rtype: str
+        """
+        token = self.settings["hue"].get("user")
+        # An absent/blank token has nothing to hide, and "".replace() would splice
+        # the marker between every character of the message.
+        if not isinstance(token, str) or not token:
+            return message
+        return message.replace(token, "<redacted>")
+
     def get_data_from_hue_bridge(self):
         """
         Connect to the Hue bridge and get the sensor data
@@ -141,11 +175,11 @@ class Hue(DataHandler):
             # handler below - otherwise a parse failure would be misreported as a
             # transport "connection" error. (Guards both the collector read path
             # and the MCP write tools' device discovery, which share this method.)
-            logging.error("Hue Bridge returned an unparseable response - %s", e)
-            raise SourceConnectionError(f"Hue Bridge returned an unparseable response: {e}") from e
+            logging.error("Hue Bridge returned an unparseable response - %s", self._redact(str(e)))
+            raise SourceConnectionError(self._redact(f"Hue Bridge returned an unparseable response: {e}")) from e
         except requests.exceptions.RequestException as e:
-            logging.error("Error connecting to Hue Bridge - %s", e)
-            raise SourceConnectionError(str(e)) from e
+            logging.error("Error connecting to Hue Bridge - %s", self._redact(str(e)))
+            raise SourceConnectionError(self._redact(str(e))) from e
         # A successful GET returns a dict (sensors/lights); a list only ever comes
         # back on error. Guard the indexing: an empty list, or a list whose first
         # item isn't the documented {"error": {...}} shape, is unexpected and must
@@ -513,11 +547,11 @@ class Hue(DataHandler):
             # the RequestException handler so a parse failure isn't misreported as
             # a transport error. (raise_for_status()'s HTTPError is a
             # RequestException but not a ValueError, so it still falls through.)
-            logging.error("Hue Bridge returned an unparseable response to a write - %s", e)
-            raise SourceConnectionError(f"Hue Bridge returned an unparseable response: {e}") from e
+            logging.error("Hue Bridge returned an unparseable response to a write - %s", self._redact(str(e)))
+            raise SourceConnectionError(self._redact(f"Hue Bridge returned an unparseable response: {e}")) from e
         except requests.exceptions.RequestException as e:
-            logging.error("Error writing to Hue Bridge - %s", e)
-            raise SourceConnectionError(str(e)) from e
+            logging.error("Error writing to Hue Bridge - %s", self._redact(str(e)))
+            raise SourceConnectionError(self._redact(str(e))) from e
         # The CLIP API always answers a state PUT with a JSON *list* of per-key
         # success/error items. A non-list body is unexpected and must fail cleanly
         # rather than being read as success (an empty error list) by the scan below.
