@@ -661,6 +661,31 @@ the source-checkout/screen-session path, where `systemd-creds` doesn't apply at 
   every pre-existing `settings.yaml` keeps working with just a warning; `example_settings.yaml` ships
   `true` explicitly, so new installs enforce by default) - `true` additionally raises `ConfigError`
   instead of just warning.
+- **Slot credentials (SI-4).** `hue-user2`, `hue-user3`, … are credentials exactly like the static eight, and
+  are **uncapped**. Every consumer asks one shared predicate in `credentials.py` rather than testing membership
+  of `CREDENTIAL_FIELDS` itself: `credential_field(name)` → `(section, field)`, `credential_name_for(section,
+  field)` → the inverse, `is_credential_field()`, `placeholder_for(name)` (a slot shares slot 1's placeholder),
+  and `slot_credential_names(settings)` which *discovers* slots from the config rather than enumerating them -
+  that discovery is what removes the cap. `CANONICAL_SLOT_SUFFIX_RE` lives there too, not in `philipshue.py`,
+  because the settings side (which slot fields exist) and the credential side (which credential names exist)
+  must agree and a second copy would drift. Two of the six consumers were security-relevant: `_cmd_set_field`'s
+  refusal (without it, `--set-field hue.user2 <token>` writes a real token into settings.yaml in **plaintext**)
+  and `_contains_real_secret` (without it, that token is invisible to the group/other-readable check). The
+  others: `--remove`'s placeholder lookup (it indexed `PLACEHOLDER_VALUES` directly and would have died with a
+  `KeyError`), `apply_credential_substitution` (now driven by a listing of `$CREDENTIALS_DIRECTORY`, since an
+  unbounded set has no table to iterate), the CLI's name argument (a validator, since `choices=` cannot express
+  unbounded names - it still refuses a typo), and `--list` (static names always, plus slots from settings, plus
+  any stored credential with no matching field, reported as a probable leftover rather than cleaned up).
+- **Creating a missing field.** `_rewrite_settings_field()` will now *create* `hue.hostN`/`hue.userN` when
+  absent, which is what lets a bridge be added without hand-editing `settings.yaml` - `settings.yaml` is written
+  once at install time from an example that has no `host2`. Gated to recognised slot names by
+  `_is_creatable_field()`: creating any field on request would destroy the refusal's other job, which is
+  catching a typo (`--set-field hue.hsot2 <address>` must stay an error, not become a key nothing reads).
+  Slot 1's unnumbered `host`/`user` are excluded, since they ship in the example. The insertion point is
+  `_last_scalar_line()`, **not** the section node's `end_mark`: a block mapping's end mark sits at the next
+  token, which in this comment-dense file is past the blank line *and* the following section's leading comment,
+  so inserting there would put the field under the wrong section. Values are written double-quoted like every
+  other value this tool writes - unquoted would parse for a hostname and then break on one containing `#`.
 - `toinflux/credential_cli.py` (`send-to-influx-set-credential`, a second `pyproject.toml` entry point):
   `<name>` encrypts a secret (read from stdin if piped, else an interactive masked prompt) via
   `systemd-creds encrypt`, writes it to `/etc/send-to-influx/credstore.encrypted/<name>.cred`,

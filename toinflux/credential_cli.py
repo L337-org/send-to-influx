@@ -27,7 +27,17 @@ import requests
 import urllib3
 import yaml
 
-from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, SENTINEL_PREFIX, sentinel_for
+from toinflux.credentials import (
+    CANONICAL_SLOT_SUFFIX_RE,
+    CREDENTIAL_FIELDS,
+    SENTINEL_PREFIX,
+    credential_field,
+    credential_name_for,
+    is_credential_name,
+    placeholder_for,
+    sentinel_for,
+    slot_credential_names,
+)
 
 DEFAULT_SETTINGS_PATH = "/etc/send-to-influx/settings.yaml"
 # The pristine example the package ships; postinst copies it into place on a fresh
@@ -122,7 +132,7 @@ def _validate_secret_value(name, value):
     """
     if not value.strip():
         raise CredentialCliError("Value must not be empty.")
-    if value == PLACEHOLDER_VALUES.get(name):
+    if value == placeholder_for(name):
         raise CredentialCliError(
             "That's still the placeholder value from example_settings.yaml - enter the real secret."
         )
@@ -346,6 +356,107 @@ def _yaml_double_quoted_escape(value):
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
 
 
+def _is_creatable_field(top_key, field):
+    """Whether a missing field may be *created* rather than refused.
+
+    Only a recognised bridge slot - ``hue.hostN`` or ``hue.userN`` - qualifies. Creating any
+    field on request would destroy this function's other job: the refusal is what catches a
+    typo, so ``--set-field hue.hsot2 <address>`` must stay an error rather than quietly
+    becoming a key nothing reads, which would leave the bridge uncollected with nothing
+    complaining.
+
+    Slot 1's unnumbered ``host``/``user`` are deliberately absent: they ship in
+    example_settings.yaml, so a config without them is not a slot to add but a file to look
+    at by hand.
+    """
+    if top_key != "hue":
+        return False
+    for stem in ("host", "user"):
+        if field.startswith(stem) and CANONICAL_SLOT_SUFFIX_RE.match(field[len(stem) :]):
+            return True
+    return False
+
+
+def _last_scalar_line(node):
+    """Return the last source line occupied by any scalar inside ``node``.
+
+    Deliberately *not* ``node.end_mark.line``: a block mapping's end mark sits at the next
+    token, which in a comment-dense file is past the blank line and the following section's
+    leading comment. Inserting there would put the new field under the wrong section's
+    comment - or outside the section entirely.
+    """
+    if isinstance(node, yaml.ScalarNode):
+        return node.end_mark.line
+    lines = [node.start_mark.line]
+    if isinstance(node, yaml.MappingNode):
+        for key_node, value_node in node.value:
+            lines.append(_last_scalar_line(key_node))
+            lines.append(_last_scalar_line(value_node))
+    elif isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            lines.append(_last_scalar_line(item))
+    return max(lines)
+
+
+def _append_field_to_section(settings_path, text, section_node, field, new_value):
+    """Insert ``field: value`` at the end of a section's own block, preserving every
+    existing byte.
+
+    The same property that makes ``_ensure_section`` safe - appending never rewrites what is
+    already there - except the insertion point has to be *inside* the section rather than at
+    end of file, so it lands after the section's last scalar (see ``_last_scalar_line``) at
+    the indentation of an existing sibling key.
+
+    :raises CredentialCliError: the section is empty or flow-style, so there is no sibling
+        key to copy indentation from and no safe place to insert
+    """
+    if not isinstance(section_node, yaml.MappingNode) or not section_node.value:
+        raise CredentialCliError(
+            f"{settings_path}: cannot add {field} automatically - the section has no fields to "
+            "add it alongside; edit it by hand instead"
+        )
+    lines = text.splitlines(keepends=True)
+    first_key = section_node.value[0][0]
+    indent = " " * first_key.start_mark.column
+    if indent == "":
+        raise CredentialCliError(
+            f"{settings_path}: cannot add {field} automatically - the section looks flow-style; "
+            "edit it by hand instead"
+        )
+    insert_at = _last_scalar_line(section_node) + 1
+    # Double-quoted, exactly as the replace path writes a value: _yaml_double_quoted_escape
+    # escapes the *inner* text only, so the quotes are the caller's job. Unquoted would
+    # happen to parse for a hostname and then break on a value containing '#' (a comment
+    # from there on) or ': ', and would be inconsistent with every value this tool rewrites.
+    escaped = _yaml_double_quoted_escape(new_value)
+    lines.insert(insert_at, f'{indent}{field}: "{escaped}"\n')
+    _atomic_write(settings_path, "".join(lines))
+
+
+def _locate_rewritable_value(settings_path, text, top_node, top_key, field, new_value):
+    """Return the scalar node whose value should be replaced, or None if the field was
+    *created* instead (in which case the file has already been written).
+
+    Split out of _rewrite_settings_field so that function stays within the complexity limit
+    and reads as "find the line, then splice it".
+
+    :raises CredentialCliError: the field is absent and not creatable, or is not a plain
+        single-line scalar
+    """
+    value_node = _find_mapping_value(top_node, field)
+    if value_node is not None and value_node.start_mark.line == value_node.end_mark.line:
+        return value_node
+    if value_node is None and _is_creatable_field(top_key, field):
+        # A recognised bridge slot may be created; anything else is refused, because that
+        # refusal is what catches a typo (see _is_creatable_field).
+        _append_field_to_section(settings_path, text, top_node, field, new_value)
+        return None
+    raise CredentialCliError(
+        f"{settings_path}: could not safely rewrite {top_key}.{field} automatically "
+        "(missing, or not a plain single-line value) - edit it by hand instead"
+    )
+
+
 def _rewrite_settings_field(settings_path, top_key, field, new_value):
     """Replace a single scalar field's value in place, preserving every other byte of
     the file (comments, ordering, blank lines) by locating the exact source line via
@@ -373,12 +484,9 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
     top_node = _find_mapping_value(root, top_key)
     if top_node is None:
         raise CredentialCliError(f"{settings_path}: no '{top_key}:' section found - add it manually first")
-    value_node = _find_mapping_value(top_node, field)
-    if value_node is None or value_node.start_mark.line != value_node.end_mark.line:
-        raise CredentialCliError(
-            f"{settings_path}: could not safely rewrite {top_key}.{field} automatically "
-            "(missing, or not a plain single-line value) - edit it by hand instead"
-        )
+    value_node = _locate_rewritable_value(settings_path, text, top_node, top_key, field, new_value)
+    if value_node is None:
+        return  # created rather than rewritten
 
     lines = text.splitlines(keepends=True)
     line_no = value_node.start_mark.line
@@ -551,7 +659,10 @@ def _resolve_credential_value(name, influx, credstore_dir):
     :param influx: the parsed `influx:` settings block
     :type influx: dict
     """
-    _, field = CREDENTIAL_FIELDS[name]
+    # Only ever called for the influx credentials, which are static - but routed through the
+    # shared mapping regardless, so no credential lookup in this file can be the one that
+    # forgets about slots.
+    _, field = credential_field(name)
     plain_value = influx.get(field, "")
     if isinstance(plain_value, str) and plain_value.startswith(SENTINEL_PREFIX):
         return _decrypt_credential(name, credstore_dir)
@@ -674,7 +785,7 @@ def _cmd_set(name, settings_path):
     _encrypt_credential(name, value)
     _regenerate_dropin()
     _reload_systemd()
-    top_key, field = CREDENTIAL_FIELDS[name]
+    top_key, field = credential_field(name)
     try:
         _rewrite_settings_field(settings_path, top_key, field, sentinel_for(name))
     except CredentialCliError as exc:
@@ -711,8 +822,8 @@ def _cmd_remove(name, settings_path):
     #    LoadCredentialEncrypted= referencing a missing path hard-fails unit
     #    startup, so the drop-in must never be left pointing at a file that's
     #    already gone, even transiently if this is interrupted mid-way.
-    top_key, field = CREDENTIAL_FIELDS[name]
-    _rewrite_settings_field(settings_path, top_key, field, PLACEHOLDER_VALUES[name])
+    top_key, field = credential_field(name)
+    _rewrite_settings_field(settings_path, top_key, field, placeholder_for(name))
     _regenerate_dropin(exclude=name)
     _reload_systemd()
     cred_path = _cred_path(name)
@@ -727,12 +838,57 @@ def _cmd_remove(name, settings_path):
         print(f"'{name}' was not stored in systemd-creds - reverted {settings_path} to the placeholder value.")
 
 
-def _cmd_list(credstore_dir=None):
+def _cmd_list(credstore_dir=None, settings_path=None):
+    """Print each credential and whether it is stored in systemd-creds.
+
+    The static credentials always appear, configured or not, so the list doubles as "what
+    can be set". Slot credentials cannot be enumerated that way - there is no upper bound -
+    so they are *discovered*: any ``hue.userN`` in settings.yaml, plus any slot credential
+    already in the credstore. The second half is what surfaces an orphan, a credential left
+    behind after its bridge was removed; it is reported rather than cleaned up, since removing
+    a stored secret is not something to do as a side effect of a listing.
+    """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
-    for name in sorted(CREDENTIAL_FIELDS):
+    static = sorted(CREDENTIAL_FIELDS)
+    from_settings = slot_credential_names(_read_settings_or_empty(settings_path or DEFAULT_SETTINGS_PATH))
+    for name in [*static, *from_settings]:
         status = "configured" if os.path.isfile(_cred_path(name, credstore_dir)) else "not set"
         print(f"{name}: {status}")
+    known = {*static, *from_settings}
+    for name in _stored_credential_names(credstore_dir):
+        if name not in known:
+            print(f"{name}: configured, but no matching field in {settings_path or DEFAULT_SETTINGS_PATH}")
+
+
+def _read_settings_or_empty(settings_path):
+    """Parse settings.yaml for read-only inspection, returning {} on any problem.
+
+    Used only to discover which slot credentials a config implies. A missing or malformed
+    file must not stop ``--list`` from reporting the static credentials, which is exactly
+    what someone diagnosing a broken config needs to see.
+    """
+    try:
+        with open(settings_path, encoding="utf8") as handle:
+            settings = yaml.safe_load(handle)
+    except (OSError, yaml.YAMLError):
+        return {}
+    return settings if isinstance(settings, dict) else {}
+
+
+def _stored_credential_names(credstore_dir):
+    """Return the credential names actually present in the credstore, in name order.
+
+    Anything in the directory that is not a credential name this tool manages is ignored -
+    ``LoadCredentialEncrypted=`` is not exclusive to us.
+    """
+    try:
+        entries = sorted(os.listdir(credstore_dir))
+    except OSError:
+        return []
+    suffix = ".cred"
+    names = [entry[: -len(suffix)] for entry in entries if entry.endswith(suffix)]
+    return [name for name in names if is_credential_name(name)]
 
 
 def _extract_section(text, name):
@@ -856,13 +1012,16 @@ def _cmd_set_field(dotted_path, value, settings_path):
     top_key, _, field = dotted_path.partition(".")
     if not field:
         raise CredentialCliError(f"'{dotted_path}' must be in the form <section>.<field>, e.g. hue.host")
-    for name, (cred_top_key, cred_field) in CREDENTIAL_FIELDS.items():
-        if (top_key, field) == (cred_top_key, cred_field):
-            raise CredentialCliError(
-                f"'{dotted_path}' is a credential field - --set-field only writes plain, "
-                f"non-secret values, and would put it back into {settings_path} in plaintext. "
-                f"Use 'send-to-influx-set-credential {name}' instead."
-            )
+    # Covers numbered slots as well as the static table - hue.user2 is every bit as much a
+    # secret as hue.user, and this refusal is what stops a token being written back into
+    # settings.yaml in plaintext.
+    credential_name = credential_name_for(top_key, field)
+    if credential_name is not None:
+        raise CredentialCliError(
+            f"'{dotted_path}' is a credential field - --set-field only writes plain, "
+            f"non-secret values, and would put it back into {settings_path} in plaintext. "
+            f"Use 'send-to-influx-set-credential {credential_name}' instead."
+        )
     _rewrite_settings_field(settings_path, top_key, field, value)
     print(f"Updated {top_key}.{field} in {settings_path}.")
 
@@ -892,13 +1051,37 @@ def _cmd_enable_source(name, settings_path):
 # --------------------------------------------------------------------------- #
 
 
+def _credential_name_arg(value):
+    """argparse type for the credential-name positional.
+
+    Replaces a fixed ``choices=`` list, which cannot express unbounded slot credentials.
+    Rejection is just as firm - a typo is refused, not silently accepted as a new credential -
+    but the acceptable set is described rather than enumerated.
+    """
+    if is_credential_name(value):
+        return value
+    raise argparse.ArgumentTypeError(
+        f"unknown credential {value!r}. Valid names: {', '.join(sorted(CREDENTIAL_FIELDS))}, "
+        f"or a numbered Hue bridge username - hue-user2, hue-user3, ... (hue-user is the first bridge)"
+    )
+
+
 def _build_parser():
     parser = argparse.ArgumentParser(prog="send-to-influx-set-credential")
     parser.add_argument(
         "--settings", default=DEFAULT_SETTINGS_PATH, help="settings.yaml to update (default: %(default)s)"
     )
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("name", nargs="?", choices=sorted(CREDENTIAL_FIELDS), help="credential name to set/remove")
+    # A validator rather than choices=: slot credentials (hue-user2, hue-user3, ...) are
+    # unbounded, so there is no list to enumerate. The validator still refuses anything that
+    # is not a credential this tool manages, and names what is acceptable - so a typo is
+    # rejected as firmly as choices= rejected it, just without the cap.
+    group.add_argument(
+        "name",
+        nargs="?",
+        type=_credential_name_arg,
+        help="credential name to set/remove (e.g. influx-token, hue-user, hue-user2)",
+    )
     group.add_argument("--list", action="store_true", help="list which credentials are configured")
     group.add_argument("--set-field", nargs=2, metavar=("PATH", "VALUE"), help="write a plain, non-secret YAML field")
     group.add_argument("--detect-influx-version", metavar="URL", help="probe URL and print v1/v2/unknown")
@@ -941,7 +1124,7 @@ def main(argv=None):
         _require_root()
 
         if args.list:
-            _cmd_list()
+            _cmd_list(settings_path=args.settings)
             return 0
         if args.set_field is not None:
             _cmd_set_field(args.set_field[0], args.set_field[1], args.settings)
