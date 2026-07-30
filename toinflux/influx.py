@@ -330,12 +330,12 @@ class DataHandler:
         """
         has_backlog = bool(use_buffer and self._write_buffers.get(self.worker_key))
         if data and not isinstance(data, dict):
-            logging.warning("Ignoring non-dict data (%s) from source '%s'", type(data).__name__, self.worker_label)
+            logging.warning("Ignoring non-dict data (%s) from worker '%s'", type(data).__name__, self.worker_label)
         elif not has_backlog:
             logging.warning("No data to send to InfluxDB")
         if not has_backlog:
             return False
-        logging.debug("No new data for source '%s'; flushing the buffered backlog only", self.worker_label)
+        logging.debug("No new data for worker '%s'; flushing the buffered backlog only", self.worker_label)
         return True
 
     def _flush_buffer(self, buffer, url, kwargs):
@@ -376,7 +376,7 @@ class DataHandler:
             except InfluxWriteError as exc:
                 if not _is_point_rejection(exc.status_code):
                     logging.warning(
-                        "Flushing %d buffered point(s) for source '%s' failed; will retry next cycle",
+                        "Flushing %d buffered point(s) for worker '%s' failed; will retry next cycle",
                         len(buffer),
                         self.worker_label,
                     )
@@ -412,7 +412,7 @@ class DataHandler:
                 entry[1] += 1
                 if entry[1] >= MAX_POINT_REJECTIONS:
                     logging.warning(
-                        "Dropping buffered point for source '%s' after %d server rejections: %s",
+                        "Dropping buffered point for worker '%s' after %d server rejections: %s",
                         self.worker_label,
                         entry[1],
                         exc,
@@ -494,11 +494,11 @@ class DataHandler:
         :return: None
         """
         if any(entry[0] == line for entry in buffer):
-            logging.debug("Point already buffered for source '%s'; not buffering a duplicate copy", self.worker_label)
+            logging.debug("Point already buffered for worker '%s'; not buffering a duplicate copy", self.worker_label)
             return
         if len(buffer) >= buffer.maxlen:
             logging.warning(
-                "InfluxDB write buffer for source '%s' is full (%d points); dropping the oldest buffered point",
+                "InfluxDB write buffer for worker '%s' is full (%d points); dropping the oldest buffered point",
                 self.worker_label,
                 buffer.maxlen,
             )
