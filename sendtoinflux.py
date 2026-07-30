@@ -327,11 +327,13 @@ def create_source_worker(unit, source_start_delay, args, stopped_sources, last_a
         own backoff, so an unreachable one cannot stall the others.
     :type unit: tuple
     :param stopped_sources: shared set that the worker adds its ``unit`` to when it
-        gives up permanently (a ConfigError), so the multi-source supervisor loop
-        knows not to restart it
+        gives up permanently (a ConfigError), so the supervisor loop knows not to restart
+        it. Holds work units, not source names, so one bridge giving up does not stop the
+        others being restarted.
     :type stopped_sources: set
-    :param last_activity: shared dict the worker stamps with ``source: time.time()``
-        on every successful or failed cycle, so the multi-source supervisor loop can
+    :param last_activity: shared dict the worker stamps with ``unit: time.time()``
+        on every successful or failed cycle - keyed by work unit, so two workers on one
+        source name stay distinguishable to the watchdog - so the supervisor loop can
         tell a source that's merely retrying (already visible via its own WARNING
         lines) from one that's stopped making any progress at all - a thread stuck
         mid-instruction never reaches either branch, so this is the only signal a
@@ -494,7 +496,7 @@ def register_thread_dump_handler():
         logging.warning("Could not register SIGUSR1 thread-dump handler: %s", exc)
 
 
-def _exit_if_nothing_to_collect(units, requested):
+def _exit_if_nothing_to_collect(units, requested, settings, args):
     """
     Stop with a clear message when no worker could be started at all.
 
@@ -503,18 +505,31 @@ def _exit_if_nothing_to_collect(units, requested):
     over an empty list would look healthy while collecting nothing, which is the worst of
     the available outcomes.
 
+    Re-runs validation with warnings enabled purely to *explain* the failure: those
+    warnings name the slot, the host and what to set, which "nothing to collect" on its own
+    does not. Deliberately only on this path - validating an explicit ``--source`` on every
+    run would reject configurations that work today, because ``--dump`` needs neither
+    ``interval`` nor ``db`` while ``validate_settings()`` requires both. Any error it raises
+    has already been logged by validate_settings itself, so it is swallowed here rather
+    than replacing the message above.
+
     :param units: work units from ``expand_sources()``
     :type units: list
     :param requested: the source names that were asked for
     :type requested: list
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :param args: parsed CLI arguments, for the settings path used in log labels
+    :type args: argparse.Namespace
     :return: None - exits the process when there is nothing to run
     """
     if units:
         return
-    logging.critical(
-        "Nothing to collect: no worker could be started for %s. Run --check-config for the details.",
-        ", ".join(requested) or "any source",
-    )
+    logging.critical("Nothing to collect: no worker could be started for %s.", ", ".join(requested) or "any source")
+    try:
+        toinflux.validate_settings(settings, settings_path=args.settings or "settings.yaml", warn=True)
+    except ConfigError:
+        pass
     sys.exit(1)
 
 
@@ -644,7 +659,7 @@ def main():
     requested, from_sources_list = _requested_sources(settings, args)
     units = toinflux.expand_sources(requested, settings)
 
-    _exit_if_nothing_to_collect(units, requested)
+    _exit_if_nothing_to_collect(units, requested, settings, args)
     if args.dump:
         if len(requested) > 1:
             logging.error("The --dump option requires --source when running in multi-source mode.")
@@ -853,27 +868,32 @@ def _stall_threshold_seconds(source, settings):
 
 
 def check_for_stalled_sources(units, stopped_units, last_activity, stalled_units, settings=None):
-    """Warn once per stall about a source whose worker thread is alive but has
+    """Warn once per stall about a worker whose thread is alive but has
     made no progress (success or failure) in over its stall threshold (see
     ``_stall_threshold_seconds``) - the thread-is_alive() check above can't
     catch this, since a thread stuck mid-instruction (e.g. the GIL-starvation-
     shaped hang this was added to diagnose) never dies, it just stops making
-    progress silently. Logs once per stall (tracked via ``stalled_sources``)
+    progress silently. Logs once per stall (tracked via ``stalled_units``)
     rather than every supervisor tick, and clears the flag once activity
     resumes so a later recurrence warns again.
 
-    :param sources: configured source names
-    :type sources: list[str]
-    :param stopped_sources: sources that gave up permanently (ConfigError) - excluded
-    :type stopped_sources: set
-    :param last_activity: shared dict from create_source_worker(), source -> last
+    Everything here is keyed by **work unit**, not source name: a source running several
+    workers (a multi-bridge Hue install) needs the watchdog to say *which* one stopped, and
+    to keep one stalled bridge from being mistaken for the whole source. The threshold is
+    still per source, since the interval is a property of the settings block.
+
+    :param units: the work units being supervised, ``[(source, instance), ...]``
+    :type units: list
+    :param stopped_units: units that gave up permanently (ConfigError) - excluded
+    :type stopped_units: set
+    :param last_activity: shared dict from create_source_worker(), unit -> last
         successful-or-failed cycle's time.time()
     :type last_activity: dict
-    :param stalled_sources: sources already warned about the current stall - mutated
+    :param stalled_units: units already warned about the current stall - mutated
         in place so the caller's loop sees updates
-    :type stalled_sources: set
+    :type stalled_units: set
     :param settings: parsed settings dict, for per-source interval-aware
-        thresholds; None falls back to STALL_WARNING_SECONDS for every source
+        thresholds; None falls back to STALL_WARNING_SECONDS for every worker
     :type settings: dict or None
     :return: None
     """
