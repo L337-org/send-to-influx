@@ -134,7 +134,7 @@ hue:
   # than as an obvious mistake.
   #
   # host2: "upstairs.example.com"
-  # user2: "your_second_hue_user"
+  # user2: "your_hue_user"
   #
   # See the README's "Multiple Hue bridges" section for adding, removing and replacing
   # one. Everything below this point applies to every bridge - there is no per-bridge

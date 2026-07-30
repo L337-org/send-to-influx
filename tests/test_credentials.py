@@ -4,6 +4,7 @@ load_settings()-integrated permission check / sentinel clearing in toinflux.gene
 
 import copy
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
@@ -16,6 +17,7 @@ from toinflux.credentials import (
     credential_name_for,
     is_credential_field,
     is_credential_name,
+    PLACEHOLDER_VALUES,
     placeholder_for,
     sentinel_for,
     slot_credential_names,
@@ -436,3 +438,40 @@ class TestSlotCredentials:
         monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path / "nope"))
         settings = {"hue": {"host": "a", "user": "t1"}}
         assert apply_credential_substitution(settings) is settings
+
+
+class TestExamplePlaceholdersAreRecognised:
+    """Every placeholder-looking value shipped in example_settings.yaml must actually be a
+    placeholder the code recognises.
+
+    Regression guard for a real defect: the commented multi-bridge example offered
+    ``user2: "your_second_hue_user"``, which is not in PLACEHOLDER_VALUES. Uncommenting it
+    as-is made slot 2 enumerate as a *usable* bridge holding a fake token - so a worker
+    started and authenticated in a loop forever - and made the group/other-readable check
+    report a real secret that was not one. Prose telling the next person to reuse the
+    existing placeholder text would not fail CI; this does.
+    """
+
+    def test_every_credential_placeholder_in_the_example_is_a_known_placeholder(self):
+        example = Path(__file__).resolve().parent.parent / "example_settings.yaml"
+        # Credential-bearing field names, from the table itself - plus numbered bridge slots,
+        # which are credentials too. Identity fields (an MPAN, a device serial) are excluded
+        # deliberately: they are not secrets and nothing treats their values as placeholders.
+        credential_fields = {field for _, field in CREDENTIAL_FIELDS.values()}
+        offenders = []
+        for line in example.read_text().splitlines():
+            # Commented lines included on purpose: the commented slot example is exactly
+            # where this went wrong, and it is copy-paste-ready by design.
+            match = re.match(r'\s*#?\s*([a-z0-9_]+):\s*"([^"]*)"\s*$', line)
+            if not match:
+                continue
+            key, value = match.group(1), match.group(2)
+            is_slot = re.fullmatch(r"user\d+", key)
+            if (key in credential_fields or is_slot) and value not in PLACEHOLDER_VALUES.values():
+                offenders.append(f"{key}: {value!r}")
+        assert not offenders, (
+            f"example_settings.yaml gives credential field(s) a value the code does not treat as a "
+            f"placeholder: {offenders}. Reuse one of {sorted(v for v in PLACEHOLDER_VALUES.values() if v)} "
+            f"- otherwise it is read as a real credential the moment anyone uncomments it, which starts a "
+            f"worker that authenticates in a loop and trips the real-secret permissions check."
+        )
