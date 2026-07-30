@@ -86,7 +86,7 @@ def resolve_handlers(source, settings, settings_file):
     return handlers
 
 
-def resolve_handler(source, settings, settings_file):
+def resolve_handler(source, settings, settings_file, instance=None):
     """Construct the DataHandler for a configured source, or raise
     ``ToolParamError`` if the name isn't one the MCP tools expose. Case-insensitive,
     matching the collector factory. The caller owns the returned handler's session
@@ -95,8 +95,11 @@ def resolve_handler(source, settings, settings_file):
     :param source: source name from a tool argument
     :param settings: parsed settings dict
     :param settings_file: settings path, threaded to the handler's own load
+    :param instance: which instance of the source to construct for - a Hue bridge host, or
+        None for a single-target source (and, for Hue, the first configured bridge)
     :return: a constructed DataHandler subclass instance
-    :raises ToolParamError: source is missing/non-string, unknown, or unusable
+    :raises ToolParamError: source is missing/non-string, unknown, unusable, or named an
+        instance that is not configured
     """
     if not isinstance(source, str) or not source.strip():
         raise ToolParamError(f"source must be a non-empty string (got {source!r})")
@@ -106,9 +109,24 @@ def resolve_handler(source, settings, settings_file):
             f"unknown source {source!r}; available sources: {', '.join(sorted(available)) or '(none)'}"
         )
     try:
-        return get_class(source, settings_file)
+        handler = get_class(source, settings_file, instance=instance)
     except ConfigError as exc:
         raise ToolParamError(f"source {source!r} is not usable: {exc}") from exc
+
+    if instance is not None:
+        # Force the instance to resolve now. Construction does not touch it, so an
+        # unconfigured one would otherwise be accepted here and surface much later - as a
+        # raw ConfigError from deep inside schema building, bypassing the ToolParamError
+        # wrapping the MCP layer relies on to distinguish a caller mistake from a transport
+        # failure, and leaking this handler's session because the caller never receives it.
+        # mcp_tag_filters() is the resolution point (Hue looks its bridge up there), so
+        # calling it is what turns "wrong bridge" into an immediate, clean refusal.
+        try:
+            handler.mcp_tag_filters()
+        except ConfigError as exc:
+            close_session(handler.session)
+            raise ToolParamError(f"source {source!r} is not usable: {exc}") from exc
+    return handler
 
 
 def close_session(session):

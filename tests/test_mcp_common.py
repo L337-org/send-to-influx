@@ -46,7 +46,38 @@ class TestResolveHandler:
         # handed to get_class (itself case-insensitive), not a lowercased one.
         with patch("toinflux.mcp_common.get_class", return_value="HANDLER") as gc:
             assert resolve_handler("Hue", {"sources": ["hue"]}, "cfg.yaml") == "HANDLER"
-        gc.assert_called_once_with("Hue", "cfg.yaml")
+        gc.assert_called_once_with("Hue", "cfg.yaml", instance=None)
+
+    def test_unknown_instance_is_refused_immediately_and_closes_the_session(self):
+        """An unconfigured bridge must be refused here, not deep inside schema building.
+
+        Construction does not touch the instance, so without this the bogus value is
+        accepted and only surfaces later as a raw ConfigError - bypassing the
+        ToolParamError wrapping that tells a caller mistake from a transport failure, and
+        leaking the handler's session because the caller never receives the handler.
+        """
+        from unittest.mock import MagicMock
+
+        settings = {
+            "sources": ["hue"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "hue": {"db": "hue_db", "interval": 300, "host": "real.example.com", "user": "tok"},
+        }
+        handler = MagicMock()
+        handler.mcp_tag_filters.side_effect = ConfigError("no Hue bridge configured at 'bogus'")
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            with pytest.raises(ToolParamError, match="not usable"):
+                resolve_handler("hue", settings, None, instance="bogus")
+        handler.session.close.assert_called_once()
+
+    def test_no_instance_skips_the_resolution_probe(self):
+        """A single-target source has nothing to resolve, so it must not be probed."""
+        from unittest.mock import MagicMock
+
+        handler = MagicMock()
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            assert resolve_handler("hue", {"sources": ["hue"]}, None) is handler
+        handler.mcp_tag_filters.assert_not_called()
 
     def test_unusable_source_wrapped_as_tool_param_error(self):
         # A ConfigError from the factory becomes a (non-retryable) ToolParamError.

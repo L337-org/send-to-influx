@@ -453,6 +453,28 @@ class Hue(DataHandler):
         bridge = self.bridge()
         return f"https://{_url_host(bridge.host)}/api/{bridge.user}"
 
+    def mcp_tag_filters(self):
+        """Scope reads to this handler's own bridge when it serves one.
+
+        Hue tags every point with the bridge's host, so adding that tag is what turns a
+        read of "the hue measurement" into a read of *one bridge*. Without it a query spans
+        every bridge, which is right when no bridge was asked for and wrong when one was.
+
+        ``instance`` is None for a handler that was not created for a particular bridge, and
+        then the filters stay as the class's - deliberately unscoped, so an unqualified
+        query still returns the whole estate.
+
+        The value is the configured host, resolved through ``bridge()`` rather than taken
+        from a caller: an unknown bridge raises before it can reach a query.
+
+        :return: tag filters, including this bridge's host when there is one
+        :rtype: dict
+        """
+        filters = dict(self.MCP_TAG_FILTERS)
+        if self.instance is not None:
+            filters["host"] = self.bridge().host
+        return filters
+
     def _redact(self, message):
         """
         Replace the bridge token with a marker before a message is logged or raised.
