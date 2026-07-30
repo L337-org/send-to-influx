@@ -814,11 +814,30 @@ class TestMultiBridgeReads:
         assert list(result["instances"]) == ["only.example.com"]
 
     def test_a_single_target_source_keeps_the_flat_shape(self):
-        """Every non-instanced source is untouched - instance None means no grouping."""
-        handlers = [(None, self._handler(None, {"ping": 12}))]
-        with patch("toinflux.mcp_read.resolve_handlers", return_value=handlers):
-            result = current_state_result("hue", self._settings(), None)
-        assert result["fields"]["ping"]["value"] == 12
+        """Every non-instanced source is untouched - instance None means no grouping.
+
+        Exercised through a genuinely single-target source (Nuki: live state, one broker),
+        not through Hue with a None instance. That combination cannot occur in production -
+        for Hue, resolve_handlers always yields host instances or raises - so asserting the
+        flat shape that way would prove it using a scenario nothing produces, and would not
+        notice a regression in the real single-target path.
+        """
+        handler = MagicMock(MCP_LIVE_STATE=True, MCP_DESCRIPTION="Nuki smart lock", MCP_FIELD_METADATA={})
+        handler.source = "nuki"
+        handler.instance = None
+        handler.worker_label = "nuki"
+        handler.get_data.return_value = {"Front_Door_stateValue": 1}
+        handler.session = MagicMock()
+        settings = {
+            "sources": ["nuki"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "nuki": {"db": "nuki_db"},
+        }
+        with patch("toinflux.mcp_read.resolve_handlers", return_value=[(None, handler)]):
+            result = current_state_result("nuki", settings, None)
+        assert result["source"] == "nuki"
+        assert result["fields"]["Front_Door_stateValue"]["value"] == 1
+        assert "as_of" in result
         assert "instances" not in result
 
     def test_one_failing_bridge_does_not_suppress_the_others(self):
