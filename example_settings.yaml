@@ -114,7 +114,9 @@ hue:
   # MCP server is read-only unless you set this true. Has no effect unless the MCP
   # server is enabled (see the mcp block above).
   mcp_read_write: false
-  # The hostname or IP address of the Hue bridge
+  # The hostname or IP address of the Hue bridge. An IPv6 address is written plainly
+  # (e.g. "2001:db8::1") - the brackets a URL needs are added internally. Whatever is
+  # written here is what appears as the "host" tag in InfluxDB.
   host: "hue.example.com"
   # Hue bridge username.  See https://developers.meethue.com/develop/get-started-2/
   #   for instructions on how to generate this

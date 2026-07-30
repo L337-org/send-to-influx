@@ -143,6 +143,7 @@ except requests.exceptions.RequestException as e:
   - `ZLLPresence`: Motion/presence sensors (converted to 0/1)
 - **Lights**: Brightness percentage (0-100) or boolean on/off (0/1)
 - **Configuration**: Bridge host, username, sensor name mappings, temperature units
+- **Request URLs**: built only via `Hue._api_base()` (`https://<host>/api/<user>`), shared by the read path (`get_data_from_hue_bridge`) and the MCP write path (`_put_light_state`). The host goes through `_url_host()`, which brackets a bare IPv6 literal (`https://2001:db8::1/...` is ambiguous - everything after the first colon parses as a port - so an unbracketed address failed every request until this was fixed); hostnames, IPv4 literals and already-bracketed values pass through unchanged, so it is idempotent. Bracketing is a URL concern only: `get_data()` still tags the point with the configured host verbatim, since normalising the tag would change series identity for an existing IPv6 install. Never reintroduce a second copy of that f-string - the bug existed in two copies, which is how one path would silently keep it.
 
 ### MyEnergi (`toinflux/myenergi.py`)
 - **Devices**:
