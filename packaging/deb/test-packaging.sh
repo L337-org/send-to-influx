@@ -408,9 +408,15 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
     # asserted directly against the installed binary in the fresh-install scenario above, and by
     # unit tests. What this adds is that the service, under its real unit and sandbox, still
     # reaches the journal at all - which is the half that config-file reasoning cannot settle.
+    # Captured then matched from a here-string, following the dpkg -L precedent above: under this
+    # script's `set -o pipefail`, `journalctl | grep -q` can register a pipeline failure when an
+    # early match closes grep's end and journalctl takes SIGPIPE mid-write, regardless of whether
+    # it matched. The startup banner is near the front of the unit's log, so that is the likely
+    # case, not the unlikely one.
     journal_ok=0
     for _ in $(seq 1 10); do
-        if journalctl -u send-to-influx --no-pager 2>/dev/null | grep -q "Starting send-to-influx"; then
+        service_journal="$(journalctl -u send-to-influx --no-pager 2>/dev/null || true)"
+        if grep -q "Starting send-to-influx" <<< "$service_journal"; then
             journal_ok=1; break
         fi
         sleep 1
@@ -441,6 +447,7 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
         probe_tag="stiprobe$$"
         systemd-cat -t "$probe_tag" echo "forwarding probe" 2>/dev/null || true
         for _ in $(seq 1 10); do
+            # -r over files, no pipe involved, so no SIGPIPE hazard here.
             if grep -rqs "$probe_tag" /var/log/syslog /var/log/messages 2>/dev/null; then
                 journald_forward=yes; break
             fi
