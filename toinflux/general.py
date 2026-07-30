@@ -237,6 +237,42 @@ def mqtt_block_errors(settings, context=""):
     return errors
 
 
+def _validate_hue_bridges(settings, sources):
+    """Return ``(errors, warnings)`` for the ``hue`` block's bridge slots, checked only
+    when hue is among the sources being validated.
+
+    Delegates to ``toinflux.philipshue.enumerate_bridges()`` rather than re-deriving the
+    slot rules here: the runtime enumerates bridges with that same function, and two
+    separate implementations would eventually disagree about what is configured - the
+    failure ``resolve_default_source()`` exists to prevent, where ``--check-config``
+    reported OK on a config whose effective source had no settings block at all.
+
+    Imported inside the function, like ``get_class()`` does: ``philipshue`` imports
+    ``influx``, which imports this module, so a module-level import would be circular.
+
+    Only self-contradictory configuration is an error. An unusable bridge - no host, or a
+    host with a placeholder/blank token - is a warning instead, because
+    ``example_settings.yaml`` ships ``hue`` in ``sources:`` next to the placeholder token,
+    so a fresh install is exactly that state: raising would stop every other collector
+    along with the unconfigured one.
+    Returns ``(errors, warnings)``; the caller decides whether to surface the warnings,
+    because ``validate_settings()`` runs inside ``load_settings()`` and therefore on
+    every ``DataHandler`` construction - logging from here would repeat the same line per
+    source at startup and again on every failure-triggered rebuild.
+    """
+    # Absent section: _validate_source_block already reports "no configuration section
+    # found for source 'hue'", which is both accurate and sufficient. Enumerating a
+    # missing block would add a second error saying it "must be a mapping (got NoneType)",
+    # which is true but misleading - the problem is that it isn't there, not that it's the
+    # wrong type. One cause, one message.
+    if "hue" not in sources or "hue" not in settings:
+        return ([], [])
+    from toinflux.philipshue import enumerate_bridges
+
+    _, errors, bridge_warnings = enumerate_bridges(settings.get("hue"))
+    return (errors, bridge_warnings)
+
+
 def _validate_mqtt_block(settings, sources):
     """Return a list of error strings for the shared mqtt block, which is required
     if (and only if) an MQTT-based source is among the sources being validated."""
@@ -507,7 +543,30 @@ def _validate_source_block(source, settings, is_v2):
     return errors
 
 
-def validate_settings(settings, source=None, settings_path="settings.yaml"):
+def _log_config_warnings(warnings_found, settings_path, warn):
+    """Log non-fatal configuration warnings, but only when the caller asked for them.
+
+    Opt-in because ``validate_settings()`` runs inside ``load_settings()`` and therefore
+    on every ``DataHandler`` construction: logging unconditionally would repeat the same
+    line once per source at startup and again on every failure-triggered rebuild, which
+    the logging policy's bounded-volume rule rules out. ``--check-config`` opts in, since
+    reporting on the configuration is its entire job; at collection time the effective
+    bridge list is reported once by the worker spawner instead.
+
+    :param warnings_found: warning messages collected during validation
+    :type warnings_found: list
+    :param settings_path: settings file path, used to label the message
+    :type settings_path: str
+    :param warn: whether to emit them at all
+    :type warn: bool
+    """
+    if not warn:
+        return
+    for warning in warnings_found:
+        logging.warning("%s: %s", settings_path, warning)
+
+
+def validate_settings(settings, source=None, settings_path="settings.yaml", warn=False):
     """Validate required keys in a parsed settings dictionary.
 
     :param settings: parsed settings dictionary
@@ -521,6 +580,12 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
         settings can come from a location other than settings.yaml (--settings, or the
         .yml fallback), so this shouldn't be hard-coded in the log output
     :type settings_path: str
+    :param warn: whether to log non-fatal configuration warnings (e.g. a Hue bridge whose
+        token isn't set, so it won't be collected). Off by default because this function
+        runs inside ``load_settings()``, which every ``DataHandler`` construction calls -
+        only ``--check-config`` opts in, so the same line isn't repeated per source and
+        per retry
+    :type warn: bool
     :raises ConfigError: if any required settings are missing or invalid
     """
     influx = settings.get("influx", {})
@@ -563,8 +628,11 @@ def validate_settings(settings, source=None, settings_path="settings.yaml"):
         sources = [*sources, source]
     for src in sources:
         errors.extend(_validate_source_block(src, settings, is_v2))
+    hue_errors, hue_warnings = _validate_hue_bridges(settings, sources)
+    errors.extend(hue_errors)
     errors.extend(_validate_mqtt_block(settings, sources))
     errors.extend(mcp_block_errors(settings))
+    _log_config_warnings(hue_warnings, settings_path, warn)
     if errors:
         for error in errors:
             logging.critical("%s: %s", settings_path, error)

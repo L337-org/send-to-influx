@@ -548,8 +548,16 @@ def main():
         # also validate args.source specifically, since a user checking config for a
         # particular --source shouldn't get a false "OK" if that source isn't part of
         # the sources/default_source list load_settings() already checked.
+        #
+        # warn=True only here: this is the one mode whose whole job is reporting on the
+        # configuration, so non-fatal findings (a Hue bridge with no token, say) belong in
+        # its output. Everywhere else validate_settings() runs via load_settings() on every
+        # DataHandler construction, where the same warning would repeat per source and per
+        # retry.
         try:
-            toinflux.validate_settings(settings, source=args.source, settings_path=args.settings or "settings.yaml")
+            toinflux.validate_settings(
+                settings, source=args.source, settings_path=args.settings or "settings.yaml", warn=True
+            )
         except ConfigError as exc:
             print(f"Configuration error: {exc}")
             sys.exit(1)
