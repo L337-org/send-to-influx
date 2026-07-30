@@ -76,6 +76,21 @@ verbatim, because normalising the tag would change the series identity for anyon
 IPv6 bridge. The single shared `_api_base()` matters more than it looks - the bug existed in *two*
 copies of the same f-string, so a second copy is exactly how one path would silently keep it.
 
+Because that token sits in the URL path, every Hue error message is passed through `Hue._redact()`
+before it is logged *or* raised - `requests` puts the request URL into its exception messages (both
+"Max retries exceeded with url: /api/&lt;token&gt;" and "503 Server Error ... for url:
+https://host/api/&lt;token&gt;/...", confirmed by reproduction), so without it one unreachable bridge
+wrote the token to the journal and `/var/log/send-to-influx.log`, again via the worker loop's own
+`Source '%s' failed` line, and - worst - handed it to any connected MCP client, since a
+`SourceConnectionError` from a read/write tool is returned to the caller as the tool's error. Only the
+token is replaced (with `<redacted>`); host, status and underlying cause survive verbatim, so a failure
+is still diagnosable from the log alone. An absent/blank/non-string token short-circuits the
+replacement, because `"".replace()` would splice the marker between every character. The wrapped cause
+(`raise ... from e`) deliberately still holds the unredacted text - the cause chain must be preserved,
+and it is only exposed by printing a traceback, which no path does for these errors. Hue is the only
+source needing this: every other source passes credentials via an auth tuple, digest auth, or a header,
+never in a URL. Pre-5.2 logs therefore still contain the token - see SECURITY.md for the revoke advice.
+
 Speedtest's `get_data()` additionally rejects an implausible `ping` (>= 5000 ms) as a `SourceConnectionError` rather than writing it. speedtest-cli's `get_best_server()` times each of the 3 latency probes it makes per candidate server with a hardcoded 10-second connection timeout (baked into `SpeedtestHTTPConnection`/`SpeedtestHTTPSConnection`'s constructor default - never overridden by `get_best_server()`, so it applies regardless of the `timeout` passed to `speedtest.Speedtest()`); a probe that doesn't complete within that raises `socket.timeout`, which is caught alongside every other connection failure and penalised with a hardcoded `3600` (seconds) instead of a real sample. The 3 per-server samples (real or penalty) are summed, divided by a fixed 6, and converted to milliseconds - so a real (non-penalised) probe can never contribute more than 10s to that sum, making `(3 * 10 / 6) * 1000 = 5000` ms the true ceiling for a genuine measurement. If every probe to a server fails (observed in practice during a transient network blip), the reported `ping` comes out around 1,800,000 ms instead of triggering an error, and would otherwise be written to InfluxDB as if it were real.
 
 Nuki is the first MQTT-based source: `MqttDataHandler` (`toinflux/mqtt.py`) owns the generic
