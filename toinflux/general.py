@@ -661,7 +661,7 @@ def _log_config_warnings(warnings_found, settings_path, warn):
     :param warn: whether to emit them at all
     :type warn: bool
     """
-    if not warn:
+    if not warn or not warnings_found:
         return
     for warning in warnings_found:
         logging.warning("%s: %s", settings_path, warning)

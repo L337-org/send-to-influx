@@ -29,6 +29,7 @@ Contents
 
 - Data sources
   - [Hue Bridge](#hue-bridge)
+    - [Multiple Hue bridges](#multiple-hue-bridges)
   - [MyEnergi Zappi / Eddi / Harvi](#myenergi-zappi--eddi--harvi)
   - [UK National Grid Carbon Intensity](#uk-national-grid-carbon-intensity)
   - [Open-Meteo](#open-meteo)
@@ -60,6 +61,94 @@ The `host` setting accepts a hostname, an IPv4 address, or an IPv6 address. Writ
 address plainly (`host: "2001:db8::1"`) — the square brackets a URL needs are added
 internally, so you do not have to. Brackets are accepted too if you prefer them, and the
 value you configure is what appears as the `host` tag in InfluxDB either way.
+
+### Multiple Hue bridges
+
+A bridge holds a limited number of devices, so larger installations run more than one. All of
+them can be collected. The first is the `host`/`user` pair every install already has; each
+further bridge adds a numbered pair — `host2`/`user2`, `host3`/`user3`, and so on — with that
+bridge's **own** username, since a username belongs to one bridge and is not valid on another.
+
+```yaml
+hue:
+  host: "downstairs.example.com"
+  user: "<downstairs username>"
+  host2: "upstairs.example.com"
+  user2: "<upstairs username>"
+```
+
+Each bridge is collected by its own worker, started `stagger_seconds` apart, with its own
+retry backoff — so a bridge that is switched off or unreachable delays only itself and the
+others keep recording. `send-to-influx --check-config` lists any problems — from a source
+checkout that is `sendtoinflux.py --check-config` — and a bridge whose username is missing is
+reported and skipped rather than stopping the rest.
+
+The numbers are **labels, not an order**. They need not be consecutive, and nothing renumbers
+them. That matters when removing a bridge: leave the gap. The number is what ties a host to
+its username, so shifting the ones above it down would pair a bridge with another bridge's
+username — which shows up as an authentication failure rather than as an obvious mistake.
+
+Settings other than `host`/`user` apply to the whole Hue estate: there is no per-bridge
+`timeout`, `insecure`, `temperature_units` or `sensors` mapping.
+
+In InfluxDB, every point carries a `host` tag naming its bridge. **Field names are unchanged
+and unprefixed**, so nothing about your existing dashboards breaks when you add a second
+bridge — but two bridges with a light of the same name write the same field key under
+different `host` tags, so filter or group by `host` to tell them apart. The
+`collector_status` heartbeat carries the same tag, so each bridge's health is separate; a
+`GROUP BY source` over `collector_status` now returns one series per Hue bridge.
+
+#### Adding an additional Hue bridge
+
+1. Pick any unused number `N`. Set the address:
+   `sudo send-to-influx-set-credential --set-field hue.hostN <address>`
+2. Generate a username on **that** bridge, following
+   [the Hue instructions](https://developers.meethue.com/develop/get-started-2/) — press the
+   link button on the bridge you are adding, not on one you already use.
+3. Store it: `sudo send-to-influx-set-credential hue-userN`
+   (on a plain source checkout, put the username in `hue.userN` in `settings.yaml` instead).
+4. `send-to-influx --check-config`, then restart the service.
+
+Existing bridges are untouched throughout — no username needs re-entering.
+
+`--check-config` run by hand cannot see credentials stored with
+`send-to-influx-set-credential`: systemd only mounts them for the service itself, so a stored
+username reads as "not set" there. The check says so when that applies, and the collector will
+still find it — `systemctl status send-to-influx` shows what the service itself sees.
+
+#### Removing a Hue bridge
+
+1. `sudo send-to-influx-set-credential hue-userN --remove`
+2. Clear the address: `sudo send-to-influx-set-credential --set-field hue.hostN ""`
+3. `send-to-influx --check-config`, then restart the service.
+
+Do both steps before restarting: between them the bridge has an address but no username,
+which `--check-config` reports and the collector skips. Leave the number unused rather than
+renumbering the others, and it is free for a future bridge. The removed bridge's history stays
+in InfluxDB under its own `host` tag — it is not deleted.
+
+#### Replacing a Hue bridge
+
+1. Point the slot at the new bridge:
+   `sudo send-to-influx-set-credential --set-field hue.hostN <new address>`
+2. Generate a username on the new bridge, then `sudo send-to-influx-set-credential hue-userN`.
+   This overwrites the stored username; there is no need to remove it first.
+3. `send-to-influx --check-config`, then restart the service.
+
+Three things worth knowing, none of them obvious:
+
+- **The `host` tag is the address, so a replacement at a *different* address starts new
+  series.** The old bridge's data stays under the old tag and nothing new is written to it, so
+  a Grafana panel filtered on the old address goes quiet without erroring. Where the new
+  bridge can reuse the old address — a DHCP reservation, or the same DNS name repointed — the
+  series continues unbroken, which is usually what you want.
+- **Field names follow *device* names, not the bridge.** Re-paired devices named identically
+  in the Hue app keep their existing field keys; devices named differently produce new keys
+  while the old ones simply stop. `sensors` name mappings are keyed on device name too, so
+  they carry over only if the names match.
+- **A half-finished replacement is safe.** With the new address set but the old username still
+  in place, that one bridge fails authentication and retries; every other bridge keeps
+  collecting normally.
 
 MyEnergi Zappi / Eddi / Harvi
 -----------------------------

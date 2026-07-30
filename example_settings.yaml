@@ -114,13 +114,31 @@ hue:
   # MCP server is read-only unless you set this true. Has no effect unless the MCP
   # server is enabled (see the mcp block above).
   mcp_read_write: false
-  # The hostname or IP address of the Hue bridge. An IPv6 address is written plainly
-  # (e.g. "2001:db8::1") - the brackets a URL needs are added internally. Whatever is
-  # written here is what appears as the "host" tag in InfluxDB.
+  # The first bridge. The hostname or IP address of the Hue bridge - an IPv6 address is
+  # written plainly (e.g. "2001:db8::1"), the brackets a URL needs are added internally.
+  # Whatever is written here is what appears as the "host" tag in InfluxDB.
   host: "hue.example.com"
   # Hue bridge username.  See https://developers.meethue.com/develop/get-started-2/
   #   for instructions on how to generate this
   user: "your_hue_user"
+  #
+  # MORE THAN ONE BRIDGE? Add host2/user2, host3/user3, and so on - one pair per bridge,
+  # each with that bridge's own username (a username belongs to one bridge and is not
+  # valid on another). Each bridge is collected by its own worker, so an unreachable one
+  # backs off on its own without stopping the others.
+  #
+  # The numbers are labels, not an order: they need not be consecutive, and nothing ever
+  # renumbers them. That matters when you remove a bridge - leave the gap. The number is
+  # what ties a host to its username, so shifting the ones above it down would pair a
+  # bridge with the wrong username, which shows up as an authentication failure rather
+  # than as an obvious mistake.
+  #
+  # host2: "upstairs.example.com"
+  # user2: "your_second_hue_user"
+  #
+  # See the README's "Multiple Hue bridges" section for adding, removing and replacing
+  # one. Everything below this point applies to every bridge - there is no per-bridge
+  # timeout, TLS setting or units setting.
   # Timeout for requests to the Hue bridge
   timeout: 5
   # Interval in seconds between data collection

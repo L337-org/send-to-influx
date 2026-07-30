@@ -141,6 +141,27 @@ class TestSettingsFilePermissionCheck:
         finally:
             Path(path).unlink(missing_ok=True)
 
+    def test_0644_warns_when_the_only_real_secret_is_in_a_bridge_slot(self, sample_settings, caplog):
+        """A token hand-written into hue.user2 makes the file secret-bearing.
+
+        The permission check sweeps the static credential table plus whatever slots the
+        settings actually declare; if it swept only the table, a file whose sole real
+        secret lives in a numbered slot would read as placeholder-only and 0644 would be
+        passed as safe.
+        """
+        for block, field in (("influx", "user"), ("influx", "password"), ("myenergi", "apikey")):
+            sample_settings[block][field] = placeholder_for(f"{block}-{field}")
+        sample_settings["hue"]["user"] = placeholder_for("hue-user")
+        sample_settings["hue"]["host2"] = "bridge2.example.com"
+        sample_settings["hue"]["user2"] = "a-real-looking-token"
+        path = self._write_settings(sample_settings, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
+        try:
+            with caplog.at_level("WARNING"):
+                load_settings(settings_file=path)
+            assert "readable by group/other" in caplog.text
+        finally:
+            Path(path).unlink(missing_ok=True)
+
     def test_0644_with_only_placeholders_loads_clean(self, sample_settings, caplog):
         """A 0644 file containing only placeholder/sentinel values doesn't warn - this
         is what makes 644 safe as the fresh-install default mode."""
@@ -255,6 +276,26 @@ class TestSettingsFilePermissionCheck:
 class TestClearUnsubstitutedCredentialSentinels:
     """Integration tests via load_settings(): a sentinel left in place without a
     matching systemd credential file must not pass validation as if it were real."""
+
+    def test_bridge_slot_sentinel_is_blanked_too(self, sample_settings, monkeypatch):
+        """A slot sentinel with no credential behind it is blanked like a static one.
+
+        Left in place it is a non-empty string, so it satisfies every truthiness check
+        downstream and the bridge is treated as configured - then fails authentication on
+        every cycle instead of being reported as unset once.
+        """
+        monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+        sample_settings["hue"]["host2"] = "bridge2.example.com"
+        sample_settings["hue"]["user2"] = sentinel_for("hue-user2")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            yaml.dump(sample_settings, f)
+            path = f.name
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        try:
+            result = load_settings(settings_file=path)
+        finally:
+            Path(path).unlink(missing_ok=True)
+        assert result["hue"]["user2"] == ""
 
     def test_sentinel_without_substitution_fails_validation(self, sample_settings, monkeypatch):
         """A sentinel-valued required field, with CREDENTIALS_DIRECTORY unset (so it's
