@@ -12,7 +12,7 @@ import warnings
 from collections import namedtuple
 import urllib3
 import requests
-from toinflux.credentials import PLACEHOLDER_VALUES, SENTINEL_PREFIX
+from toinflux.credentials import CANONICAL_SLOT_SUFFIX_RE, PLACEHOLDER_VALUES, SENTINEL_PREFIX
 from toinflux.influx import DataHandler, escape_key_or_tag_value
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 
@@ -26,16 +26,15 @@ Bridge = namedtuple("Bridge", "slot host user")
 # The suffix must be canonical: ``host1`` is rejected rather than silently accepted as
 # a synonym for ``host`` (it would be a second way to spell slot 1), and a leading zero
 # is rejected rather than folded onto its unpadded twin (``host02`` vs ``host2``).
-# Note the alternation: a bare ``[2-9]\d*`` looks right but rejects 10-19 (and 100-199,
-# ...) because they start with a 1, so a perfectly valid hue.host10 would have been
-# refused as malformed. Single digit 2-9, or any multi-digit number not starting with 0.
-#
 # Both halves of a slot are matched, not just the host: otherwise a mistyped ``user02``
 # would be silently ignored (the slot would report its token as unset while the token sat
 # in a key nothing reads), and a token left behind in a slot whose host key was deleted
 # outright would never be noticed at all.
+#
+# The canonical-suffix rule itself lives in toinflux.credentials, because the credential
+# side must agree with it about which slots exist (hue-user2 is a credential iff hue.user2
+# is a slot field) and a second copy would drift.
 _SLOT_FIELD_RE = re.compile(r"^(?:host|user)(?P<suffix>\d*)$")
-_CANONICAL_SLOT_SUFFIX_RE = re.compile(r"^([2-9]|[1-9]\d+)$")
 
 
 def bridge_field_names(slot):
@@ -119,7 +118,7 @@ def _parse_slot_field(field):
     if not match:
         return (None, None)
     suffix = match.group("suffix")
-    if suffix and not _CANONICAL_SLOT_SUFFIX_RE.match(suffix):
+    if suffix and not CANONICAL_SLOT_SUFFIX_RE.match(suffix):
         return (
             None,
             f"hue.{field} is not a valid bridge slot - the first bridge is hue.host/hue.user, and "

@@ -15,7 +15,14 @@ import sys
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse
 import yaml
-from toinflux.credentials import CREDENTIAL_FIELDS, PLACEHOLDER_VALUES, SENTINEL_PREFIX, apply_credential_substitution
+from toinflux.credentials import (
+    CREDENTIAL_FIELDS,
+    SENTINEL_PREFIX,
+    apply_credential_substitution,
+    credential_field,
+    placeholder_for,
+    slot_credential_names,
+)
 from toinflux.exceptions import ConfigError
 
 # The source sendtoinflux.py runs when neither sources: nor default_source: is
@@ -742,7 +749,11 @@ def _contains_real_secret(settings):
     :type settings: dict
     :rtype: bool
     """
-    for name, (top_key, field) in CREDENTIAL_FIELDS.items():
+    # Slot credentials are included, not just the static table: a real token hand-written
+    # into hue.user2 must count, or the group/other-readable check below would pass a file
+    # that does contain a secret.
+    for name in [*CREDENTIAL_FIELDS, *slot_credential_names(settings)]:
+        top_key, field = credential_field(name)
         block = settings.get(top_key)
         if not isinstance(block, dict):
             continue
@@ -756,7 +767,7 @@ def _contains_real_secret(settings):
         # the whole set - otherwise a real secret that happens to equal a
         # *different* field's placeholder text (e.g. influx.user == "your_api_key")
         # would be wrongly treated as empty/placeholder and skip the warning.
-        if value == PLACEHOLDER_VALUES[name]:
+        if value == placeholder_for(name):
             continue
         if isinstance(value, str) and value.startswith(SENTINEL_PREFIX):
             continue
@@ -830,7 +841,11 @@ def _clear_unsubstituted_credential_sentinels(settings):
     :raises ConfigError: if influx-token specifically is still a sentinel - see the
         note below on why this one field can't just be blanked like the others
     """
-    for name, (top_key, field) in CREDENTIAL_FIELDS.items():
+    # Slot credentials included for the same reason as the static ones: a hue.user3 left
+    # holding sentinel text with no credential behind it would otherwise pass validation's
+    # truthiness checks and then fail authentication forever.
+    for name in [*CREDENTIAL_FIELDS, *slot_credential_names(settings)]:
+        top_key, field = credential_field(name)
         block = settings.get(top_key)
         if not isinstance(block, dict):
             continue

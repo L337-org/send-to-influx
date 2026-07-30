@@ -9,7 +9,17 @@ import tempfile
 from pathlib import Path
 import pytest
 import yaml
-from toinflux.credentials import CREDENTIAL_FIELDS, apply_credential_substitution, sentinel_for
+from toinflux.credentials import (
+    CREDENTIAL_FIELDS,
+    apply_credential_substitution,
+    credential_field,
+    credential_name_for,
+    is_credential_field,
+    is_credential_name,
+    placeholder_for,
+    sentinel_for,
+    slot_credential_names,
+)
 from toinflux.general import load_settings
 from toinflux.exceptions import ConfigError
 
@@ -288,3 +298,100 @@ class TestClearUnsubstitutedCredentialSentinels:
                 load_settings(settings_file=path)
         finally:
             Path(path).unlink(missing_ok=True)
+
+
+class TestSlotCredentials:
+    """Numbered Hue bridge usernames are credentials like any other.
+
+    Before this, every consumer asked "is it in CREDENTIAL_FIELDS?" - a static table that
+    cannot express an unbounded number of slots. The two security-relevant consequences were
+    that `--set-field hue.user2 <token>` would write a real token into settings.yaml in
+    plaintext, and that the settings-file permissions check could not see it.
+    """
+
+    @pytest.mark.parametrize(
+        "name, expected",
+        [
+            ("influx-token", ("influx", "token")),
+            ("hue-user", ("hue", "user")),
+            ("hue-user2", ("hue", "user2")),
+            ("hue-user10", ("hue", "user10")),
+            ("hue-user99", ("hue", "user99")),
+        ],
+    )
+    def test_recognised_names_map_to_their_field(self, name, expected):
+        assert credential_field(name) == expected
+        assert is_credential_name(name)
+
+    @pytest.mark.parametrize("name", ["hue-user1", "hue-user0", "hue-user02", "hue-userX", "hue-host2", "nope"])
+    def test_non_canonical_or_unknown_names_are_not_credentials(self, name):
+        """hue-user1 would be a second way to spell slot 1, hue-user02 a second way to spell
+        slot 2, and hue-host2 is not a secret at all."""
+        assert credential_field(name) is None
+        assert not is_credential_name(name)
+
+    @pytest.mark.parametrize(
+        "section, field, expected",
+        [
+            ("hue", "user", "hue-user"),
+            ("hue", "user3", "hue-user3"),
+            ("influx", "token", "influx-token"),
+            ("hue", "user1", None),
+            ("hue", "host2", None),
+            ("speedtest", "user2", None),
+        ],
+    )
+    def test_settings_paths_map_back_to_their_credential(self, section, field, expected):
+        """The inverse direction is what lets --set-field refuse a secret field and name the
+        right command in the refusal."""
+        assert credential_name_for(section, field) == expected
+        assert is_credential_field(section, field) is (expected is not None)
+
+    def test_a_slot_shares_slot_ones_placeholder(self):
+        """Every Hue username field carries the same example text, and --remove needs a
+        placeholder for a slot - it used to index PLACEHOLDER_VALUES directly and would have
+        died with a KeyError."""
+        assert placeholder_for("hue-user2") == placeholder_for("hue-user")
+        assert placeholder_for("nope") is None
+
+    def test_slots_are_discovered_from_settings_in_slot_order(self):
+        """Discovered, not enumerated - which is what removes the cap. Numeric order, so
+        user10 comes after user2 rather than sorting before it as a string."""
+        settings = {"hue": {"host": "a", "user": "t", "user2": "t2", "user10": "t10", "host3": "c"}}
+        assert slot_credential_names(settings) == ["hue-user2", "hue-user10"]
+
+    @pytest.mark.parametrize("settings", [{}, {"hue": None}, {"hue": "oops"}, {"hue": {}}, None])
+    def test_slot_discovery_survives_a_malformed_block(self, settings):
+        assert slot_credential_names(settings) == []
+
+    def test_substitution_applies_a_slot_credential(self, monkeypatch, tmp_path):
+        """The directory listing drives substitution now, so an unbounded slot works where
+        iterating the static table could not reach it."""
+        creds = tmp_path / "creds"
+        creds.mkdir()
+        (creds / "hue-user2").write_text("UPSTAIRS_TOKEN", encoding="utf8")
+        (creds / "hue-user99").write_text("FAR_TOKEN", encoding="utf8")
+        (creds / "not-ours").write_text("ignored", encoding="utf8")
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(creds))
+        settings = {"hue": {"host": "a", "user": "t1", "host2": "b", "user2": "placeholder"}}
+        apply_credential_substitution(settings)
+        assert settings["hue"]["user2"] == "UPSTAIRS_TOKEN"
+        assert settings["hue"]["user99"] == "FAR_TOKEN"
+        assert "not-ours" not in settings["hue"]
+
+    def test_substitution_ignores_a_non_credential_filename(self, monkeypatch, tmp_path):
+        """LoadCredentialEncrypted= is not exclusive to this tool, so an unrelated credential
+        in the directory must not be written anywhere."""
+        creds = tmp_path / "creds"
+        creds.mkdir()
+        (creds / "hue-user1").write_text("non-canonical", encoding="utf8")
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(creds))
+        settings = {"hue": {"host": "a", "user": "t1"}}
+        apply_credential_substitution(settings)
+        assert "user1" not in settings["hue"]
+
+    def test_unreadable_credentials_directory_does_not_crash(self, monkeypatch, tmp_path):
+        """A missing directory must leave load_settings() working, not raise."""
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path / "nope"))
+        settings = {"hue": {"host": "a", "user": "t1"}}
+        assert apply_credential_substitution(settings) is settings
