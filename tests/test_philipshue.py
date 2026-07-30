@@ -371,7 +371,7 @@ class TestHueTokenRedaction:
         # The shape requests actually produces - the URL, and therefore the token,
         # is inside the message (verified against requests, not assumed).
         boom = requests.exceptions.ConnectionError(
-            f"HTTPSConnectionPool(host='hue.example.com', port=443): Max retries "
+            f"HTTPSConnectionPool(host='bridge-under-test', port=443): Max retries "
             f"exceeded with url: /api/{self.TOKEN} (Caused by ConnectTimeoutError())"
         )
         with patch.object(hue.session, "get", side_effect=boom):
@@ -381,11 +381,13 @@ class TestHueTokenRedaction:
 
         assert self.TOKEN not in caplog.text
         assert "<redacted>" in caplog.text
-        assert self.TOKEN not in str(excinfo.value)
-        assert "<redacted>" in str(excinfo.value)
-        # Still diagnosable: the host and the underlying cause survive verbatim.
-        assert "hue.example.com" in str(excinfo.value)
-        assert "ConnectTimeoutError" in str(excinfo.value)
+        # Asserted by equality rather than substring: this pins both halves of the
+        # contract at once - the token is gone, and every other byte (host, port,
+        # underlying cause) survives, so the failure is still diagnosable.
+        assert str(excinfo.value) == (
+            "HTTPSConnectionPool(host='bridge-under-test', port=443): Max retries "
+            "exceeded with url: /api/<redacted> (Caused by ConnectTimeoutError())"
+        )
 
     def test_unparseable_response_redacts_the_token(self, sample_settings):
         """The JSON-decode path is redacted too, not just the transport one."""

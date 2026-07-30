@@ -205,10 +205,11 @@ class TestHueSetLight:
         )
         with pytest.raises(SourceConnectionError) as excinfo:
             handler.mcp_set_device_state("2", on=False)
-        assert "SUPERSECRETHUETOKEN123" not in str(excinfo.value)
-        assert "<redacted>" in str(excinfo.value)
-        # The diagnosable part survives: status text and host.
-        assert "503" in str(excinfo.value) and "hue.local" in str(excinfo.value)
+        # Equality, not substring: pins that the token is gone *and* that the rest
+        # of the message (status text, host, path) survives for diagnosis.
+        assert str(excinfo.value) == (
+            "503 Server Error: Service Unavailable for url: https://hue.local/api/<redacted>/lights/2/state"
+        )
 
     def test_write_path_brackets_a_bare_ipv6_host(self):
         """The write PUT brackets an IPv6 host exactly as the read GET does (SI-17).
