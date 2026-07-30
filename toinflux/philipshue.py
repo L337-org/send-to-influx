@@ -209,8 +209,10 @@ def _duplicate_host_errors(configured):
         host_field, _ = bridge_field_names(slot)
         errors.append(
             f"hue.{host_field} ({host}) is the same bridge as hue.{first_host_field} "
-            f"({first_host}) - each slot must address a different bridge; once both have tokens it "
-            f"would be collected twice, writing two series for one set of devices"
+            f"({first_host}) - each slot must address a different bridge. Once both have tokens the "
+            f"same devices would be polled twice: into one series if the two values are spelled "
+            f"identically (two workers overwriting each other's points), or into two series for one "
+            f"physical bridge if they differ, double-counting it in any query"
         )
     return errors
 
