@@ -498,7 +498,7 @@ class TestEnumerateBridges:
         assert errors == []
         assert bridges == []
         assert len(warnings) == 1
-        assert "hue.user" in warnings[0] and "hue.example.com" in warnings[0]
+        assert "hue.user is not set for the bridge at hue.host (hue.example.com)" in warnings[0]
 
     @pytest.mark.parametrize("token", ["", "   ", None, 12345, "<stored in systemd-creds - run x>"])
     def test_unusable_tokens_warn_rather_than_collect(self, token):
@@ -763,7 +763,8 @@ class TestBridgeResolution:
         hue = self._hue(instance="gone.example.com")
         with pytest.raises(ConfigError) as excinfo:
             hue.bridge()
-        assert "gone.example.com" in str(excinfo.value) and "a.example.com" in str(excinfo.value)
+        assert "no Hue bridge configured at 'gone.example.com'" in str(excinfo.value)
+        assert "configured: a.example.com" in str(excinfo.value)
 
     def test_malformed_block_is_a_config_error(self):
         """Enumeration errors surface as a ConfigError rather than being collected from."""

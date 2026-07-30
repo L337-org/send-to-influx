@@ -586,7 +586,7 @@ class TestHueMultiBridgeWrites:
                 )
         message = str(excinfo.value)
         assert "ambiguous" in message
-        assert "downstairs.example.com" in message and "upstairs.example.com" in message
+        assert "on bridge downstairs.example.com" in message and "on bridge upstairs.example.com" in message
         # Cross-bridge ambiguity IS resolvable with 'bridge', so that is the hint here -
         # unlike two lights sharing a name on one bridge (see the test above).
         assert "Pass 'bridge'" in message
@@ -676,7 +676,7 @@ class TestHueMultiBridgeWrites:
                     bridge="nosuch.example.com",
                 )
         assert "unknown bridge" in str(excinfo.value)
-        assert "downstairs.example.com" in str(excinfo.value)
+        assert "configured bridges: downstairs.example.com" in str(excinfo.value)
 
     def test_unknown_device_names_the_discovery_tool(self):
         handlers = self._two_bridges()

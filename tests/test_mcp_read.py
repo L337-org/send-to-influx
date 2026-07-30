@@ -861,7 +861,9 @@ class TestMultiBridgeReads:
         with patch("toinflux.mcp_read.resolve_handlers", return_value=handlers):
             with pytest.raises(SourceConnectionError) as excinfo:
                 current_state_result("hue", self._settings(), None)
-        assert "down.example.com" in str(excinfo.value) and "up.example.com" in str(excinfo.value)
+        message = str(excinfo.value)
+        # Each bridge paired with its own error, not merely both hostnames present somewhere.
+        assert "down.example.com: down" in message and "up.example.com: also down" in message
 
     def test_bridge_is_rejected_for_a_source_with_one_target(self):
         """Silently ignoring it would be worse than refusing.

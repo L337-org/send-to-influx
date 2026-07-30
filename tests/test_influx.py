@@ -93,7 +93,10 @@ class TestDataHandler:
                 h.send_data()
                 url = mock_post.call_args[0][0]
                 call_kw = mock_post.call_args[1]
-                assert "influx.example.com" in url
+                # The whole URL, not just the host somewhere in it - this test's name claims
+                # it checks the URL is built correctly, and a substring match would pass on
+                # a wrong endpoint, a wrong database or a wrong scheme.
+                assert url == "https://influx.example.com:8086/write?db=hue_db&precision=s"
                 assert call_kw["auth"] == ("influx_user", "influx_password")
 
     def test_send_data_v2_uses_token_auth_and_bucket_url(self, sample_settings):
