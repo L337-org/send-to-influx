@@ -514,6 +514,44 @@ class TestCmdSet:
         result_yaml = yaml.safe_load(settings_path.read_text())
         assert "stored in systemd-creds" in result_yaml["influx"]["token"]
 
+    def test_stores_a_slot_credential_and_creates_its_field(self, tmp_path, monkeypatch):
+        """The whole "add a bridge" command, end to end.
+
+        _cmd_set indexed CREDENTIAL_FIELDS directly, so `send-to-influx-set-credential
+        hue-user2` raised KeyError - the primary documented command for adding a bridge could
+        not run. It also has to *create* hue.user2, since a config written from the shipped
+        example has no such key.
+        """
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(
+            'hue:\n  # a comment that must survive\n  host: "a.example.com"\n  user: "t1"\n'
+            '  host2: "b.example.com"\n'
+        )
+        credstore = tmp_path / "credstore"
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+        monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(tmp_path / "dropin.conf"))
+        monkeypatch.setattr(credential_cli.sys.stdin, "isatty", lambda: False)
+        monkeypatch.setattr(credential_cli.sys.stdin, "read", lambda: "UPSTAIRS_TOKEN\n")
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["systemd-creds", "--version"]:
+                return MagicMock(stdout="systemd 257\n")
+            if cmd[:2] == ["systemd-creds", "encrypt"]:
+                credstore.mkdir(parents=True, exist_ok=True)
+                (credstore / "hue-user2.cred").write_text("ciphertext")
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=fake_run):
+            _cmd_set("hue-user2", str(settings_path))
+
+        text = settings_path.read_text()
+        assert "# a comment that must survive" in text
+        result = yaml.safe_load(text)
+        assert "stored in systemd-creds" in result["hue"]["user2"]
+        assert result["hue"]["user"] == "t1"  # the other bridge untouched
+        assert (credstore / "hue-user2.cred").exists()
+
     def test_settings_diff_is_only_the_one_line(self, tmp_path, monkeypatch):
         original = 'influx:\n  # a comment that must survive\n  token: "your_influx_token"\n  org: "myorg"\n'
         settings_path = tmp_path / "settings.yaml"
@@ -598,6 +636,34 @@ class TestCmdRemove:
         assert not (credstore / "influx-token.cred").exists()
         result_yaml = yaml.safe_load(settings_path.read_text())
         assert result_yaml["influx"]["token"] == "your_influx_token"
+
+    def test_removes_a_slot_credential(self, tmp_path, monkeypatch):
+        """The command entry point, not just the plumbing under it.
+
+        _cmd_remove indexed CREDENTIAL_FIELDS directly, so `send-to-influx-set-credential
+        hue-user2 --remove` raised KeyError - the command for removing a bridge could not
+        remove one. My tests exercised _rewrite_settings_field and _cmd_set_field and passed
+        throughout, which is exactly why this goes through _cmd_remove instead.
+        """
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(
+            'hue:\n  host: "a.example.com"\n  user: "t1"\n'
+            '  host2: "b.example.com"\n  user2: "<stored in systemd-creds - x>"\n'
+        )
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "hue-user2.cred").write_text("ciphertext")
+        monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
+        monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(tmp_path / "dropin.conf"))
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+            _cmd_remove("hue-user2", str(settings_path))
+
+        assert not (credstore / "hue-user2.cred").exists()
+        result = yaml.safe_load(settings_path.read_text())
+        assert result["hue"]["user2"] == "your_hue_user"
+        # The other bridge is untouched - removing one must not disturb another's credential.
+        assert result["hue"]["user"] == "t1"
 
     def test_cred_file_removal_failure_raises_credential_cli_error(self, tmp_path, monkeypatch):
         """os.remove() on the .cred file must surface as CredentialCliError, not a

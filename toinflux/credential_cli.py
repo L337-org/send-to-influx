@@ -31,6 +31,7 @@ from toinflux.credentials import (
     CANONICAL_SLOT_SUFFIX_RE,
     CREDENTIAL_FIELDS,
     SENTINEL_PREFIX,
+    credential_field,
     credential_name_for,
     is_credential_name,
     placeholder_for,
@@ -658,7 +659,10 @@ def _resolve_credential_value(name, influx, credstore_dir):
     :param influx: the parsed `influx:` settings block
     :type influx: dict
     """
-    _, field = CREDENTIAL_FIELDS[name]
+    # Only ever called for the influx credentials, which are static - but routed through the
+    # shared mapping regardless, so no credential lookup in this file can be the one that
+    # forgets about slots.
+    _, field = credential_field(name)
     plain_value = influx.get(field, "")
     if isinstance(plain_value, str) and plain_value.startswith(SENTINEL_PREFIX):
         return _decrypt_credential(name, credstore_dir)
@@ -781,7 +785,7 @@ def _cmd_set(name, settings_path):
     _encrypt_credential(name, value)
     _regenerate_dropin()
     _reload_systemd()
-    top_key, field = CREDENTIAL_FIELDS[name]
+    top_key, field = credential_field(name)
     try:
         _rewrite_settings_field(settings_path, top_key, field, sentinel_for(name))
     except CredentialCliError as exc:
@@ -818,7 +822,7 @@ def _cmd_remove(name, settings_path):
     #    LoadCredentialEncrypted= referencing a missing path hard-fails unit
     #    startup, so the drop-in must never be left pointing at a file that's
     #    already gone, even transiently if this is interrupted mid-way.
-    top_key, field = CREDENTIAL_FIELDS[name]
+    top_key, field = credential_field(name)
     _rewrite_settings_field(settings_path, top_key, field, placeholder_for(name))
     _regenerate_dropin(exclude=name)
     _reload_systemd()
