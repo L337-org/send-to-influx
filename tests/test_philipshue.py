@@ -411,14 +411,55 @@ class TestHueTokenRedaction:
 
     @pytest.mark.parametrize("token", ["", None, 12345])
     def test_absent_or_non_string_token_leaves_the_message_intact(self, sample_settings, token):
-        """No token to hide must mean no rewriting - a naive ""-replace would
-        splice the marker between every character of the message."""
+        """No token to hide must mean no rewriting - a naive ""-replace would splice the
+        marker between every character of the message.
+
+        Exercised directly rather than through a request, because a bridge with no usable
+        token no longer reaches the request path at all - bridge() raises ConfigError
+        first (see test_host_without_a_token_is_a_config_error_not_a_retry).
+        """
         hue = self._hue(sample_settings, token=token)
-        boom = requests.exceptions.ConnectionError("Max retries exceeded with url: /api/whatever")
-        with patch.object(hue.session, "get", side_effect=boom):
-            with pytest.raises(SourceConnectionError) as excinfo:
-                hue.get_data_from_hue_bridge()
-        assert str(excinfo.value) == "Max retries exceeded with url: /api/whatever"
+        assert hue._redact("Max retries exceeded with url: /api/whatever") == (
+            "Max retries exceeded with url: /api/whatever"
+        )
+
+    def test_host_without_a_token_is_a_config_error_not_a_retry(self, sample_settings):
+        """A bridge whose token is unusable must fail fast, not authenticate forever.
+
+        ConfigError stops that worker permanently (the worker loop does not retry it) while
+        leaving every other source running - which is the outcome acceptance criterion 6
+        was after, without the fatal-at-load-time behaviour that would have taken the whole
+        service down on a fresh install.
+        """
+        from toinflux.exceptions import ConfigError
+
+        hue = self._hue(sample_settings, token="")
+        with pytest.raises(ConfigError) as excinfo:
+            hue.get_data_from_hue_bridge()
+        assert "no Hue bridge is configured" in str(excinfo.value)
+
+    def test_every_configured_bridges_token_is_redacted(self, sample_settings):
+        """Redaction covers the whole configured set, not just this worker's own token.
+
+        Enumeration cannot raise, so this stays safe to call from an exception handler, and
+        a message can never carry a token merely because it came from a different slot than
+        the one expected.
+        """
+        settings = {
+            **sample_settings,
+            "hue": {
+                **sample_settings["hue"],
+                "host": "a.example.com",
+                "user": "TOKEN_A",
+                "host2": "b.example.com",
+                "user2": "TOKEN_B",
+            },
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            hue = Hue(source="hue", instance="a.example.com")
+        cleaned = hue._redact("url /api/TOKEN_A failed, and /api/TOKEN_B also failed")
+        assert "TOKEN_A" not in cleaned and "TOKEN_B" not in cleaned
+        assert cleaned.count("<redacted>") == 2
 
 
 class TestEnumerateBridges:
@@ -644,3 +685,75 @@ class TestEnumerateBridges:
         assert bridge_field_names(1) == ("host", "user")
         assert bridge_field_names(2) == ("host2", "user2")
         assert bridge_field_names(99) == ("host99", "user99")
+
+
+class TestBridgeResolution:
+    """Which bridge a handler collects from, and what it emits for it."""
+
+    @staticmethod
+    def _hue(instance=None, **hue_fields):
+        settings = {
+            "hue": {"db": "hue_db", "interval": 300, "host": "a.example.com", "user": "tok-a", **hue_fields},
+            "influx": {"url": "http://influx", "token": "t", "org": "o"},
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            return Hue(source="hue", instance=instance)
+
+    def test_no_instance_resolves_to_the_first_configured_bridge(self):
+        """The single-bridge case, and every caller that doesn't care about instances
+        (the MCP tools construct handlers without one) - must behave as it always has."""
+        hue = self._hue()
+        assert hue.bridge() == Bridge(slot=1, host="a.example.com", user="tok-a")
+
+    def test_instance_selects_its_own_bridge(self):
+        """Each worker collects from its own bridge, with that bridge's own token."""
+        hue = self._hue(instance="b.example.com", host2="b.example.com", user2="tok-b")
+        assert hue.bridge() == Bridge(slot=2, host="b.example.com", user="tok-b")
+
+    def test_url_uses_the_instance_bridges_host_and_token(self):
+        """The request URL is built from the resolved bridge, not from slot 1."""
+        hue = self._hue(instance="b.example.com", host2="b.example.com", user2="tok-b")
+        assert hue._api_base() == "https://b.example.com/api/tok-b"
+
+    def test_header_tags_the_instance_bridges_host(self):
+        """Each bridge's points carry its own host tag - which is what keeps field names
+        identical to the single-bridge era instead of needing per-bridge prefixes."""
+        hue = self._hue(instance="b.example.com", host2="b.example.com", user2="tok-b")
+        with patch.object(Hue, "parse_hue_data", return_value={}):
+            hue.get_data()
+        assert hue.influx_header == "hue,host=b.example.com "
+
+    def test_header_escapes_a_host_containing_line_protocol_specials(self):
+        """send_data() escapes field keys but takes the header verbatim, so a host with a
+        space/comma/equals would end the tag set early and silently corrupt the point."""
+        hue = self._hue(instance="my bridge,x", host2="my bridge,x", user2="tok-b")
+        with patch.object(Hue, "parse_hue_data", return_value={}):
+            hue.get_data()
+        assert hue.influx_header == "hue,host=my\\ bridge\\,x "
+
+    def test_header_does_not_normalise_the_host(self):
+        """Escaped, but never rewritten: normalising would change the series identity of
+        an install that is already running an IPv6 bridge."""
+        hue = self._hue(instance="2001:0db8::1", host2="2001:0db8::1", user2="tok-b")
+        with patch.object(Hue, "parse_hue_data", return_value={}):
+            hue.get_data()
+        assert hue.influx_header == "hue,host=2001:0db8::1 "
+
+    def test_unknown_instance_is_a_config_error(self):
+        """A worker outliving a configuration change must stop, not loop against a bridge
+        that is no longer configured."""
+        from toinflux.exceptions import ConfigError
+
+        hue = self._hue(instance="gone.example.com")
+        with pytest.raises(ConfigError) as excinfo:
+            hue.bridge()
+        assert "gone.example.com" in str(excinfo.value) and "a.example.com" in str(excinfo.value)
+
+    def test_malformed_block_is_a_config_error(self):
+        """Enumeration errors surface as a ConfigError rather than being collected from."""
+        from toinflux.exceptions import ConfigError
+
+        hue = self._hue(host2="a.example.com", user2="tok-b")  # duplicate of slot 1
+        with pytest.raises(ConfigError) as excinfo:
+            hue.bridge()
+        assert "same bridge" in str(excinfo.value)

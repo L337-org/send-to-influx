@@ -13,8 +13,8 @@ from collections import namedtuple
 import urllib3
 import requests
 from toinflux.credentials import PLACEHOLDER_VALUES, SENTINEL_PREFIX
-from toinflux.influx import DataHandler
-from toinflux.exceptions import SourceConnectionError, ToolParamError
+from toinflux.influx import DataHandler, escape_key_or_tag_value
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 
 # One configured bridge: its slot number, and the host/token as written in settings.
 # ``slot`` is only ever used to name the fields it came from, in messages and in
@@ -383,6 +383,39 @@ class Hue(DataHandler):
         "cool white": "f0f8ff",
     }
 
+    def bridge(self):
+        """
+        Return the bridge this handler collects from.
+
+        ``self.instance`` names the bridge by host. ``None`` means "the first configured
+        bridge", which is what keeps a single-bridge install - and every caller that
+        constructs a handler without an instance, such as the MCP tools - behaving exactly
+        as it did before slots existed.
+
+        Resolved on each use rather than cached: ``self.settings`` is read once at
+        construction, so the answer cannot change during the handler's life, and
+        enumeration is pure dictionary work with no I/O.
+
+        :return: the resolved bridge
+        :rtype: Bridge
+        :raises ConfigError: the block is malformed, configures no usable bridge, or does
+            not contain the bridge this handler was created for (a worker outliving a
+            configuration change). Not retryable - the worker should stop rather than loop
+            forever against a bridge that is not there.
+        """
+        bridges, errors, _ = enumerate_bridges(self.settings.get("hue"))
+        if errors:
+            raise ConfigError("; ".join(errors))
+        if not bridges:
+            raise ConfigError("no Hue bridge is configured (hue.host is empty or absent)")
+        if self.instance is None:
+            return bridges[0]
+        for bridge in bridges:
+            if bridge.host == self.instance:
+                return bridge
+        configured = ", ".join(bridge.host for bridge in bridges)
+        raise ConfigError(f"no Hue bridge configured at '{self.instance}' (configured: {configured})")
+
     def get_data(self):
         """
         Get the data from the Hue Bridge
@@ -390,7 +423,12 @@ class Hue(DataHandler):
         :return: data
         :rtype: dict
         """
-        self.influx_header = f"hue,host={self.settings['hue']['host']} "
+        # The host is escaped here but NOT normalised: the tag keeps whatever was
+        # configured, because rewriting it would change the series identity of an existing
+        # install. Escaping is separate - send_data() escapes field keys but takes the
+        # header verbatim, so a host containing a comma, equals sign or space would
+        # otherwise end the tag set early and silently produce a corrupt point.
+        self.influx_header = f"hue,host={escape_key_or_tag_value(self.bridge().host)} "
         self.data = self.parse_hue_data()
         return self.data
 
@@ -406,8 +444,8 @@ class Hue(DataHandler):
         :return: API base URL for this bridge
         :rtype: str
         """
-        host = _url_host(self.settings["hue"]["host"])
-        return f"https://{host}/api/{self.settings['hue']['user']}"
+        bridge = self.bridge()
+        return f"https://{_url_host(bridge.host)}/api/{bridge.user}"
 
     def _redact(self, message):
         """
@@ -436,12 +474,20 @@ class Hue(DataHandler):
         :return: the message with any occurrence of the token replaced
         :rtype: str
         """
-        token = self.settings["hue"].get("user")
-        # An absent/blank token has nothing to hide, and "".replace() would splice
-        # the marker between every character of the message.
-        if not isinstance(token, str) or not token:
-            return message
-        return message.replace(token, "<redacted>")
+        # Every configured bridge's token, not just this worker's: enumeration cannot
+        # raise, so this stays safe to call from an exception handler, and redacting the
+        # whole set means a message can never carry a token merely because it came from a
+        # different slot than expected. Longest first, so a token that is a prefix of
+        # another cannot leave a fragment behind. An absent/blank token has nothing to
+        # hide, and "".replace() would splice the marker between every character.
+        bridges, _, _ = enumerate_bridges(self.settings.get("hue"))
+        for token in sorted(
+            {bridge.user for bridge in bridges if isinstance(bridge.user, str) and bridge.user},
+            key=len,
+            reverse=True,
+        ):
+            message = message.replace(token, "<redacted>")
+        return message
 
     def get_data_from_hue_bridge(self):
         """

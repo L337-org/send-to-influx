@@ -88,7 +88,7 @@ def _format_field_value(value):
     return str(value)
 
 
-def _escape_key_or_tag_value(value):
+def escape_key_or_tag_value(value):
     """
     Escape a value for use as an InfluxDB line protocol key or tag value.
 
@@ -102,6 +102,30 @@ def _escape_key_or_tag_value(value):
     """
     value = str(value)
     return value.replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
+
+
+def worker_label(source, instance=None):
+    """
+    Format a worker's identity for log messages: ``source`` or ``source@instance``.
+
+    Display only - never parsed, never a dict key (that is ``DataHandler.worker_key``),
+    and never an emitted tag value. Lives at module level as well as on the handler
+    because the supervisor in ``sendtoinflux.py`` must label a worker before its handler
+    has been constructed - two separate formatters would eventually disagree.
+
+    Tests ``is not None`` rather than truthiness on purpose: only ``None`` means
+    "single-target source, no instance". A blank-but-present instance is a
+    misconfiguration, and rendering it as a bare source name would both hide that and
+    disagree with ``worker_key``, which keeps the value verbatim - so the label shows it
+    (as ``source@``) instead of silently swallowing it.
+
+    :param source: source name
+    :type source: str
+    :param instance: the worker's instance, or None for a single-target source
+    :return: label for log output
+    :rtype: str
+    """
+    return f"{source}" if instance is None else f"{source}@{instance}"
 
 
 class DataHandler:
@@ -236,17 +260,13 @@ class DataHandler:
         Human-readable identity for log messages: ``source`` or ``source@instance``.
 
         Display only - never parsed, and never used as a dict key or an emitted tag
-        value (see ``worker_key``).
-
-        Tests ``is not None`` rather than truthiness on purpose: only ``None`` means
-        "single-target source, no instance". A blank-but-present instance is a
-        misconfiguration, and rendering it as a bare source name would both hide that
-        and disagree with ``worker_key``, which keeps the value verbatim - so the label
-        shows it (as ``source@``) instead of silently swallowing it.
+        value (see ``worker_key``). Delegates to the module-level ``worker_label()`` so
+        that the supervisor in ``sendtoinflux.py``, which has to label a worker before its
+        handler exists, formats it identically.
 
         :rtype: str
         """
-        return self.source if self.instance is None else f"{self.source}@{self.instance}"
+        return worker_label(self.source, self.instance)
 
     def send_data(self, data=None, timestamp=None, use_buffer=True):
         """
@@ -291,7 +311,7 @@ class DataHandler:
             data_to_send = (
                 self.influx_header
                 + ",".join(
-                    f"{_escape_key_or_tag_value(key)}={_format_field_value(value)}" for key, value in data.items()
+                    f"{escape_key_or_tag_value(key)}={_format_field_value(value)}" for key, value in data.items()
                 )
                 + f" {timestamp}"
             )
