@@ -163,24 +163,45 @@ class DataHandler:
         control). The default is off - writes are opt-in per source."""
         return self.MCP_WRITABLE and self.source_settings.get("mcp_read_write", False) is True
 
-    # Bounded per-source buffer of points that failed to write, flushed on the next
+    # Bounded per-worker buffer of points that failed to write, flushed on the next
     # successful send. Each entry is a mutable [line, rejection_count] pair - the count
     # tracks how many times the server has rejected (4xx) that specific point, so
     # _flush_buffer can give up on it after MAX_POINT_REJECTIONS. Class-level (shared
-    # across instances/subclasses, keyed by source name) rather than an instance
-    # attribute: the worker loop in sendtoinflux.py discards and reconstructs the
-    # DataHandler instance after every failure, so only a buffer that outlives the
-    # instance survives to be flushed later. deque(maxlen=...) evicts the oldest
-    # buffered point once a source's buffer is full, so a very long outage degrades
-    # gracefully instead of growing memory without bound. Buffered lines are flushed to
-    # whatever destination the *current* settings resolve to - an accepted limitation:
-    # editing influx.url/bucket/db while a backlog exists re-routes that backlog to the
-    # new destination.
+    # across instances/subclasses) rather than an instance attribute: the worker loop in
+    # sendtoinflux.py discards and reconstructs the DataHandler instance after every
+    # failure, so only a buffer that outlives the instance survives to be flushed later.
+    #
+    # Keyed by ``worker_key`` - (source, instance) - NOT by source name alone. A source
+    # with several instances (a Hue install with more than one bridge) runs one worker
+    # thread per instance, and they must not share a deque: _flush_buffer/_flush_head do
+    # read-then-popleft sequences that are not atomic across threads, so a shared buffer
+    # could double-post or lose points. validate_settings() refuses duplicate `sources:`
+    # entries for exactly that reason; per-instance keys are what make several workers on
+    # one source name safe. Mutating this dict from several threads is fine as it stands:
+    # a single dict.setdefault() is atomic under the GIL, and each worker only ever
+    # touches its own deque afterwards.
+    #
+    # deque(maxlen=...) evicts the oldest buffered point once a worker's buffer is full,
+    # so a very long outage degrades gracefully instead of growing memory without bound -
+    # note the bound is per worker, so N instances of a source can hold up to N *
+    # MAX_BUFFERED_POINTS between them. Buffered lines are flushed to whatever
+    # destination the *current* settings resolve to - an accepted limitation: editing
+    # influx.url/bucket/db while a backlog exists re-routes that backlog to the new
+    # destination.
     _write_buffers: dict = {}
 
-    def __init__(self, source=None, settings_file=None):
+    def __init__(self, source=None, settings_file=None, instance=None):
         self.settings = load_settings(settings_file)
         self.source = source
+        # Which instance of the source this handler serves, for a source that can have
+        # more than one target behind a single settings block (currently only Hue, whose
+        # instance is a bridge host). None for every single-target source, which keeps
+        # their worker_key/worker_label - and therefore their buffering, heartbeat and
+        # log output - exactly as they were before instances existed. Deliberately
+        # separate from self.source rather than folded into it: self.source is also the
+        # settings-block key, the get_class() lookup name, the heartbeat's `source` tag
+        # and the MCP measurement fallback, none of which vary per instance.
+        self.instance = instance
         self.influx_header = None
         self.data = None
         self.timestamp = None
@@ -190,6 +211,42 @@ class DataHandler:
             self.source_settings = self.settings[self.source]
         else:
             raise ConfigError(f"Source {self.source} not found in settings")
+
+    @property
+    def worker_key(self):
+        """
+        Identity of the worker this handler belongs to, as ``(source, instance)``.
+
+        Used to key anything that is per *worker* rather than per source: the write
+        buffer here, and the supervisor's activity/stopped/stalled bookkeeping in
+        ``sendtoinflux.py``. A tuple rather than a joined string on purpose - an
+        instance may be an IPv6 literal, so any ``source@host`` form would be
+        ambiguous to a later split on ``:``, and callers that need the settings-block
+        name (e.g. reading ``settings[source]["interval"]``) must be able to take it
+        back out without re-parsing.
+
+        :return: (source name, instance or None)
+        :rtype: tuple
+        """
+        return (self.source, self.instance)
+
+    @property
+    def worker_label(self):
+        """
+        Human-readable identity for log messages: ``source`` or ``source@instance``.
+
+        Display only - never parsed, and never used as a dict key or an emitted tag
+        value (see ``worker_key``).
+
+        Tests ``is not None`` rather than truthiness on purpose: only ``None`` means
+        "single-target source, no instance". A blank-but-present instance is a
+        misconfiguration, and rendering it as a bare source name would both hide that
+        and disagree with ``worker_key``, which keeps the value verbatim - so the label
+        shows it (as ``source@``) instead of silently swallowing it.
+
+        :rtype: str
+        """
+        return self.source if self.instance is None else f"{self.source}@{self.instance}"
 
     def send_data(self, data=None, timestamp=None, use_buffer=True):
         """
@@ -245,7 +302,7 @@ class DataHandler:
             self._post_line(data_to_send, url, post_kwargs)
             return
 
-        buffer = self._write_buffers.setdefault(self.source, deque(maxlen=MAX_BUFFERED_POINTS))
+        buffer = self._write_buffers.setdefault(self.worker_key, deque(maxlen=MAX_BUFFERED_POINTS))
         try:
             self._flush_buffer(buffer, url, post_kwargs)
             if data_to_send is not None:
@@ -271,14 +328,14 @@ class DataHandler:
             nothing at all for this call to do
         :rtype: bool
         """
-        has_backlog = bool(use_buffer and self._write_buffers.get(self.source))
+        has_backlog = bool(use_buffer and self._write_buffers.get(self.worker_key))
         if data and not isinstance(data, dict):
-            logging.warning("Ignoring non-dict data (%s) from source '%s'", type(data).__name__, self.source)
+            logging.warning("Ignoring non-dict data (%s) from worker '%s'", type(data).__name__, self.worker_label)
         elif not has_backlog:
             logging.warning("No data to send to InfluxDB")
         if not has_backlog:
             return False
-        logging.debug("No new data for source '%s'; flushing the buffered backlog only", self.source)
+        logging.debug("No new data for worker '%s'; flushing the buffered backlog only", self.worker_label)
         return True
 
     def _flush_buffer(self, buffer, url, kwargs):
@@ -319,9 +376,9 @@ class DataHandler:
             except InfluxWriteError as exc:
                 if not _is_point_rejection(exc.status_code):
                     logging.warning(
-                        "Flushing %d buffered point(s) for source '%s' failed; will retry next cycle",
+                        "Flushing %d buffered point(s) for worker '%s' failed; will retry next cycle",
                         len(buffer),
-                        self.source,
+                        self.worker_label,
                     )
                     raise
                 # The server rejected the chunk - isolate the offending point(s).
@@ -355,8 +412,8 @@ class DataHandler:
                 entry[1] += 1
                 if entry[1] >= MAX_POINT_REJECTIONS:
                     logging.warning(
-                        "Dropping buffered point for source '%s' after %d server rejections: %s",
-                        self.source,
+                        "Dropping buffered point for worker '%s' after %d server rejections: %s",
+                        self.worker_label,
                         entry[1],
                         exc,
                     )
@@ -437,12 +494,12 @@ class DataHandler:
         :return: None
         """
         if any(entry[0] == line for entry in buffer):
-            logging.debug("Point already buffered for source '%s'; not buffering a duplicate copy", self.source)
+            logging.debug("Point already buffered for worker '%s'; not buffering a duplicate copy", self.worker_label)
             return
         if len(buffer) >= buffer.maxlen:
             logging.warning(
-                "InfluxDB write buffer for source '%s' is full (%d points); dropping the oldest buffered point",
-                self.source,
+                "InfluxDB write buffer for worker '%s' is full (%d points); dropping the oldest buffered point",
+                self.worker_label,
                 buffer.maxlen,
             )
         buffer.append([line, 0])
