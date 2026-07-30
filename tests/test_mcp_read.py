@@ -890,6 +890,38 @@ class TestMultiBridgeReads:
         assert "does not apply" in str(excinfo.value)
         assert "hue" in str(excinfo.value)  # names the sources it does apply to
 
+    @pytest.mark.parametrize("bad_source", [5, None, ["hue"], "", "   "])
+    def test_a_bad_source_is_reported_as_a_bad_source_not_a_bridge_problem(self, bad_source):
+        """The bridge guard must not be the thing that judges an unusable source name.
+
+        Review finding: the guard called ``source.lower()`` before anything had checked the
+        type, so a non-string raised AttributeError - escaping the
+        ToolParamError/SourceConnectionError split the MCP layer relies on to tell a caller
+        mistake from a transport failure. A blank string was worse in a quieter way: it *is* a
+        string, so it reached the guard and came back blaming ``bridge`` for what was wrong
+        with ``source``.
+
+        Both now fall through to the source validation, so the message names the parameter
+        actually at fault.
+        """
+        from toinflux.mcp_read import _query_history_result
+
+        with pytest.raises(ToolParamError) as excinfo:
+            _query_history_result(
+                {"sources": ["hue"]},
+                None,
+                source=bad_source,
+                field="x",
+                start=None,
+                end=None,
+                aggregation=None,
+                group_by=None,
+                limit=None,
+                bridge="anything",
+            )
+        assert "source must be a non-empty string" in str(excinfo.value)
+        assert "does not apply" not in str(excinfo.value)
+
     def test_history_scoped_to_one_bridge_filters_by_its_host_tag(self):
         """Hue writes every bridge to one measurement, so scoping a query means filtering on
         the host tag its own writes carry."""

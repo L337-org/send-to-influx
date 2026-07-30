@@ -616,7 +616,14 @@ def _query_history_result(
     the result would echo ``bridge`` back, telling the caller the query was scoped when it
     was not. Refusing is the only honest answer.
     """
-    if bridge is not None and source.lower() not in INSTANCED_SOURCES:
+    # Only judge 'bridge' once the source is a usable name. A non-string would raise
+    # AttributeError from .lower() here, escaping the ToolParamError/SourceConnectionError
+    # contract the MCP layer uses to tell a caller mistake from a transport failure; a blank
+    # one would be reported as a 'bridge' problem when the source is what is wrong. Either way
+    # the condition matches resolve_handler()'s, so skipping the guard hands the value to that
+    # validation and the message names the parameter actually at fault.
+    usable_source = isinstance(source, str) and source.strip()
+    if bridge is not None and usable_source and source.lower() not in INSTANCED_SOURCES:
         raise ToolParamError(
             f"'bridge' does not apply to source {source!r} - it has a single target. "
             f"Only these sources have separate targets to scope to: {', '.join(sorted(INSTANCED_SOURCES))}"
