@@ -120,6 +120,38 @@ def _hue_list_devices_result(settings, settings_file):
             close_session(handler.session)
 
 
+def _hue_matches_across_bridges(handlers, device, bridge):
+    """Search every given bridge for ``device``, returning ``(matches, unreachable)``.
+
+    Split out of :func:`_resolve_hue_target` to keep that function's decision logic readable
+    - this half is the I/O, that half is the arbitration.
+
+    A bridge that cannot be answered is collected rather than fatal *only* when it was being
+    consulted to arbitrate. If the caller named a bridge, or it is the only one configured,
+    the failure is against the target itself and is propagated as the transport error it is.
+
+    :param handlers: ``[(instance, handler), ...]`` to search
+    :param device: light id or exact name to match
+    :param bridge: the bridge the caller named, or None
+    :return: ``([(instance, handler, light_id, name), ...], [(instance, exc), ...])``
+    :raises SourceConnectionError: the named or only bridge could not be reached
+    """
+    matches, unreachable = [], []
+    for instance, handler in handlers:
+        try:
+            names = handler._names_by_id(handler._fetch_lights())
+        except SourceConnectionError as exc:
+            if bridge is not None or len(handlers) == 1:
+                raise
+            logging.warning("Could not list lights on Hue bridge %s while resolving %r: %s", instance, device, exc)
+            unreachable.append((instance, exc))
+            continue
+        for light_id, name in names.items():
+            if device == light_id or device == name:
+                matches.append((instance, handler, light_id, name))
+    return matches, unreachable
+
+
 def _resolve_hue_target(handlers, device, bridge):
     """Resolve ``device`` (and optional ``bridge``) to exactly one light on one bridge.
 
@@ -132,12 +164,22 @@ def _resolve_hue_target(handlers, device, bridge):
     for ids (every bridge has a light ``1``) and common for names (``Kitchen`` on each
     floor). The error names the bridges involved and how to disambiguate.
 
+    One bridge being unreachable does not make every write impossible. If ``bridge`` was
+    given, that bridge is the only one consulted and a connection failure against it is
+    propagated. If it was not, an unreachable bridge means the estate cannot be searched
+    completely, so the result is a ``ToolParamError`` naming the missing bridge and pointing
+    at ``bridge`` - a refusal the caller can act on, rather than a transport error inviting
+    an identical retry. Acting on a lone match found elsewhere is deliberately *not* the
+    behaviour: the silent bridge may carry the same name.
+
     :param handlers: ``[(instance, handler), ...]`` from _resolve_writable_handlers
     :param device: light id or exact name, from the tool call
     :param bridge: bridge host to restrict to, or None to search every bridge
     :return: ``(instance, handler, light_id, name)`` for the single match
-    :raises ToolParamError: unknown bridge, unknown device, or an ambiguous device
-    :raises SourceConnectionError: a bridge needed for the decision is unreachable
+    :raises ToolParamError: unknown bridge, unknown device, an ambiguous device, or a bridge
+        that could not be reached while arbitrating across several
+    :raises SourceConnectionError: the bridge named in ``bridge`` is unreachable, or the only
+        configured bridge is
     """
     if not isinstance(device, str) or not device.strip():
         raise ToolParamError(f"device must be a non-empty light id or name (got {device!r})")
@@ -148,12 +190,26 @@ def _resolve_hue_target(handlers, device, bridge):
             raise ToolParamError(f"unknown bridge {bridge!r}; configured bridges: {', '.join(known)}")
         handlers = [(instance, handler) for instance, handler in handlers if instance == bridge]
 
-    matches = []
-    for instance, handler in handlers:
-        names = handler._names_by_id(handler._fetch_lights())
-        for light_id, name in names.items():
-            if device == light_id or device == name:
-                matches.append((instance, handler, light_id, name))
+    matches, unreachable = _hue_matches_across_bridges(handlers, device, bridge)
+
+    if unreachable:
+        # Refuse, but *actionably*. Acting on the single match found would risk actuating the
+        # wrong light: the bridge that did not answer may carry that name too, and this
+        # function exists precisely because that mistake is not recoverable. Equally, one
+        # bridge being down must not make every write impossible - so say which bridge went
+        # missing and that 'bridge' proceeds without consulting it. Raised as a
+        # ToolParamError, not the underlying SourceConnectionError: the caller has something
+        # different to do, whereas a transient-transport error invites an identical retry.
+        missing = ", ".join(f"{instance} ({exc})" for instance, exc in unreachable)
+        found = (
+            ", ".join(f"{name!r} (id {light_id}) on bridge {instance}" for instance, _, light_id, name in matches)
+            or "none"
+        )
+        raise ToolParamError(
+            f"cannot determine which light {device!r} refers to: bridge {missing} could not be reached, so "
+            f"the estate could not be searched completely. Matches on the bridges that answered: {found}. "
+            f"Pass 'bridge' to act on one bridge without consulting the others"
+        )
 
     if len(matches) == 1:
         return matches[0]
