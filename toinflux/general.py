@@ -165,23 +165,51 @@ def get_class(source, settings_file=None, instance=None):
 MQTT_SOURCES = frozenset({"nuki"})
 
 
-# Sources that can have more than one target behind a single settings block, and so run
-# one worker per target rather than one per source. Only Hue today - one worker per
-# bridge, so that one unreachable bridge cannot stop the others. Add a source here, and
-# give it a branch in _source_instances(), when it gains the same shape.
-INSTANCED_SOURCES = frozenset({"hue"})
+def _hue_bridge_hosts(settings):
+    """
+    Return the host of every usable configured Hue bridge - one per worker.
+
+    Imported inside the function, like ``get_class()`` does: ``philipshue`` imports
+    ``influx``, which imports this module, so a module-level import would be circular.
+
+    Errors and warnings from enumeration are deliberately dropped: ``validate_settings()``
+    has already reported them (fatally, for the errors), and this function's only job is to
+    say what will actually run. A bridge whose token is missing yields no host, so it is
+    simply not collected - which is exactly the warning validation already emitted.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: bridge hosts, empty when none is usable
+    :rtype: list
+    """
+    from toinflux.philipshue import enumerate_bridges
+
+    bridges, _, _ = enumerate_bridges(settings.get("hue"))
+    return [bridge.host for bridge in bridges]
+
+
+# Sources that can have more than one target behind a single settings block, and so run one
+# worker per target rather than one per source - mapped to the function that enumerates
+# those targets. Only Hue today: one worker per bridge, so that one unreachable bridge
+# cannot stop the others.
+#
+# The mapping *is* the registration: membership and expansion behaviour are the same
+# structure, so a source cannot be listed as instanced while still being expanded as a
+# single unit. Add a source by adding its enumerator here, and nothing else can be
+# forgotten.
+_INSTANCE_ENUMERATORS = {"hue": _hue_bridge_hosts}
+
+# Derived, never hand-maintained - see above.
+INSTANCED_SOURCES = frozenset(_INSTANCE_ENUMERATORS)
 
 
 def _source_instances(source, settings):
     """
     Return the instance values a single source expands to.
 
-    ``[None]`` for an ordinary single-target source. For an instanced source, one entry
-    per configured target - and an **empty** list when it has none, which means the source
-    is simply not collected rather than collected with a broken target.
-
-    Imported inside the function, like ``get_class()`` does: ``philipshue`` imports
-    ``influx``, which imports this module, so a module-level import would be circular.
+    ``[None]`` for an ordinary single-target source. For an instanced source, one entry per
+    configured target - and an **empty** list when it has none, which means the source is
+    simply not collected rather than collected against a broken target.
 
     :param source: source name, already lowercased
     :type source: str
@@ -190,16 +218,8 @@ def _source_instances(source, settings):
     :return: instance values for this source
     :rtype: list
     """
-    if source != "hue":
-        return [None]
-    from toinflux.philipshue import enumerate_bridges
-
-    # Errors and warnings are deliberately dropped here: validate_settings() has already
-    # reported them (fatally for the errors), and this function's job is only to say what
-    # will actually run. A bridge whose token is missing yields no unit, so it is not
-    # collected - which is the warning validation already emitted.
-    bridges, _, _ = enumerate_bridges(settings.get(source))
-    return [bridge.host for bridge in bridges]
+    enumerator = _INSTANCE_ENUMERATORS.get(source)
+    return enumerator(settings) if enumerator is not None else [None]
 
 
 def expand_sources(sources, settings):
