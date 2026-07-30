@@ -431,7 +431,23 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
         systemctl start rsyslog >/dev/null 2>&1 || true
         sleep 2
     fi
-    if pgrep -x rsyslogd >/dev/null 2>&1 && [ -S /run/systemd/journal/syslog ]; then
+    # Probe journald -> rsyslog forwarding empirically rather than inferring it from config. The
+    # socket can exist while ForwardToSyslog=no leaves it unused, and reading journald.conf only
+    # tells you the setting, not the outcome. systemd-cat puts a line in the journal under a known
+    # tag; if that line reaches syslog then forwarding demonstrably works in this environment, and
+    # any failure of *our* rule after that is ours.
+    journald_forward=no
+    if pgrep -x rsyslogd >/dev/null 2>&1; then
+        probe_tag="stiprobe$$"
+        systemd-cat -t "$probe_tag" echo "forwarding probe" 2>/dev/null || true
+        for _ in $(seq 1 10); do
+            if grep -rqs "$probe_tag" /var/log/syslog /var/log/messages 2>/dev/null; then
+                journald_forward=yes; break
+            fi
+            sleep 1
+        done
+    fi
+    if [ "$journald_forward" = "yes" ]; then
         # Restart so the banner is logged again with rsyslog now listening.
         systemctl restart send-to-influx >/dev/null 2>&1 || true
         log_ok=0
@@ -449,13 +465,19 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
             ls -l /var/log/send-to-influx.log 2>&1 | sed 's/^/  logfile: /'
             grep -c . /var/log/send-to-influx.log 2>/dev/null | sed 's/^/  logfile lines: /'
             journalctl -u send-to-influx --no-pager -n 3 2>&1 | sed 's/^/  journal: /'
-            fail "/var/log/send-to-influx.log captured no startup line despite rsyslog and journald forwarding both being active"
+            # The discriminator: forwarding is proven working by the probe above, so if the
+            # service's own lines are not in syslog either, the programname tag is wrong; if they
+            # are there but not in our file, the rule or its conffile is.
+            journalctl -u send-to-influx -o json --no-pager -n 1 2>/dev/null \
+                | grep -o '"SYSLOG_IDENTIFIER":"[^"]*"' | sed 's/^/  identifier: /'
+            grep -c "send-to-influx" /var/log/syslog 2>/dev/null | sed 's/^/  lines in syslog: /'
+            fail "/var/log/send-to-influx.log captured no startup line although journald->syslog forwarding was proven working"
         fi
     else
         echo "note: NOT VERIFIED - the rsyslog logfile route could not be exercised here" \
              "(rsyslogd=$(pgrep -x rsyslogd >/dev/null 2>&1 && echo running || echo 'not running')," \
-             "/run/systemd/journal/syslog=$([ -S /run/systemd/journal/syslog ] && echo present || echo absent))." \
-             "journald forwards to syslog only while that socket is active. Unaffected by the stdout/stderr split."
+             "journald ForwardToSyslog=$journald_forward). Whether stderr reaches the programname" \
+             "rule is not in question - that is verified directly, and is stream-agnostic."
     fi
     pid_before=$(systemctl show -p MainPID --value send-to-influx)
     upgrade_and_assert_silent "upgrade with running service"
