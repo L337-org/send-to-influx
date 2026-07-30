@@ -130,6 +130,11 @@ def _hue_matches_across_bridges(handlers, device, bridge):
     consulted to arbitrate. If the caller named a bridge, or it is the only one configured,
     the failure is against the target itself and is propagated as the transport error it is.
 
+    Searches ``mcp_list_writable_devices()`` - the source's public write allowlist - rather
+    than the bridge response directly, so what ``hue_set_light`` will act on is by
+    construction what ``hue_list_devices`` advertises, instead of two paths that happen to
+    derive the same answer.
+
     :param handlers: ``[(instance, handler), ...]`` to search
     :param device: light id or exact name to match
     :param bridge: the bridge the caller named, or None
@@ -139,7 +144,7 @@ def _hue_matches_across_bridges(handlers, device, bridge):
     matches, unreachable = [], []
     for instance, handler in handlers:
         try:
-            names = handler._names_by_id(handler._fetch_lights())
+            names = {entry["id"]: entry["name"] for entry in handler.mcp_list_writable_devices()}
         except SourceConnectionError as exc:
             if bridge is not None or len(handlers) == 1:
                 raise
