@@ -16,7 +16,7 @@ __license__ = "MIT License"
 import logging
 
 from toinflux.exceptions import ConfigError, ToolParamError
-from toinflux.general import expand_sources, get_class, resolve_default_source
+from toinflux.general import INSTANCED_SOURCES, expand_sources, get_class, resolve_default_source
 
 
 def configured_sources(settings):
@@ -107,6 +107,17 @@ def resolve_handler(source, settings, settings_file, instance=None):
     if source.lower() not in available:
         raise ToolParamError(
             f"unknown source {source!r}; available sources: {', '.join(sorted(available)) or '(none)'}"
+        )
+    if instance is not None and source.lower() not in INSTANCED_SOURCES:
+        # A single-target source ignores its instance entirely - mcp_tag_filters() does not
+        # consult it - so without this the value is accepted, the read runs *unscoped*, and
+        # the caller is left believing it was narrowed. Refusing here rather than in each
+        # tool is what makes it safe by default: this is the one function every read and
+        # write tool constructs through, so a future tool that grows an instance-ish
+        # parameter inherits the check instead of having to remember it.
+        raise ToolParamError(
+            f"source {source!r} has a single target, so it cannot be scoped to {instance!r}. "
+            f"Sources with separate targets: {', '.join(sorted(INSTANCED_SOURCES)) or '(none)'}"
         )
     try:
         handler = get_class(source, settings_file, instance=instance)

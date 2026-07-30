@@ -79,6 +79,31 @@ class TestResolveHandler:
             assert resolve_handler("hue", {"sources": ["hue"]}, None) is handler
         handler.mcp_tag_filters.assert_not_called()
 
+    def test_instance_is_refused_for_a_single_target_source(self):
+        """Accepting it would silently return an unscoped read the caller thinks is narrowed.
+
+        A single-target source never consults its instance - ``mcp_tag_filters()`` does not
+        look at it - so the resolution probe below cannot catch this: there is nothing to
+        resolve and nothing raises. The value was therefore accepted, the read ran across
+        everything, and the answer came back looking scoped.
+
+        Guarded here rather than in each tool because this is the one function every read
+        and write tool constructs through, so a future tool that grows an instance-shaped
+        parameter inherits the refusal instead of having to remember it.
+        """
+        with patch("toinflux.mcp_common.get_class") as gc:
+            with pytest.raises(ToolParamError, match="single target"):
+                resolve_handler("octopus", {"sources": ["octopus"]}, None, instance="bogus")
+        # Refused before construction, so there is no session to leak.
+        gc.assert_not_called()
+
+    def test_instance_is_still_accepted_for_an_instanced_source(self):
+        """The guard must not block the case it exists to protect."""
+        handler = MagicMock()
+        handler.mcp_tag_filters.return_value = {"host": "a.example.com"}
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            assert resolve_handler("hue", {"sources": ["hue"]}, None, instance="a.example.com") is handler
+
     def test_unusable_source_wrapped_as_tool_param_error(self):
         # A ConfigError from the factory becomes a (non-retryable) ToolParamError.
         with patch("toinflux.mcp_common.get_class", side_effect=ConfigError("boom")):
