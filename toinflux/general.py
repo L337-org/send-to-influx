@@ -165,6 +165,74 @@ def get_class(source, settings_file=None, instance=None):
 MQTT_SOURCES = frozenset({"nuki"})
 
 
+# Sources that can have more than one target behind a single settings block, and so run
+# one worker per target rather than one per source. Only Hue today - one worker per
+# bridge, so that one unreachable bridge cannot stop the others. Add a source here, and
+# give it a branch in _source_instances(), when it gains the same shape.
+INSTANCED_SOURCES = frozenset({"hue"})
+
+
+def _source_instances(source, settings):
+    """
+    Return the instance values a single source expands to.
+
+    ``[None]`` for an ordinary single-target source. For an instanced source, one entry
+    per configured target - and an **empty** list when it has none, which means the source
+    is simply not collected rather than collected with a broken target.
+
+    Imported inside the function, like ``get_class()`` does: ``philipshue`` imports
+    ``influx``, which imports this module, so a module-level import would be circular.
+
+    :param source: source name, already lowercased
+    :type source: str
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: instance values for this source
+    :rtype: list
+    """
+    if source != "hue":
+        return [None]
+    from toinflux.philipshue import enumerate_bridges
+
+    # Errors and warnings are deliberately dropped here: validate_settings() has already
+    # reported them (fatally for the errors), and this function's job is only to say what
+    # will actually run. A bridge whose token is missing yields no unit, so it is not
+    # collected - which is the warning validation already emitted.
+    bridges, _, _ = enumerate_bridges(settings.get(source))
+    return [bridge.host for bridge in bridges]
+
+
+def expand_sources(sources, settings):
+    """
+    Expand configured source names into the work units the runtime actually runs.
+
+    A work unit is ``(source, instance)`` - the same shape as
+    ``DataHandler.worker_key`` - and each one becomes exactly one worker. Most sources
+    yield a single ``(name, None)`` unit; Hue yields one per configured bridge, so that a
+    bridge that is unreachable backs off on its own without stopping the others.
+
+    The single source of truth for "what runs", used by the multi-source supervisor, the
+    single-source path and the one-shot CLI modes alike. If any of those enumerated
+    instances for themselves they would eventually disagree with each other and with
+    ``validate_settings()`` - the failure ``resolve_default_source()`` exists to prevent.
+
+    A source that expands to nothing (Hue with no usable bridge) is absent from the
+    result: it is not collected, validation has already warned why, and every other
+    source is unaffected.
+
+    :param sources: configured source names, already lowercased
+    :type sources: list
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: ``[(source, instance), ...]``, one entry per worker
+    :rtype: list
+    """
+    units = []
+    for source in sources:
+        units.extend((source, instance) for instance in _source_instances(source, settings))
+    return units
+
+
 def resolve_default_source(settings):
     """
     Return the source to run when no ``sources:`` list is configured.

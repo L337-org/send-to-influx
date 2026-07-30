@@ -389,6 +389,21 @@ computation costs isn't done twice at startup.
 ### Entry point (`sendtoinflux.py`)
 
 - **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source. Connection failures (`SourceConnectionError`) are retried with exponential backoff (base 5 s, max 300 s); a `ConfigError` is not retried — it exits the process immediately with code 1.
+- **Work units.** Every mode expands the requested source names into `(source, instance)` work units via
+  `expand_sources()` (`toinflux/general.py`) - one unit per worker, the same shape as `DataHandler.worker_key`.
+  Most sources expand to a single `(name, None)`; a source in `INSTANCED_SOURCES` (only `hue`) expands to one
+  unit per *configured bridge*, so each bridge gets its own thread, its own backoff and its own write buffer -
+  an unreachable bridge delays only itself. One function serves `--source`, the supervisor and `--dump` alike,
+  so they cannot disagree about what runs (the `resolve_default_source()` lesson). A source that expands to
+  nothing (Hue with no usable bridge) simply has no worker; if *every* requested source expands to nothing the
+  process logs "Nothing to collect" and exits 1 rather than idling while appearing healthy. The startup INFO
+  line reports `workers=` (labelled per bridge), not `sources=`, because with an instanced source the two
+  differ. `run_workers()` staggers across the *expanded* list, so two bridges are spread apart exactly as two
+  sources are; the supervisor's restart/stall bookkeeping is keyed by unit, and `--dump` emits a JSON object
+  keyed by instance whenever the source is instanced (even with one bridge, so nothing reading the output
+  depends on the operator's bridge count), printing what succeeded and exiting 2 if any bridge failed.
+  `run_one_worker()` keeps the main-thread path when there is exactly one unit, which is what lets a streaming
+  source shut down cleanly on a signal.
 - **Multi-source mode** (no `--source`): reads `sources` list from `settings.yaml`, spawns one daemon thread per source with a configurable startup stagger (`stagger_seconds`, default 10). Dead threads are detected and restarted with the same exponential backoff — unless the source's worker stopped because of a `ConfigError`, in which case it is logged and left stopped (other sources keep running).
 - `--dump`: one-time raw JSON to stdout, then exit (single source only).
 - `--print`: parsed data to stdout instead of InfluxDB.

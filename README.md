@@ -239,7 +239,7 @@ Log output goes to stdout with timestamps and log level, e.g.:
 
 On startup, an INFO line logs the version and which source(s) will run, so restarts are visible in the logs:
 
-    2026-06-29 14:23:00 INFO     Starting send-to-influx v1.0 (sources=hue, zappi, speedtest)
+    2026-06-29 14:23:00 INFO     Starting send-to-influx v1.0 (workers=hue@hue.example.com, zappi, speedtest)
 
 To also write logs to a file, add an optional `logfile` key to `settings.yaml`. The file is rotated automatically
 once it reaches `log_max_bytes` (default 10 MiB), keeping `log_backup_count` old copies (default 3):

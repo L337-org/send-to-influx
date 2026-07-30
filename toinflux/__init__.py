@@ -9,6 +9,8 @@ from .carbonintensity import CarbonIntensity
 from .general import (
     DEFAULT_SOURCE,
     resolve_default_source,
+    expand_sources,
+    INSTANCED_SOURCES,
     load_settings,
     get_class,
     configure_logging,
