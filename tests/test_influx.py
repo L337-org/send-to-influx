@@ -744,6 +744,21 @@ class TestWorkerIdentity:
         assert handler.worker_key == ("hue", "192.168.1.5")
         assert handler.worker_label == "hue@192.168.1.5"
 
+    def test_blank_instance_is_not_treated_as_absent(self, sample_settings):
+        """Only None means "no instance".
+
+        A blank-but-present instance is a misconfiguration. Rendering it as a bare
+        source name would hide that *and* disagree with worker_key, which keeps the
+        value verbatim - so the label has to show it rather than swallow it. (The
+        enumeration slice rejects a blank bridge host at source; this is the
+        belt-and-braces so the two views can never disagree.)
+        """
+        with patch("toinflux.influx.load_settings", return_value=sample_settings):
+            handler = DataHandler(source="hue", instance="")
+        assert handler.worker_key == ("hue", "")
+        assert handler.worker_label == "hue@"
+        assert handler.worker_label != "hue"
+
     def test_source_is_not_redefined_by_an_instance(self, sample_settings):
         """self.source keeps every one of its other meanings - settings-block lookup,
         get_class name, heartbeat tag, MCP measurement fallback - so an instance must

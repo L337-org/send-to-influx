@@ -238,9 +238,15 @@ class DataHandler:
         Display only - never parsed, and never used as a dict key or an emitted tag
         value (see ``worker_key``).
 
+        Tests ``is not None`` rather than truthiness on purpose: only ``None`` means
+        "single-target source, no instance". A blank-but-present instance is a
+        misconfiguration, and rendering it as a bare source name would both hide that
+        and disagree with ``worker_key``, which keeps the value verbatim - so the label
+        shows it (as ``source@``) instead of silently swallowing it.
+
         :rtype: str
         """
-        return f"{self.source}@{self.instance}" if self.instance else f"{self.source}"
+        return self.source if self.instance is None else f"{self.source}@{self.instance}"
 
     def send_data(self, data=None, timestamp=None, use_buffer=True):
         """
