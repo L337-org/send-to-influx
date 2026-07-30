@@ -76,6 +76,29 @@ verbatim, because normalising the tag would change the series identity for anyon
 IPv6 bridge. The single shared `_api_base()` matters more than it looks - the bug existed in *two*
 copies of the same f-string, so a second copy is exactly how one path would silently keep it.
 
+**Bridge slots (in progress, `feature/multi-hue-bridges`).** `enumerate_bridges()` in
+`toinflux/philipshue.py` is the single source of truth for "which Hue bridges are configured", shared by
+`validate_settings()`, the worker spawner and the CLI modes - two separate implementations would
+eventually disagree about what runs, which is the failure `resolve_default_source()` exists to prevent.
+Slot 1 is the unnumbered `host`/`user` pair every install has always had; further bridges are
+`hostN`/`userN`, uncapped. **Slot numbers carry no ordering, need not be contiguous, and nothing ever
+renumbers** - the slot number *is* the binding between a host and its token, so a vacated slot stays
+vacant rather than shifting the ones above it down onto the wrong credentials (which fails silently:
+the surviving bridge authenticates with the departed bridge's token and presents as a bad token, not a
+config error). `bridge_field_names()` is the only place that knows the numbering, so callers never
+build `f"host{n}"` themselves. **The severity split is load-bearing:** self-contradictory config is a
+fatal `ConfigError` (a non-canonical slot field like `host1`/`host02`, a non-string host, two slots
+addressing the same bridge - compared via `_comparable_host()`, which normalises IPv6 spelling and
+hostname case *for comparison only*), while "not usable yet" - no host, or a host with a blank/
+placeholder/unsubstituted-sentinel token - is only a **warning**, because `example_settings.yaml` ships
+`hue` in `sources:` next to the placeholder token, so a fresh install is exactly that state and raising
+would stop *every* collector and break the packaging suite's invariant that the example's placeholders
+pass validation while workers merely retry. A leftover `userN` with no `hostN` is DEBUG only - that is
+the resting state after `--remove`, which blanks the token and leaves clearing the host as a separate
+step. Warnings are opt-in via `validate_settings(..., warn=True)`, used only by `--check-config`:
+`validate_settings()` runs inside `load_settings()`, so unconditional logging would repeat per source at
+startup and again on every failure-triggered handler rebuild.
+
 Because that token sits in the URL path, every Hue error message is passed through `Hue._redact()`
 before it is logged *or* raised - `requests` puts the request URL into its exception messages (both
 "Max retries exceeded with url: /api/&lt;token&gt;" and "503 Server Error ... for url:

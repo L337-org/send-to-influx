@@ -238,8 +238,11 @@ class TestMain:
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
             mock_exit.assert_called_once_with(0)
+            # warn=True: --check-config is the one mode whose job is reporting on the
+            # configuration, so non-fatal findings belong in its output. Everywhere else
+            # validate_settings() runs via load_settings() on every handler construction.
             mock_validate_settings.assert_called_once_with(
-                {"default_source": "hue"}, source=None, settings_path="settings.yaml"
+                {"default_source": "hue"}, source=None, settings_path="settings.yaml", warn=True
             )
             mock_print.assert_called_once_with("Configuration OK")
 

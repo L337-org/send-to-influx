@@ -7,11 +7,245 @@ __version__ = "1.0"
 
 import ipaddress
 import logging
+import re
 import warnings
+from collections import namedtuple
 import urllib3
 import requests
+from toinflux.credentials import PLACEHOLDER_VALUES, SENTINEL_PREFIX
 from toinflux.influx import DataHandler
 from toinflux.exceptions import SourceConnectionError, ToolParamError
+
+# One configured bridge: its slot number, and the host/token as written in settings.
+# ``slot`` is only ever used to name the fields it came from, in messages and in
+# bridge_field_names() - it carries no ordering, and slots need not be contiguous.
+Bridge = namedtuple("Bridge", "slot host user")
+
+# Slot 1 is the unnumbered ``host``/``user`` pair that every install has always had;
+# further bridges are ``host2``/``user2`` … ``hostN``/``userN``. Deliberately no cap.
+# The suffix must be canonical: ``host1`` is rejected rather than silently accepted as
+# a synonym for ``host`` (it would be a second way to spell slot 1), and a leading zero
+# is rejected rather than folded onto its unpadded twin (``host02`` vs ``host2``).
+_SLOT_FIELD_RE = re.compile(r"^host(?P<suffix>\d*)$")
+_CANONICAL_SLOT_SUFFIX_RE = re.compile(r"^[2-9]\d*$")
+
+
+def bridge_field_names(slot):
+    """
+    Return the ``(host_field, user_field)`` settings keys for a slot number.
+
+    Slot 1 is the unnumbered pair, so this is the single place that knows the
+    numbering convention - callers never build ``f"host{n}"`` themselves.
+
+    :param slot: slot number (1 for the original unnumbered pair)
+    :type slot: int
+    :return: (host field name, user field name)
+    :rtype: tuple
+    """
+    suffix = "" if slot == 1 else str(slot)
+    return (f"host{suffix}", f"user{suffix}")
+
+
+def _comparable_host(host):
+    """
+    Normalise a host for *comparison only*, so two spellings of one address are
+    recognised as the same bridge.
+
+    ``2001:db8::1`` and ``2001:0db8:0000:0000:0000:0000:0000:0001`` are the same
+    address written differently, and ``HUE1.local``/``hue1.local`` differ only in case -
+    a raw string comparison catches neither. IP literals are compared as parsed
+    addresses (brackets stripped first), hostnames case-folded.
+
+    Never used for the request URL or the InfluxDB tag: those keep the configured
+    value verbatim (see ``_url_host`` and ``get_data``).
+
+    :param host: host as configured
+    :type host: str
+    :return: a value equal for any two spellings of the same host
+    :rtype: str
+    """
+    text = str(host).strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        # A hostname (or something unparseable) - case is the only equivalence we can
+        # claim without resolving it. A hostname and its own IP are NOT recognised as
+        # the same bridge; that's an accepted limitation, documented in README.
+        return text.casefold()
+
+
+def _usable_token(value):
+    """
+    Whether a configured Hue token is real, as opposed to absent or a stand-in.
+
+    Unusable means: not a string, blank, still the example placeholder, or a
+    systemd-creds sentinel that was never substituted (settings.yaml says the value
+    lives in the credstore but no credential was found). Each of those would otherwise
+    reach the bridge as a doomed authentication attempt, retried with backoff forever,
+    instead of failing fast as the configuration error it is.
+
+    :param value: the configured ``user``/``userN`` value
+    :return: True if it looks like a real token
+    :rtype: bool
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or text.startswith(SENTINEL_PREFIX):
+        return False
+    return text != PLACEHOLDER_VALUES.get("hue-user")
+
+
+def _parse_slot_field(field):
+    """
+    Interpret a settings field name as a bridge slot.
+
+    :param field: a key from the ``hue`` block
+    :return: ``(slot, error)`` - ``(None, None)`` when the field doesn't name a slot at
+        all, ``(None, message)`` when it looks like one but isn't canonical
+    :rtype: tuple
+    """
+    match = _SLOT_FIELD_RE.match(str(field))
+    if not match:
+        return (None, None)
+    suffix = match.group("suffix")
+    if suffix and not _CANONICAL_SLOT_SUFFIX_RE.match(suffix):
+        return (
+            None,
+            f"hue.{field} is not a valid bridge slot - the first bridge is hue.host/hue.user, "
+            f"and further bridges are numbered from 2 with no leading zeros (hue.host2, hue.host3, ...)",
+        )
+    return (int(suffix) if suffix else 1, None)
+
+
+def _bridge_for_slot(hue_settings, slot):
+    """
+    Resolve one slot into a bridge, an error, or a warning.
+
+    At most one of the three is returned; all three are ``None`` for a vacant slot,
+    which is a legitimate resting state rather than a fault.
+
+    :return: ``(bridge, error, warning)``
+    :rtype: tuple
+    """
+    host_field, user_field = bridge_field_names(slot)
+    host = hue_settings.get(host_field)
+    user = hue_settings.get(user_field)
+
+    if host is None or (isinstance(host, str) and not host.strip()):
+        # Vacant. A token left behind in it is cosmetic - see the module docstring note
+        # on the two-step removal procedure.
+        if _usable_token(user):
+            logging.debug(
+                "hue.%s is set but hue.%s is empty - that bridge is not collected; "
+                "clear hue.%s too, or set the host to use the slot again",
+                user_field,
+                host_field,
+                user_field,
+            )
+        return (None, None, None)
+    if not isinstance(host, str):
+        # YAML coerces more than you'd expect: `host: 10.0` is a float, `host: yes` is a
+        # bool. Neither can address a bridge, and both would otherwise be str()-ed into a
+        # doomed URL.
+        return (None, f"hue.{host_field} must be a string (got {host!r})", None)
+    if not _usable_token(user):
+        return (
+            None,
+            None,
+            f"hue.{user_field} is not set for the bridge at hue.{host_field} ({host.strip()}) - "
+            f"that bridge will not be collected. Set it with "
+            f"'send-to-influx-set-credential hue-{user_field}', or clear hue.{host_field} "
+            f"if that bridge is no longer in use",
+        )
+    return (Bridge(slot=slot, host=host.strip(), user=user.strip()), None, None)
+
+
+def _duplicate_host_errors(bridges):
+    """
+    Return an error for every slot addressing a bridge an earlier slot already addresses.
+
+    Compared through ``_comparable_host``, so two spellings of one address are caught.
+    """
+    errors, seen = [], {}
+    for bridge in bridges:
+        first = seen.setdefault(_comparable_host(bridge.host), bridge)
+        if first is bridge:
+            continue
+        first_host_field, _ = bridge_field_names(first.slot)
+        host_field, _ = bridge_field_names(bridge.slot)
+        errors.append(
+            f"hue.{host_field} ({bridge.host}) is the same bridge as hue.{first_host_field} "
+            f"({first.host}) - each slot must address a different bridge, or both workers would "
+            f"collect it and write two series for one device set"
+        )
+    return errors
+
+
+def enumerate_bridges(hue_settings):
+    """
+    Enumerate the bridges configured in a ``hue`` settings block.
+
+    The single source of truth for "which bridges are configured", shared by
+    ``validate_settings()``, the worker spawner and the CLI modes - if validation and
+    the runtime enumerated separately they would eventually disagree, which is exactly
+    the bug ``resolve_default_source()`` exists to prevent.
+
+    Slot 1 is the unnumbered ``host``/``user`` pair; further bridges are ``hostN``/
+    ``userN``. A slot counts as configured when its host is a non-blank string. Slot
+    numbers carry no ordering and need not be contiguous, and nothing ever renumbers -
+    the slot number is the binding between a host and its token, so a vacated slot stays
+    vacant rather than shifting the ones above it down onto the wrong credentials.
+
+    Severity is split deliberately, and the line matters:
+
+    - **Errors** are self-contradictory configuration: a field that isn't a valid slot,
+      a non-string host, two slots addressing the same bridge. None of these can be a
+      not-yet-configured state, so failing fast is safe.
+    - **Warnings** are "this bridge isn't usable yet": no host at all, or a host with a
+      placeholder/blank/unsubstituted token. These *must not* be fatal, because
+      ``example_settings.yaml`` ships ``hue`` in ``sources:`` alongside the placeholder
+      token - so a fresh install (source checkout or packaged) is exactly this state.
+      Raising here would stop **every** collector, taking working sources down with the
+      unconfigured one, and would break the packaging suite's invariant that the
+      example's placeholder values pass validation while workers merely retry.
+
+    A leftover ``userN`` with no ``hostN`` is neither: that is the resting state after
+    ``send-to-influx-set-credential hue-userN --remove``, which blanks the token and
+    leaves clearing the host as a separate step, so treating it as a fault would flag the
+    documented removal procedure mid-way through. Reported at DEBUG only.
+
+    :param hue_settings: the ``hue`` settings block
+    :type hue_settings: dict
+    :return: (bridges found, error strings, warning strings) - bridges are returned even
+        when there are errors, so a caller can report every problem at once rather than
+        one per run
+    :rtype: tuple
+    """
+    if not isinstance(hue_settings, dict):
+        return ([], [f"hue must be a mapping of settings (got {type(hue_settings).__name__})"], [])
+
+    bridges, errors, warnings_out = [], [], []
+    for field in sorted(hue_settings):
+        slot, slot_error = _parse_slot_field(field)
+        if slot_error:
+            errors.append(slot_error)
+        if slot is None:
+            continue
+        bridge, error, warning = _bridge_for_slot(hue_settings, slot)
+        if bridge is not None:
+            bridges.append(bridge)
+        if error:
+            errors.append(error)
+        if warning:
+            warnings_out.append(warning)
+
+    if not bridges and not errors and not warnings_out:
+        warnings_out.append("no Hue bridge is configured (hue.host is empty or absent) - hue collects nothing")
+    errors.extend(_duplicate_host_errors(bridges))
+    return (bridges, errors, warnings_out)
 
 
 def _url_host(host):
