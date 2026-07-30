@@ -109,12 +109,24 @@ def resolve_handler(source, settings, settings_file, instance=None):
             f"unknown source {source!r}; available sources: {', '.join(sorted(available)) or '(none)'}"
         )
     try:
-        return get_class(source, settings_file, instance=instance)
+        handler = get_class(source, settings_file, instance=instance)
     except ConfigError as exc:
-        # Includes an instance that is not configured - Hue.bridge() raises ConfigError
-        # naming the bridges that are, which is a caller mistake rather than a transport
-        # failure, so it surfaces as ToolParamError.
         raise ToolParamError(f"source {source!r} is not usable: {exc}") from exc
+
+    if instance is not None:
+        # Force the instance to resolve now. Construction does not touch it, so an
+        # unconfigured one would otherwise be accepted here and surface much later - as a
+        # raw ConfigError from deep inside schema building, bypassing the ToolParamError
+        # wrapping the MCP layer relies on to distinguish a caller mistake from a transport
+        # failure, and leaking this handler's session because the caller never receives it.
+        # mcp_tag_filters() is the resolution point (Hue looks its bridge up there), so
+        # calling it is what turns "wrong bridge" into an immediate, clean refusal.
+        try:
+            handler.mcp_tag_filters()
+        except ConfigError as exc:
+            close_session(handler.session)
+            raise ToolParamError(f"source {source!r} is not usable: {exc}") from exc
+    return handler
 
 
 def close_session(session):
