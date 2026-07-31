@@ -217,8 +217,13 @@ cp /usr/share/send-to-influx/example_settings.yaml /tmp/ci-settings.yaml
 # as a failure rather than "Configuration OK".
 /opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml >/dev/null \
     && fail "--check-config unexpectedly succeeded on the shipped example (nothing is configured)"
-/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml 2>&1 >/dev/null \
-    | grep -qi "no sources are configured" || fail "expected the no-sources-configured message on the shipped example"
+# Captured rather than piped directly into grep: under this script's `set -o pipefail`, a
+# pipeline reports failure if send-to-influx exits non-zero (which it does here, by
+# design) regardless of whether grep found the message - see the stream_out/stream_err
+# capture pattern used just below for the same reason.
+nothing_configured_err=$(/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml 2>&1 >/dev/null || true)
+echo "$nothing_configured_err" | grep -qi "no sources are configured" \
+    || fail "expected the no-sources-configured message on the shipped example, got: $nothing_configured_err"
 # A copy with one source enabled - the shipped hue: block's interval/db and the shipped
 # influx: block's url/user/password already satisfy validate_settings() on their own
 # (their values being placeholders isn't checked there, only presence), so enabling
