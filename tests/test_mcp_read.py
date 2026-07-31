@@ -1224,10 +1224,38 @@ class TestDataRangeResult:
 
     def test_the_oldest_point_query_orders_ascending(self):
         """The whole mechanism: ORDER BY time ASC is what makes it the *oldest* point."""
-        from toinflux.mcp_read import build_earliest_query, build_latest_query
+        from toinflux.mcp_read import build_edge_time_query, build_latest_query
 
-        earliest = build_earliest_query("hue", {}, {"lamp"})
+        earliest = build_edge_time_query("hue", {}, "ASC")
         assert earliest.endswith("ORDER BY time ASC LIMIT 1")
+        assert build_edge_time_query("hue", {}, "DESC").endswith("ORDER BY time DESC LIMIT 1")
         assert build_latest_query("hue", {}, {"lamp"}).endswith("ORDER BY time DESC LIMIT 1")
-        # Same injection defence on both, since they share one builder.
-        assert '"hue"' in earliest and '"lamp"' in earliest
+        # Same measurement/tag validation and quoting, since all of them share one builder.
+        assert '"hue"' in earliest
+
+    def test_the_edge_time_query_does_not_enumerate_fields(self):
+        """It travels in a GET parameter, and only the `time` column is ever read.
+
+        Measured against a real InfluxDB with a 120-field measurement, enumerating fields
+        produced a 3.4 KB query string; a measurement grows with device count (Nuki prefixes
+        fields per lock), so a wide enough estate would exceed a reverse proxy's request-line
+        limit for a read that has no need of the width. `build_latest_query` still enumerates,
+        because it reads values and must exclude tag columns.
+        """
+        from toinflux.mcp_read import build_edge_time_query, build_latest_query
+
+        wide = {f"Front_Door_{i}_stateValue" for i in range(120)}
+        edge = build_edge_time_query("nuki", {}, "ASC")
+        assert "SELECT * FROM" in edge
+        assert len(edge) < 100
+        assert "Front_Door_0_stateValue" not in edge
+        # The value-reading builder is deliberately unchanged and still enumerates.
+        assert "Front_Door_0_stateValue" in build_latest_query("nuki", {}, wide)
+
+    def test_the_edge_time_query_still_applies_tag_filters(self):
+        """Selecting * must not lose the static tag scoping - the myenergi trio share one
+        measurement and are told apart by a device tag."""
+        from toinflux.mcp_read import build_edge_time_query
+
+        query = build_edge_time_query("myenergi", {"device": "zappi"}, "ASC")
+        assert "\"device\" = 'zappi'" in query

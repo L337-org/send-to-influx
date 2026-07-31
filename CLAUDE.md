@@ -376,9 +376,16 @@ field set. Design points:
   - **Data range vs retention are two answers, not one** (`get_data_range`, `data_range_result`):
     the oldest/newest points actually present, *and* what InfluxDB is configured to keep. Both are
     reported because they differ - a three-year-old install with 30-day retention holds 30 days of
-    data - and neither alone answers "how far back does this go". `build_earliest_query` is
-    `build_latest_query` with `ORDER BY time ASC`; both come from one `_build_single_point_query` so
-    the injection defence cannot drift between them. **Retention is read differently per version, and
+    data - and neither alone answers "how far back does this go". `build_edge_time_query` gives either
+    edge by `ORDER BY time ASC|DESC` and shares `_build_single_point_query` with
+    `build_latest_query`, so the injection defence cannot drift between them. It selects `*` rather
+    than enumerating fields, unlike `build_latest_query`, because only the `time` column is read:
+    the query travels in a GET parameter, and measured against a real InfluxDB a 120-field
+    measurement produced a **3.4 KB** query string that way (46 characters now). A measurement grows
+    with device count - Nuki prefixes fields per lock - so a wide enough estate would exceed a
+    reverse proxy's request-line limit on a read with no need of the width. Tag columns in the
+    returned row are harmless when no value is read from it; `build_latest_query` still enumerates,
+    because it *does* read values and must exclude them. **Retention is read differently per version, and
     this is the load-bearing part**: v1 uses `SHOW RETENTION POLICIES` over the existing `/query`
     path (preferring the `default` policy, since that is where writes with no explicit policy land),
     but v2 uses the `/api/v2/buckets` management API *even though the same InfluxQL succeeds on v2's

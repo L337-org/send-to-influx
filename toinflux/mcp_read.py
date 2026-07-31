@@ -419,7 +419,13 @@ def _build_single_point_query(measurement, tag_filters, fields, order):
     if order not in ("ASC", "DESC"):
         raise ValueError(f"order must be ASC or DESC, got {order!r}")
     _validate_identifier(measurement, "measurement")
-    select = ", ".join(_quote_identifier(_validate_identifier(f, "field")) for f in sorted(fields))
+    if fields is None:
+        # Only for callers that read the timestamp and nothing else - see
+        # build_edge_time_query. Enumerating fields is what keeps tag columns out of a
+        # *value* read, which does not apply when no value is read.
+        select = "*"
+    else:
+        select = ", ".join(_quote_identifier(_validate_identifier(f, "field")) for f in sorted(fields))
     query = f"SELECT {select} FROM {_quote_identifier(measurement)}"
     conditions = []
     for tag_key, tag_value in sorted(tag_filters.items()):
@@ -442,20 +448,28 @@ def build_latest_query(measurement, tag_filters, fields):
     return _build_single_point_query(measurement, tag_filters, fields, "DESC")
 
 
-def build_earliest_query(measurement, tag_filters, fields):
-    """Build an InfluxQL SELECT for the single *oldest* point of a measurement - how far
-    back a source's data actually goes, for the data-range read.
+def build_edge_time_query(measurement, tag_filters, order):
+    """Build an InfluxQL SELECT for the timestamp at one end of a measurement's data.
 
-    ``ORDER BY time ASC`` is what makes this answer "when did collection start, or where
-    has older data aged out": the oldest surviving point is the floor of what any history
-    query can return, whatever the retention policy permits in principle.
+    ``ORDER BY time ASC`` answers "when did collection start, or where has older data aged
+    out" - the oldest surviving point is the floor of what any history query can return,
+    whatever retention permits in principle. ``DESC`` gives the newest.
+
+    Selects ``*`` rather than enumerating fields, unlike :func:`build_latest_query`, because
+    the caller reads only the ``time`` column. Enumerating them here would put every field
+    key in the query string, and that string travels in a GET parameter: measured against a
+    real InfluxDB with a 120-field measurement, the enumerated form was a 3.4 KB query, and a
+    measurement grows with device count (a Nuki install prefixes fields per lock). A wide
+    enough estate would exceed a reverse proxy's request-line limit, failing a read that has
+    no need of the width. Tag columns coming back in the row are harmless when no value is
+    read from it.
 
     :param measurement: the InfluxDB measurement name
     :param tag_filters: static tag key/value filters (may be empty)
-    :param fields: the field keys to select (non-empty)
+    :param order: ``"ASC"`` for the oldest point, ``"DESC"`` for the newest
     :return: the InfluxQL query string
     """
-    return _build_single_point_query(measurement, tag_filters, fields, "ASC")
+    return _build_single_point_query(measurement, tag_filters, None, order)
 
 
 def _influx_read_request(influx_settings, db, query):
@@ -1047,12 +1061,8 @@ def data_range_result(source, settings, settings_file):
             # which is configured independently of whether anything was collected.
             result.update({"earliest": None, "latest": None, "span_seconds": None, "points_present": False})
         else:
-            earliest = _edge_time(
-                handler, schema, build_earliest_query(schema.measurement, schema.tag_filters, schema.allowed_fields)
-            )
-            latest = _edge_time(
-                handler, schema, build_latest_query(schema.measurement, schema.tag_filters, schema.allowed_fields)
-            )
+            earliest = _edge_time(handler, schema, build_edge_time_query(schema.measurement, schema.tag_filters, "ASC"))
+            latest = _edge_time(handler, schema, build_edge_time_query(schema.measurement, schema.tag_filters, "DESC"))
             span = latest - earliest if isinstance(earliest, int) and isinstance(latest, int) else None
             result.update(
                 {
