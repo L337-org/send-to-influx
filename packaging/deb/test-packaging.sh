@@ -568,9 +568,23 @@ if [ "$CREDS_WORK" = 1 ]; then
     # The blank mqtt-password prompt must likewise be satisfied by the stored
     # credential (the shared-block analogue of the hue assertion above).
     echo "$out" | grep -qi "Nuki not fully configured" && { echo "$out"; fail "reconfigure warned despite stored mqtt-password credential"; }
+    # InfluxDB itself was fully configured (and its credential stored) during
+    # the fresh seeded install above, now that a reachable stub answers
+    # --detect-influx-version - so the blank secret prompt on this reconfigure
+    # must fall back to the stored credential too, the same as hue/mqtt just
+    # above, not warn as if nothing had ever been provided.
+    echo "$out" | grep -qi "InfluxDB user/org or password/token not provided" \
+        && { echo "$out"; fail "reconfigure warned despite stored InfluxDB credential"; }
+else
+    # Without systemd-creds, the fresh install's credential storage itself
+    # failed (set_secret records that as CLI_FAILED, which keeps INFLUX_OK
+    # unset regardless of detection succeeding), so InfluxDB was genuinely
+    # never configured - the "not provided" warning is the correct, expected
+    # outcome here, matching the relaxed-credential-assertions contract in
+    # this script's header.
+    echo "$out" | grep -qi "InfluxDB user/org or password/token not provided" \
+        || { echo "$out"; fail "expected the engaged-but-incomplete InfluxDB warning on reconfigure"; }
 fi
-echo "$out" | grep -qi "InfluxDB user/org or password/token not provided" \
-    || { echo "$out"; fail "expected the engaged-but-incomplete InfluxDB warning on reconfigure"; }
 # Reconfigure (unlike an upgrade) deliberately re-asserts debconf's answers.
 grep -q "ci-test-bridge.example.com" "$SETTINGS" || fail "reconfigure did not re-apply hue-host"
 # The MCP block must survive reconfigure with the (blank-on-reconfigure) password
