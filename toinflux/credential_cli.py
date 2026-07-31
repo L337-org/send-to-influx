@@ -574,9 +574,13 @@ def _load_sources_sequence(settings_path):
     sources_node = _find_mapping_value(root, "sources")
     if sources_key is None or sources_node is None:
         raise CredentialCliError(f"{settings_path}: no 'sources:' key found - add it manually first")
-    if isinstance(sources_node, yaml.ScalarNode) and not sources_node.value:
+    if isinstance(sources_node, yaml.ScalarNode) and sources_node.tag == "tag:yaml.org,2002:null":
         # A bare `sources:` with nothing after it (comment-only lines don't count) -
-        # the shipped default.
+        # the shipped default - or an explicit null spelling (`~`, `null`, `Null`,
+        # `NULL`). All of these compose to a ScalarNode whose *raw text* differs
+        # (`.value` is `''`, `'~'`, `'null'`... respectively) but whose resolved
+        # tag is uniformly YAML's null tag - check that rather than `.value`
+        # being empty, or the non-bare spellings are missed entirely.
         return text, sources_key, None
     if not isinstance(sources_node, yaml.SequenceNode):
         raise CredentialCliError(f"{settings_path}: 'sources:' is not a sequence - edit it manually first")
@@ -616,16 +620,17 @@ def _enable_source(name, settings_path=None):
     escaped = _yaml_double_quoted_escape(name)
 
     if sources_node is None:
-        # Empty `sources:` (bare key or `[]`, any internal spacing - `sources:[]` and
+        # Empty `sources:` - a bare key, an explicit null spelling (`~`, `null`,
+        # `Null`, `NULL`), or `[]` with any internal spacing (`sources:[]` and
         # `sources:  []` are just as valid as `sources: []`) - no existing item to
-        # append after. Both shapes fit entirely on the key's own line (see
+        # append after. All of these fit entirely on the key's own line (see
         # _load_sources_sequence), so replacing that one line with the key plus a
         # single block item is safe - but only when there's nothing else trailing on
         # it (e.g. an inline comment), which would otherwise be silently dropped.
         lines = text.splitlines(keepends=True)
         key_line = lines[sources_key.start_mark.line]
         indent = key_line[: len(key_line) - len(key_line.lstrip())]
-        if not re.fullmatch(r"sources:\s*(\[\s*\])?", key_line.strip()):
+        if not re.fullmatch(r"sources:\s*(\[\s*\]|~|null|Null|NULL)?", key_line.strip()):
             raise CredentialCliError(
                 f"{settings_path}: could not safely rewrite the empty 'sources:' line automatically "
                 "(unexpected trailing content, e.g. a comment) - edit it by hand instead"

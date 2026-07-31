@@ -897,6 +897,19 @@ class TestEnableSource:
         assert yaml.safe_load(result_text)["sources"] == ["hue"]
         assert "stagger_seconds: 10" in result_text
 
+    @pytest.mark.parametrize("spelling", ["sources: ~", "sources: null", "sources: Null", "sources: NULL"])
+    def test_creates_first_entry_from_explicit_null_spellings(self, tmp_path, spelling):
+        """`~`/`null`/`Null`/`NULL` all compose to YAML's null tag just like a bare
+        `sources:` key, but with different raw text (`.value` is `'~'`, `'null'`,
+        etc., not `''`) - checking the resolved tag rather than raw-text emptiness
+        is what catches all of them, not just the bare-key spelling."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(f"{spelling}\nstagger_seconds: 10\n")
+        _cmd_enable_source("hue", str(settings_path))
+        result_text = settings_path.read_text()
+        assert yaml.safe_load(result_text)["sources"] == ["hue"]
+        assert "stagger_seconds: 10" in result_text
+
     def test_raises_on_populated_flow_style_sequence(self, tmp_path):
         """`sources: ["hue", "zappi"]` on one line - inserting a new block-style
         `  - "name"` line after it would leave a dangling sequence item with no

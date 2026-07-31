@@ -14,8 +14,12 @@ RestartSec=5
 # Exit code 1 covers every condition that needs manual intervention and never
 # resolves itself by waiting - a fatal ConfigError, or "nothing to collect"
 # (no sources configured, or a configured source with no usable target). None
-# of those benefit from a restart loop, so systemd treats that exit as a clean
-# stop instead of crash-looping every RestartSec. See CLAUDE.md/README.md's
+# of those benefit from a restart loop, so this stops systemd respawning the
+# service every RestartSec - deliberately not paired with SuccessExitStatus=1,
+# so the unit still reports Active: failed (Result: exit-code) rather than a
+# clean inactive/dead: an admin (or a monitoring tool alerting on
+# systemctl is-failed) should still be told the service stopped and needs
+# attention, just without the pointless crash-loop. See CLAUDE.md/README.md's
 # exit-code table.
 RestartPreventExitStatus=1
 

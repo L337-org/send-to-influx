@@ -703,7 +703,7 @@ debconf-show send-to-influx 2>/dev/null | grep -q . && fail "debconf answers sur
 ls /var/log/send-to-influx.log* >/dev/null 2>&1 && fail "log file/backups survived purge"
 pass "purge: config, credentials, drop-in, user, debconf answers, and log files all removed"
 
-# --- Scenario: nothing configured exits cleanly and is not respawned --------
+# --- Scenario: nothing configured stops the service and is not respawned ----
 # A fully-defaulted install (no debconf answers seeded, and the purge above ran
 # postrm's db_purge, so every question is back to its blank template default):
 # sources-to-configure selects nothing, so postinst auto-enables nothing and the
@@ -711,8 +711,12 @@ pass "purge: config, credentials, drop-in, user, debconf answers, and log files 
 # stands. The service must log that plainly and exit rather than start a phantom
 # Hue worker (the pre-fix behaviour this whole story exists to remove) - and, since
 # that exit shares ConfigError's code 1, systemd must not respawn it either
-# (RestartPreventExitStatus=1 in the unit).
-echo "=== scenario: nothing configured exits cleanly and is not respawned ==="
+# (RestartPreventExitStatus=1 in the unit). It must still report Active: failed,
+# not a clean inactive/dead - RestartPreventExitStatus alone doesn't make an exit
+# code "successful" (that's SuccessExitStatus=, deliberately not set here), and an
+# admin/monitoring tool alerting on `systemctl is-failed` should still be told this
+# needs attention.
+echo "=== scenario: nothing configured stops the service and is not respawned ==="
 if [ "$HAVE_SYSTEMD" = 1 ]; then
     dpkg -i "$DEB" >/dev/null 2>&1 || dpkg -i "$DEB"
     grep -qE '^sources:\s*$' "$SETTINGS" || fail "expected a bare 'sources:' on a fully-defaulted install, got: $(grep '^sources:' "$SETTINGS")"
@@ -720,6 +724,8 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
     sleep 8  # past RestartSec (5s) - a bounce would already have happened by now
     systemctl is-active --quiet send-to-influx \
         && fail "service is still active with nothing configured - should have exited"
+    systemctl is-failed --quiet send-to-influx \
+        || fail "service should report as failed (not just inactive) so monitoring notices - got: $(systemctl is-active send-to-influx)"
     restarts_1=$(systemctl show -p NRestarts --value send-to-influx)
     sleep 8
     restarts_2=$(systemctl show -p NRestarts --value send-to-influx)
@@ -727,7 +733,7 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
         || fail "service was respawned ($restarts_1 -> $restarts_2 restarts) - RestartPreventExitStatus=1 did not take effect"
     journalctl -u send-to-influx --no-pager 2>/dev/null | grep -q "No sources are configured" \
         || fail "expected the 'no sources are configured' message in the journal"
-    pass "nothing configured: service logs plainly, exits, and is not respawned by systemd"
+    pass "nothing configured: service logs plainly, stops, reports failed, and is not respawned by systemd"
     dpkg -P send-to-influx >/dev/null 2>&1 || dpkg -P send-to-influx
 else
     echo "note: skipping nothing-configured scenario (systemd not running here)"
