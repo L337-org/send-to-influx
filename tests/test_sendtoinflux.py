@@ -1213,6 +1213,23 @@ class TestMaybeStartMcpServer:
         start.assert_called_once_with(self.ENABLED_SETTINGS, "/etc/send-to-influx/settings.yaml")
         assert result is start.return_value
 
+    def test_main_does_not_start_mcp_server_when_nothing_configured(self):
+        """maybe_start_mcp_server() runs after the nothing-to-collect check, not
+        before - starting it (a bind, a thread, possible state-file writes) for a
+        config with nothing to collect is pure waste on what's meant to be a clean
+        early exit, and configured_sources() would expose nothing over MCP anyway
+        with sources: empty."""
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings", return_value={"mcp": dict(self.ENABLED_SETTINGS["mcp"])}),
+            patch("sendtoinflux.maybe_start_mcp_server") as mock_start,
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(1)),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+        mock_start.assert_not_called()
+
 
 class TestStreamSink:
     """Tests for _StreamSink - the bridge from the streaming transport's callbacks to the

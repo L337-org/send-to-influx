@@ -700,7 +700,6 @@ def main():
         _check_config_and_exit(settings, args)
 
     _configure_logging_or_exit(settings, args)
-    maybe_start_mcp_server(settings, args)
 
     requested = _requested_sources(settings, args)
     units = toinflux.expand_sources(requested, settings)
@@ -715,7 +714,12 @@ def main():
         ", ".join(worker_label(*unit) for unit in units) or "none",
     )
 
+    # After the nothing-to-collect check, not before: with zero sources configured,
+    # configured_sources() would expose nothing over MCP anyway, so starting the
+    # server here would only be a brief bind/log-noise/state-file-write cycle on a
+    # path meant to be a clean early exit.
     _exit_if_nothing_to_collect(units, requested, settings, args)
+    maybe_start_mcp_server(settings, args)
     if args.dump:
         if len(requested) > 1:
             logging.error("The --dump option requires --source when running in multi-source mode.")
