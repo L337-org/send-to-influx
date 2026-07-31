@@ -524,11 +524,20 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
 
 
 def _load_sources_sequence(settings_path):
-    """Read and parse settings_path, returning (text, sources_node) for its
-    top-level `sources:` sequence.
+    """Read and parse settings_path, returning (text, sources_key_node, sources_node)
+    for its top-level `sources:` key and sequence.
 
-    :raises CredentialCliError: if the file can't be read, isn't valid YAML, or
-        `sources:` isn't a plain (non-empty) sequence
+    `sources_node` is None when `sources:` is empty - either a bare key with nothing
+    but comments under it (parses as a null scalar - the shipped default, since a
+    fresh install enables nothing until the admin uncomments what they want) or the
+    less common but equally valid explicit `sources: []`. Neither has an existing
+    item to anchor an append on, so _enable_source() handles that case by rewriting
+    the key's own line into a block sequence instead.
+
+    :raises CredentialCliError: if the file can't be read, isn't valid YAML, `sources:`
+        is missing entirely, or is a populated flow-style sequence (e.g.
+        `sources: [a, b]`) - there's no safe way to turn that into a block sequence by
+        inserting a line after it without producing invalid YAML
     """
     try:
         with open(settings_path, encoding="utf8") as f:
@@ -541,29 +550,29 @@ def _load_sources_sequence(settings_path):
     except yaml.YAMLError as exc:
         raise CredentialCliError(f"{settings_path}: could not parse YAML: {exc}") from exc
 
+    sources_key = next((key_node for key_node, _ in root.value if key_node.value == "sources"), None)
     sources_node = _find_mapping_value(root, "sources")
-    if sources_node is None or not isinstance(sources_node, yaml.SequenceNode):
-        raise CredentialCliError(f"{settings_path}: no 'sources:' sequence found - add it manually first")
+    if sources_key is None or sources_node is None:
+        raise CredentialCliError(f"{settings_path}: no 'sources:' key found - add it manually first")
+    if isinstance(sources_node, yaml.ScalarNode) and not sources_node.value:
+        # A bare `sources:` with nothing after it (comment-only lines don't count) -
+        # the shipped default.
+        return text, sources_key, None
+    if not isinstance(sources_node, yaml.SequenceNode):
+        raise CredentialCliError(f"{settings_path}: 'sources:' is not a sequence - edit it manually first")
     if sources_node.flow_style:
+        if not sources_node.value:
+            # `sources: []` - the other empty shape, less common but handled the same way.
+            return text, sources_key, None
         # e.g. `sources: ["hue", "zappi"]` on one line - inserting a new block-style
-        # `  - "name"` line after it (this function's only insertion strategy) would
-        # leave a dangling sequence item with no key of its own, invalid YAML. The
-        # shipped example_settings.yaml always uses block style; asking the user to
-        # add flow-style entries by hand is a fine trade-off for how rare this is.
+        # `  - "name"` line after it (this function's only insertion strategy for a
+        # populated list) would leave a dangling sequence item with no key of its
+        # own, invalid YAML. Rare enough in practice that asking the user to add
+        # flow-style entries by hand is a fine trade-off.
         raise CredentialCliError(
             f"{settings_path}: 'sources:' uses flow style (e.g. [a, b]) - add the new source manually"
         )
-    if not sources_node.value:
-        # A block-style `sources:` with nothing under it parses as `sources: null`
-        # (a scalar), not an empty sequence - so this only happens for something
-        # like the (unusual) explicit flow-style `sources: []`, and there's no safe
-        # way to turn that into a populated block sequence by just inserting a line
-        # after it without risking invalid YAML. Rare enough in practice (the
-        # shipped example_settings.yaml always ships several sources uncommented)
-        # that asking the user to add the first entry by hand is a fine trade-off.
-        raise CredentialCliError(f"{settings_path}: 'sources:' is empty - add at least one source manually first")
-
-    return text, sources_node
+    return text, sources_key, sources_node
 
 
 def _enable_source(name, settings_path=None):
@@ -583,7 +592,29 @@ def _enable_source(name, settings_path=None):
     """
     if settings_path is None:
         settings_path = DEFAULT_SETTINGS_PATH
-    text, sources_node = _load_sources_sequence(settings_path)
+    text, sources_key, sources_node = _load_sources_sequence(settings_path)
+    escaped = _yaml_double_quoted_escape(name)
+
+    if sources_node is None:
+        # Empty `sources:` (bare key or `[]`) - no existing item to append after.
+        # Both shapes fit entirely on the key's own line (see _load_sources_sequence),
+        # so replacing that one line with the key plus a single block item is safe -
+        # but only when the line is exactly one of those two shapes: anything else
+        # trailing (e.g. an inline comment) would otherwise be silently dropped.
+        lines = text.splitlines(keepends=True)
+        key_line = lines[sources_key.start_mark.line]
+        indent = key_line[: len(key_line) - len(key_line.lstrip())]
+        if key_line.strip() not in ("sources:", "sources: []"):
+            raise CredentialCliError(
+                f"{settings_path}: could not safely rewrite the empty 'sources:' line automatically "
+                "(unexpected trailing content, e.g. a comment) - edit it by hand instead"
+            )
+        lines[sources_key.start_mark.line] = f'{indent}sources:\n{indent}  - "{escaped}"\n'
+        try:
+            _atomic_write(settings_path, "".join(lines))
+        except OSError as exc:
+            raise CredentialCliError(f"could not write {settings_path}: {exc}") from exc
+        return True
 
     existing = [item.value for item in sources_node.value if isinstance(item, yaml.ScalarNode)]
     if name in existing:
@@ -595,7 +626,7 @@ def _enable_source(name, settings_path=None):
     indent = item_line[: len(item_line) - len(item_line.lstrip())]
     insert_at = last_item.end_mark.line + 1
 
-    lines.insert(insert_at, f'{indent}- "{_yaml_double_quoted_escape(name)}"\n')
+    lines.insert(insert_at, f'{indent}- "{escaped}"\n')
 
     try:
         _atomic_write(settings_path, "".join(lines))

@@ -212,8 +212,21 @@ seed_answers_nuki
 dpkg -i "$DEB" >/dev/null 2>&1 || dpkg -i "$DEB"
 /opt/send-to-influx/venv/bin/send-to-influx --version >/dev/null || fail "--version smoke test failed"
 cp /usr/share/send-to-influx/example_settings.yaml /tmp/ci-settings.yaml
+# The shipped example ships nothing enabled (a bare `sources:` key with every entry
+# commented out, so it parses as null) by design, so --check-config must report that
+# as a failure rather than "Configuration OK".
 /opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml >/dev/null \
-    || fail "--check-config smoke test failed on the shipped example settings"
+    && fail "--check-config unexpectedly succeeded on the shipped example (nothing is configured)"
+/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml 2>&1 >/dev/null \
+    | grep -qi "no sources are configured" || fail "expected the no-sources-configured message on the shipped example"
+# A copy with one source enabled - the shipped hue: block's interval/db and the shipped
+# influx: block's url/user/password already satisfy validate_settings() on their own
+# (their values being placeholders isn't checked there, only presence), so enabling
+# "hue" is the only change needed to get a clean "Configuration OK" - used below to
+# prove the verdict lands on stdout.
+cp /tmp/ci-settings.yaml /tmp/ci-good-settings.yaml
+sed -i 's/^sources:$/sources: ["hue"]/' /tmp/ci-good-settings.yaml
+grep -q 'sources: \["hue"\]' /tmp/ci-good-settings.yaml || fail "test setup: failed to enable hue in ci-good-settings.yaml"
 # Which stream carries diagnostics, asserted against the *installed* artefact rather than a
 # checkout. Deliberately not done via the journal: systemd captures stdout and stderr alike, so
 # a line appearing in journalctl proves it was captured, never which fd it came from. Running
@@ -227,9 +240,9 @@ stream_out=$(/opt/send-to-influx/venv/bin/send-to-influx --check-config --settin
 stream_err=$(/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-bad-settings.yaml 2>&1 >/dev/null || true)
 [ -z "$stream_out" ] || fail "diagnostics reached stdout on the installed package: $stream_out"
 echo "$stream_err" | grep -q "Configuration error" || fail "diagnostics did not reach stderr on the installed package"
-/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml 2>/dev/null \
+/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-good-settings.yaml 2>/dev/null \
     | grep -q "Configuration OK" || fail "the --check-config verdict is not on stdout on the installed package"
-rm -f /tmp/ci-bad-settings.yaml
+rm -f /tmp/ci-bad-settings.yaml /tmp/ci-good-settings.yaml
 pass "installed package: diagnostics on stderr, the --check-config verdict on stdout"
 [ -f "$SETTINGS" ] || fail "settings.yaml not created"
 [ -f /usr/share/send-to-influx/example_settings.yaml ] || fail "example not shipped under /usr/share"
@@ -388,12 +401,13 @@ pass "plain upgrade: no prompts, no warnings, settings.yaml untouched"
 # --- Scenario: a running service is restarted on upgrade ---------------------
 if [ "$HAVE_SYSTEMD" = 1 ]; then
     echo "=== scenario: restart-on-upgrade ==="
-    # The example config's placeholder values pass validation (workers fail
-    # against the fake endpoints and retry with backoff), so the service
-    # stays active without any real InfluxDB behind it.
+    # $SETTINGS was seeded (not the shipped example, which is empty) by the "fresh
+    # seeded install" scenario above - hue and nuki are enabled against fake-but-
+    # present endpoints, which pass validation and simply fail/retry with backoff,
+    # so the service stays active without any real InfluxDB or bridge behind it.
     systemctl enable --now send-to-influx >/dev/null 2>&1
     sleep 3
-    systemctl is-active --quiet send-to-influx || fail "service did not stay active on the example config"
+    systemctl is-active --quiet send-to-influx || fail "service did not stay active on the seeded config"
     # The seeded settings.yaml has the MCP server enabled, so - when systemd-creds
     # actually migrated its password - it must be listening on its loopback port
     # under the FULL systemd sandbox: the hardening directives plus
@@ -632,5 +646,35 @@ debconf-show send-to-influx 2>/dev/null | grep -q . && fail "debconf answers sur
 [ ! -e /etc/logrotate.d/send-to-influx ] || fail "logrotate conffile survived purge"
 ls /var/log/send-to-influx.log* >/dev/null 2>&1 && fail "log file/backups survived purge"
 pass "purge: config, credentials, drop-in, user, debconf answers, and log files all removed"
+
+# --- Scenario: nothing configured exits cleanly and is not respawned --------
+# A fully-defaulted install (no debconf answers seeded, and the purge above ran
+# postrm's db_purge, so every question is back to its blank template default):
+# sources-to-configure selects nothing, so postinst auto-enables nothing and the
+# shipped example's bare `sources:` key (every entry commented out, parses as null)
+# stands. The service must log that plainly and exit rather than start a phantom
+# Hue worker (the pre-fix behaviour this whole story exists to remove) - and, since
+# that exit shares ConfigError's code 1, systemd must not respawn it either
+# (RestartPreventExitStatus=1 in the unit).
+echo "=== scenario: nothing configured exits cleanly and is not respawned ==="
+if [ "$HAVE_SYSTEMD" = 1 ]; then
+    dpkg -i "$DEB" >/dev/null 2>&1 || dpkg -i "$DEB"
+    grep -qE '^sources:\s*$' "$SETTINGS" || fail "expected a bare 'sources:' on a fully-defaulted install, got: $(grep '^sources:' "$SETTINGS")"
+    systemctl enable --now send-to-influx >/dev/null 2>&1
+    sleep 8  # past RestartSec (5s) - a bounce would already have happened by now
+    systemctl is-active --quiet send-to-influx \
+        && fail "service is still active with nothing configured - should have exited"
+    restarts_1=$(systemctl show -p NRestarts --value send-to-influx)
+    sleep 8
+    restarts_2=$(systemctl show -p NRestarts --value send-to-influx)
+    [ "$restarts_1" = "$restarts_2" ] \
+        || fail "service was respawned ($restarts_1 -> $restarts_2 restarts) - RestartPreventExitStatus=1 did not take effect"
+    journalctl -u send-to-influx --no-pager 2>/dev/null | grep -q "No sources are configured" \
+        || fail "expected the 'no sources are configured' message in the journal"
+    pass "nothing configured: service logs plainly, exits, and is not respawned by systemd"
+    dpkg -P send-to-influx >/dev/null 2>&1 || dpkg -P send-to-influx
+else
+    echo "note: skipping nothing-configured scenario (systemd not running here)"
+fi
 
 echo "ALL PACKAGING SCENARIOS PASSED"

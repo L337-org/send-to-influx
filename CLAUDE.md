@@ -79,7 +79,7 @@ copies of the same f-string, so a second copy is exactly how one path would sile
 **Bridge slots.** `enumerate_bridges()` in
 `toinflux/philipshue.py` is the single source of truth for "which Hue bridges are configured", shared by
 `validate_settings()`, the worker spawner and the CLI modes - two separate implementations would
-eventually disagree about what runs, which is the failure `resolve_default_source()` exists to prevent.
+eventually disagree about what runs.
 Slot 1 is the unnumbered `host`/`user` pair every install has always had; further bridges are
 `hostN`/`userN`, uncapped. **Slot numbers carry no ordering, need not be contiguous, and nothing ever
 renumbers** - the slot number *is* the binding between a host and its token, so a vacated slot stays
@@ -462,22 +462,29 @@ computation costs isn't done twice at startup.
   Most sources expand to a single `(name, None)`; a source in `INSTANCED_SOURCES` (only `hue`) expands to one
   unit per *configured bridge*, so each bridge gets its own thread, its own backoff and its own write buffer -
   an unreachable bridge delays only itself. One function serves `--source`, the supervisor and `--dump` alike,
-  so they cannot disagree about what runs (the `resolve_default_source()` lesson). A source that expands to
-  nothing (Hue with no usable bridge) simply has no worker; if *every* requested source expands to nothing the
-  process logs "Nothing to collect" and exits 1 rather than idling while appearing healthy. The startup INFO
-  line reports `workers=` (labelled per bridge), not `sources=`, because with an instanced source the two
-  differ. `run_workers()` staggers across the *expanded* list, so two bridges are spread apart exactly as two
-  sources are; the supervisor's restart/stall bookkeeping is keyed by unit, and `--dump` emits a JSON object
-  keyed by instance whenever the source is instanced (even with one bridge, so nothing reading the output
-  depends on the operator's bridge count), printing what succeeded and exiting 2 if any bridge failed.
-  `run_one_worker()` keeps the main-thread path when there is exactly one unit, which is what lets a streaming
-  source shut down cleanly on a signal.
+  so they cannot disagree about what runs. `_requested_sources()` resolves what was actually asked for: `--source`
+  wins, otherwise the `sources:` list, otherwise nothing - there is no `default_source` fallback (removed
+  outright, no deprecation window; nothing suggested anyone relied on it). A source that expands to nothing (Hue
+  with no usable bridge) simply has no worker; `_exit_if_nothing_to_collect()` stops the process when *every* requested
+  source expands to nothing, or nothing was requested at all - two distinct causes, logged distinctly (the
+  journal can tell "nothing configured" from "configured but unusable" apart) - rather than idling while
+  appearing healthy. Both exit with code 1, the same code a fatal `ConfigError` uses: neither self-resolves by
+  waiting, so `packaging/send-to-influx.service` marks that code `RestartPreventExitStatus`, and the packaged
+  service is not respawned for any of the three. The startup INFO line ("Starting send-to-influx vX
+  (workers=...)") is logged *before* this check, so even an immediate exit is preceded by the normal
+  version/intent banner - `workers=none` when nothing was requested - rather than only the critical line. It
+  reports `workers=`, not `sources=`, because with an instanced source the two differ. `run_workers()` staggers
+  across the *expanded* list, so two bridges are spread apart exactly as two sources are; the supervisor's
+  restart/stall bookkeeping is keyed by unit, and `--dump` emits a JSON object keyed by instance whenever the
+  source is instanced (even with one bridge, so nothing reading the output depends on the operator's bridge
+  count), printing what succeeded and exiting 2 if any bridge failed. `run_one_worker()` keeps the main-thread
+  path when there is exactly one unit, which is what lets a streaming source shut down cleanly on a signal.
 - **Multi-source mode** (no `--source`): reads `sources` list from `settings.yaml`, expands it into work units (above) and spawns one daemon thread **per unit** — one per source for most, one per bridge for Hue — with a configurable startup stagger (`stagger_seconds`, default 10) applied across the expanded list. Dead threads are detected and restarted with the same exponential backoff — unless that worker stopped because of a `ConfigError`, in which case it is logged and left stopped (every other worker keeps running, including the other bridges of the same source). The restart, stall and stopped bookkeeping is all keyed by work unit, not by source name, so two workers on one source name stay distinguishable.
 - `--dump`: one-time raw JSON to stdout, then exit (single source only).
 - `--print`: parsed data to stdout instead of InfluxDB.
 - `--settings <path>`: use a settings file at a path other than `settings.yaml` in the project root (e.g. `/etc/send-to-influx/settings.yaml` for a packaged install). Threaded through `toinflux.get_class()`/`load_settings()`.
 - `--version`: print `__version__` and exit; parsed before settings are loaded, so it works without a `settings.yaml` present.
-- `--check-config`: load and validate the settings file (via `load_settings()`), print `Configuration OK`, exit 0. Exits 1 with details if invalid (same validation as a normal run). If `--source` is also given, that source's block is validated too even if it isn't in `sources`/`default_source` (`validate_settings(settings, source=...)`), so checking config for a one-off `--source` can't report a false "OK".
+- `--check-config`: load and validate the settings file (via `load_settings()`) - via `_check_config_and_exit()`, extracted out of `main()` to keep its cyclomatic complexity within the flake8 limit. Prints `Configuration OK` and exits 0 only if validation passes **and** something is actually requested (`_requested_sources()` non-empty); a config that validates cleanly but configures nothing to collect prints the same "no sources are configured" failure `_exit_if_nothing_to_collect()` would stop a real run for, and exits 1 - "OK" must not mean "nothing will happen". Exits 1 with details if invalid (same validation as a normal run). If `--source` is also given, that source's block is validated too even if it isn't in `sources:` (`validate_settings(settings, source=...)`), so checking config for a one-off `--source` can't report a false "OK".
 - `-v`/`--verbose`: force `DEBUG`-level logging, overriding the `loglevel` settings.yaml key.
 - Handles SIGINT and SIGTERM for graceful shutdown.
 - On startup, logs an INFO line with the version and the source(s) that will run, so process (re)starts are visible in the logs.
@@ -572,7 +579,7 @@ computation costs isn't done twice at startup.
 | Code | Meaning |
 |------|---------|
 | 0 | Normal exit |
-| 1 | Configuration error (`ConfigError`: missing/invalid settings, unknown source) |
+| 1 | A condition requiring manual intervention that never resolves itself by waiting: a fatal `ConfigError` (missing/invalid settings, unknown source), or "nothing to collect" (`_exit_if_nothing_to_collect()` - `sources:` empty/absent with no `--source`, or every configured instance of a requested source is unusable, e.g. Hue with no usable bridge). Unified deliberately: `packaging/send-to-influx.service` marks this code `RestartPreventExitStatus`, so the packaged service is not respawned for any of them instead of crash-looping every `RestartSec` under `Restart=on-failure`. |
 | 2 | Connection error (`SourceConnectionError`) in `--dump` mode only - there's no worker loop to retry a one-shot dump with backoff. In continuous mode (single- or multi-source), connection errors are always retried with backoff instead of exiting. |
 
 ### Packaging (`packaging/`)
@@ -815,7 +822,7 @@ from `postinst`, once package files are unpacked and everything's been answered.
   threshold, ever revealed them - which is why this wasn't caught by reconfigure-based testing).
   There's no prompt-spam risk in `high` here, since each question is only asked at all when its
   source was explicitly selected. Tuning fields (`interval`, `timeout`, `fields` lists,
-  `stagger_seconds`/`default_source`) are never prompted for - see the "Template structure" reasoning
+  `stagger_seconds`) are never prompted for - see the "Template structure" reasoning
   in the original plan for why (`fields` particularly can't be validated against a source's real field
   names at install time). The one deliberate exception is `hue-temperature-units`, which gets a
   *computed* default (checks `$LC_ALL`/`$LANG` for a `_US` territory code, defaulting to Celsius
@@ -862,11 +869,18 @@ from `postinst`, once package files are unpacked and everything's been answered.
   password` note below), so that re-run cleanly re-collects them rather than silently reusing something
   stale. Then, per selected source: secrets via `send-to-influx-set-credential <name>`, non-secret fields via
   `--set-field`, both reusing the same CLI rather than a second YAML-patcher in shell. **Auto-enable**:
-  a source is only added to `sources:` (via `--enable-source` - `default_source:` is never touched,
-  since `sendtoinflux.py` only falls back to it when `sources:` is absent entirely, which is never true
-  once `example_settings.yaml` has shipped it non-empty) if *every* required field for it (and the
-  InfluxDB block) actually resolved - not just "was it ticked" - with `--ensure-influx-storage`
-  attempted first (best-effort database/bucket creation, logged-not-raised on failure). A secret
+  a source is only added to `sources:` (via `--enable-source`) if *every* required field for it (and
+  the InfluxDB block) actually resolved - not just "was it ticked" - with `--ensure-influx-storage`
+  attempted first (best-effort database/bucket creation, logged-not-raised on failure). `example_settings.yaml`
+  ships a bare `sources:` key with every entry commented out (nothing enabled by default - see the entry-point
+  section above), which parses as null, not an empty sequence. `_enable_source()`/`_load_sources_sequence()` in
+  `toinflux/credential_cli.py` handle that as their own case - along with the less common but equally valid
+  explicit `sources: []` - since neither has an existing item to anchor a block-style append after: the first
+  `--enable-source` call rewrites that one line into `sources:` plus a single indented item (the commented-out
+  placeholder lines survive untouched below it, same as any other pre-existing comment), rather than refusing
+  (as it still does for a *populated* flow-style list like `sources: ["hue"]`, where there's no safe insertion
+  point without risking invalid YAML). Refuses instead of silently dropping any unexpected trailing content on
+  the `sources:` line itself (e.g. a hand-added inline comment). A secret
   field also counts as resolved when its credential is already stored in systemd-creds (`.cred`
   file present in the credstore) - secret prompts always come back blank on a reconfigure ("blank
   keeps the stored value"), so an already-configured install revisiting the prompts (e.g. to add

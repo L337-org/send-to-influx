@@ -848,21 +848,37 @@ class TestEnableSource:
         result_yaml = yaml.safe_load(settings_path.read_text())
         assert result_yaml["sources"] == ["hue", "octopus"]  # not duplicated
 
-    def test_raises_on_bare_sources_key(self, tmp_path):
+    def test_creates_first_entry_from_bare_sources_key(self, tmp_path):
         """A bare `sources:` with nothing after it parses as `sources: null` (a
-        scalar), not an empty sequence - correctly rejected rather than silently
-        writing something that isn't valid YAML."""
+        scalar), not a sequence - this is the shipped example_settings.yaml default
+        (nothing configured), so --enable-source must be able to turn it into a
+        populated block sequence, or every fresh debconf-seeded install would fail
+        to auto-enable whatever the admin selected."""
         settings_path = tmp_path / "settings.yaml"
         settings_path.write_text("sources:\nstagger_seconds: 10\n")
-        with pytest.raises(CredentialCliError, match="no 'sources:'"):
-            _cmd_enable_source("hue", str(settings_path))
+        _cmd_enable_source("hue", str(settings_path))
+        result_text = settings_path.read_text()
+        assert yaml.safe_load(result_text)["sources"] == ["hue"]
+        assert "stagger_seconds: 10" in result_text
 
-    def test_raises_on_explicit_empty_sequence(self, tmp_path):
-        """`[]` is itself flow-style syntax, so this hits the flow-style rejection
-        (more specific/accurate) rather than a separate "is empty" message."""
+    def test_creates_first_entry_from_explicit_empty_sequence(self, tmp_path):
+        """`sources: []` is the other shape the shipped default can take - same
+        "no anchor to append after" situation as the bare-key case above, just
+        spelled differently, and must be handled the same way."""
         settings_path = tmp_path / "settings.yaml"
-        settings_path.write_text("sources: []\n")
-        with pytest.raises(CredentialCliError, match="flow style"):
+        settings_path.write_text("sources: []\nstagger_seconds: 10\n")
+        _cmd_enable_source("octopus", str(settings_path))
+        result_text = settings_path.read_text()
+        assert yaml.safe_load(result_text)["sources"] == ["octopus"]
+        assert "stagger_seconds: 10" in result_text
+
+    def test_raises_on_empty_sources_with_trailing_comment(self, tmp_path):
+        """An inline comment on the empty `sources:` line would be silently dropped
+        by the line-replace this uses for the bare/`[]` cases - refuse rather than
+        lose it."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("sources: []  # nothing enabled yet\n")
+        with pytest.raises(CredentialCliError, match="edit it by hand"):
             _cmd_enable_source("hue", str(settings_path))
 
     def test_raises_on_populated_flow_style_sequence(self, tmp_path):

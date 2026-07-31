@@ -169,7 +169,6 @@ class TestMain:
             patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
         ):
             mock_load_settings.return_value = {
-                "default_source": "hue",
                 "sources": ["hue", "zappi", "speedtest"],
                 "stagger_seconds": 3,
                 # A real bridge: hue expands to one worker per *configured* bridge, so a
@@ -193,7 +192,6 @@ class TestMain:
             caplog.at_level("INFO"),
         ):
             mock_load_settings.return_value = {
-                "default_source": "hue",
                 "sources": ["hue", "zappi", "speedtest"],
                 "stagger_seconds": 3,
                 # A real bridge: hue expands to one worker per *configured* bridge, so a
@@ -215,18 +213,41 @@ class TestMain:
                 sendtoinflux.main()
             assert any("workers=zappi" in record.message for record in caplog.records)
 
-    def test_main_logs_default_source_on_startup(self, mock_main_deps, caplog):
-        """main logs the default_source when no --source or settings sources list is given."""
+    def test_main_exits_when_nothing_configured(self, caplog):
+        """main with no --source and no (or empty) sources: list logs plainly that
+        nothing is configured and exits 1, rather than falling back to any default -
+        default_source was removed rather than deprecated (see CLAUDE.md)."""
         with (
-            patch("sendtoinflux.time.sleep", side_effect=SystemExit(0)),
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
             patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(1)) as mock_exit,
             caplog.at_level("INFO"),
         ):
+            mock_load_settings.return_value = {}
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
-            assert any(
-                "workers=hue@hue.example.com, from default_source" in record.message for record in caplog.records
-            )
+            mock_exit.assert_called_once_with(1)
+            messages = [record.message for record in caplog.records]
+            # The normal startup banner still appears - even for an exit, so the
+            # journal always shows the version before anything else.
+            assert any("workers=none" in message for message in messages)
+            assert any("No sources are configured" in message for message in messages)
+
+    def test_main_exits_when_sources_list_is_explicitly_empty(self, caplog):
+        """An explicit `sources: []` behaves the same as the key being absent."""
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(1)) as mock_exit,
+            caplog.at_level("INFO"),
+        ):
+            mock_load_settings.return_value = {"sources": []}
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            mock_exit.assert_called_once_with(1)
+            assert any("No sources are configured" in record.message for record in caplog.records)
 
     def test_main_version_flag_prints_version_and_exits_zero(self, capsys):
         """main with --version prints the version string and exits 0, without needing settings."""
@@ -247,7 +268,7 @@ class TestMain:
             patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
             patch("sendtoinflux.sys.exit", side_effect=SystemExit(0)) as mock_exit,
         ):
-            mock_load_settings.return_value = {"default_source": "hue"}
+            mock_load_settings.return_value = {"sources": ["hue"]}
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
             mock_exit.assert_called_once_with(0)
@@ -255,19 +276,20 @@ class TestMain:
             # configuration, so non-fatal findings belong in its output. Everywhere else
             # validate_settings() runs via load_settings() on every handler construction.
             mock_validate_settings.assert_called_once_with(
-                {"default_source": "hue"}, source=None, settings_path="settings.yaml", warn=True
+                {"sources": ["hue"]}, source=None, settings_path="settings.yaml", warn=True
             )
             mock_print.assert_called_once_with("Configuration OK")
 
     def test_main_check_config_validates_explicit_source_argument(self, tmp_path):
-        """--check-config also validates the source named by --source, even if it isn't in sources/default_source.
+        """--check-config also validates the source named by --source, even if it isn't in sources:.
 
         Uses a real settings file and the real validate_settings() (not mocked), since
         that's exactly the code path a fully-mocked test can't catch a gap in.
         """
         settings_path = tmp_path / "settings.yaml"
         settings_path.write_text("""
-default_source: hue
+sources:
+  - "hue"
 influx:
   url: "http://influx.example.com:8086"
   user: "u"
@@ -327,7 +349,7 @@ octopus:
             patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
             patch("sendtoinflux.toinflux.configure_logging") as mock_configure_logging,
         ):
-            mock_load_settings.return_value = {"default_source": "hue", "loglevel": "WARNING"}
+            mock_load_settings.return_value = {"loglevel": "WARNING"}
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
             assert mock_configure_logging.call_args.kwargs["loglevel"] == "WARNING"
@@ -341,7 +363,6 @@ octopus:
             patch("sendtoinflux.toinflux.configure_logging") as mock_configure_logging,
         ):
             mock_load_settings.return_value = {
-                "default_source": "hue",
                 "logfile": "/tmp/send-to-influx-test.log",
                 "log_max_bytes": 123,
                 "log_backup_count": 7,
@@ -375,7 +396,6 @@ octopus:
             patch("sendtoinflux.sys.exit", side_effect=SystemExit(1)) as mock_exit,
         ):
             mock_load_settings.return_value = {
-                "default_source": "hue",
                 "sources": ["hue", "zappi"],
             }
             with pytest.raises(SystemExit):

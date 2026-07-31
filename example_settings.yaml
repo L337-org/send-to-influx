@@ -6,12 +6,15 @@
 # (warning-only) until you opt in - see SECURITY.md.
 enforce_permissions: true
 
-# The sources to be kicked off by the wrapper script
+# The sources to collect. Nothing is enabled by default: send-to-influx logs that
+# plainly and exits rather than silently collecting nothing useful. Uncomment the ones
+# you want - each also needs its own settings section below filled in with real values
+# rather than the placeholders this file ships with.
 sources:
-  - "hue"
-  - "speedtest"
-  - "openmeteo"
-  - "carbonintensity"
+  # - "hue"
+  # - "speedtest"
+  # - "openmeteo"
+  # - "carbonintensity"
   # - "zappi"
   # - "harvi"
   # - "eddi"
@@ -34,9 +37,6 @@ stagger_seconds: 10
 # Optional log level (DEBUG/INFO/WARNING/ERROR/CRITICAL); defaults to INFO.
 # Overridden by the -v/--verbose command line flag.
 # loglevel: "INFO"
-
-# The default source to use if no source is specified on the command line
-default_source: "hue"
 
 # InfluxDB settings
 influx:

@@ -498,20 +498,27 @@ def register_thread_dump_handler():
 
 def _exit_if_nothing_to_collect(units, requested, settings, args):
     """
-    Stop with a clear message when no worker could be started at all.
+    Stop with a clear message when there is nothing to collect.
 
-    Today this is only reachable when every requested source is instanced and none has a
-    usable target - a Hue-only install whose bridges have no tokens. Spinning a supervisor
-    over an empty list would look healthy while collecting nothing, which is the worst of
-    the available outcomes.
+    Two distinct causes land here, logged distinctly so the journal makes clear which one
+    happened: nothing was requested at all (``sources:`` empty/absent and no ``--source`` -
+    a deliberate "nothing configured" state), or something was requested but every instance
+    of it turned out unusable (a Hue-only install whose bridges have no tokens). Spinning a
+    supervisor over an empty list would look healthy while collecting nothing, which is the
+    worst of the available outcomes - and neither cause resolves itself by waiting, so this
+    exits (code 1, the same as a fatal ``ConfigError`` - see the exit-codes table in
+    CLAUDE.md/README.md) rather than retrying. ``packaging/send-to-influx.service`` marks
+    that code ``RestartPreventExitStatus``, so the packaged service is not respawned for
+    either cause.
 
-    Re-runs validation with warnings enabled purely to *explain* the failure: those
+    Re-runs validation with warnings enabled purely to *explain* the second cause: those
     warnings name the slot, the host and what to set, which "nothing to collect" on its own
-    does not. Deliberately only on this path - validating an explicit ``--source`` on every
-    run would reject configurations that work today, because ``--dump`` needs neither
-    ``interval`` nor ``db`` while ``validate_settings()`` requires both. Any error it raises
-    has already been logged by validate_settings itself, so it is swallowed here rather
-    than replacing the message above.
+    does not. There is nothing to validate for the first cause (an empty ``sources:`` list
+    has no source blocks to check). Deliberately only on this path - validating an explicit
+    ``--source`` on every run would reject configurations that work today, because
+    ``--dump`` needs neither ``interval`` nor ``db`` while ``validate_settings()`` requires
+    both. Any error it raises has already been logged by validate_settings itself, so it is
+    swallowed here rather than replacing the message above.
 
     :param units: work units from ``expand_sources()``
     :type units: list
@@ -525,21 +532,27 @@ def _exit_if_nothing_to_collect(units, requested, settings, args):
     """
     if units:
         return
-    logging.critical("Nothing to collect: no worker could be started for %s.", ", ".join(requested) or "any source")
-    try:
-        toinflux.validate_settings(settings, settings_path=args.settings or "settings.yaml", warn=True)
-    except ConfigError:
-        pass
+    if not requested:
+        logging.critical(
+            "No sources are configured - nothing to collect. Enable at least one source in "
+            "the 'sources:' list (see example_settings.yaml)."
+        )
+    else:
+        logging.critical("Nothing to collect: no worker could be started for %s.", ", ".join(requested))
+        try:
+            toinflux.validate_settings(settings, settings_path=args.settings or "settings.yaml", warn=True)
+        except ConfigError:
+            pass
     sys.exit(1)
 
 
 def _requested_sources(settings, args):
     """
-    Return ``(source names, came_from_sources_list)`` for this run.
+    Return the lowercased source names requested for this run.
 
-    ``--source`` wins; otherwise the ``sources:`` list; otherwise the deprecated
-    ``default_source`` fallback. The flag is only used to label the startup line, so an
-    operator can see whether the fallback was taken.
+    ``--source`` wins; otherwise the ``sources:`` list; otherwise nothing is requested -
+    an empty or absent ``sources:`` list is a valid "nothing configured" state, not a
+    fallback trigger (see ``_exit_if_nothing_to_collect()``).
 
     These are *source names*, not work units - ``expand_sources()`` turns them into
     workers, and is the one place that knows a source may have several instances.
@@ -548,15 +561,56 @@ def _requested_sources(settings, args):
     :type settings: dict
     :param args: parsed CLI arguments
     :type args: argparse.Namespace
-    :return: (lowercased source names, whether they came from the sources list)
-    :rtype: tuple
+    :return: lowercased source names requested for this run, empty if none
+    :rtype: list
     """
     if args.source:
-        return ([args.source.lower()], False)
+        return [args.source.lower()]
     configured = settings.get("sources")
-    if isinstance(configured, list) and configured:
-        return ([src.lower() for src in configured if isinstance(src, str)], True)
-    return ([str(toinflux.resolve_default_source(settings)).lower()], False)
+    if isinstance(configured, list):
+        return [src.lower() for src in configured if isinstance(src, str)]
+    return []
+
+
+def _check_config_and_exit(settings, args):
+    """
+    Handle ``--check-config``: validate, report, and exit - 0 if valid and something
+    is configured, 1 otherwise.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :param args: parsed CLI arguments
+    :type args: argparse.Namespace
+    :return: None - always exits the process
+    """
+    # load_settings() already validated the configured sources above; also validate
+    # args.source specifically, since a user checking config for a particular
+    # --source shouldn't get a false "OK" if that source isn't part of sources:.
+    #
+    # warn=True only here: this is the one mode whose whole job is reporting on the
+    # configuration, so non-fatal findings (a Hue bridge with no token, say) belong in
+    # its output. Everywhere else validate_settings() runs via load_settings() on every
+    # DataHandler construction, where the same warning would repeat per source and per
+    # retry.
+    try:
+        toinflux.validate_settings(
+            settings, source=args.source, settings_path=args.settings or "settings.yaml", warn=True
+        )
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    # A config that validates cleanly but configures nothing to collect isn't "OK" -
+    # it's the same "nothing to collect" state _exit_if_nothing_to_collect() stops a
+    # real run for, so --check-config must not report success on it either.
+    if not _requested_sources(settings, args):
+        print(
+            "Configuration error: no sources are configured - nothing would be collected. "
+            "Enable at least one source in the 'sources:' list.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print("Configuration OK")
+    sys.exit(0)
 
 
 def main():
@@ -619,7 +673,7 @@ def main():
         help=(
             "the source of the data to send to InfluxDB (hue, zappi, etc.). "
             "If this parameter is omitted, all sources in the settings file 'sources' list are started. "
-            "If no sources are specified in the settings file, the 'default_source' settings key is used."
+            "If no sources are configured, the process logs that plainly and exits."
         ),
     )
     args = arg_parse.parse_args()
@@ -633,31 +687,23 @@ def main():
         sys.exit(1)
 
     if args.check_config:
-        # load_settings() already validated the configured sources/default_source above;
-        # also validate args.source specifically, since a user checking config for a
-        # particular --source shouldn't get a false "OK" if that source isn't part of
-        # the sources/default_source list load_settings() already checked.
-        #
-        # warn=True only here: this is the one mode whose whole job is reporting on the
-        # configuration, so non-fatal findings (a Hue bridge with no token, say) belong in
-        # its output. Everywhere else validate_settings() runs via load_settings() on every
-        # DataHandler construction, where the same warning would repeat per source and per
-        # retry.
-        try:
-            toinflux.validate_settings(
-                settings, source=args.source, settings_path=args.settings or "settings.yaml", warn=True
-            )
-        except ConfigError as exc:
-            print(f"Configuration error: {exc}", file=sys.stderr)
-            sys.exit(1)
-        print("Configuration OK")
-        sys.exit(0)
+        _check_config_and_exit(settings, args)
 
     _configure_logging_or_exit(settings, args)
     maybe_start_mcp_server(settings, args)
 
-    requested, from_sources_list = _requested_sources(settings, args)
+    requested = _requested_sources(settings, args)
     units = toinflux.expand_sources(requested, settings)
+
+    # "workers=", not "sources=": with an instanced source the two differ, and the useful
+    # thing to see at startup is what will actually run - one entry per bridge, labelled.
+    # Logged before the nothing-to-collect check below, so even that exit is preceded by
+    # the normal version/intent banner rather than only the critical line.
+    logging.info(
+        "Starting send-to-influx v%s (workers=%s)",
+        __version__,
+        ", ".join(worker_label(*unit) for unit in units) or "none",
+    )
 
     _exit_if_nothing_to_collect(units, requested, settings, args)
     if args.dump:
@@ -666,14 +712,6 @@ def main():
             sys.exit(1)
         _dump_source_and_exit(units, args)
 
-    # "workers=", not "sources=": with an instanced source the two differ, and the useful
-    # thing to see at startup is what will actually run - one entry per bridge, labelled.
-    logging.info(
-        "Starting send-to-influx v%s (workers=%s%s)",
-        __version__,
-        ", ".join(worker_label(*unit) for unit in units),
-        "" if args.source or from_sources_list else ", from default_source",
-    )
     if len(units) == 1:
         # One worker runs on this thread, which is what lets a streaming source shut down
         # cleanly on a signal (see run_one_worker).

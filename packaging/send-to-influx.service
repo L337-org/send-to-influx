@@ -11,6 +11,13 @@ WorkingDirectory=/opt/send-to-influx
 ExecStart=/opt/send-to-influx/venv/bin/send-to-influx --settings /etc/send-to-influx/settings.yaml
 Restart=on-failure
 RestartSec=5
+# Exit code 1 covers every condition that needs manual intervention and never
+# resolves itself by waiting - a fatal ConfigError, or "nothing to collect"
+# (no sources configured, or a configured source with no usable target). None
+# of those benefit from a restart loop, so systemd treats that exit as a clean
+# stop instead of crash-looping every RestartSec. See CLAUDE.md/README.md's
+# exit-code table.
+RestartPreventExitStatus=1
 
 NoNewPrivileges=true
 ProtectSystem=strict
