@@ -1579,6 +1579,25 @@ class TestMultiBridgeWorkers:
                 sendtoinflux.main()
         mock_exit.assert_called_once_with(1)
 
+    def test_source_flag_explains_via_warnings_with_no_sources_list(self, caplog):
+        """--source hue with no sources: list configured must still get the slot/host/
+        token explanatory warning when hue expands to no bridges. validate_settings()
+        only reads settings["sources"] by itself - a bare `--source X` run (X never
+        in sources:) needs source=X passed explicitly, or the warning this whole
+        re-validation exists to surface is silently skipped. Confirmed by direct
+        reproduction before fixing: without source=, no warning was logged at all."""
+        settings = self._settings(hue={"db": "d", "interval": 300, "host": "a.example.com", "user": "your_hue_user"})
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings", return_value=settings),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "-s", "hue"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(1)),
+            caplog.at_level("WARNING"),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+        assert any("hue.user is not set" in record.message for record in caplog.records)
+
     def test_heartbeat_identifies_the_bridge(self):
         """Per-bridge health, rather than several workers overwriting one another's
         ok/consecutive_failures on the same series at second precision."""

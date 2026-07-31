@@ -539,8 +539,18 @@ def _exit_if_nothing_to_collect(units, requested, settings, args):
         )
     else:
         logging.critical("Nothing to collect: no worker could be started for %s.", ", ".join(requested))
+        # source= is only a single extra name, not a list - but it only needs to be one:
+        # when requested has more than one entry, every one of them came from the
+        # sources: list (the only other way to reach this branch) and validate_settings()
+        # already reads that itself. It's requested==[X] from --source X that needs it
+        # explicitly - X isn't necessarily in sources: at all, and without this the Hue
+        # slot/host/token warnings this whole re-run exists to surface never fire for a
+        # one-off --source run, silently defeating the "explain via warnings" purpose above.
+        explain_source = requested[0] if len(requested) == 1 else None
         try:
-            toinflux.validate_settings(settings, settings_path=args.settings or "settings.yaml", warn=True)
+            toinflux.validate_settings(
+                settings, source=explain_source, settings_path=args.settings or "settings.yaml", warn=True
+            )
         except ConfigError:
             pass
     sys.exit(1)
