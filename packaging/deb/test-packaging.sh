@@ -277,8 +277,17 @@ if command -v logrotate >/dev/null 2>&1; then
     # neutralised (|| true) rather than left to run bare under this script's
     # `set -e`, or a nonzero-on-success run silently kills the whole suite
     # with no fail() message at all. Check the output text, not the status.
+    # logrotate needs the file to exist to say anything useful about rotating it. Created and
+    # then removed again, because leaving it behind breaks everything downstream: touch runs as
+    # root, so the file is root:root 0644, and rsyslog drops privileges ($PrivDropToUser syslog
+    # on Debian/Ubuntu) so it can never open it. The rule's `stop` still applies, so the
+    # service's lines are then dropped from the shared syslog *as well* - silently, with only
+    # "action 'action-0-builtin:omfile' suspended" in rsyslog's own journal to show for it.
+    # Reproduced exactly that way in an ubuntu:24.04 systemd container while chasing a CI
+    # failure. On a real install nothing creates this file: rsyslog makes it syslog:adm 0640.
     touch /var/log/send-to-influx.log
     logrotate -d -f /etc/logrotate.d/send-to-influx >/tmp/logrotate-check.out 2>&1 || true
+    rm -f /var/log/send-to-influx.log
     # Anchored on the actual "error:" prefix logrotate uses for a genuine
     # parse/permission failure (verified directly), not a bare substring -
     # a success run could otherwise false-positive on unrelated text
