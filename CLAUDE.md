@@ -354,8 +354,9 @@ actually binds `127.0.0.1:8420` under the full hardened sandbox (the real test t
 `LoadCredentialEncrypted` don't break the network-facing server).
 
 **Read tools** (`toinflux/mcp_read.py`, registered onto the server by `register_read_tools()`):
-five read-only tools - `list_sources`, `list_fields`, `query_history`, `get_current_state`, and
-`get_documentation` - exposing each configured collector's live and historical state, domain-aware
+six read-only tools - `list_sources`, `list_fields`, `query_history`, `get_current_state`,
+`get_data_range`, and `get_documentation` - exposing each configured collector's live and historical
+state, domain-aware
 rather than a raw passthrough. The read mechanics live in `mcp_read.py`; the per-source domain
 knowledge lives on the `DataHandler` subclasses as class attributes (`MCP_MEASUREMENT`,
 `MCP_TAG_FILTERS`, `MCP_FIELD_METADATA`, plus `MCP_DESCRIPTION` and `MCP_LIVE_STATE` - see below) so
@@ -372,6 +373,33 @@ field set. Design points:
     (`live`/`last_recorded`). `get_documentation()` synthesises a static, InfluxDB-free Markdown
     reference of every source's `MCP_DESCRIPTION` + field units/codes (not a shipped file - it can't
     drift from what the tools expose); `list_sources` now carries each source's `MCP_DESCRIPTION`.
+  - **Data range vs retention are two answers, not one** (`get_data_range`, `data_range_result`):
+    the oldest/newest points actually present, *and* what InfluxDB is configured to keep. Both are
+    reported because they differ - a three-year-old install with 30-day retention holds 30 days of
+    data - and neither alone answers "how far back does this go". `build_edge_time_query` gives either
+    edge by `ORDER BY time ASC|DESC` and shares `_build_single_point_query` with
+    `build_latest_query`, so the injection defence cannot drift between them. It selects `*` rather
+    than enumerating fields, unlike `build_latest_query`, because only the `time` column is read:
+    the query travels in a GET parameter, and measured against a real InfluxDB a 120-field
+    measurement produced a **3.4 KB** query string that way (46 characters now). A measurement grows
+    with device count - Nuki prefixes fields per lock - so a wide enough estate would exceed a
+    reverse proxy's request-line limit on a read with no need of the width. Tag columns in the
+    returned row are harmless when no value is read from it; `build_latest_query` still enumerates,
+    because it *does* read values and must exclude them. **Retention is read differently per version, and
+    this is the load-bearing part**: v1 uses `SHOW RETENTION POLICIES` over the existing `/query`
+    path (preferring the `default` policy, since that is where writes with no explicit policy land),
+    but v2 uses the `/api/v2/buckets` management API *even though the same InfluxQL succeeds on v2's
+    v1-compatibility endpoint with the same credential*. Verified against InfluxDB 2.7: for a bucket
+    with 720h retention and a 24h shard group, that endpoint answers `duration=0s` and
+    `shardGroupDuration=168h0m0s` - it reports the virtual DBRP mapping's policy, not the bucket's,
+    and `0s` means keep-forever, so it would report unlimited retention for data that expires in 30
+    days. No broader credential is needed for the management API: querying a v2 bucket already
+    requires `read:buckets` on it, confirmed with a token scoped to read exactly one bucket. A
+    retention read that fails degrades to `retention.known: false` with a reason and keeps the range,
+    since the range is the primary answer - and it is *reported* rather than omitted, because an
+    absent retention key reads as "nothing expires", the same misleading direction as the `0s`.
+    Durations are rendered in v1's own `720h0m0s` style on both versions so answers are comparable
+    without knowing which version produced them.
   - **Measurements aren't always the source name**: `openmeteo` writes to `weather`, and the three
     MyEnergi devices share the `myenergi` measurement distinguished by a `device` tag - so their
     classes set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS`, or a query for one device would return all

@@ -646,6 +646,11 @@ Once connected, the client has these read tools:
 - **`query_history`** - a field's history over a time range, either as individual points or
   aggregated (mean/max/min/sum/count/…) into buckets ("how much electricity this month vs last?",
   "when did the light go off?").
+- **`get_data_range`** - how far back a source's data goes, and how long InfluxDB is configured to
+  keep it ("how far back do my records go?", "when did collection start?"). Reports the oldest and
+  newest points actually present *and* the retention duration separately, because they answer
+  different questions: an install collecting for three years with 30-day retention has 30 days of
+  data, not three years.
 - **`get_documentation`** - a one-call reference of what every source reports and what its coded
   values mean.
 
