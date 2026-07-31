@@ -46,6 +46,40 @@ else
     echo "note: systemd-creds encryption unavailable - credential assertions will be relaxed"
 fi
 
+# A local stub answering /ping like a real InfluxDB v1 server - postinst's
+# --detect-influx-version makes a genuine, unauthenticated HTTP probe to route
+# identity/secret to the right fields and to gate auto-enable (INFLUX_OK), and
+# there is no live InfluxDB anywhere in this environment. Without this, InfluxDB
+# never counts as configured on a first-ever install, so hue/nuki below would
+# never actually land in sources: via auto-enable - the scenarios would still
+# pass (nothing here asserts sources: content), but the auto-enable path itself,
+# and everything downstream that depends on something actually being configured
+# (e.g. the service staying active), would silently go untested.
+FAKE_INFLUX_PORT=18086
+python3 - "$FAKE_INFLUX_PORT" >/tmp/fake-influx.log 2>&1 <<'PYEOF' &
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/ping":
+            self.send_response(204)
+            self.send_header("X-Influxdb-Version", "1.8.10")
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+PYEOF
+FAKE_INFLUX_PID=$!
+trap 'kill "$FAKE_INFLUX_PID" 2>/dev/null || true' EXIT
+
 # grep -q exits 1 for "no match" (the outcome asserted here) but 2 for a real
 # error (unreadable path) - a bare `! grep` would silently pass on an error
 # without having checked anything. Assert the exact exit code instead.
@@ -87,6 +121,9 @@ seed_answers_nuki() {
     seed_answers
     debconf-set-selections <<EOF
 send-to-influx send-to-influx/sources-to-configure multiselect hue, nuki
+send-to-influx send-to-influx/influx-url string http://127.0.0.1:${FAKE_INFLUX_PORT}
+send-to-influx send-to-influx/influx-identity string ci-influx-user
+send-to-influx send-to-influx/influx-secret password ci-influx-password
 send-to-influx send-to-influx/mqtt-broker-host string ci-mqtt-broker.example.com
 send-to-influx send-to-influx/mqtt-username string ci-mqtt-reader
 send-to-influx send-to-influx/mqtt-password password ${MQTT_TEST_SECRET}
