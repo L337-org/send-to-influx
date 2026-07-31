@@ -560,6 +560,26 @@ _DURATION_UNIT_SECONDS = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
 _DURATION_PART_RE = re.compile(r"(\d+)([wdhms])")
 
 
+def _cell(row, index, name):
+    """Return a named column's value from an InfluxDB result row, or None.
+
+    InfluxDB returns ``columns`` and ``values`` separately, and nothing guarantees every row
+    is as long as the column list - a short row would make a bare ``row[index[name]]`` raise
+    IndexError deep inside a read, instead of the "could not read that" the callers are
+    written to expect. One reader for every row access in this module so the guard cannot be
+    present at some sites and missing at others.
+
+    :param row: one row from a result series
+    :param index: column name -> position mapping
+    :param name: the column wanted
+    :return: the value, or None when the column is absent or the row is too short
+    """
+    position = index.get(name)
+    if position is None or position >= len(row):
+        return None
+    return row[position]
+
+
 def _influx_duration_seconds(duration):
     """Convert an InfluxDB duration string to whole seconds, or None if unparseable.
 
@@ -643,21 +663,21 @@ def _v1_retention(session, influx_settings, db):
     if not values:
         raise SourceConnectionError(f"InfluxDB reported no retention policy for database {db!r}")
     index = {col: i for i, col in enumerate(columns)}
-    rows = [row for row in values if index.get("default") is not None and row[index["default"]]]
+    rows = [row for row in values if _cell(row, index, "default")]
     row = (rows or values)[0]
-
-    def cell(name):
-        position = index.get(name)
-        return row[position] if position is not None and position < len(row) else None
-
-    duration = cell("duration")
+    duration_seconds = _influx_duration_seconds(_cell(row, index, "duration"))
+    shard_seconds = _influx_duration_seconds(_cell(row, index, "shardGroupDuration"))
     return {
         "known": True,
-        "policy": cell("name"),
-        "duration": duration,
-        "duration_seconds": _influx_duration_seconds(duration),
-        "shard_group_duration": cell("shardGroupDuration"),
-        "shard_group_duration_seconds": _influx_duration_seconds(cell("shardGroupDuration")),
+        "policy": _cell(row, index, "name"),
+        # Rendered from the parsed seconds rather than passed through raw, so v1 and v2 cannot
+        # disagree about how the same retention reads. v1 reports keep-forever as the literal
+        # "0s" - easy to misread as "nothing is kept" - and a database created without an
+        # explicit duration is exactly that case, so it is the common one, not a corner.
+        "duration": _seconds_as_duration(duration_seconds) if duration_seconds is not None else None,
+        "duration_seconds": duration_seconds,
+        "shard_group_duration": _seconds_as_duration(shard_seconds) if shard_seconds is not None else None,
+        "shard_group_duration_seconds": shard_seconds,
         "read_from": "v1 SHOW RETENTION POLICIES",
     }
 
@@ -883,8 +903,8 @@ def _latest_recorded(handler):
     index = {col: i for i, col in enumerate(columns)}
     # Skip a field that came back NULL (a field written in some points but not the
     # latest one) rather than reporting a meaningless None as its current value.
-    data = {name: row[index[name]] for name in sorted(fields) if name in index and row[index[name]] is not None}
-    as_of = row[index["time"]] if "time" in index else None
+    data = {name: _cell(row, index, name) for name in sorted(fields) if _cell(row, index, name) is not None}
+    as_of = _cell(row, index, "time")
     return data, as_of
 
 
@@ -984,8 +1004,7 @@ def _edge_time(handler, schema, order_query):
     if not values:
         return None
     index = {col: i for i, col in enumerate(columns)}
-    position = index.get("time")
-    return values[0][position] if position is not None else None
+    return _cell(values[0], index, "time")
 
 
 def data_range_result(source, settings, settings_file):

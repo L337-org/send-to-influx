@@ -1143,6 +1143,10 @@ class TestDataRangeResult:
         assert result["earliest"] is None and result["latest"] is None and result["span_seconds"] is None
         assert result["retention"]["known"] is True
         assert result["retention"]["duration_seconds"] == 0
+        # v1 reports keep-forever as the literal "0s"; it must read the same as v2's, or the
+        # answer means different things depending on which InfluxDB is behind it. Asserting
+        # only duration_seconds here is what let that inconsistency through review once.
+        assert result["retention"]["duration"] == "infinite"
 
     def test_range_failure_is_not_swallowed(self):
         """The range is the tool's primary answer, so unlike retention its failure is a
@@ -1154,6 +1158,69 @@ class TestDataRangeResult:
         with patch("toinflux.mcp_read.resolve_handler", return_value=handler):
             with pytest.raises(SourceConnectionError):
                 data_range_result("speedtest", self.V1, None)
+
+    def test_v1_and_v2_render_the_same_retention_identically(self):
+        """The cross-version guarantee, asserted directly rather than inferred.
+
+        A caller must not have to know which InfluxDB version answered to interpret
+        `duration`. v1 reports strings, v2 reports seconds; both go through one renderer, so
+        the same underlying retention has to come back byte-identical either way.
+        """
+        v1_retention = {
+            "results": [
+                {
+                    "series": [
+                        {
+                            "columns": ["name", "duration", "shardGroupDuration", "replicaN", "default"],
+                            "values": [["autogen", "720h0m0s", "24h0m0s", 1, True]],
+                        }
+                    ]
+                }
+            ]
+        }
+        v2_buckets = {
+            "buckets": [
+                {
+                    "name": "speedtest_bucket",
+                    "retentionRules": [{"everySeconds": 2592000, "shardGroupDurationSeconds": 86400}],
+                }
+            ]
+        }
+        v1, _ = self._run(self.V1, [self._fields("ping"), self._point(1), self._point(2), v1_retention])
+        v2, _ = self._run(self.V2, [self._fields("ping"), self._point(1), self._point(2), v2_buckets])
+        for key in ("duration", "duration_seconds", "shard_group_duration", "shard_group_duration_seconds"):
+            assert v1["retention"][key] == v2["retention"][key], key
+
+    def test_a_short_result_row_reads_as_no_timestamp_not_a_crash(self):
+        """Nothing guarantees a row is as long as its column list.
+
+        A bare positional index would raise IndexError from inside the read rather than the
+        "could not read that" the caller is written for. Applies to every row access in the
+        module, not just this one, which is why they share one reader.
+        """
+        from toinflux.mcp_read import _cell, data_range_result
+
+        assert _cell([], {"time": 0}, "time") is None
+        assert _cell([1], {"time": 5}, "time") is None
+        assert _cell([7], {"time": 0}, "time") == 7
+
+        truncated = {"results": [{"series": [{"columns": ["time", "ping"], "values": [[]]}]}]}
+        handler = self._handler(self.V1)
+        responses = [self._fields("ping"), truncated, truncated, {"results": [{"series": []}]}]
+        calls = []
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            resp = MagicMock()
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = responses[min(len(calls) - 1, len(responses) - 1)]
+            return resp
+
+        handler.session.get.side_effect = fake_get
+        with patch("toinflux.mcp_read.resolve_handler", return_value=handler):
+            result = data_range_result("speedtest", self.V1, None)
+        assert result["earliest"] is None and result["latest"] is None
+        assert result["span_seconds"] is None
 
     def test_the_oldest_point_query_orders_ascending(self):
         """The whole mechanism: ORDER BY time ASC is what makes it the *oldest* point."""
