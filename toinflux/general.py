@@ -695,7 +695,16 @@ def validate_settings(settings, source=None, settings_path="settings.yaml", warn
     invalid = [src for src in sources if not isinstance(src, str)]
     if invalid:
         errors.append("sources entries must be strings (got: " + ", ".join(repr(s) for s in invalid) + ")")
-    sources = [src.lower() for src in sources if isinstance(src, str)]
+    # A blank/whitespace-only entry (e.g. sources: [""]) is a string, so it survives
+    # the check above, but _validate_source_block() returns early for a falsy source
+    # name - meaning it would otherwise validate cleanly and then expand into a real
+    # work unit at runtime with an empty name (a confusing "workers=" startup log and
+    # an eventual "unknown source" failure from get_class(), rather than a clear
+    # config-time error). Reject it the same way as a non-string entry.
+    blank = [src for src in sources if isinstance(src, str) and not src.strip()]
+    if blank:
+        errors.append(f"sources entries must not be blank (got {len(blank)} blank entry/entries)")
+    sources = [src.lower() for src in sources if isinstance(src, str) and src.strip()]
     if source:
         source = source.lower()
     duplicates = sorted({str(src) for src in sources if sources.count(src) > 1})

@@ -380,6 +380,16 @@ class TestValidateSettings:
         with pytest.raises(ConfigError, match="must be strings"):
             validate_settings(sample_settings)
 
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_entry_in_sources_is_rejected(self, sample_settings, blank):
+        """A blank string is a valid non-None, non-empty-list entry that would
+        otherwise pass _validate_source_block()'s early return for a falsy source
+        name, then expand into a real work unit at runtime with an empty name -
+        must be caught here instead, not silently accepted."""
+        sample_settings["sources"] = ["hue", blank]
+        with pytest.raises(ConfigError, match="must not be blank"):
+            validate_settings(sample_settings)
+
 
 class TestConfigWarningCaveat:
     """A migrated credential is invisible outside the service, and the warning says so."""
