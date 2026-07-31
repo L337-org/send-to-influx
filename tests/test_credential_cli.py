@@ -881,6 +881,22 @@ class TestEnableSource:
         with pytest.raises(CredentialCliError, match="edit it by hand"):
             _cmd_enable_source("hue", str(settings_path))
 
+    @pytest.mark.parametrize("spelling", ["sources:  []", "sources: [ ]"])
+    def test_creates_first_entry_from_unusual_empty_sequence_spacing(self, tmp_path, spelling):
+        """`sources:  []`/`sources: [ ]`/etc. are just as valid and just as safe to
+        rewrite as the canonical `sources: []` - the empty-line check must not
+        require an exact spelling, only that nothing else trails the line.
+        (`sources:[]` with no space at all is excluded: verified it isn't reliably
+        valid YAML in the first place once a following key is present - pyyaml
+        raises "mapping values are not allowed here" - so there's nothing to fix
+        for that spelling; it already fails at the parse step with a clear error.)"""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(f"{spelling}\nstagger_seconds: 10\n")
+        _cmd_enable_source("hue", str(settings_path))
+        result_text = settings_path.read_text()
+        assert yaml.safe_load(result_text)["sources"] == ["hue"]
+        assert "stagger_seconds: 10" in result_text
+
     def test_raises_on_populated_flow_style_sequence(self, tmp_path):
         """`sources: ["hue", "zappi"]` on one line - inserting a new block-style
         `  - "name"` line after it would leave a dangling sequence item with no
@@ -914,6 +930,24 @@ class TestEnableSource:
         settings_path = tmp_path / "settings.yaml"
         settings_path.write_text("stagger_seconds: 10\n")
         with pytest.raises(CredentialCliError, match="no 'sources:'"):
+            _cmd_enable_source("hue", str(settings_path))
+
+    def test_raises_cleanly_on_empty_file(self, tmp_path):
+        """An empty file composes to None (yaml.compose has nothing to parse), not a
+        MappingNode - a clean CredentialCliError, not a raw AttributeError from
+        iterating None.value."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("")
+        with pytest.raises(CredentialCliError, match="top-level mapping"):
+            _cmd_enable_source("hue", str(settings_path))
+
+    def test_raises_cleanly_on_non_mapping_top_level_document(self, tmp_path):
+        """A settings.yaml that's just a bare sequence at the top level is valid YAML
+        but not a valid settings file - a clean CredentialCliError, not a raw
+        TypeError from unpacking non-tuple sequence items as (key, value) pairs."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("- a\n- b\n")
+        with pytest.raises(CredentialCliError, match="top-level mapping"):
             _cmd_enable_source("hue", str(settings_path))
 
 

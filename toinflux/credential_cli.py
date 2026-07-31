@@ -523,21 +523,18 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
         raise CredentialCliError(f"could not write {settings_path}: {exc}") from exc
 
 
-def _load_sources_sequence(settings_path):
-    """Read and parse settings_path, returning (text, sources_key_node, sources_node)
-    for its top-level `sources:` key and sequence.
+def _compose_settings_mapping(settings_path):
+    """Read settings_path and parse it into a yaml.compose() MappingNode.
 
-    `sources_node` is None when `sources:` is empty - either a bare key with nothing
-    but comments under it (parses as a null scalar - the shipped default, since a
-    fresh install enables nothing until the admin uncomments what they want) or the
-    less common but equally valid explicit `sources: []`. Neither has an existing
-    item to anchor an append on, so _enable_source() handles that case by rewriting
-    the key's own line into a block sequence instead.
+    Split out of _load_sources_sequence() so that function stays within the
+    complexity limit, and because the empty-file/non-mapping guard belongs with
+    the read+parse step rather than with sources:-specific logic.
 
-    :raises CredentialCliError: if the file can't be read, isn't valid YAML, `sources:`
-        is missing entirely, or is a populated flow-style sequence (e.g.
-        `sources: [a, b]`) - there's no safe way to turn that into a block sequence by
-        inserting a line after it without producing invalid YAML
+    :raises CredentialCliError: if the file can't be read, isn't valid YAML, or is
+        syntactically valid YAML with no top-level mapping (e.g. an empty file, or
+        a bare sequence/scalar document like "- a\\n- b\\n") - neither is a valid
+        settings.yaml, and without this check the caller's own (key, value)
+        iteration would raise a raw AttributeError/TypeError instead
     """
     try:
         with open(settings_path, encoding="utf8") as f:
@@ -549,6 +546,29 @@ def _load_sources_sequence(settings_path):
         root = yaml.compose(text)
     except yaml.YAMLError as exc:
         raise CredentialCliError(f"{settings_path}: could not parse YAML: {exc}") from exc
+
+    if not isinstance(root, yaml.MappingNode):
+        raise CredentialCliError(f"{settings_path}: does not contain a top-level mapping - edit it manually first")
+    return text, root
+
+
+def _load_sources_sequence(settings_path):
+    """Read and parse settings_path, returning (text, sources_key_node, sources_node)
+    for its top-level `sources:` key and sequence.
+
+    `sources_node` is None when `sources:` is empty - either a bare key with nothing
+    but comments under it (parses as a null scalar - the shipped default, since a
+    fresh install enables nothing until the admin uncomments what they want) or the
+    less common but equally valid explicit `sources: []`. Neither has an existing
+    item to anchor an append on, so _enable_source() handles that case by rewriting
+    the key's own line into a block sequence instead.
+
+    :raises CredentialCliError: see _compose_settings_mapping(), plus if `sources:`
+        is missing entirely, or is a populated flow-style sequence (e.g.
+        `sources: [a, b]`) - there's no safe way to turn that into a block sequence by
+        inserting a line after it without producing invalid YAML
+    """
+    text, root = _compose_settings_mapping(settings_path)
 
     sources_key = next((key_node for key_node, _ in root.value if key_node.value == "sources"), None)
     sources_node = _find_mapping_value(root, "sources")
@@ -596,15 +616,16 @@ def _enable_source(name, settings_path=None):
     escaped = _yaml_double_quoted_escape(name)
 
     if sources_node is None:
-        # Empty `sources:` (bare key or `[]`) - no existing item to append after.
-        # Both shapes fit entirely on the key's own line (see _load_sources_sequence),
-        # so replacing that one line with the key plus a single block item is safe -
-        # but only when the line is exactly one of those two shapes: anything else
-        # trailing (e.g. an inline comment) would otherwise be silently dropped.
+        # Empty `sources:` (bare key or `[]`, any internal spacing - `sources:[]` and
+        # `sources:  []` are just as valid as `sources: []`) - no existing item to
+        # append after. Both shapes fit entirely on the key's own line (see
+        # _load_sources_sequence), so replacing that one line with the key plus a
+        # single block item is safe - but only when there's nothing else trailing on
+        # it (e.g. an inline comment), which would otherwise be silently dropped.
         lines = text.splitlines(keepends=True)
         key_line = lines[sources_key.start_mark.line]
         indent = key_line[: len(key_line) - len(key_line.lstrip())]
-        if key_line.strip() not in ("sources:", "sources: []"):
+        if not re.fullmatch(r"sources:\s*(\[\s*\])?", key_line.strip()):
             raise CredentialCliError(
                 f"{settings_path}: could not safely rewrite the empty 'sources:' line automatically "
                 "(unexpected trailing content, e.g. a comment) - edit it by hand instead"
