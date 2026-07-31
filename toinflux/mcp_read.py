@@ -398,21 +398,26 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     )
 
 
-def build_latest_query(measurement, tag_filters, fields):
-    """Build an InfluxQL SELECT for the single most recent point of a measurement -
-    the current-state read for a non-live source (see MCP_LIVE_STATE).
+def _build_single_point_query(measurement, tag_filters, fields, order):
+    """Build an InfluxQL SELECT for one point at either end of a measurement.
 
-    Selects each field explicitly (not ``*``) so tag columns are excluded, and
-    applies the source's static tag filters. Measurement, field and tag keys are
-    charset-validated and double-quoted, tag values quoted string literals - the
-    same layered defence as build_query. Fields come from discover_fields (the
-    live allowlist), never model input.
+    Shared by :func:`build_latest_query` and :func:`build_earliest_query`, which differ
+    only in the ORDER BY direction - kept as one implementation so the injection defence
+    below cannot drift between the newest-point and oldest-point reads.
+
+    Selects each field explicitly (not ``*``) so tag columns are excluded, and applies the
+    source's static tag filters. Measurement, field and tag keys are charset-validated and
+    double-quoted, tag values quoted string literals - the same layered defence as
+    build_query. Fields come from discover_fields (the live allowlist), never model input.
 
     :param measurement: the InfluxDB measurement name
     :param tag_filters: static tag key/value filters (may be empty)
     :param fields: the field keys to select (non-empty)
+    :param order: ``"DESC"`` for the newest point, ``"ASC"`` for the oldest
     :return: the InfluxQL query string
     """
+    if order not in ("ASC", "DESC"):
+        raise ValueError(f"order must be ASC or DESC, got {order!r}")
     _validate_identifier(measurement, "measurement")
     select = ", ".join(_quote_identifier(_validate_identifier(f, "field")) for f in sorted(fields))
     query = f"SELECT {select} FROM {_quote_identifier(measurement)}"
@@ -422,7 +427,35 @@ def build_latest_query(measurement, tag_filters, fields):
         conditions.append(f"{_quote_identifier(tag_key)} = {_quote_string_literal(tag_value)}")
     if conditions:
         query += f" WHERE {' AND '.join(conditions)}"
-    return query + " ORDER BY time DESC LIMIT 1"
+    return query + f" ORDER BY time {order} LIMIT 1"
+
+
+def build_latest_query(measurement, tag_filters, fields):
+    """Build an InfluxQL SELECT for the single most recent point of a measurement -
+    the current-state read for a non-live source (see MCP_LIVE_STATE).
+
+    :param measurement: the InfluxDB measurement name
+    :param tag_filters: static tag key/value filters (may be empty)
+    :param fields: the field keys to select (non-empty)
+    :return: the InfluxQL query string
+    """
+    return _build_single_point_query(measurement, tag_filters, fields, "DESC")
+
+
+def build_earliest_query(measurement, tag_filters, fields):
+    """Build an InfluxQL SELECT for the single *oldest* point of a measurement - how far
+    back a source's data actually goes, for the data-range read.
+
+    ``ORDER BY time ASC`` is what makes this answer "when did collection start, or where
+    has older data aged out": the oldest surviving point is the floor of what any history
+    query can return, whatever the retention policy permits in principle.
+
+    :param measurement: the InfluxDB measurement name
+    :param tag_filters: static tag key/value filters (may be empty)
+    :param fields: the field keys to select (non-empty)
+    :return: the InfluxQL query string
+    """
+    return _build_single_point_query(measurement, tag_filters, fields, "ASC")
 
 
 def _influx_read_request(influx_settings, db, query):
@@ -521,6 +554,173 @@ def run_query(session, influx_settings, db, query):
         for series in result.get("series", []):
             return series.get("columns", []), series.get("values", [])
     return [], []
+
+
+_DURATION_UNIT_SECONDS = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
+_DURATION_PART_RE = re.compile(r"(\d+)([wdhms])")
+
+
+def _influx_duration_seconds(duration):
+    """Convert an InfluxDB duration string to whole seconds, or None if unparseable.
+
+    v1 reports retention as e.g. ``720h0m0s``, ``1h0m0s`` or ``0s`` - concatenated
+    unit/value pairs, not a single number - so the seconds equivalent is computed here to
+    give callers something comparable with v2's ``everySeconds``. ``0s`` means keep
+    forever, and is returned as 0 rather than None: that is a known answer, not a failure
+    to parse, and the two must stay distinguishable.
+
+    :param duration: an InfluxDB duration string, or None
+    :return: seconds as int, or None when there is nothing parseable
+    """
+    if not isinstance(duration, str):
+        return None
+    parts = _DURATION_PART_RE.findall(duration)
+    if not parts:
+        return None
+    return sum(int(value) * _DURATION_UNIT_SECONDS[unit] for value, unit in parts)
+
+
+def _seconds_as_duration(seconds):
+    """Render seconds in InfluxDB's own duration style, so v1 and v2 read alike.
+
+    v2 reports retention in seconds; presenting it as ``720h0m0s`` alongside v1's identical
+    string is what lets one answer be compared with another without the caller knowing
+    which InfluxDB version produced it. Zero means keep forever and says so in words, since
+    ``0s`` is easy to misread as "no data kept".
+
+    :param seconds: a whole number of seconds, or None
+    :return: a duration string, "infinite" for 0, or None when not a number
+    """
+    if not isinstance(seconds, int) or isinstance(seconds, bool):
+        return None
+    if seconds == 0:
+        return "infinite"
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours}h{minutes}m{secs}s"
+
+
+def _influx_buckets_request(influx_settings, bucket):
+    """Build (url, kwargs) for a GET of v2's ``/api/v2/buckets`` filtered to one bucket.
+
+    Separate from :func:`_influx_read_request` because this is v2's *management* API, not
+    the query endpoint - a different path, and the answer is JSON rather than an InfluxQL
+    result set. The credential is the same one reads already use: querying a v2 bucket
+    requires ``read:buckets`` on it, and that is the permission this endpoint wants, so a
+    token that can query can read the bucket's retention. Verified against InfluxDB 2.7
+    with a token scoped to read exactly one bucket.
+
+    :param influx_settings: the ``influx`` settings block (must have a token)
+    :param bucket: the bucket name to filter to
+    :return: (url, requests kwargs)
+    """
+    params = {"name": bucket}
+    # Pass org when configured, as the query path does: it disambiguates a token with
+    # access to more than one org, and v2 answers 404 with a JSON error for an org that
+    # does not exist, which the caller reports rather than mistaking for "no retention".
+    if influx_settings.get("org"):
+        params["org"] = influx_settings["org"]
+    kwargs = {
+        "headers": {"Authorization": f'Token {influx_settings["token"]}'},
+        "params": params,
+        "verify": not influx_settings.get("insecure", False),
+        "timeout": influx_settings.get("timeout", 5),
+    }
+    return f'{influx_settings["url"]}/api/v2/buckets', kwargs
+
+
+def _v1_retention(session, influx_settings, db):
+    """Read v1's retention policy for a database via ``SHOW RETENTION POLICIES``.
+
+    Prefers the policy flagged ``default``, since that is the one a write with no explicit
+    policy lands in - which is every write this project makes.
+
+    :return: dict describing the retention, for the ``retention`` key of the payload
+    :raises SourceConnectionError: transport, parse, or an InfluxDB-reported error
+    """
+    _validate_identifier(db, "database")
+    columns, values = run_query(session, influx_settings, db, f"SHOW RETENTION POLICIES ON {_quote_identifier(db)}")
+    if not values:
+        raise SourceConnectionError(f"InfluxDB reported no retention policy for database {db!r}")
+    index = {col: i for i, col in enumerate(columns)}
+    rows = [row for row in values if index.get("default") is not None and row[index["default"]]]
+    row = (rows or values)[0]
+
+    def cell(name):
+        position = index.get(name)
+        return row[position] if position is not None and position < len(row) else None
+
+    duration = cell("duration")
+    return {
+        "known": True,
+        "policy": cell("name"),
+        "duration": duration,
+        "duration_seconds": _influx_duration_seconds(duration),
+        "shard_group_duration": cell("shardGroupDuration"),
+        "shard_group_duration_seconds": _influx_duration_seconds(cell("shardGroupDuration")),
+        "read_from": "v1 SHOW RETENTION POLICIES",
+    }
+
+
+def _v2_retention(session, influx_settings, bucket):
+    """Read v2's retention rules for a bucket via ``/api/v2/buckets``.
+
+    Deliberately *not* read through the v1-compatibility ``/query`` endpoint, even though
+    ``SHOW RETENTION POLICIES`` succeeds there with the same credential. Verified against
+    InfluxDB 2.7: for a bucket with 720h retention and a 24h shard group, that endpoint
+    answers ``duration=0s`` and ``shardGroupDuration=168h0m0s`` - it reports the virtual
+    DBRP mapping's own policy, not the bucket's. ``0s`` means "keep forever", so using it
+    would tell an operator their data is never deleted when it expires in 30 days, and be
+    wrong in the reassuring direction. The management API returns the real values.
+
+    :return: dict describing the retention, for the ``retention`` key of the payload
+    :raises SourceConnectionError: transport, parse, or no such bucket
+    """
+    url, kwargs = _influx_buckets_request(influx_settings, bucket)
+    payload = _get(session, url, kwargs, f"read retention for bucket {bucket}")
+    buckets = payload.get("buckets") or []
+    if not buckets:
+        # v2 answers 200 with an empty list for a name that matches nothing, so this is
+        # not caught by raise_for_status.
+        raise SourceConnectionError(f"InfluxDB has no bucket named {bucket!r}")
+    rules = buckets[0].get("retentionRules") or []
+    if not rules:
+        # A bucket with no retention rules keeps data indefinitely - a real answer, not a
+        # failure, and distinguishable from "could not find out" by known=True.
+        return {"known": True, "duration_seconds": 0, "duration": "infinite", "read_from": "v2 /api/v2/buckets"}
+    rule = rules[0]
+    every = rule.get("everySeconds")
+    shard = rule.get("shardGroupDurationSeconds")
+    return {
+        "known": True,
+        "duration_seconds": every,
+        "duration": _seconds_as_duration(every),
+        "shard_group_duration_seconds": shard,
+        "shard_group_duration": _seconds_as_duration(shard),
+        "read_from": "v2 /api/v2/buckets",
+    }
+
+
+def _retention_for(session, influx_settings, db):
+    """Read the retention configuration bounding how far back data could go, degrading to
+    an explicit "not known" rather than failing the whole call.
+
+    Retention is the *second* half of the data-range answer and the less important one: if
+    it cannot be read, the earliest/latest range is still worth returning. So a failure
+    here is reported in place - ``known: false`` with the reason - rather than raised.
+    Reported rather than omitted on purpose: a missing ``retention`` key reads as "no
+    retention configured", i.e. kept forever, which is the same misleading direction as
+    v2's ``0s``.
+
+    :return: dict for the payload's ``retention`` key, always with a ``known`` flag
+    """
+    try:
+        if influx_settings.get("token"):
+            return _v2_retention(session, influx_settings, db)
+        return _v1_retention(session, influx_settings, db)
+    except SourceConnectionError as exc:
+        logging.warning("Could not read retention configuration for %r: %s", db, exc)
+        return {"known": False, "reason": str(exc)}
 
 
 def resolve_schema(source, settings, settings_file, instance=None):
@@ -771,6 +971,84 @@ def _instance_state(handler):
     )
 
 
+def _edge_time(handler, schema, order_query):
+    """Return the unix-seconds timestamp of one edge point, or None when there is no data.
+
+    :param handler: constructed DataHandler (caller owns its session)
+    :param schema: the ReadSchema for the source
+    :param order_query: the built query (see build_earliest_query/build_latest_query)
+    :return: unix seconds as int, or None
+    :raises SourceConnectionError: on a transport/parse failure or an InfluxDB-side error
+    """
+    columns, values = run_query(handler.session, handler.settings["influx"], schema.db, order_query)
+    if not values:
+        return None
+    index = {col: i for i, col in enumerate(columns)}
+    position = index.get("time")
+    return values[0][position] if position is not None else None
+
+
+def data_range_result(source, settings, settings_file):
+    """Build the get_data_range payload (runs in a worker thread).
+
+    Answers "how far back does this go", which none of the other read tools can: they
+    either need a range already known (``query_history``) or describe only the present
+    (``get_current_state``). Two separate facts, deliberately both reported:
+
+    * The **actual** range - the oldest and newest points present. That is the floor on
+      what any history query can return, whatever retention permits in principle, and it
+      reflects both when collection started and where older data has aged out.
+    * The **configured** retention bounding how far back data could ever go, independent
+      of collection history. A three-year-old install with 30-day retention has three
+      years of history and 30 days of data; only reporting both distinguishes that from an
+      install that started last month.
+
+    For an instanced source (a Hue install with more than one bridge) the range covers
+    every bridge, since they share one measurement - matching ``query_history``'s
+    unqualified default rather than inventing a per-bridge answer here.
+
+    :param source: source name from a tool argument
+    :param settings: parsed settings dict
+    :param settings_file: settings path, threaded to the handler's own load
+    :return: dict payload
+    :raises ToolParamError: unknown or unusable source
+    :raises SourceConnectionError: the InfluxDB range read failed (retention failure alone
+        degrades to ``retention.known = false`` instead)
+    """
+    handler, schema = resolve_schema(source, settings, settings_file)
+    try:
+        result = {"source": schema.source, "measurement": schema.measurement, "database": schema.db}
+        if handler.MCP_DESCRIPTION:
+            result["description"] = handler.MCP_DESCRIPTION
+
+        if not schema.allowed_fields:
+            # No fields discovered means nothing has ever been written for this
+            # measurement. Report that plainly rather than as a failure - a source
+            # configured today legitimately has no data yet - but still report retention,
+            # which is configured independently of whether anything was collected.
+            result.update({"earliest": None, "latest": None, "span_seconds": None, "points_present": False})
+        else:
+            earliest = _edge_time(
+                handler, schema, build_earliest_query(schema.measurement, schema.tag_filters, schema.allowed_fields)
+            )
+            latest = _edge_time(
+                handler, schema, build_latest_query(schema.measurement, schema.tag_filters, schema.allowed_fields)
+            )
+            span = latest - earliest if isinstance(earliest, int) and isinstance(latest, int) else None
+            result.update(
+                {
+                    "earliest": earliest,
+                    "latest": latest,
+                    "span_seconds": span,
+                    "points_present": earliest is not None,
+                }
+            )
+        result["retention"] = _retention_for(handler.session, handler.settings["influx"], schema.db)
+        return result
+    finally:
+        close_session(handler.session)
+
+
 def build_documentation(settings, settings_file):
     """Assemble a static Markdown reference of every configured source: its
     description and, per annotated field, the unit and any coded-value meanings.
@@ -933,6 +1211,37 @@ def register_read_tools(server, settings, settings_file=None):
         of each field to its `value` plus any `unit` and decoded `label` (so a
         lock state reads back as 'locked', not a bare number)."""
         return await anyio.to_thread.run_sync(current_state_result, source, settings, settings_file)
+
+    @server.tool()
+    async def get_data_range(source: str) -> dict:
+        """Get how far back a source's data goes, and how long InfluxDB keeps it.
+
+        Answers "how far back do my records go", "when did collection start", "how long is
+        data kept". Use this before `query_history` when you don't know what range exists -
+        history needs a range, this tells you what range is there. Unlike
+        `get_current_state` (the present moment) this describes the whole span.
+
+        `source` is a name from `list_sources`; an unknown one returns an error.
+
+        Two different facts, both reported, because they answer different questions:
+
+        - `earliest`/`latest` (unix seconds) and `span_seconds`: the oldest and newest
+          points actually present - the real floor on what history can return.
+          `points_present` is false when nothing has been collected yet, with the
+          timestamps null.
+        - `retention`: what InfluxDB is configured to keep, independent of what was
+          collected. `duration` is a string like '720h0m0s', or 'infinite' when data is
+          never expired, with `duration_seconds` alongside for arithmetic; v1 also reports
+          the `policy` name, and both versions report the shard group duration.
+
+        The two differ, and the difference is the point: an install collecting for three
+        years with 30-day retention has 30 days of data, not three years.
+
+        `retention.known` is false, with a `reason`, when the configuration could not be
+        read - the range is still returned in that case rather than failing the call. It is
+        reported rather than omitted so an unreadable retention is never mistaken for
+        unlimited retention."""
+        return await anyio.to_thread.run_sync(data_range_result, source, settings, settings_file)
 
     @server.tool()
     async def get_documentation() -> dict:

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import anyio
 import pytest
+import requests
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
 from toinflux.mcp_read import (
@@ -496,6 +497,7 @@ class TestRegisterReadTools:
             "list_fields",
             "query_history",
             "get_current_state",
+            "get_data_range",
             "get_documentation",
         }
 
@@ -943,3 +945,222 @@ class TestMultiBridgeReads:
         )
         query = build_query(schema, field="Kitchen", start="-1h", end="now")
         assert "host" not in query
+
+
+class TestDataRangeResult:
+    """get_data_range: how far back data goes, and how long InfluxDB keeps it.
+
+    The two halves are read differently and fail differently, which is what these tests are
+    about. The range comes from the shared query path on both InfluxDB versions; retention
+    comes from `SHOW RETENTION POLICIES` on v1 and the management API on v2, and a retention
+    failure must degrade rather than take the whole call down.
+    """
+
+    V1 = {
+        "sources": ["speedtest"],
+        "influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"},
+        "speedtest": {"db": "speedtest_db"},
+    }
+    V2 = {
+        "sources": ["speedtest"],
+        "influx": {"url": "http://influx.example.com:8086", "token": "tok", "org": "si-org"},
+        "speedtest": {"bucket": "speedtest_bucket"},
+    }
+
+    @staticmethod
+    def _handler(settings):
+        from toinflux.speedtest import Speedtest
+
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Speedtest("speedtest")
+        handler.session = MagicMock()
+        return handler
+
+    def _run(self, settings, responses):
+        """Drive data_range_result with a canned response per GET, in order."""
+        from toinflux.mcp_read import data_range_result
+
+        handler = self._handler(settings)
+        calls = []
+
+        def fake_get(url, **kwargs):
+            calls.append((url, kwargs.get("params", {})))
+            resp = MagicMock()
+            resp.raise_for_status.return_value = None
+            body = responses[min(len(calls) - 1, len(responses) - 1)]
+            if isinstance(body, Exception):
+                raise body
+            resp.json.return_value = body
+            return resp
+
+        handler.session.get.side_effect = fake_get
+        with patch("toinflux.mcp_read.resolve_handler", return_value=handler):
+            return data_range_result("speedtest", settings, None), calls
+
+    @staticmethod
+    def _fields(*names):
+        return {"results": [{"series": [{"columns": ["fieldKey"], "values": [[n] for n in names]}]}]}
+
+    @staticmethod
+    def _point(ts):
+        return {"results": [{"series": [{"columns": ["time", "ping"], "values": [[ts, 12.0]]}]}]}
+
+    def test_v1_reports_range_and_retention(self):
+        """Acceptance question 2: v1 reports the configured duration and shard duration.
+
+        The values are the ones a real InfluxDB 1.8 returned for a database created with
+        30-day retention and a 1h shard group, so the parsing is checked against reality
+        rather than an invented shape.
+        """
+        retention = {
+            "results": [
+                {
+                    "series": [
+                        {
+                            "columns": ["name", "duration", "shardGroupDuration", "replicaN", "default"],
+                            "values": [["autogen", "720h0m0s", "1h0m0s", 1, True]],
+                        }
+                    ]
+                }
+            ]
+        }
+        result, _ = self._run(self.V1, [self._fields("ping"), self._point(1000), self._point(5000), retention])
+        assert (result["earliest"], result["latest"], result["span_seconds"]) == (1000, 5000, 4000)
+        assert result["points_present"] is True
+        assert result["retention"]["known"] is True
+        assert result["retention"]["policy"] == "autogen"
+        assert result["retention"]["duration"] == "720h0m0s"
+        assert result["retention"]["duration_seconds"] == 2592000
+        assert result["retention"]["shard_group_duration_seconds"] == 3600
+        assert result["retention"]["read_from"] == "v1 SHOW RETENTION POLICIES"
+
+    def test_v1_prefers_the_default_policy(self):
+        """Writes with no explicit policy land in the default one, so that is the policy
+        whose duration actually bounds this project's data."""
+        retention = {
+            "results": [
+                {
+                    "series": [
+                        {
+                            "columns": ["name", "duration", "shardGroupDuration", "replicaN", "default"],
+                            "values": [
+                                ["short", "24h0m0s", "1h0m0s", 1, False],
+                                ["keep", "8760h0m0s", "24h0m0s", 1, True],
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+        result, _ = self._run(self.V1, [self._fields("ping"), self._point(1), self._point(2), retention])
+        assert result["retention"]["policy"] == "keep"
+
+    def test_v2_reads_retention_from_the_management_api_not_the_query_path(self):
+        """Acceptance question 3, and the finding that shaped this tool.
+
+        v2's v1-compatibility /query *does* answer SHOW RETENTION POLICIES with the same
+        credential - but it reports the DBRP mapping's policy, not the bucket's. Verified
+        against InfluxDB 2.7: a bucket with 720h retention and a 24h shard group came back
+        as duration=0s, shardGroupDuration=168h0m0s. 0s means "keep forever", so trusting
+        it would report unlimited retention for data that expires in 30 days. Hence the
+        management API - and hence this test asserting which URL was actually used.
+        """
+        buckets = {
+            "buckets": [
+                {
+                    "name": "speedtest_bucket",
+                    "retentionRules": [{"type": "expire", "everySeconds": 2592000, "shardGroupDurationSeconds": 86400}],
+                }
+            ]
+        }
+        result, calls = self._run(self.V2, [self._fields("ping"), self._point(10), self._point(20), buckets])
+        assert result["retention"]["known"] is True
+        assert result["retention"]["duration_seconds"] == 2592000
+        # Rendered in v1's own style, so an answer is comparable across versions.
+        assert result["retention"]["duration"] == "720h0m0s"
+        assert result["retention"]["shard_group_duration"] == "24h0m0s"
+        assert result["retention"]["read_from"] == "v2 /api/v2/buckets"
+        # The retention read went to the management API, not /query.
+        assert calls[-1][0].endswith("/api/v2/buckets")
+        assert calls[-1][1]["name"] == "speedtest_bucket"
+        assert calls[-1][1]["org"] == "si-org"
+
+    def test_v2_bucket_with_no_rules_is_infinite_and_known(self):
+        """A bucket that never expires data is a real answer, not a failed lookup - so it
+        must stay distinguishable from 'could not find out'."""
+        result, _ = self._run(
+            self.V2,
+            [self._fields("ping"), self._point(1), self._point(2), {"buckets": [{"name": "b", "retentionRules": []}]}],
+        )
+        assert result["retention"]["known"] is True
+        assert result["retention"]["duration"] == "infinite"
+        assert result["retention"]["duration_seconds"] == 0
+
+    def test_v2_retention_failure_degrades_and_keeps_the_range(self):
+        """Acceptance question 3's degraded half: the call must not fail wholesale.
+
+        Reported rather than omitted, because a missing retention key reads as 'nothing
+        expires' - the same misleading direction as v2's 0s.
+        """
+        result, _ = self._run(
+            self.V2,
+            [
+                self._fields("ping"),
+                self._point(100),
+                self._point(200),
+                requests.exceptions.HTTPError("403 Forbidden"),
+            ],
+        )
+        assert (result["earliest"], result["latest"]) == (100, 200)
+        assert result["retention"]["known"] is False
+        assert "reason" in result["retention"]
+        assert "403" in result["retention"]["reason"]
+
+    def test_v2_missing_bucket_degrades_rather_than_reporting_infinite(self):
+        """v2 answers 200 with an empty list for a name matching nothing, so this is not
+        caught by raise_for_status - and must not be read as 'no retention rules'."""
+        result, _ = self._run(self.V2, [self._fields("ping"), self._point(1), self._point(2), {"buckets": []}])
+        assert result["retention"]["known"] is False
+        assert "no bucket named" in result["retention"]["reason"]
+
+    def test_no_data_yet_is_reported_not_failed(self):
+        """A source configured today has no points; that is an answer, and retention is
+        still worth reporting since it is configured independently of collection."""
+        retention = {
+            "results": [
+                {
+                    "series": [
+                        {
+                            "columns": ["name", "duration", "shardGroupDuration", "replicaN", "default"],
+                            "values": [["autogen", "0s", "168h0m0s", 1, True]],
+                        }
+                    ]
+                }
+            ]
+        }
+        result, _ = self._run(self.V1, [{"results": [{}]}, retention])
+        assert result["points_present"] is False
+        assert result["earliest"] is None and result["latest"] is None and result["span_seconds"] is None
+        assert result["retention"]["known"] is True
+        assert result["retention"]["duration_seconds"] == 0
+
+    def test_range_failure_is_not_swallowed(self):
+        """The range is the tool's primary answer, so unlike retention its failure is a
+        transport error the caller sees - not a null quietly reported as 'no data'."""
+        from toinflux.mcp_read import data_range_result
+
+        handler = self._handler(self.V1)
+        handler.session.get.side_effect = requests.exceptions.ConnectionError("influx down")
+        with patch("toinflux.mcp_read.resolve_handler", return_value=handler):
+            with pytest.raises(SourceConnectionError):
+                data_range_result("speedtest", self.V1, None)
+
+    def test_the_oldest_point_query_orders_ascending(self):
+        """The whole mechanism: ORDER BY time ASC is what makes it the *oldest* point."""
+        from toinflux.mcp_read import build_earliest_query, build_latest_query
+
+        earliest = build_earliest_query("hue", {}, {"lamp"})
+        assert earliest.endswith("ORDER BY time ASC LIMIT 1")
+        assert build_latest_query("hue", {}, {"lamp"}).endswith("ORDER BY time DESC LIMIT 1")
+        # Same injection defence on both, since they share one builder.
+        assert '"hue"' in earliest and '"lamp"' in earliest
