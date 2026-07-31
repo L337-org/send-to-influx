@@ -53,10 +53,8 @@ Optional remote MCP server (introduced in 5.0) - NOT a data source/`DataHandler`
 ### Configuration (`settings.yaml`)
 YAML-based configuration supporting multiple data sources:
 - **Orchestration**:
-  - `sources`: list of sources to run in parallel when `--source` is omitted
+  - `sources`: list of sources to run in parallel when `--source` is omitted. Empty or absent (and no `--source`) is a valid "nothing configured" state: the process logs that plainly and exits (code 1) rather than falling back to anything - there is no `default_source` fallback (removed outright, no deprecation window)
   - `stagger_seconds`: optional start delay between sources (default `10`)
-- **Defaults**:
-  - `default_source`: used when no `sources` list is configured and `--source` is omitted
 - **Logging**:
   - `logfile`: optional path to write logs to a file in addition to stderr (rotated automatically)
   - `log_max_bytes`/`log_backup_count`: optional rotation size (default 10 MiB) and backup count (default 3) for `logfile`
@@ -281,7 +279,6 @@ sources:
   - "speedtest"
 
 stagger_seconds: 10
-default_source: "hue"
 ```
 
 ### Speedtest settings

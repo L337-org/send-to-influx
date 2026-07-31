@@ -13,18 +13,16 @@ class TestConfiguredSources:
     def test_uses_sources_list(self):
         assert configured_sources({"sources": ["Hue", "Zappi"]}) == ["hue", "zappi"]
 
-    def test_falls_back_to_default_source(self):
-        assert configured_sources({"default_source": "octopus"}) == ["octopus"]
+    def test_empty_or_absent_sources_returns_empty(self):
+        # No fallback since default_source was removed - "nothing configured" means
+        # the MCP tools expose nothing, matching what the collectors run.
+        assert configured_sources({"sources": []}) == []
+        assert configured_sources({}) == []
 
-    def test_default_source_is_lowercased(self):
-        # A capitalised default_source must normalise, or resolve_handler's
-        # source.lower() comparison would never match it.
-        assert configured_sources({"default_source": "Octopus"}) == ["octopus"]
-
-    def test_non_string_default_source_dropped(self):
-        # YAML coerces `default_source: no` to False; must not end up in the list
-        # (it would crash the sorted()/join in resolve_handler's error message).
-        assert configured_sources({"sources": [], "default_source": False}) == []
+    def test_leftover_default_source_key_is_inert(self):
+        # default_source was removed with no deprecation window - a leftover key from
+        # before this change must be silently ignored, not fall back to it.
+        assert configured_sources({"default_source": "octopus"}) == []
 
     def test_non_string_entries_filtered_from_list(self):
         assert configured_sources({"sources": ["Hue", 5, None, "zappi"]}) == ["hue", "zappi"]

@@ -46,6 +46,40 @@ else
     echo "note: systemd-creds encryption unavailable - credential assertions will be relaxed"
 fi
 
+# A local stub answering /ping like a real InfluxDB v1 server - postinst's
+# --detect-influx-version makes a genuine, unauthenticated HTTP probe to route
+# identity/secret to the right fields and to gate auto-enable (INFLUX_OK), and
+# there is no live InfluxDB anywhere in this environment. Without this, InfluxDB
+# never counts as configured on a first-ever install, so hue/nuki below would
+# never actually land in sources: via auto-enable - the scenarios would still
+# pass (nothing here asserts sources: content), but the auto-enable path itself,
+# and everything downstream that depends on something actually being configured
+# (e.g. the service staying active), would silently go untested.
+FAKE_INFLUX_PORT=18086
+python3 - "$FAKE_INFLUX_PORT" >/tmp/fake-influx.log 2>&1 <<'PYEOF' &
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/ping":
+            self.send_response(204)
+            self.send_header("X-Influxdb-Version", "1.8.10")
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+PYEOF
+FAKE_INFLUX_PID=$!
+trap 'kill "$FAKE_INFLUX_PID" 2>/dev/null || true' EXIT
+
 # grep -q exits 1 for "no match" (the outcome asserted here) but 2 for a real
 # error (unreadable path) - a bare `! grep` would silently pass on an error
 # without having checked anything. Assert the exact exit code instead.
@@ -87,6 +121,9 @@ seed_answers_nuki() {
     seed_answers
     debconf-set-selections <<EOF
 send-to-influx send-to-influx/sources-to-configure multiselect hue, nuki
+send-to-influx send-to-influx/influx-url string http://127.0.0.1:${FAKE_INFLUX_PORT}
+send-to-influx send-to-influx/influx-identity string ci-influx-user
+send-to-influx send-to-influx/influx-secret password ci-influx-password
 send-to-influx send-to-influx/mqtt-broker-host string ci-mqtt-broker.example.com
 send-to-influx send-to-influx/mqtt-username string ci-mqtt-reader
 send-to-influx send-to-influx/mqtt-password password ${MQTT_TEST_SECRET}
@@ -212,8 +249,26 @@ seed_answers_nuki
 dpkg -i "$DEB" >/dev/null 2>&1 || dpkg -i "$DEB"
 /opt/send-to-influx/venv/bin/send-to-influx --version >/dev/null || fail "--version smoke test failed"
 cp /usr/share/send-to-influx/example_settings.yaml /tmp/ci-settings.yaml
+# The shipped example ships nothing enabled (a bare `sources:` key with every entry
+# commented out, so it parses as null) by design, so --check-config must report that
+# as a failure rather than "Configuration OK".
 /opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml >/dev/null \
-    || fail "--check-config smoke test failed on the shipped example settings"
+    && fail "--check-config unexpectedly succeeded on the shipped example (nothing is configured)"
+# Captured rather than piped directly into grep: under this script's `set -o pipefail`, a
+# pipeline reports failure if send-to-influx exits non-zero (which it does here, by
+# design) regardless of whether grep found the message - see the stream_out/stream_err
+# capture pattern used just below for the same reason.
+nothing_configured_err=$(/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml 2>&1 >/dev/null || true)
+echo "$nothing_configured_err" | grep -qi "no sources are configured" \
+    || fail "expected the no-sources-configured message on the shipped example, got: $nothing_configured_err"
+# A copy with one source enabled - the shipped hue: block's interval/db and the shipped
+# influx: block's url/user/password already satisfy validate_settings() on their own
+# (their values being placeholders isn't checked there, only presence), so enabling
+# "hue" is the only change needed to get a clean "Configuration OK" - used below to
+# prove the verdict lands on stdout.
+cp /tmp/ci-settings.yaml /tmp/ci-good-settings.yaml
+sed -i 's/^sources:$/sources: ["hue"]/' /tmp/ci-good-settings.yaml
+grep -q 'sources: \["hue"\]' /tmp/ci-good-settings.yaml || fail "test setup: failed to enable hue in ci-good-settings.yaml"
 # Which stream carries diagnostics, asserted against the *installed* artefact rather than a
 # checkout. Deliberately not done via the journal: systemd captures stdout and stderr alike, so
 # a line appearing in journalctl proves it was captured, never which fd it came from. Running
@@ -227,9 +282,9 @@ stream_out=$(/opt/send-to-influx/venv/bin/send-to-influx --check-config --settin
 stream_err=$(/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-bad-settings.yaml 2>&1 >/dev/null || true)
 [ -z "$stream_out" ] || fail "diagnostics reached stdout on the installed package: $stream_out"
 echo "$stream_err" | grep -q "Configuration error" || fail "diagnostics did not reach stderr on the installed package"
-/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml 2>/dev/null \
+/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-good-settings.yaml 2>/dev/null \
     | grep -q "Configuration OK" || fail "the --check-config verdict is not on stdout on the installed package"
-rm -f /tmp/ci-bad-settings.yaml
+rm -f /tmp/ci-bad-settings.yaml /tmp/ci-good-settings.yaml
 pass "installed package: diagnostics on stderr, the --check-config verdict on stdout"
 [ -f "$SETTINGS" ] || fail "settings.yaml not created"
 [ -f /usr/share/send-to-influx/example_settings.yaml ] || fail "example not shipped under /usr/share"
@@ -388,12 +443,13 @@ pass "plain upgrade: no prompts, no warnings, settings.yaml untouched"
 # --- Scenario: a running service is restarted on upgrade ---------------------
 if [ "$HAVE_SYSTEMD" = 1 ]; then
     echo "=== scenario: restart-on-upgrade ==="
-    # The example config's placeholder values pass validation (workers fail
-    # against the fake endpoints and retry with backoff), so the service
-    # stays active without any real InfluxDB behind it.
+    # $SETTINGS was seeded (not the shipped example, which is empty) by the "fresh
+    # seeded install" scenario above - hue and nuki are enabled against fake-but-
+    # present endpoints, which pass validation and simply fail/retry with backoff,
+    # so the service stays active without any real InfluxDB or bridge behind it.
     systemctl enable --now send-to-influx >/dev/null 2>&1
     sleep 3
-    systemctl is-active --quiet send-to-influx || fail "service did not stay active on the example config"
+    systemctl is-active --quiet send-to-influx || fail "service did not stay active on the seeded config"
     # The seeded settings.yaml has the MCP server enabled, so - when systemd-creds
     # actually migrated its password - it must be listening on its loopback port
     # under the FULL systemd sandbox: the hardening directives plus
@@ -512,9 +568,23 @@ if [ "$CREDS_WORK" = 1 ]; then
     # The blank mqtt-password prompt must likewise be satisfied by the stored
     # credential (the shared-block analogue of the hue assertion above).
     echo "$out" | grep -qi "Nuki not fully configured" && { echo "$out"; fail "reconfigure warned despite stored mqtt-password credential"; }
+    # InfluxDB itself was fully configured (and its credential stored) during
+    # the fresh seeded install above, now that a reachable stub answers
+    # --detect-influx-version - so the blank secret prompt on this reconfigure
+    # must fall back to the stored credential too, the same as hue/mqtt just
+    # above, not warn as if nothing had ever been provided.
+    echo "$out" | grep -qi "InfluxDB user/org or password/token not provided" \
+        && { echo "$out"; fail "reconfigure warned despite stored InfluxDB credential"; }
+else
+    # Without systemd-creds, the fresh install's credential storage itself
+    # failed (set_secret records that as CLI_FAILED, which keeps INFLUX_OK
+    # unset regardless of detection succeeding), so InfluxDB was genuinely
+    # never configured - the "not provided" warning is the correct, expected
+    # outcome here, matching the relaxed-credential-assertions contract in
+    # this script's header.
+    echo "$out" | grep -qi "InfluxDB user/org or password/token not provided" \
+        || { echo "$out"; fail "expected the engaged-but-incomplete InfluxDB warning on reconfigure"; }
 fi
-echo "$out" | grep -qi "InfluxDB user/org or password/token not provided" \
-    || { echo "$out"; fail "expected the engaged-but-incomplete InfluxDB warning on reconfigure"; }
 # Reconfigure (unlike an upgrade) deliberately re-asserts debconf's answers.
 grep -q "ci-test-bridge.example.com" "$SETTINGS" || fail "reconfigure did not re-apply hue-host"
 # The MCP block must survive reconfigure with the (blank-on-reconfigure) password
@@ -632,5 +702,41 @@ debconf-show send-to-influx 2>/dev/null | grep -q . && fail "debconf answers sur
 [ ! -e /etc/logrotate.d/send-to-influx ] || fail "logrotate conffile survived purge"
 ls /var/log/send-to-influx.log* >/dev/null 2>&1 && fail "log file/backups survived purge"
 pass "purge: config, credentials, drop-in, user, debconf answers, and log files all removed"
+
+# --- Scenario: nothing configured stops the service and is not respawned ----
+# A fully-defaulted install (no debconf answers seeded, and the purge above ran
+# postrm's db_purge, so every question is back to its blank template default):
+# sources-to-configure selects nothing, so postinst auto-enables nothing and the
+# shipped example's bare `sources:` key (every entry commented out, parses as null)
+# stands. The service must log that plainly and exit rather than start a phantom
+# Hue worker (the pre-fix behaviour this whole story exists to remove) - and, since
+# that exit shares ConfigError's code 1, systemd must not respawn it either
+# (RestartPreventExitStatus=1 in the unit). It must still report Active: failed,
+# not a clean inactive/dead - RestartPreventExitStatus alone doesn't make an exit
+# code "successful" (that's SuccessExitStatus=, deliberately not set here), and an
+# admin/monitoring tool alerting on `systemctl is-failed` should still be told this
+# needs attention.
+echo "=== scenario: nothing configured stops the service and is not respawned ==="
+if [ "$HAVE_SYSTEMD" = 1 ]; then
+    dpkg -i "$DEB" >/dev/null 2>&1 || dpkg -i "$DEB"
+    grep -qE '^sources:\s*$' "$SETTINGS" || fail "expected a bare 'sources:' on a fully-defaulted install, got: $(grep '^sources:' "$SETTINGS")"
+    systemctl enable --now send-to-influx >/dev/null 2>&1
+    sleep 8  # past RestartSec (5s) - a bounce would already have happened by now
+    systemctl is-active --quiet send-to-influx \
+        && fail "service is still active with nothing configured - should have exited"
+    systemctl is-failed --quiet send-to-influx \
+        || fail "service should report as failed (not just inactive) so monitoring notices - got: $(systemctl is-active send-to-influx)"
+    restarts_1=$(systemctl show -p NRestarts --value send-to-influx)
+    sleep 8
+    restarts_2=$(systemctl show -p NRestarts --value send-to-influx)
+    [ "$restarts_1" = "$restarts_2" ] \
+        || fail "service was respawned ($restarts_1 -> $restarts_2 restarts) - RestartPreventExitStatus=1 did not take effect"
+    journalctl -u send-to-influx --no-pager 2>/dev/null | grep -q "No sources are configured" \
+        || fail "expected the 'no sources are configured' message in the journal"
+    pass "nothing configured: service logs plainly, stops, reports failed, and is not respawned by systemd"
+    dpkg -P send-to-influx >/dev/null 2>&1 || dpkg -P send-to-influx
+else
+    echo "note: skipping nothing-configured scenario (systemd not running here)"
+fi
 
 echo "ALL PACKAGING SCENARIOS PASSED"

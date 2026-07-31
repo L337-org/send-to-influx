@@ -285,8 +285,8 @@ def enumerate_bridges(hue_settings):
 
     The single source of truth for "which bridges are configured", shared by
     ``validate_settings()``, the worker spawner and the CLI modes - if validation and
-    the runtime enumerated separately they would eventually disagree, which is exactly
-    the bug ``resolve_default_source()`` exists to prevent.
+    the runtime enumerated separately they would eventually disagree about what is
+    actually configured.
 
     Slot 1 is the unnumbered ``host``/``user`` pair; further bridges are ``hostN``/
     ``userN``. A slot counts as configured when its host is a non-blank string. Slot
@@ -301,11 +301,12 @@ def enumerate_bridges(hue_settings):
       not-yet-configured state, so failing fast is safe.
     - **Warnings** are "this bridge isn't usable yet": no host at all, or a host with a
       placeholder/blank/unsubstituted token. These *must not* be fatal, because
-      ``example_settings.yaml`` ships ``hue`` in ``sources:`` alongside the placeholder
-      token - so a fresh install (source checkout or packaged) is exactly this state.
-      Raising here would stop **every** collector, taking working sources down with the
-      unconfigured one, and would break the packaging suite's invariant that the
-      example's placeholder values pass validation while workers merely retry.
+      ``example_settings.yaml``'s ``hue:`` block still ships the placeholder host/token
+      pair - enabling ``hue`` in ``sources:`` without also filling those in is exactly
+      this state, and is also how the packaging suite seeds Hue (a real host that just
+      happens to be unreachable, not a placeholder, but validated the same way). Raising
+      here would stop **every** collector, taking working sources down with the
+      unconfigured one.
 
     A leftover ``userN`` with no usable ``hostN`` is neither: a token whose host has been
     cleared is the resting state part-way through removing a bridge (the token is blanked

@@ -25,13 +25,6 @@ from toinflux.credentials import (
 )
 from toinflux.exceptions import ConfigError
 
-# The source sendtoinflux.py runs when neither sources: nor default_source: is
-# configured. Defined here so validate_settings() checks exactly what the runtime
-# will actually run - the two previously disagreed (the runtime fell back to "hue"
-# while validation checked nothing), so --check-config could report OK on a config
-# whose effective source had no settings block at all.
-DEFAULT_SOURCE = "hue"
-
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_LOG_BACKUP_COUNT = 3
 
@@ -253,11 +246,12 @@ def expand_sources(sources, settings):
     The single source of truth for "what runs", used by the multi-source supervisor, the
     single-source path and the one-shot CLI modes alike. If any of those enumerated
     instances for themselves they would eventually disagree with each other and with
-    ``validate_settings()`` - the failure ``resolve_default_source()`` exists to prevent.
+    ``validate_settings()`` about what is actually configured.
 
     A source that expands to nothing (Hue with no usable bridge) is absent from the
     result: it is not collected, validation has already warned why, and every other
-    source is unaffected.
+    source is unaffected. An empty ``sources`` list expands to no work units at all -
+    a valid "nothing configured" state, not an error.
 
     :param sources: configured source names, already lowercased
     :type sources: list
@@ -270,30 +264,6 @@ def expand_sources(sources, settings):
     for source in sources:
         units.extend((source, instance) for instance in _source_instances(source, settings))
     return units
-
-
-def resolve_default_source(settings):
-    """
-    Return the source to run when no ``sources:`` list is configured.
-
-    Used by both ``validate_settings()`` and ``sendtoinflux.py`` so the two cannot
-    disagree about what actually runs - they previously did, and the result was
-    ``--check-config`` reporting OK on a config whose effective source had no
-    settings block at all.
-
-    Only an absent or blank ``default_source`` counts as unset. A non-string (YAML
-    turns ``default_source: no`` into ``False``) is returned unchanged rather than
-    silently replaced, so ``validate_settings()`` reports it as the malformed value
-    it is instead of quietly running something the admin never asked for.
-
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :return: the configured default source, or DEFAULT_SOURCE when unset
-    """
-    value = settings.get("default_source")
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return DEFAULT_SOURCE
-    return value
 
 
 def mqtt_block_errors(settings, context=""):
@@ -356,18 +326,17 @@ def _validate_hue_bridges(settings, sources):
 
     Delegates to ``toinflux.philipshue.enumerate_bridges()`` rather than re-deriving the
     slot rules here: the runtime enumerates bridges with that same function, and two
-    separate implementations would eventually disagree about what is configured - the
-    failure ``resolve_default_source()`` exists to prevent, where ``--check-config``
-    reported OK on a config whose effective source had no settings block at all.
+    separate implementations would eventually disagree about what is configured.
 
     Imported inside the function, like ``get_class()`` does: ``philipshue`` imports
     ``influx``, which imports this module, so a module-level import would be circular.
 
     Only self-contradictory configuration is an error. An unusable bridge - no host, or a
     host with a placeholder/blank token - is a warning instead, because
-    ``example_settings.yaml`` ships ``hue`` in ``sources:`` next to the placeholder token,
-    so a fresh install is exactly that state: raising would stop every other collector
-    along with the unconfigured one.
+    ``example_settings.yaml``'s ``hue:`` block still ships the placeholder host/token
+    pair, so enabling ``hue`` in ``sources:`` without also filling those in is exactly
+    that state: raising would stop every other collector along with the unconfigured
+    one.
     Returns ``(errors, warnings)``; the caller decides whether to surface the warnings,
     because ``validate_settings()`` runs inside ``load_settings()`` and therefore on
     every ``DataHandler`` construction - logging from here would repeat the same line per
@@ -685,9 +654,9 @@ def validate_settings(settings, source=None, settings_path="settings.yaml", warn
     :param settings: parsed settings dictionary
     :type settings: dict
     :param source: an additional specific source to validate (e.g. the --source CLI
-        argument), even if it isn't in the configured sources/default_source - without
+        argument), even if it isn't in the configured sources list - without
         this, --check-config --source <x> could report success while <x>'s own block
-        is broken, if <x> isn't part of the normal sources list
+        is broken, if <x> isn't part of sources:
     :type source: str or None
     :param settings_path: path to the settings file, used only to label log messages -
         settings can come from a location other than settings.yaml (--settings, or the
@@ -711,15 +680,14 @@ def validate_settings(settings, source=None, settings_path="settings.yaml", warn
     raw_sources = settings.get("sources")
     if raw_sources is not None and not isinstance(raw_sources, list):
         # A scalar (sources: hue) or mapping would otherwise be iterated by
-        # character/key below - report it as the ConfigError it is, then fall back to
-        # default_source so the rest of validation still runs sensibly.
+        # character/key below - report it as the ConfigError it is, then treat it as
+        # absent so the rest of validation still runs sensibly.
         errors.append(f"sources must be a list (got {type(raw_sources).__name__})")
         raw_sources = None
-    # An absent or empty sources list means the runtime falls back to
-    # default_source, and to DEFAULT_SOURCE if that is absent too - validate exactly
-    # what will actually run, or a config whose effective source has no settings
-    # block would pass --check-config and then fail at startup.
-    sources = raw_sources or [resolve_default_source(settings)]
+    # An absent or empty sources list is a valid "nothing configured" state - there is
+    # nothing to validate here; sendtoinflux.py logs it plainly and exits rather than
+    # starting a worker (see _exit_if_nothing_to_collect()).
+    sources = raw_sources or []
     # A non-string entry (e.g. a YAML mapping, or an explicit null, from a malformed
     # sources list) would raise a raw TypeError from the dict/set membership tests
     # below - report it as the ConfigError it really is, and validate the remaining
@@ -727,7 +695,16 @@ def validate_settings(settings, source=None, settings_path="settings.yaml", warn
     invalid = [src for src in sources if not isinstance(src, str)]
     if invalid:
         errors.append("sources entries must be strings (got: " + ", ".join(repr(s) for s in invalid) + ")")
-    sources = [src.lower() for src in sources if isinstance(src, str)]
+    # A blank/whitespace-only entry (e.g. sources: [""]) is a string, so it survives
+    # the check above, but _validate_source_block() returns early for a falsy source
+    # name - meaning it would otherwise validate cleanly and then expand into a real
+    # work unit at runtime with an empty name (a confusing "workers=" startup log and
+    # an eventual "unknown source" failure from get_class(), rather than a clear
+    # config-time error). Reject it the same way as a non-string entry.
+    blank = [src for src in sources if isinstance(src, str) and not src.strip()]
+    if blank:
+        errors.append(f"sources entries must not be blank (got {len(blank)} blank entry/entries)")
+    sources = [src.lower() for src in sources if isinstance(src, str) and src.strip()]
     if source:
         source = source.lower()
     duplicates = sorted({str(src) for src in sources if sources.count(src) > 1})

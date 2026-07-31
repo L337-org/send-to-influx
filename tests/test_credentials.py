@@ -330,7 +330,6 @@ class TestClearUnsubstitutedCredentialSentinels:
             "token": sentinel_for("influx-token"),
         }
         sample_settings["sources"] = ["zappi"]
-        sample_settings["default_source"] = "zappi"
         sample_settings["zappi"] = {"interval": 300, "bucket": "zappi_bucket", "serial": "12345"}
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
             yaml.dump(sample_settings, f)

@@ -468,8 +468,7 @@ class TestHueTokenRedaction:
 class TestEnumerateBridges:
     """enumerate_bridges is the single source of truth for "which bridges are
     configured" - shared by validate_settings, the worker spawner and the CLI modes, so
-    they cannot disagree about what runs (the failure resolve_default_source exists to
-    prevent).
+    they cannot disagree about what runs.
     """
 
     @staticmethod
@@ -491,9 +490,9 @@ class TestEnumerateBridges:
         assert [(b.slot, b.host) for b in bridges] == [(1, "a.example.com"), (3, "c.example.com")]
 
     def test_host_without_a_token_warns_and_is_not_collected(self):
-        """A warning, not an error: example_settings.yaml ships hue in sources: next to
-        the placeholder token, so a fresh install is exactly this state and raising would
-        stop every other collector too."""
+        """A warning, not an error: example_settings.yaml's hue: block still ships the
+        placeholder token, so enabling hue in sources: without also setting it is
+        exactly this state, and raising would stop every other collector too."""
         bridges, errors, warnings = enumerate_bridges(self._hue(host="hue.example.com", user="your_hue_user"))
         assert errors == []
         assert bridges == []

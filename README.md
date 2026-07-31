@@ -379,6 +379,8 @@ Worker start times are slightly staggered to avoid all collectors firing at exac
 
 If a source hits a transient failure (e.g. a network error talking to its API or to InfluxDB) — whether running in single-source or multi-source mode — it is automatically restarted with exponential backoff (base 5 s, max 300 s) to avoid tight failure loops. In multi-source mode, only the failed source is retried; other sources keep running. A configuration problem (e.g. a source missing its settings section) is not retried: in single-source mode the process exits with code 1; in multi-source mode that source's worker stops permanently and a critical line is logged, while other sources keep running.
 
+If `sources:` is empty or absent (and no `-s`/`--source` was given), or every configured instance of a requested source turns out unusable (e.g. a Hue install whose bridges have no tokens), the process logs that plainly and exits with code 1 rather than starting nothing while looking healthy. Both causes require manual intervention (an edit to `settings.yaml` and a restart) and never resolve themselves by waiting, so under the packaged systemd service they are not retried either — see "Exit codes" and "After installing" below.
+
 If InfluxDB itself is briefly unreachable, a point that fails to write is buffered in memory (per source, up to a few hundred points) rather than dropped, and sent automatically — oldest first, batched into a handful of requests — once InfluxDB is reachable again, so a short outage delays data rather than losing it. A point the server itself repeatedly rejects (for example, one that has aged past the bucket's retention window) is given up on after a few attempts rather than blocking the points queued behind it. The buffer is in-memory only: it does not survive a process restart, and if the settings file's InfluxDB destination is changed while a backlog exists, the backlog is delivered to the new destination. Heartbeat status points are never buffered — they are a live signal, so a failed one is simply dropped.
 
 After every collection cycle (success or failure), a `collector_status,source=<name>` heartbeat point is written to InfluxDB alongside the source's own data, with fields `ok` (`1`/`0`) and `consecutive_failures`. A dead collector would otherwise only show up as a silent gap in Grafana; this gives you a positive signal to alert on (e.g. `ok == 0` or a stale `collector_status` point). Heartbeats are not written in `--print` mode, since that mode never sends anything to InfluxDB.
@@ -461,6 +463,12 @@ On upgrades, a *running* service is automatically restarted so it actually picks
 version - upgrades are often unattended (cron/apt timers), where a "please restart" hint in the
 package output would never be seen, and the old code would otherwise keep running until the next
 reboot. A stopped service is left stopped; an upgrade never starts anything.
+
+The shipped `settings.yaml` starts with `sources:` empty, so starting the service before editing it
+exits immediately rather than silently running nothing useful - see "Exit codes" above. That exit
+is deliberately not retried by systemd (`RestartPreventExitStatus` in the unit), along with a fatal
+configuration error: both require an edit and a restart, and neither resolves itself by waiting, so
+there's no point bouncing the service every few seconds until you do.
 
 Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as
 above. Journald also forwards to syslog as usual, and the package ships rsyslog and
@@ -682,7 +690,15 @@ Usage
 > &emsp; -d, --dump            dump the data to the console one time and exit. This requires a source to be specified  
 > &emsp; -p, --print           print the raw data rather than sending it to InfluxDB  
 > &emsp; -s, --source SOURCE   the source of the data to send to InfluxDB (hue, zappi, etc.). If this parameter is omitted, all sources in the settings file
-> &emsp;                       'sources' list are started. If no sources are specified in the settings file, the 'default_source' settings key is used.
+> &emsp;                       'sources' list are started. If no sources are configured, the process logs that plainly and exits.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Normal exit |
+| 1 | A condition that requires manual intervention and never resolves itself by waiting: a fatal configuration error (missing/invalid settings, unknown source name), or nothing to collect (`sources:` empty/absent with no `-s`/`--source`, or every configured instance of a requested source is unusable - e.g. a Hue install whose bridges have no tokens). Under the packaged systemd service, this exit code is marked `RestartPreventExitStatus`, so the service is not respawned for either cause - see "After installing" below. |
+| 2 | Connection error (a transient failure talking to a source's API or InfluxDB) in `--dump` mode only - there's no worker loop to retry a one-shot dump with backoff. In continuous mode (single- or multi-source), connection errors are always retried with backoff instead of exiting. |
 
 Contributing
 ------------

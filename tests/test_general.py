@@ -8,7 +8,6 @@ from unittest.mock import patch
 import pytest
 import yaml
 from toinflux.general import (
-    DEFAULT_SOURCE,
     MCP_DEFAULT_BIND_ADDRESS,
     expand_sources,
     flatten_dict,
@@ -17,7 +16,6 @@ from toinflux.general import (
     mcp_block_errors,
     mcp_enabled,
     parse_mcp_bind_address,
-    resolve_default_source,
     validate_settings,
 )
 from toinflux.exceptions import ConfigError
@@ -44,7 +42,7 @@ class TestLoadSettings:
             path = f.name
         try:
             result = load_settings(settings_file=path)
-            assert result["default_source"] == "hue"
+            assert result["sources"] == ["hue", "zappi", "speedtest"]
         finally:
             Path(path).unlink(missing_ok=True)
 
@@ -103,7 +101,7 @@ class TestLoadSettings:
         import copy
 
         yaml_settings = copy.deepcopy(sample_settings)
-        yaml_settings["default_source"] = "from_yaml"
+        yaml_settings["stagger_seconds"] = 999
         with tempfile.TemporaryDirectory() as tmp:
             yml_path = os.path.join(tmp, "settings.yml")
             yaml_path = os.path.join(tmp, "settings.yaml")
@@ -112,7 +110,7 @@ class TestLoadSettings:
             with open(yaml_path, "w", encoding="utf8") as f:
                 yaml.dump(yaml_settings, f)
             result = load_settings(settings_file=yaml_path)
-            assert result["default_source"] == "from_yaml"
+            assert result["stagger_seconds"] == 999
 
     def test_validation_error_log_uses_the_actual_resolved_path(self, sample_settings, caplog):
         """load_settings labels validation error logs with the real resolved path, not 'settings.yaml'."""
@@ -245,20 +243,20 @@ class TestValidateSettings:
             validate_settings(sample_settings)
 
     def test_explicit_source_validated_even_if_not_in_sources_list(self, sample_settings):
-        """validate_settings(source=...) also validates a source outside sources/default_source.
+        """validate_settings(source=...) also validates a source outside sources:.
 
         Without the source= kwarg, a broken block for a source that isn't part of
-        sources/default_source is never checked - passing it explicitly (as --check-config
+        sources: is never checked - passing it explicitly (as --check-config
         --source <x> now does) is what surfaces it.
         """
-        sample_settings["octopus"] = {"db": "octopus_db"}  # missing interval; not in sources/default_source
+        sample_settings["octopus"] = {"db": "octopus_db"}  # missing interval; not in sources:
         validate_settings(sample_settings)  # passes: octopus isn't checked without source=
         with pytest.raises(ConfigError):
             validate_settings(sample_settings, source="octopus")
 
     def test_explicit_source_not_double_reported_if_already_in_sources_list(self, sample_settings):
-        """validate_settings(source=...) doesn't duplicate a source already covered by sources/default_source."""
-        # default_source is "hue" per sample_settings; passing it explicitly shouldn't
+        """validate_settings(source=...) doesn't duplicate a source already covered by sources:."""
+        # "hue" is already in sample_settings["sources"]; passing it explicitly shouldn't
         # cause it to be validated (and thus reported) twice.
         validate_settings(sample_settings, source="hue")
 
@@ -357,39 +355,39 @@ class TestValidateSettings:
         with pytest.raises(ConfigError, match="broker_host is required"):
             validate_settings(sample_settings, source="nuki")
 
-    def test_falls_back_to_the_same_default_source_as_the_runtime(self, sample_settings):
-        """With neither sources: nor default_source:, sendtoinflux.py runs
-        DEFAULT_SOURCE - so validation must check that source's block, or a config
-        whose effective source has no settings section passes --check-config and then
-        dies at startup."""
+    def test_absent_or_empty_sources_validates_cleanly(self, sample_settings):
+        """An absent or empty sources: list is a valid "nothing configured" state -
+        there is nothing to validate, so this must not raise. sendtoinflux.py's
+        _exit_if_nothing_to_collect() is what stops the process for this state, not
+        validation - default_source/DEFAULT_SOURCE were removed outright rather than
+        deprecated, so there is no fallback left to check here."""
         del sample_settings["sources"]
-        del sample_settings["default_source"]
-        validate_settings(sample_settings)  # hue block present, matches what runs
-        del sample_settings[DEFAULT_SOURCE]
-        with pytest.raises(ConfigError, match=f"no configuration section found for source '{DEFAULT_SOURCE}'"):
-            validate_settings(sample_settings)
+        validate_settings(sample_settings)  # no sources: key at all
+        sample_settings["sources"] = []
+        validate_settings(sample_settings)  # explicit empty list
 
-    def test_non_string_default_source_is_reported_not_silently_replaced(self, sample_settings):
-        """YAML turns `default_source: no` into False. Treating any falsy value as
-        "unset" would silently run DEFAULT_SOURCE instead of what the admin wrote;
-        it must be reported as the malformed value it is."""
-        del sample_settings["sources"]
-        sample_settings["default_source"] = False
-        with pytest.raises(ConfigError, match="must be strings"):
-            validate_settings(sample_settings)
-
-    def test_blank_default_source_falls_back(self, sample_settings):
-        """An absent or blank default_source legitimately means "unset"."""
-        del sample_settings["sources"]
-        sample_settings["default_source"] = "   "
-        assert resolve_default_source(sample_settings) == DEFAULT_SOURCE
-        validate_settings(sample_settings)
+    def test_leftover_default_source_key_is_inert(self, sample_settings):
+        """default_source was removed with no deprecation window, so a settings.yaml
+        left over from before this change may still have the key set - it must be
+        silently ignored rather than influencing what's validated or run."""
+        sample_settings["default_source"] = "octopus"  # not configured, and not in sources:
+        validate_settings(sample_settings)  # unaffected - only "sources" is consulted
 
     def test_explicit_null_entry_in_sources_is_rejected(self, sample_settings):
         """A null entry is a malformed list entry, not an absent default - it must be
         reported rather than silently skipped."""
         sample_settings["sources"] = ["hue", None]
         with pytest.raises(ConfigError, match="must be strings"):
+            validate_settings(sample_settings)
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_entry_in_sources_is_rejected(self, sample_settings, blank):
+        """A blank string is a valid non-None, non-empty-list entry that would
+        otherwise pass _validate_source_block()'s early return for a falsy source
+        name, then expand into a real work unit at runtime with an empty name -
+        must be caught here instead, not silently accepted."""
+        sample_settings["sources"] = ["hue", blank]
+        with pytest.raises(ConfigError, match="must not be blank"):
             validate_settings(sample_settings)
 
 

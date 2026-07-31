@@ -848,22 +848,67 @@ class TestEnableSource:
         result_yaml = yaml.safe_load(settings_path.read_text())
         assert result_yaml["sources"] == ["hue", "octopus"]  # not duplicated
 
-    def test_raises_on_bare_sources_key(self, tmp_path):
+    def test_creates_first_entry_from_bare_sources_key(self, tmp_path):
         """A bare `sources:` with nothing after it parses as `sources: null` (a
-        scalar), not an empty sequence - correctly rejected rather than silently
-        writing something that isn't valid YAML."""
+        scalar), not a sequence - this is the shipped example_settings.yaml default
+        (nothing configured), so --enable-source must be able to turn it into a
+        populated block sequence, or every fresh debconf-seeded install would fail
+        to auto-enable whatever the admin selected."""
         settings_path = tmp_path / "settings.yaml"
         settings_path.write_text("sources:\nstagger_seconds: 10\n")
-        with pytest.raises(CredentialCliError, match="no 'sources:'"):
+        _cmd_enable_source("hue", str(settings_path))
+        result_text = settings_path.read_text()
+        assert yaml.safe_load(result_text)["sources"] == ["hue"]
+        assert "stagger_seconds: 10" in result_text
+
+    def test_creates_first_entry_from_explicit_empty_sequence(self, tmp_path):
+        """`sources: []` is the other shape the shipped default can take - same
+        "no anchor to append after" situation as the bare-key case above, just
+        spelled differently, and must be handled the same way."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("sources: []\nstagger_seconds: 10\n")
+        _cmd_enable_source("octopus", str(settings_path))
+        result_text = settings_path.read_text()
+        assert yaml.safe_load(result_text)["sources"] == ["octopus"]
+        assert "stagger_seconds: 10" in result_text
+
+    def test_raises_on_empty_sources_with_trailing_comment(self, tmp_path):
+        """An inline comment on the empty `sources:` line would be silently dropped
+        by the line-replace this uses for the bare/`[]` cases - refuse rather than
+        lose it."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("sources: []  # nothing enabled yet\n")
+        with pytest.raises(CredentialCliError, match="edit it by hand"):
             _cmd_enable_source("hue", str(settings_path))
 
-    def test_raises_on_explicit_empty_sequence(self, tmp_path):
-        """`[]` is itself flow-style syntax, so this hits the flow-style rejection
-        (more specific/accurate) rather than a separate "is empty" message."""
+    @pytest.mark.parametrize("spelling", ["sources:  []", "sources: [ ]"])
+    def test_creates_first_entry_from_unusual_empty_sequence_spacing(self, tmp_path, spelling):
+        """`sources:  []`/`sources: [ ]`/etc. are just as valid and just as safe to
+        rewrite as the canonical `sources: []` - the empty-line check must not
+        require an exact spelling, only that nothing else trails the line.
+        (`sources:[]` with no space at all is excluded: verified it isn't reliably
+        valid YAML in the first place once a following key is present - pyyaml
+        raises "mapping values are not allowed here" - so there's nothing to fix
+        for that spelling; it already fails at the parse step with a clear error.)"""
         settings_path = tmp_path / "settings.yaml"
-        settings_path.write_text("sources: []\n")
-        with pytest.raises(CredentialCliError, match="flow style"):
-            _cmd_enable_source("hue", str(settings_path))
+        settings_path.write_text(f"{spelling}\nstagger_seconds: 10\n")
+        _cmd_enable_source("hue", str(settings_path))
+        result_text = settings_path.read_text()
+        assert yaml.safe_load(result_text)["sources"] == ["hue"]
+        assert "stagger_seconds: 10" in result_text
+
+    @pytest.mark.parametrize("spelling", ["sources: ~", "sources: null", "sources: Null", "sources: NULL"])
+    def test_creates_first_entry_from_explicit_null_spellings(self, tmp_path, spelling):
+        """`~`/`null`/`Null`/`NULL` all compose to YAML's null tag just like a bare
+        `sources:` key, but with different raw text (`.value` is `'~'`, `'null'`,
+        etc., not `''`) - checking the resolved tag rather than raw-text emptiness
+        is what catches all of them, not just the bare-key spelling."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text(f"{spelling}\nstagger_seconds: 10\n")
+        _cmd_enable_source("hue", str(settings_path))
+        result_text = settings_path.read_text()
+        assert yaml.safe_load(result_text)["sources"] == ["hue"]
+        assert "stagger_seconds: 10" in result_text
 
     def test_raises_on_populated_flow_style_sequence(self, tmp_path):
         """`sources: ["hue", "zappi"]` on one line - inserting a new block-style
@@ -898,6 +943,24 @@ class TestEnableSource:
         settings_path = tmp_path / "settings.yaml"
         settings_path.write_text("stagger_seconds: 10\n")
         with pytest.raises(CredentialCliError, match="no 'sources:'"):
+            _cmd_enable_source("hue", str(settings_path))
+
+    def test_raises_cleanly_on_empty_file(self, tmp_path):
+        """An empty file composes to None (yaml.compose has nothing to parse), not a
+        MappingNode - a clean CredentialCliError, not a raw AttributeError from
+        iterating None.value."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("")
+        with pytest.raises(CredentialCliError, match="top-level mapping"):
+            _cmd_enable_source("hue", str(settings_path))
+
+    def test_raises_cleanly_on_non_mapping_top_level_document(self, tmp_path):
+        """A settings.yaml that's just a bare sequence at the top level is valid YAML
+        but not a valid settings file - a clean CredentialCliError, not a raw
+        TypeError from unpacking non-tuple sequence items as (key, value) pairs."""
+        settings_path = tmp_path / "settings.yaml"
+        settings_path.write_text("- a\n- b\n")
+        with pytest.raises(CredentialCliError, match="top-level mapping"):
             _cmd_enable_source("hue", str(settings_path))
 
 

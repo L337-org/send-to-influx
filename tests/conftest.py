@@ -25,7 +25,6 @@ def _reset_influx_write_buffers():
 _BASE_SAMPLE_SETTINGS = {
     "sources": ["hue", "zappi", "speedtest"],
     "stagger_seconds": 10,
-    "default_source": "hue",
     "hue": {
         "db": "hue_db",
         "host": "hue.example.com",
@@ -73,9 +72,9 @@ def mock_main_deps():
 
     The settings include a real ``hue`` block because main() now expands configured
     sources into work units before dispatching, and Hue expands to one unit per
-    *configured bridge*. A bare ``{"default_source": "hue"}`` names a source with no
-    settings block at all, which correctly expands to nothing - previously that went
-    unnoticed only because get_class is mocked, so the missing block was never read.
+    *configured bridge*. A ``sources:`` list naming a source with no settings block at
+    all would correctly expand to nothing - previously that went unnoticed only because
+    get_class is mocked, so the missing block was never read.
     """
     mock_handler = MagicMock(STREAMING=False, instance=None)
     mock_handler.get_data.return_value = {}
@@ -86,7 +85,7 @@ def mock_main_deps():
         patch("sendtoinflux.toinflux.get_class", return_value=mock_handler) as mock_get_class,
     ):
         mock_load_settings.return_value = {
-            "default_source": "hue",
+            "sources": ["hue"],
             "hue": {"db": "hue_db", "interval": 60, "host": "hue.example.com", "user": "test_hue_user"},
         }
         yield mock_handler, mock_get_class

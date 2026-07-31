@@ -16,26 +16,21 @@ __license__ = "MIT License"
 import logging
 
 from toinflux.exceptions import ConfigError, ToolParamError
-from toinflux.general import INSTANCED_SOURCES, expand_sources, get_class, resolve_default_source
+from toinflux.general import INSTANCED_SOURCES, expand_sources, get_class
 
 
 def configured_sources(settings):
     """Return the lowercased source names the MCP tools expose - the same
-    ``sources:`` list the collectors run, so the two can't drift. Falls back to
-    the single default source when no list is configured.
+    ``sources:`` list the collectors run, so the two can't drift. Empty when
+    nothing is configured.
 
     :param settings: parsed settings dict
     :return: list of lowercased source names
     """
     raw = settings.get("sources")
-    if isinstance(raw, list) and raw:
+    if isinstance(raw, list):
         return [src.lower() for src in raw if isinstance(src, str)]
-    # Normalise the default-source fallback the same way: lowercase it, and drop
-    # a non-string value (YAML coerces `default_source: no` to False) so callers
-    # always get a list[str] - a mixed-case default would otherwise never match
-    # source.lower(), and a non-string would crash the error-message join.
-    default = resolve_default_source(settings)
-    return [default.lower()] if isinstance(default, str) else []
+    return []
 
 
 def resolve_handlers(source, settings, settings_file):
