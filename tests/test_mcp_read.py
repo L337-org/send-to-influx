@@ -1222,6 +1222,36 @@ class TestDataRangeResult:
         assert result["earliest"] is None and result["latest"] is None
         assert result["span_seconds"] is None
 
+    @pytest.mark.parametrize(
+        "duration,expected",
+        [
+            ("720h0m0s", 2592000),
+            ("0s", 0),
+            ("168h0m0s", 604800),
+            (" 24h0m0s ", 86400),
+            # Everything below must be None, not a confident number. findall alone accepted a
+            # *prefix*, so "720h junk" parsed as 2592000 - a malformed value from some future
+            # InfluxDB would then have been reported as a real retention rather than unknown.
+            ("720h junk", None),
+            ("junk720h", None),
+            ("720h0m0sEXTRA", None),
+            ("12x", None),
+            ("720", None),
+            ("INF", None),
+            ("", None),
+            (None, None),
+        ],
+    )
+    def test_only_a_whole_valid_duration_parses(self, duration, expected):
+        """A partly-parseable duration is not a duration.
+
+        This feeds `duration_seconds`, which is reported as fact to the caller, so guessing
+        from a prefix would be worse than admitting the value is unreadable.
+        """
+        from toinflux.mcp_read import _influx_duration_seconds
+
+        assert _influx_duration_seconds(duration) == expected
+
     def test_the_oldest_point_query_orders_ascending(self):
         """The whole mechanism: ORDER BY time ASC is what makes it the *oldest* point."""
         from toinflux.mcp_read import build_edge_time_query, build_latest_query

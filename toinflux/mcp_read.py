@@ -401,9 +401,9 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
 def _build_single_point_query(measurement, tag_filters, fields, order):
     """Build an InfluxQL SELECT for one point at either end of a measurement.
 
-    Shared by :func:`build_latest_query` and :func:`build_earliest_query`, which differ
-    only in the ORDER BY direction - kept as one implementation so the injection defence
-    below cannot drift between the newest-point and oldest-point reads.
+    Shared by :func:`build_latest_query` and :func:`build_edge_time_query` - kept as one
+    implementation so the measurement/tag validation and quoting below cannot drift between
+    the value read and the timestamp-only reads.
 
     Selects each field explicitly (not ``*``) so tag columns are excluded, and applies the
     source's static tag filters. Measurement, field and tag keys are charset-validated and
@@ -572,6 +572,10 @@ def run_query(session, influx_settings, db, query):
 
 _DURATION_UNIT_SECONDS = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
 _DURATION_PART_RE = re.compile(r"(\d+)([wdhms])")
+# The whole string must be unit/value pairs and nothing else. findall alone would accept a
+# *prefix* - "720h junk" and "junk720h" both yielded 2592000 - turning a malformed value from
+# some future InfluxDB into a confident retention figure reported as fact.
+_DURATION_RE = re.compile(r"(?:\d+[wdhms])+")
 
 
 def _cell(row, index, name):
@@ -606,11 +610,9 @@ def _influx_duration_seconds(duration):
     :param duration: an InfluxDB duration string, or None
     :return: seconds as int, or None when there is nothing parseable
     """
-    if not isinstance(duration, str):
+    if not isinstance(duration, str) or not _DURATION_RE.fullmatch(duration.strip()):
         return None
-    parts = _DURATION_PART_RE.findall(duration)
-    if not parts:
-        return None
+    parts = _DURATION_PART_RE.findall(duration.strip())
     return sum(int(value) * _DURATION_UNIT_SECONDS[unit] for value, unit in parts)
 
 
@@ -1008,11 +1010,17 @@ def _instance_state(handler):
 def _edge_time(handler, schema, order_query):
     """Return the unix-seconds timestamp of one edge point, or None when there is no data.
 
+    None covers every way the timestamp can be absent rather than wrong: no points matched,
+    or the row came back without a usable ``time`` column (see :func:`_cell`). An InfluxDB
+    transport failure or a server-side error still raises, because that is not the same thing
+    as "there is no data" and must not be reported as an empty range.
+
     :param handler: constructed DataHandler (caller owns its session)
     :param schema: the ReadSchema for the source
-    :param order_query: the built query (see build_earliest_query/build_latest_query)
+    :param order_query: the built query (see :func:`build_edge_time_query`)
     :return: unix seconds as int, or None
-    :raises SourceConnectionError: on a transport/parse failure or an InfluxDB-side error
+    :raises SourceConnectionError: transport failure, unparseable response, or an
+        InfluxDB-reported query error
     """
     columns, values = run_query(handler.session, handler.settings["influx"], schema.db, order_query)
     if not values:
