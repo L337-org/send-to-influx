@@ -2,6 +2,8 @@
 
 import copy
 from unittest.mock import MagicMock, patch
+import logging
+
 import pytest
 from toinflux.influx import DataHandler
 
@@ -88,3 +90,29 @@ def mock_main_deps():
             "hue": {"db": "hue_db", "interval": 60, "host": "hue.example.com", "user": "test_hue_user"},
         }
         yield mock_handler, mock_get_class
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logger_state():
+    """Restore the root logger's level and handlers around every test.
+
+    Several tests call ``configure_logging()`` for real - deliberately, since patching it would
+    hide which stream logging reaches - and it sets the root level and installs a handler. Tests
+    that tidied up afterwards restored handlers but not the level, so the suite finished with the
+    root logger at INFO instead of WARNING. Measured across the whole suite before this fixture:
+    WARNING/0 handlers in, INFO/0 handlers out.
+
+    Nothing was visibly broken by that, which is the problem: it makes any later log-capture
+    assertion depend on what ran before it, and the failure would appear as an unrelated test
+    being order-dependent. Restoring centrally means a new test cannot reintroduce it by
+    forgetting.
+    """
+    root = logging.getLogger()
+    level, handlers = root.level, list(root.handlers)
+    try:
+        yield
+    finally:
+        for handler in [h for h in root.handlers if h not in handlers]:
+            root.removeHandler(handler)
+            handler.close()
+        root.setLevel(level)

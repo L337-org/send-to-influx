@@ -214,6 +214,23 @@ dpkg -i "$DEB" >/dev/null 2>&1 || dpkg -i "$DEB"
 cp /usr/share/send-to-influx/example_settings.yaml /tmp/ci-settings.yaml
 /opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml >/dev/null \
     || fail "--check-config smoke test failed on the shipped example settings"
+# Which stream carries diagnostics, asserted against the *installed* artefact rather than a
+# checkout. Deliberately not done via the journal: systemd captures stdout and stderr alike, so
+# a line appearing in journalctl proves it was captured, never which fd it came from. Running
+# the binary directly is what distinguishes them. An invalid config is the cheapest trigger -
+# it must report on stderr and leave stdout empty, since stdout is where --dump/--print put
+# JSON a caller has to parse.
+printf 'sources: [hue]\ninflux: {db: home, user: u, password: p}\nhue: {host: h, user: t, interval: 5, db: home}\n' \
+    > /tmp/ci-bad-settings.yaml
+chmod 600 /tmp/ci-bad-settings.yaml
+stream_out=$(/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-bad-settings.yaml 2>/dev/null || true)
+stream_err=$(/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-bad-settings.yaml 2>&1 >/dev/null || true)
+[ -z "$stream_out" ] || fail "diagnostics reached stdout on the installed package: $stream_out"
+echo "$stream_err" | grep -q "Configuration error" || fail "diagnostics did not reach stderr on the installed package"
+/opt/send-to-influx/venv/bin/send-to-influx --check-config --settings /tmp/ci-settings.yaml 2>/dev/null \
+    | grep -q "Configuration OK" || fail "the --check-config verdict is not on stdout on the installed package"
+rm -f /tmp/ci-bad-settings.yaml
+pass "installed package: diagnostics on stderr, the --check-config verdict on stdout"
 [ -f "$SETTINGS" ] || fail "settings.yaml not created"
 [ -f /usr/share/send-to-influx/example_settings.yaml ] || fail "example not shipped under /usr/share"
 # settings.yaml is deliberately NOT a conffile (see build-deb.sh) - but the
@@ -260,8 +277,17 @@ if command -v logrotate >/dev/null 2>&1; then
     # neutralised (|| true) rather than left to run bare under this script's
     # `set -e`, or a nonzero-on-success run silently kills the whole suite
     # with no fail() message at all. Check the output text, not the status.
+    # logrotate needs the file to exist to say anything useful about rotating it. Created and
+    # then removed again, because leaving it behind breaks everything downstream: touch runs as
+    # root, so the file is root:root 0644, and rsyslog drops privileges ($PrivDropToUser syslog
+    # on Debian/Ubuntu) so it can never open it. The rule's `stop` still applies, so the
+    # service's lines are then dropped from the shared syslog *as well* - silently, with only
+    # "action 'action-0-builtin:omfile' suspended" in rsyslog's own journal to show for it.
+    # Reproduced exactly that way in an ubuntu:24.04 systemd container while chasing a CI
+    # failure. On a real install nothing creates this file: rsyslog makes it syslog:adm 0640.
     touch /var/log/send-to-influx.log
     logrotate -d -f /etc/logrotate.d/send-to-influx >/tmp/logrotate-check.out 2>&1 || true
+    rm -f /var/log/send-to-influx.log
     # Anchored on the actual "error:" prefix logrotate uses for a genuine
     # parse/permission failure (verified directly), not a bare substring -
     # a success run could otherwise false-positive on unrelated text
@@ -384,6 +410,88 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
         done
         [ "$mcp_up" = 1 ] || fail "MCP server did not bind 127.0.0.1:8420 under the hardened systemd unit"
         pass "MCP server bound and served OAuth metadata under the hardened systemd sandbox"
+    fi
+    # Nothing was *lost* by moving diagnostics to stderr: the journal must still capture them.
+    # This deliberately does not claim to prove *which* stream they came from - systemd captures
+    # stdout and stderr alike, so journalctl cannot distinguish them. The stream itself is
+    # asserted directly against the installed binary in the fresh-install scenario above, and by
+    # unit tests. What this adds is that the service, under its real unit and sandbox, still
+    # reaches the journal at all - which is the half that config-file reasoning cannot settle.
+    # Captured then matched from a here-string, following the dpkg -L precedent above: under this
+    # script's `set -o pipefail`, `journalctl | grep -q` can register a pipeline failure when an
+    # early match closes grep's end and journalctl takes SIGPIPE mid-write, regardless of whether
+    # it matched. The startup banner is near the front of the unit's log, so that is the likely
+    # case, not the unlikely one.
+    journal_ok=0
+    for _ in $(seq 1 10); do
+        service_journal="$(journalctl -u send-to-influx --no-pager 2>/dev/null || true)"
+        if grep -q "Starting send-to-influx" <<< "$service_journal"; then
+            journal_ok=1; break
+        fi
+        sleep 1
+    done
+    [ "$journal_ok" = 1 ] || fail "journalctl captured no startup line from the running service"
+    pass "journal still captures the service's log output"
+    # And the same lines must still reach the rsyslog-managed logfile, where present. rsyslog
+    # is only a Recommends:, so absence is not a failure - a missing *rule* would be.
+    # The rsyslog-to-logfile route. postinst does `systemctl try-restart rsyslog` on every
+    # configure, which is deliberately a no-op when rsyslog is stopped - so in this suite, which
+    # installs, upgrades and purges the package repeatedly, rsyslogd can legitimately be running
+    # from *before* the current conffile was laid down and will not have read it. The test has to
+    # establish its own precondition: restart rsyslog, not merely start it, so the shipped rule is
+    # certainly loaded before asserting anything about it.
+    if command -v rsyslogd >/dev/null 2>&1; then
+        systemctl restart rsyslog >/dev/null 2>&1 || true
+        sleep 2
+    fi
+    # Then prove journald -> syslog forwarding empirically rather than reading it out of config:
+    # the socket can exist while ForwardToSyslog=no leaves it unused. systemd-cat puts a line in
+    # the journal under a unique tag; if that reaches syslog, forwarding works here and any
+    # subsequent failure of our own rule is ours.
+    journald_forward=no
+    if pgrep -x rsyslogd >/dev/null 2>&1; then
+        probe_tag="stiprobe$$"
+        systemd-cat -t "$probe_tag" echo "forwarding probe" 2>/dev/null || true
+        for _ in $(seq 1 10); do
+            # -r over files, no pipe, so no SIGPIPE hazard.
+            if grep -rqs "$probe_tag" /var/log/syslog /var/log/messages 2>/dev/null; then
+                journald_forward=yes; break
+            fi
+            sleep 1
+        done
+    fi
+    if [ "$journald_forward" = "yes" ]; then
+        systemctl restart send-to-influx >/dev/null 2>&1 || true
+        log_ok=0
+        for _ in $(seq 1 15); do
+            if grep -q "Starting send-to-influx" /var/log/send-to-influx.log 2>/dev/null; then
+                log_ok=1; break
+            fi
+            sleep 1
+        done
+        if [ "$log_ok" = 1 ]; then
+            pass "rsyslog routes the service's logging to /var/log/send-to-influx.log"
+        else
+            # Every line guarded: this block only runs when something is already wrong, and under
+            # `set -euo pipefail` an unguarded `grep -c` on an empty file or `grep -o` with no match
+            # exits 1 and takes the run down mid-dump - which previously stopped the output before
+            # the useful part.
+            echo "  logfile: $(ls -l /var/log/send-to-influx.log 2>&1 || true)"
+            echo "  logfile lines: $(wc -l < /var/log/send-to-influx.log 2>/dev/null || echo 0)"
+            journal_json="$(journalctl -u send-to-influx -o json --no-pager -n 1 2>/dev/null || true)"
+            echo "  identifier: $(grep -o '"SYSLOG_IDENTIFIER":"[^"]*"' <<< "$journal_json" | head -1 || true)"
+            # Count OUR lines specifically - syslog renders them as "send-to-influx[pid]:" - not any
+            # line merely mentioning the string, which also matches systemd's own unit messages and
+            # made an earlier version of this dump misleading.
+            echo "  our lines in syslog: $(grep -c 'send-to-influx\[' /var/log/syslog 2>/dev/null || echo 0)"
+            echo "  any mention in syslog: $(grep -c 'send-to-influx' /var/log/syslog 2>/dev/null || echo 0)"
+            echo "  rsyslog loaded our rule: $(pgrep -x rsyslogd >/dev/null 2>&1 && echo 'rsyslogd running' || echo 'rsyslogd absent')"
+            fail "/var/log/send-to-influx.log captured no startup line although journald->syslog forwarding was proven working"
+        fi
+    else
+        echo "note: NOT VERIFIED - journald->syslog forwarding is not active here" \
+             "(rsyslogd=$(pgrep -x rsyslogd >/dev/null 2>&1 && echo running || echo 'not running'))," \
+             "so the logfile route cannot be exercised. Independent of the stdout/stderr split."
     fi
     pid_before=$(systemctl show -p MainPID --value send-to-influx)
     upgrade_and_assert_silent "upgrade with running service"

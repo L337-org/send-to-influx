@@ -39,9 +39,13 @@ DEFAULT_LOG_BACKUP_COUNT = 3
 def configure_logging(
     logfile=None, loglevel="INFO", log_max_bytes=DEFAULT_LOG_MAX_BYTES, log_backup_count=DEFAULT_LOG_BACKUP_COUNT
 ):
-    """Configure root logger with stdout and an optional rotating file handler.
+    """Configure root logger with a stderr handler and an optional rotating file handler.
 
-    :param logfile: path to log file; if None, logs to stdout only
+    Diagnostics go to **stderr**; stdout is reserved for the program's own output
+    (``--dump``/``--print`` JSON, ``--check-config``'s verdict), so a caller can parse it
+    while failures are still reported. Every level goes to stderr, not just errors.
+
+    :param logfile: path to log file; if None, logs to stderr only
     :type logfile: str or None
     :param loglevel: logging level name (e.g. "INFO", "DEBUG"); falls back to INFO if invalid
     :type loglevel: str
@@ -66,10 +70,18 @@ def configure_logging(
             root.removeHandler(handler)
             handler.close()
 
-    stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setFormatter(fmt)
-    stdout_handler._send_to_influx_handler = True
-    root.addHandler(stdout_handler)
+    # stderr, not stdout: stdout carries the program's *data* - --dump/--print JSON and
+    # --check-config's verdict - and a caller has to be able to parse it. Sharing the stream
+    # made a partial-failure dump unparseable, since the failure it reports lands in the
+    # middle of the payload it still produces. Every level goes here, not just errors:
+    # diagnostics are diagnostics, and splitting them across two streams by severity would
+    # interleave unpredictably. Under systemd both streams reach the journal (the unit pins
+    # neither), and the rsyslog rule matches on programname rather than stream, so
+    # journalctl and /var/log/send-to-influx.log are unaffected.
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(fmt)
+    stderr_handler._send_to_influx_handler = True
+    root.addHandler(stderr_handler)
 
     if logfile:
         try:

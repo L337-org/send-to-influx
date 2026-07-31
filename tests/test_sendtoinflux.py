@@ -4,6 +4,7 @@ import itertools
 import json
 import logging
 import signal
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -304,7 +305,8 @@ octopus:
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
             mock_exit.assert_called_once_with(1)
-            mock_print.assert_called_once_with("Configuration error: influx.url is required")
+            # On stderr, so --check-config's stdout carries only its verdict.
+            mock_print.assert_called_once_with("Configuration error: influx.url is required", file=sys.stderr)
 
     def test_main_verbose_flag_forces_debug_loglevel(self, mock_main_deps):
         """main with -v/--verbose overrides the configured loglevel with DEBUG."""
@@ -1010,8 +1012,13 @@ class TestConfigureLogging:
             root.removeHandler(h)
             h.close()
 
-    def test_adds_stdout_stream_handler(self):
-        """configure_logging adds a StreamHandler writing to stdout."""
+    def test_adds_stderr_stream_handler(self):
+        """configure_logging adds a StreamHandler writing to *stderr*.
+
+        stdout carries the program's data - --dump/--print JSON, --check-config's verdict -
+        so a caller can parse it. Logging there made a partial-failure dump unparseable,
+        because the failure it reports lands in the middle of the payload it still produces.
+        """
         import logging
         import sys
         from toinflux.general import configure_logging
@@ -1025,7 +1032,8 @@ class TestConfigureLogging:
                 h for h in added if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
             ]
             assert len(stream_handlers) == 1
-            assert stream_handlers[0].stream is sys.stdout
+            assert stream_handlers[0].stream is sys.stderr
+            assert stream_handlers[0].stream is not sys.stdout
         finally:
             self._remove_handlers(root, [h for h in root.handlers if h not in before])
 
@@ -1630,3 +1638,103 @@ class TestMultiBridgeWorkers:
             sendtoinflux.check_for_stalled_sources(units, set(), last_activity, stalled, self._settings())
         assert stalled == {("hue", "a.example.com")}
         assert mock_critical.call_args[0][1] == "hue@a.example.com"
+
+
+class TestOutputStreams:
+    """Which stream carries what.
+
+    stdout is the program's *data* - --dump/--print JSON and --check-config's verdict - and a
+    caller has to be able to parse it. Diagnostics go to stderr. Before this split, a dump
+    that partially succeeded was unparseable: the failure it reported landed in the middle of
+    the payload it still produced, so `--dump | jq` failed exactly when the output mattered.
+    """
+
+    @staticmethod
+    def _settings(sources):
+        return {
+            "sources": sources,
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "hue": {
+                "db": "hue_db",
+                "interval": 300,
+                "host": "a.example.com",
+                "user": "t1",
+                "host2": "b.example.com",
+                "user2": "t2",
+            },
+        }
+
+    @pytest.mark.parametrize("level", ["debug", "info", "warning", "error", "critical"])
+    def test_every_level_goes_to_stderr(self, level, capsys):
+        """Every level, not just errors - splitting diagnostics across two streams by
+        severity would interleave them unpredictably for anyone capturing either."""
+        from toinflux.general import configure_logging
+
+        configure_logging(loglevel="DEBUG")
+        getattr(logging, level)("marker-%s", level)
+        captured = capsys.readouterr()
+        assert f"marker-{level}" in captured.err
+        assert f"marker-{level}" not in captured.out
+
+    def test_check_config_verdict_on_stdout_failure_on_stderr(self, capsys, tmp_path):
+        """The verdict answers the question asked, so it belongs on stdout; the failure is
+        diagnostics. Exit codes unchanged either way."""
+        good = tmp_path / "good.yaml"
+        good.write_text(
+            "sources: [hue]\n"
+            "influx: {url: 'http://x', db: home, user: u, password: p}\n"
+            "hue: {host: h, user: t, interval: 5, db: home}\n"
+        )
+        good.chmod(0o600)
+        with patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config", "--settings", str(good)]):
+            with pytest.raises(SystemExit) as excinfo:
+                sendtoinflux.main()
+        assert excinfo.value.code == 0
+        captured = capsys.readouterr()
+        assert captured.out.strip() == "Configuration OK"
+
+        bad = tmp_path / "bad.yaml"
+        bad.write_text(
+            "sources: [hue]\ninflux: {db: home, user: u, password: p}\nhue: {host: h, user: t, interval: 5, db: home}\n"
+        )
+        bad.chmod(0o600)
+        with patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config", "--settings", str(bad)]):
+            with pytest.raises(SystemExit) as excinfo:
+                sendtoinflux.main()
+        assert excinfo.value.code == 1
+        captured = capsys.readouterr()
+        assert "Configuration error" in captured.err
+        assert captured.out.strip() == ""
+
+    def test_a_partially_failing_dump_leaves_stdout_parseable(self, capsys):
+        """The regression this split exists for.
+
+        One bridge answers, one does not: the payload is still emitted, the failure is still
+        reported, the exit code is still 2 - and stdout on its own is valid JSON, so
+        `--dump | jq` works. Deliberately does *not* patch print or logging: the whole point
+        is which real stream each one reaches.
+        """
+        settings = self._settings(["hue"])
+
+        def fake_get_class(source, settings_file=None, instance=None):
+            handler = MagicMock(STREAMING=False, instance=instance)
+            if instance == "b.example.com":
+                handler.get_data.side_effect = SourceConnectionError("bridge down")
+            else:
+                handler.get_data.return_value = {"lamp": 1}
+            return handler
+
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings", return_value=settings),
+            patch("sendtoinflux.toinflux.get_class", side_effect=fake_get_class),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "-s", "hue", "-d"]),
+        ):
+            with pytest.raises(SystemExit) as excinfo:
+                sendtoinflux.main()
+        assert excinfo.value.code == 2
+        captured = capsys.readouterr()
+        # stdout parses on its own - the assertion that fails if diagnostics return to it.
+        assert json.loads(captured.out) == {"a.example.com": {"lamp": 1}}
+        # ...and the failure was still reported, just elsewhere.
+        assert "bridge down" in captured.err
