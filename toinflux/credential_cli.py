@@ -621,12 +621,17 @@ def _enable_source(name, settings_path=None):
 
     if sources_node is None:
         # Empty `sources:` - a bare key, an explicit null spelling (`~`, `null`,
-        # `Null`, `NULL`), or `[]` with any internal spacing (`sources:[]` and
-        # `sources:  []` are just as valid as `sources: []`) - no existing item to
-        # append after. All of these fit entirely on the key's own line (see
-        # _load_sources_sequence), so replacing that one line with the key plus a
-        # single block item is safe - but only when there's nothing else trailing on
-        # it (e.g. an inline comment), which would otherwise be silently dropped.
+        # `Null`, `NULL`), or `[]` with any internal spacing (`sources:  []` is
+        # just as valid as `sources: []` - though `sources:[]` with *no* space at
+        # all isn't reliably valid YAML once another key follows in the same file,
+        # per direct testing; the regex below still matches it since it's harmless
+        # dead code there - yaml.compose() in _load_sources_sequence() would
+        # already have raised a parse error before this point for that case) - no
+        # existing item to append after. All of these fit entirely on the key's
+        # own line (see _load_sources_sequence), so replacing that one line with
+        # the key plus a single block item is safe - but only when there's
+        # nothing else trailing on it (e.g. an inline comment), which would
+        # otherwise be silently dropped.
         lines = text.splitlines(keepends=True)
         key_line = lines[sources_key.start_mark.line]
         indent = key_line[: len(key_line) - len(key_line.lstrip())]
