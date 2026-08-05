@@ -18,4 +18,4 @@ rpds-py~=0.30.0
 # Rust toolchain happens to be installed, and failing everywhere else). Linux
 # wheel coverage is identical between 48 and 49, so the .deb loses nothing.
 # Kept at the same version as the docker-mcp project, which hit this first.
-cryptography~=48.0.1
+cryptography~=50.0.0
