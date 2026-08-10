@@ -270,10 +270,12 @@ EOF
         # version of it removed the whole venv here and permanently broke the install.
         [ -x /usr/sbin/send-to-influx-set-credential ] || fail "reconfigure destroyed the venv"
         creds_dir="$(credentials_directory_for_check)"
+        check_status=0
         CREDENTIALS_DIRECTORY="$creds_dir" \
             /opt/send-to-influx/venv/bin/send-to-influx --settings "$SETTINGS" --check-config >/dev/null \
-            || fail "settings.yaml no longer valid after post-upgrade reconfigure"
+            || check_status=$?
         rm -rf "$creds_dir"
+        [ "$check_status" -eq 0 ] || fail "settings.yaml no longer valid after post-upgrade reconfigure"
         pass "post-upgrade reconfigure: sections back-filled, venv intact, config still valid"
 
         dpkg -P send-to-influx >/dev/null 2>&1
