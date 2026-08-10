@@ -57,13 +57,26 @@ fi
 # name from the input filename without stripping ".cred" and refuses the
 # mismatch. A no-op (empty directory) when CREDS_WORK=0, since nothing was
 # ever migrated to decrypt.
+#
+# A decrypt failure is NOT swallowed: this suite exists to catch exactly this
+# class of regression (e.g. the systemd 250-253 ".cred"-stripping bug this
+# same --name= guards against), and a field being merely optional at the
+# --check-config level (Hue/MQTT/MCP) must not let a real decrypt break go
+# unnoticed just because the caller only cares whether influx resolved.
+# Prints the error and returns non-zero instead of calling fail() directly -
+# this runs inside a $(...) subshell (see the call site), where fail()'s own
+# exit would only end the subshell, not the script.
 credentials_directory_for_check() {
-    local dir cred name
+    local dir cred name err
     dir="$(mktemp -d)"
     for cred in "$CREDSTORE"/*.cred; do
         [ -e "$cred" ] || continue
         name="$(basename "$cred" .cred)"
-        systemd-creds decrypt "$cred" "$dir/$name" --name="$name" 2>/dev/null || true
+        if ! err="$(systemd-creds decrypt "$cred" "$dir/$name" --name="$name" 2>&1)"; then
+            echo "systemd-creds decrypt failed for credential '$name': $err" >&2
+            rm -rf "$dir"
+            return 1
+        fi
     done
     echo "$dir"
 }
@@ -269,7 +282,7 @@ EOF
         # following it, so anything preinst deletes is gone for good - an earlier
         # version of it removed the whole venv here and permanently broke the install.
         [ -x /usr/sbin/send-to-influx-set-credential ] || fail "reconfigure destroyed the venv"
-        creds_dir="$(credentials_directory_for_check)"
+        creds_dir="$(credentials_directory_for_check)" || fail "could not decrypt the credstore for the post-upgrade check-config"
         check_status=0
         CREDENTIALS_DIRECTORY="$creds_dir" \
             /opt/send-to-influx/venv/bin/send-to-influx --settings "$SETTINGS" --check-config >/dev/null \
