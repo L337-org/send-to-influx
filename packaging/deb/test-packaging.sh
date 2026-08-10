@@ -26,6 +26,7 @@ CREDSTORE=/etc/send-to-influx/credstore.encrypted
 HUE_TEST_SECRET="${HUE_TEST_SECRET:-test-hue-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 MQTT_TEST_SECRET="${MQTT_TEST_SECRET:-test-mqtt-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 MCP_TEST_SECRET="${MCP_TEST_SECRET:-test-mcp-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
+INFLUX_TEST_SECRET="${INFLUX_TEST_SECRET:-test-influx-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 export DEBIAN_FRONTEND=noninteractive
 
 [ "$(id -u)" = 0 ] || { echo "must run as root (on a DISPOSABLE system)" >&2; exit 1; }
@@ -45,6 +46,48 @@ if printf 'probe' | systemd-creds encrypt --name=probe - - >/dev/null 2>&1; then
 else
     echo "note: systemd-creds encryption unavailable - credential assertions will be relaxed"
 fi
+
+# Decrypts the current credstore into a directory shaped like systemd's
+# LoadCredentialEncrypted= tmpfs (one plaintext file per credential name) -
+# what apply_credential_substitution() reads. A bare CLI --check-config run
+# outside the service (as below) has no CREDENTIALS_DIRECTORY of its own, so
+# without this a credential that lives only in systemd-creds reads back as
+# unset - fine for an optional field (Hue only warns) but fatal for the
+# required influx block. --name= is mandatory: on systemd 250-253 (e.g.
+# Debian 12's 252) an unnamed `systemd-creds decrypt` derives the expected
+# name from the input filename without stripping ".cred" and refuses the
+# mismatch. A no-op (empty directory) when CREDS_WORK=0, since nothing was
+# ever migrated to decrypt.
+#
+# A decrypt failure is NOT swallowed: this suite exists to catch exactly this
+# class of regression (e.g. the systemd 250-253 ".cred"-stripping bug this
+# same --name= guards against), and a field being merely optional at the
+# --check-config level (Hue/MQTT/MCP) must not let a real decrypt break go
+# unnoticed just because the caller only cares whether influx resolved.
+# Prints the error and returns non-zero instead of calling fail() directly -
+# this runs inside a $(...) subshell (see the call site), where fail()'s own
+# exit would only end the subshell, not the script.
+credentials_directory_for_check() {
+    local dir cred name err
+    dir="$(mktemp -d)"
+    # Explicit, not just implied by an empty credstore: when systemd-creds
+    # encryption itself is known unavailable, a *leftover* .cred file from a
+    # prior run on a persistent host must not turn into a decrypt failure -
+    # this run's own credential assertions are already relaxed (see the
+    # CREDS_WORK note at its definition), and decrypting is meaningless when
+    # nothing this run did could have produced a working credential anyway.
+    [ "$CREDS_WORK" = 1 ] || { echo "$dir"; return; }
+    for cred in "$CREDSTORE"/*.cred; do
+        [ -e "$cred" ] || continue
+        name="$(basename "$cred" .cred)"
+        if ! err="$(systemd-creds decrypt "$cred" "$dir/$name" --name="$name" 2>&1)"; then
+            echo "systemd-creds decrypt failed for credential '$name': $err" >&2
+            rm -rf "$dir"
+            return 1
+        fi
+    done
+    echo "$dir"
+}
 
 # A local stub answering /ping like a real InfluxDB v1 server - postinst's
 # --detect-influx-version makes a genuine, unauthenticated HTTP probe to route
@@ -85,7 +128,7 @@ trap 'kill "$FAKE_INFLUX_PID" 2>/dev/null || true' EXIT
 # without having checked anything. Assert the exact exit code instead.
 assert_secret_absent() {
     local secret
-    for secret in "$HUE_TEST_SECRET" "$MQTT_TEST_SECRET"; do
+    for secret in "$HUE_TEST_SECRET" "$MQTT_TEST_SECRET" "$INFLUX_TEST_SECRET"; do
         set +e
         # -F --: the secret is a literal string, not a regex - a CI-provided
         # value containing metacharacters (or starting with a dash) must not
@@ -102,12 +145,28 @@ assert_secret_absent() {
 # templates the old package doesn't ship (or a multiselect value outside its
 # Choices) is undefined-behaviour territory, so the release-upgrade scenario
 # sticks to what that package understands.
+#
+# influx-identity/influx-secret point at the same local stub HTTP server the
+# "fresh seeded install" scenario uses (FAKE_INFLUX_PORT), not left blank:
+# postinst only ever adds a source to sources: when INFLUX_OK=1, which
+# requires either a resolved identity+secret pair or an already-stored
+# InfluxDB credential - blank fields (the previous state here) mean hue is
+# never actually auto-enabled anywhere in this scenario, so sources: stays
+# empty throughout the whole release-upgrade flow below. That was invisible
+# while default_source made an empty sources: still pass --check-config;
+# since default_source was retired, "no sources are configured" is a hard
+# --check-config failure, and the later post-upgrade-reconfigure step in this
+# same scenario asserts --check-config still passes. Seeding a real (fake but
+# reachable) credential here lets hue auto-enable now and migrates an
+# influx-user/influx-password credential into systemd-creds, which is what
+# lets the later reconfigure step (which never re-supplies influx-identity/
+# influx-secret) auto-enable nuki too via the stored-credential fallback.
 seed_answers() {
     debconf-set-selections <<EOF
 send-to-influx send-to-influx/sources-to-configure multiselect hue
-send-to-influx send-to-influx/influx-url string
-send-to-influx send-to-influx/influx-identity string
-send-to-influx send-to-influx/influx-secret password
+send-to-influx send-to-influx/influx-url string http://127.0.0.1:${FAKE_INFLUX_PORT}
+send-to-influx send-to-influx/influx-identity string ci-influx-user
+send-to-influx send-to-influx/influx-secret password ${INFLUX_TEST_SECRET}
 send-to-influx send-to-influx/hue-host string ci-test-bridge.example.com
 send-to-influx send-to-influx/hue-user password ${HUE_TEST_SECRET}
 send-to-influx send-to-influx/hue-temperature-units select C
@@ -121,9 +180,6 @@ seed_answers_nuki() {
     seed_answers
     debconf-set-selections <<EOF
 send-to-influx send-to-influx/sources-to-configure multiselect hue, nuki
-send-to-influx send-to-influx/influx-url string http://127.0.0.1:${FAKE_INFLUX_PORT}
-send-to-influx send-to-influx/influx-identity string ci-influx-user
-send-to-influx send-to-influx/influx-secret password ci-influx-password
 send-to-influx send-to-influx/mqtt-broker-host string ci-mqtt-broker.example.com
 send-to-influx send-to-influx/mqtt-username string ci-mqtt-reader
 send-to-influx send-to-influx/mqtt-password password ${MQTT_TEST_SECRET}
@@ -234,8 +290,13 @@ EOF
         # following it, so anything preinst deletes is gone for good - an earlier
         # version of it removed the whole venv here and permanently broke the install.
         [ -x /usr/sbin/send-to-influx-set-credential ] || fail "reconfigure destroyed the venv"
-        /opt/send-to-influx/venv/bin/send-to-influx --settings "$SETTINGS" --check-config >/dev/null \
-            || fail "settings.yaml no longer valid after post-upgrade reconfigure"
+        creds_dir="$(credentials_directory_for_check)" || fail "could not decrypt the credstore for the post-upgrade check-config"
+        check_status=0
+        CREDENTIALS_DIRECTORY="$creds_dir" \
+            /opt/send-to-influx/venv/bin/send-to-influx --settings "$SETTINGS" --check-config >/dev/null \
+            || check_status=$?
+        rm -rf "$creds_dir"
+        [ "$check_status" -eq 0 ] || fail "settings.yaml no longer valid after post-upgrade reconfigure"
         pass "post-upgrade reconfigure: sections back-filled, venv intact, config still valid"
 
         dpkg -P send-to-influx >/dev/null 2>&1

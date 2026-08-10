@@ -100,6 +100,12 @@ one, items 2-3 don't apply, but the rest still do wherever relevant.
 
 ## Local development
 
+On Intel macOS, installing dev dependencies builds `cryptography` (pulled in transitively via
+`mcp` -> `pyjwt[crypto]`) from source, since it has shipped no `x86_64`/`universal2` macOS wheel
+since 49.0.0 - this needs Rust and OpenSSL 3.x installed first: `brew install rust openssl@3`.
+Apple Silicon and Linux are unaffected; this is a permanent upstream change, not something to
+work around by pinning `cryptography` here.
+
 ```bash
 # Setup (creates .venv, installs runtime + dev deps, editable-installs the package itself
 # so __version__ resolves to something other than "0.0.0-dev")

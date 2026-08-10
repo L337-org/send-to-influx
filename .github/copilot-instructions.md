@@ -194,7 +194,7 @@ except requests.exceptions.RequestException as e:
 - `pyyaml`: YAML configuration file parsing
 - `speedtest-cli`: Speedtest library for collecting network perf data
 - `paho-mqtt`: MQTT client for MQTT-based sources (Nuki); imported only in `toinflux/mqtt.py`, v2 callback API
-- `mcp`: official MCP SDK for the optional remote MCP server; imported only in `toinflux/mcpserver.py`. NOT pure Python: needs `pydantic_core`, `rpds-py`, `cffi` and `cryptography` (compiled, no fallback; `cryptography` via `pyjwt[crypto]`, imported unconditionally by `mcp/server/request_state.py` so it is load-bearing). `rpds-py` is held to `~=0.30.0` because 2026.x CalVer releases dropped Python 3.10 wheels; `cryptography` to `~=48.0.1` because 49.0.0 dropped the macOS universal2 wheel for arm64-only, leaving Intel Macs to source-build it (which silently succeeds wherever Rust is installed - validate such pins with `--only-binary=:all:`). Linux wheel coverage is identical between 48 and 49. The `.deb` build's compiled-wheel-matrix step fails loudly if wheel coverage regresses
+- `mcp`: official MCP SDK for the optional remote MCP server; imported only in `toinflux/mcpserver.py`. NOT pure Python: needs `pydantic_core`, `rpds-py`, `cffi` and `cryptography` (compiled, no fallback; `cryptography` via `pyjwt[crypto]`, imported unconditionally by `mcp/server/request_state.py` so it is load-bearing). `rpds-py` is held to `~=0.30.0` because 2026.x CalVer releases dropped Python 3.10 wheels. The `.deb` build's compiled-wheel-matrix step fails loudly if wheel coverage regresses
 
 ### Development Dependencies
 - `black`: Code formatting
