@@ -23,6 +23,8 @@ __license__ = "MIT License"
 
 import logging
 
+from mcp.types import ToolAnnotations
+
 from toinflux.exceptions import SourceConnectionError, ToolParamError
 
 # Shared per-call handler lifecycle (construct from current settings, close the
@@ -271,7 +273,13 @@ def _register_hue_write_tools(server, settings, settings_file):
     """Register Hue's write tools (light/plug control)."""
     import anyio
 
-    @server.tool()
+    # A read despite living in the write registrar: it only lists devices and
+    # their capabilities, changing nothing - grouped here because it exists
+    # purely to feed hue_set_light's device/bridge arguments.
+    @server.tool(
+        title="List Hue Devices",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    )
     async def hue_list_devices() -> dict:
         """List the controllable Hue lights and plugs across every configured bridge, each
         with its id, name, the bridge it is on, and the controls it supports (on/off,
@@ -286,7 +294,15 @@ def _register_hue_write_tools(server, settings, settings_file):
         list means "could not ask", not "no such light"."""
         return await anyio.to_thread.run_sync(_hue_list_devices_result, settings, settings_file)
 
-    @server.tool()
+    # Additive/reversible (turns a light on/off, adjusts brightness/colour) and
+    # idempotent (setting the same state twice ends in the same state), so
+    # neither destructive_hint nor a false idempotent_hint would be accurate.
+    @server.tool(
+        title="Set Hue Light State",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+        ),
+    )
     async def hue_set_light(
         device: str,
         on: "bool | None" = None,
@@ -341,7 +357,16 @@ def _register_speedtest_write_tools(server, settings, settings_file):
     """Register Speedtest's write tool (trigger a run)."""
     import anyio
 
-    @server.tool()
+    # Not idempotent - each call runs a fresh test and can return a different
+    # result - and, unlike every other tool here, genuinely open-world: it
+    # picks a best server from speedtest.net's public network rather than a
+    # fixed set of configured devices.
+    @server.tool(
+        title="Run Speed Test",
+        annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
+        ),
+    )
     async def speedtest_run() -> dict:
         """Run an internet speed test now, on the host this server runs on, and
         return the result (download/upload throughput and latency). Use this for an

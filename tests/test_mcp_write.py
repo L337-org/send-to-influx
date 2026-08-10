@@ -417,6 +417,27 @@ class TestWriteToolRegistration:
         names = {t.name for t in anyio.run(server.list_tools)}
         assert names == {"hue_list_devices", "hue_set_light"}
 
+    def test_every_write_tool_has_a_title_and_the_applicable_hint(self):
+        # Structured annotations are checked mechanically, not by reading the
+        # description - a client's auto-permission logic and a registry review
+        # both read title/annotations directly. read_only_hint must be explicit
+        # on every tool; a non-read-only tool must also carry an explicit
+        # destructive_hint, since that's the one an auto-permission gate acts on.
+        hue_handler = make_hue(mcp_read_write=True)
+        with patch("toinflux.mcp_write.resolve_handler", return_value=hue_handler):
+            server = self._server()
+            register_write_tools(server, self._hue_settings(), None)
+            register_write_tools(server, self._speedtest_settings(), None)
+        tools = anyio.run(server.list_tools)
+        assert len(tools) == 3
+        for tool in tools:
+            assert tool.title, f"{tool.name} has no title"
+            assert tool.title != tool.name, f"{tool.name}'s title must be distinct from its name"
+            assert tool.annotations is not None, f"{tool.name} has no annotations"
+            assert tool.annotations.read_only_hint is not None, f"{tool.name} has no read_only_hint"
+            if tool.annotations.read_only_hint is False:
+                assert tool.annotations.destructive_hint is not None, f"{tool.name} has no destructive_hint"
+
     def test_speedtest_write_tool_registered_when_enabled(self):
         with patch("toinflux.mcp_write.resolve_handler", return_value=make_speedtest(True)):
             server = self._server()
