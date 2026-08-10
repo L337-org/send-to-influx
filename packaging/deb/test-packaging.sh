@@ -26,6 +26,7 @@ CREDSTORE=/etc/send-to-influx/credstore.encrypted
 HUE_TEST_SECRET="${HUE_TEST_SECRET:-test-hue-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 MQTT_TEST_SECRET="${MQTT_TEST_SECRET:-test-mqtt-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 MCP_TEST_SECRET="${MCP_TEST_SECRET:-test-mcp-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
+INFLUX_TEST_SECRET="${INFLUX_TEST_SECRET:-test-influx-secret-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')}"
 export DEBIAN_FRONTEND=noninteractive
 
 [ "$(id -u)" = 0 ] || { echo "must run as root (on a DISPOSABLE system)" >&2; exit 1; }
@@ -69,6 +70,13 @@ fi
 credentials_directory_for_check() {
     local dir cred name err
     dir="$(mktemp -d)"
+    # Explicit, not just implied by an empty credstore: when systemd-creds
+    # encryption itself is known unavailable, a *leftover* .cred file from a
+    # prior run on a persistent host must not turn into a decrypt failure -
+    # this run's own credential assertions are already relaxed (see the
+    # CREDS_WORK note at its definition), and decrypting is meaningless when
+    # nothing this run did could have produced a working credential anyway.
+    [ "$CREDS_WORK" = 1 ] || { echo "$dir"; return; }
     for cred in "$CREDSTORE"/*.cred; do
         [ -e "$cred" ] || continue
         name="$(basename "$cred" .cred)"
@@ -120,7 +128,7 @@ trap 'kill "$FAKE_INFLUX_PID" 2>/dev/null || true' EXIT
 # without having checked anything. Assert the exact exit code instead.
 assert_secret_absent() {
     local secret
-    for secret in "$HUE_TEST_SECRET" "$MQTT_TEST_SECRET"; do
+    for secret in "$HUE_TEST_SECRET" "$MQTT_TEST_SECRET" "$INFLUX_TEST_SECRET"; do
         set +e
         # -F --: the secret is a literal string, not a regex - a CI-provided
         # value containing metacharacters (or starting with a dash) must not
@@ -158,7 +166,7 @@ seed_answers() {
 send-to-influx send-to-influx/sources-to-configure multiselect hue
 send-to-influx send-to-influx/influx-url string http://127.0.0.1:${FAKE_INFLUX_PORT}
 send-to-influx send-to-influx/influx-identity string ci-influx-user
-send-to-influx send-to-influx/influx-secret password ci-influx-password
+send-to-influx send-to-influx/influx-secret password ${INFLUX_TEST_SECRET}
 send-to-influx send-to-influx/hue-host string ci-test-bridge.example.com
 send-to-influx send-to-influx/hue-user password ${HUE_TEST_SECRET}
 send-to-influx send-to-influx/hue-temperature-units select C
