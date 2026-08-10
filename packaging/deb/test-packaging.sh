@@ -46,6 +46,28 @@ else
     echo "note: systemd-creds encryption unavailable - credential assertions will be relaxed"
 fi
 
+# Decrypts the current credstore into a directory shaped like systemd's
+# LoadCredentialEncrypted= tmpfs (one plaintext file per credential name) -
+# what apply_credential_substitution() reads. A bare CLI --check-config run
+# outside the service (as below) has no CREDENTIALS_DIRECTORY of its own, so
+# without this a credential that lives only in systemd-creds reads back as
+# unset - fine for an optional field (Hue only warns) but fatal for the
+# required influx block. --name= is mandatory: on systemd 250-253 (e.g.
+# Debian 12's 252) an unnamed `systemd-creds decrypt` derives the expected
+# name from the input filename without stripping ".cred" and refuses the
+# mismatch. A no-op (empty directory) when CREDS_WORK=0, since nothing was
+# ever migrated to decrypt.
+credentials_directory_for_check() {
+    local dir cred name
+    dir="$(mktemp -d)"
+    for cred in "$CREDSTORE"/*.cred; do
+        [ -e "$cred" ] || continue
+        name="$(basename "$cred" .cred)"
+        systemd-creds decrypt "$cred" "$dir/$name" --name="$name" 2>/dev/null || true
+    done
+    echo "$dir"
+}
+
 # A local stub answering /ping like a real InfluxDB v1 server - postinst's
 # --detect-influx-version makes a genuine, unauthenticated HTTP probe to route
 # identity/secret to the right fields and to gate auto-enable (INFLUX_OK), and
@@ -247,8 +269,11 @@ EOF
         # following it, so anything preinst deletes is gone for good - an earlier
         # version of it removed the whole venv here and permanently broke the install.
         [ -x /usr/sbin/send-to-influx-set-credential ] || fail "reconfigure destroyed the venv"
-        /opt/send-to-influx/venv/bin/send-to-influx --settings "$SETTINGS" --check-config >/dev/null \
+        creds_dir="$(credentials_directory_for_check)"
+        CREDENTIALS_DIRECTORY="$creds_dir" \
+            /opt/send-to-influx/venv/bin/send-to-influx --settings "$SETTINGS" --check-config >/dev/null \
             || fail "settings.yaml no longer valid after post-upgrade reconfigure"
+        rm -rf "$creds_dir"
         pass "post-upgrade reconfigure: sections back-filled, venv intact, config still valid"
 
         dpkg -P send-to-influx >/dev/null 2>&1
