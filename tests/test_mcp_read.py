@@ -501,6 +501,21 @@ class TestRegisterReadTools:
             "get_documentation",
         }
 
+    def test_every_read_tool_has_a_title_and_the_read_only_hint(self):
+        # Structured annotations are checked mechanically, not by reading the
+        # description - a client's auto-permission logic and a registry review
+        # both read title/annotations directly. Every read tool is genuinely
+        # read-only, so this is the one hint all six must carry.
+        server = self._server()
+        register_read_tools(server, self._settings(), None)
+        tools = anyio.run(server.list_tools)
+        assert tools
+        for tool in tools:
+            assert tool.title, f"{tool.name} has no title"
+            assert tool.title != tool.name, f"{tool.name}'s title must be distinct from its name"
+            assert tool.annotations is not None, f"{tool.name} has no annotations"
+            assert tool.annotations.read_only_hint is True, f"{tool.name} should be marked read_only_hint=True"
+
     def test_list_sources(self):
         server = self._server()
         register_read_tools(server, self._settings(), None)

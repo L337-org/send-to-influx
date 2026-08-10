@@ -528,9 +528,14 @@ computation costs isn't done twice at startup.
    `mcp_trigger_run`), keeping the name→id/param/capability mapping there. Then add a per-source
    registrar to `_WRITE_TOOL_REGISTRARS` in `toinflux/mcp_write.py` that wires the source's bespoke,
    well-described tool(s) onto the server (a write-enabled source with no registrar is logged and
-   skipped, not silently controllable). Add `<source>.mcp_read_write` (bool, default false) to
-   `example_settings.yaml`; validation already rejects a non-bool. The tools appear once the operator
-   opts in. Most sources are read-only and skip this.
+   skipped, not silently controllable). Every `@server.tool()` (read or write) needs a `title=`
+   distinct from its own name and an `annotations=ToolAnnotations(...)` with `read_only_hint` set
+   explicitly, plus `destructive_hint` when `read_only_hint=False` - a client's auto-permission logic
+   and a registry review both read these fields directly, never the description; enforced by
+   `test_every_read_tool_has_a_title_and_the_read_only_hint`/
+   `test_every_write_tool_has_a_title_and_the_applicable_hint`. Add `<source>.mcp_read_write` (bool,
+   default false) to `example_settings.yaml`; validation already rejects a non-bool. The tools appear
+   once the operator opts in. Most sources are read-only and skip this.
 5. Update README.md, UNITS.md, CLAUDE.md, and `.github/copilot-instructions.md`.
 6. Wire the source into the debconf install flow — a mechanical checklist, not a judgment call
    (every rule below is an existing, tested convention; the scenario suite enforces most of them):

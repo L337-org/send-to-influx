@@ -38,9 +38,16 @@ from dataclasses import dataclass, field as dataclass_field
 import requests
 import urllib3
 
+from mcp.types import ToolAnnotations
+
 from toinflux.exceptions import SourceConnectionError, ToolParamError
 from toinflux.general import INSTANCED_SOURCES
 from toinflux.mcp_common import close_session, configured_sources, resolve_handler, resolve_handlers
+
+# Every read tool is read-only and scoped to this server's own configured
+# sources/measurements, never an open-ended external domain - shared so the six
+# registrations below can't drift from each other on these two hints.
+_READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 
 # User-facing aggregation name -> InfluxQL selector/aggregator function. "raw"
 # is handled separately (no function, no GROUP BY) and is the default.
@@ -1151,7 +1158,7 @@ def register_read_tools(server, settings, settings_file=None):
     """
     import anyio
 
-    @server.tool()
+    @server.tool(title="List Data Sources", annotations=_READ_ONLY)
     async def list_sources() -> dict:
         """List the collector sources whose history can be queried, each with its
         InfluxDB measurement.
@@ -1162,7 +1169,7 @@ def register_read_tools(server, settings, settings_file=None):
         `list_fields` when you already know the source and want its fields."""
         return await anyio.to_thread.run_sync(_list_sources_result, settings, settings_file)
 
-    @server.tool()
+    @server.tool(title="List Source Fields", annotations=_READ_ONLY)
     async def list_fields(source: str) -> dict:
         """List the field keys available for one source, each with any known unit
         and, for coded fields, what each numeric value means.
@@ -1174,7 +1181,7 @@ def register_read_tools(server, settings, settings_file=None):
         source name from `list_sources`; an unknown one returns an error."""
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file)
 
-    @server.tool()
+    @server.tool(title="Query Historical Data", annotations=_READ_ONLY)
     async def query_history(
         source: str,
         field: str,
@@ -1231,7 +1238,7 @@ def register_read_tools(server, settings, settings_file=None):
             )
         )
 
-    @server.tool()
+    @server.tool(title="Get Current State", annotations=_READ_ONLY)
     async def get_current_state(source: str) -> dict:
         """Get a source's current state *now* - the live answer to "is the light
         on?", "is the door locked?", "which devices are on?". Use this, not
@@ -1249,7 +1256,7 @@ def register_read_tools(server, settings, settings_file=None):
         lock state reads back as 'locked', not a bare number)."""
         return await anyio.to_thread.run_sync(current_state_result, source, settings, settings_file)
 
-    @server.tool()
+    @server.tool(title="Get Data Range & Retention", annotations=_READ_ONLY)
     async def get_data_range(source: str) -> dict:
         """Get how far back a source's data goes, and how long InfluxDB keeps it.
 
@@ -1280,7 +1287,7 @@ def register_read_tools(server, settings, settings_file=None):
         unlimited retention."""
         return await anyio.to_thread.run_sync(data_range_result, source, settings, settings_file)
 
-    @server.tool()
+    @server.tool(title="Get Field Documentation", annotations=_READ_ONLY)
     async def get_documentation() -> dict:
         """Get a reference for what every source reports and what its values mean -
         units, and the meaning of coded values (e.g. Nuki lock/door state codes).
