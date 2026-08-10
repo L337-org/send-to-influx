@@ -102,12 +102,28 @@ assert_secret_absent() {
 # templates the old package doesn't ship (or a multiselect value outside its
 # Choices) is undefined-behaviour territory, so the release-upgrade scenario
 # sticks to what that package understands.
+#
+# influx-identity/influx-secret point at the same local stub HTTP server the
+# "fresh seeded install" scenario uses (FAKE_INFLUX_PORT), not left blank:
+# postinst only ever adds a source to sources: when INFLUX_OK=1, which
+# requires either a resolved identity+secret pair or an already-stored
+# InfluxDB credential - blank fields (the previous state here) mean hue is
+# never actually auto-enabled anywhere in this scenario, so sources: stays
+# empty throughout the whole release-upgrade flow below. That was invisible
+# while default_source made an empty sources: still pass --check-config;
+# since default_source was retired, "no sources are configured" is a hard
+# --check-config failure, and the later post-upgrade-reconfigure step in this
+# same scenario asserts --check-config still passes. Seeding a real (fake but
+# reachable) credential here lets hue auto-enable now and migrates an
+# influx-user/influx-password credential into systemd-creds, which is what
+# lets the later reconfigure step (which never re-supplies influx-identity/
+# influx-secret) auto-enable nuki too via the stored-credential fallback.
 seed_answers() {
     debconf-set-selections <<EOF
 send-to-influx send-to-influx/sources-to-configure multiselect hue
-send-to-influx send-to-influx/influx-url string
-send-to-influx send-to-influx/influx-identity string
-send-to-influx send-to-influx/influx-secret password
+send-to-influx send-to-influx/influx-url string http://127.0.0.1:${FAKE_INFLUX_PORT}
+send-to-influx send-to-influx/influx-identity string ci-influx-user
+send-to-influx send-to-influx/influx-secret password ci-influx-password
 send-to-influx send-to-influx/hue-host string ci-test-bridge.example.com
 send-to-influx send-to-influx/hue-user password ${HUE_TEST_SECRET}
 send-to-influx send-to-influx/hue-temperature-units select C
@@ -121,9 +137,6 @@ seed_answers_nuki() {
     seed_answers
     debconf-set-selections <<EOF
 send-to-influx send-to-influx/sources-to-configure multiselect hue, nuki
-send-to-influx send-to-influx/influx-url string http://127.0.0.1:${FAKE_INFLUX_PORT}
-send-to-influx send-to-influx/influx-identity string ci-influx-user
-send-to-influx send-to-influx/influx-secret password ci-influx-password
 send-to-influx send-to-influx/mqtt-broker-host string ci-mqtt-broker.example.com
 send-to-influx send-to-influx/mqtt-username string ci-mqtt-reader
 send-to-influx send-to-influx/mqtt-password password ${MQTT_TEST_SECRET}
