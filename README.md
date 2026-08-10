@@ -327,8 +327,8 @@ Running the script
 - Install runtime requirements with `pip install -r requirements.txt`
   - On Intel macOS, this builds `cryptography` (a transitive dependency via the `mcp` package)
     from source, since it has shipped no `x86_64`/`universal2` macOS wheel since 49.0.0 - install
-    [Rust](https://rustup.rs/) and OpenSSL 3.x first (e.g. `brew install openssl@3`). Apple Silicon
-    and Linux are unaffected.
+    Rust and OpenSSL 3.x first: `brew install rust openssl@3`. Apple Silicon and Linux are
+    unaffected.
 - Leave the script running in a screen session and sit back and watch the data roll in.
 
 Alternatively, see [Using the .deb package](#using-the-deb-package) below for a
