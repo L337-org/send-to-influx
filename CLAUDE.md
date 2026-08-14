@@ -35,7 +35,9 @@ differences, which let a real systemd-creds decrypt regression reach the 4.1 rel
 see "Testing" and "Packaging"), and `action-pins` (see below), in parallel on every push to `main` and
 every PR (`.github/workflows/premerge.yaml`) - all are required status checks on `main`'s ruleset, so a
 failure blocks merging rather than only being noticed
-afterward. Dependency and GitHub Actions updates are managed by Dependabot
+afterward. The cheap ones (lint, type-check, pytest, `action-pins`) also gate the `release/**/*` and
+`feature/**/*` tiers; see "Branch protection" for which checks gate which tier and how to classify a
+new one. Dependency and GitHub Actions updates are managed by Dependabot
 (`.github/dependabot.yml`), weekly.
 
 `action-pins` ("Action pins are immutable") fails the build when any `uses:` reference in
@@ -938,21 +940,38 @@ from `postinst`, once package files are unpacked and everything's been answered.
 
 Three rulesets, in decreasing order of strictness - `release/**/*` and `feature/**/*` mirror the same
 tiering pattern used on the maintainer's other repos (e.g. `docker-mcp`), adapted to this repo's own
-CI check names:
+CI check names. All three enforce a PR, resolved review threads, dismiss-stale-reviews, Copilot
+auto-review, and no branch deletion; what the tiers vary is who must approve, what may be
+force-pushed, and which checks block the merge.
 
-- `main`: no force-pushes/deletion, PR required (1 approval, code-owner review, resolved review
-  threads, squash-merge only), Copilot auto-review, CodeQL code scanning, and every check from
-  `premerge.yaml` required ("Run flake8", "Run mypy", "Run pytest (3.10)"-"Run pytest (3.14)", "Verify
-  .deb build on arm64", "Verify .deb on Debian 12 (systemd 252)", "Run integration tests (MQTT broker)",
-  "Action pins are immutable").
-- `release/**/*`: same PR requirements as `main` (1 approval, code-owner review, resolved threads) but
-  merge method widened to squash/merge/rebase, and CodeQL and "Verify .deb build on arm64" dropped from
-  the required checks (still run, just not a merge-blocking gate at this tier) - kept for longer-lived
-  release-prep branches that don't need the full ceremony of `main` on every push.
+**Every tier requires the same eight checks**: "Run flake8", "Run mypy", "Run pytest (3.10)"-"Run
+pytest (3.14)", and "Action pins are immutable". What the looser tiers drop is the slow and expensive
+half - CodeQL, "Verify .deb build on arm64", "Verify .deb on Debian 12 (systemd 252)" and "Run
+integration tests (MQTT broker)" gate `main` only. **That split is the rule for classifying a new
+check**, and it is about cost rather than importance: a cheap check goes on every tier, because
+catching a mistake on the branch where it was made is cheaper than catching it at the `main` PR; a
+multi-minute one gates `main` only, because the looser tiers exist to keep iteration fast. "Action
+pins are immutable" runs in about 5 seconds, so it sits in the first group despite being the most
+security-relevant of them - importance did not decide it, and asking "how long does it take?" is what
+settles the next one.
+
+- `main`: no force-pushes/deletion, signed commits (`required_signatures`, this tier only), 1 approval
+  with code-owner review, squash-merge only, CodeQL code scanning, and all twelve checks above
+  required.
+- `release/**/*`: same PR requirements as `main` (1 approval, code-owner review) and still no
+  force-pushes, but merge method widened to squash/merge/rebase and the four expensive checks dropped
+  as a merge gate (they still *run*) - for longer-lived release-prep branches that don't need the full
+  ceremony of `main` on every push.
 - `feature/**/*`: one tier looser again - force-pushes/rebasing allowed (no `non_fast_forward` rule),
   and the PR rule relaxed to 0 required approvals and no code-owner review (changes still go through a
   PR and must have review threads resolved, just without needing anyone's sign-off) - for fast
   iteration on shared topic branches without losing CI coverage entirely.
+
+The widened merge methods on the two looser tiers are theoretical: the repo-level settings disable
+merge-commit and rebase-merge outright, so squash is the only method actually available anywhere. The
+check lists above are a hand-maintained mirror of live config with nothing keeping them honest, and
+they have been wrong before - read the rulesets from the API (`gh api repos/L337-org/send-to-influx/rulesets`)
+before trusting this paragraph over them.
 (A fourth `gh-pages` ruleset existed until 2026-07-15, when the branch, its ruleset, and the APT
 publish job were retired in favour of [L337-org/apt](https://github.com/L337-org/apt) - that repo
 now carries the equivalent `gh-pages` ruleset: `non_fast_forward`, `deletion`,
