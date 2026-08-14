@@ -32,11 +32,26 @@ scenario suite against it - install/upgrade/reconfigure/purge lifecycle, see "Pa
 systemd-creds actually supported; the arm64 runner's systemd 255+ masks pre-254 behaviour
 differences, which let a real systemd-creds decrypt regression reach the 4.1 release), plus
 `integration-run` (the marked `integration` tests against a mosquitto broker started on the runner -
-see "Testing" and "Packaging"), in parallel on every push to `main` and every PR
-(`.github/workflows/premerge.yaml`) - all are required status checks on `main`'s ruleset, so a
+see "Testing" and "Packaging"), and `action-pins` (see below), in parallel on every push to `main` and
+every PR (`.github/workflows/premerge.yaml`) - all are required status checks on `main`'s ruleset, so a
 failure blocks merging rather than only being noticed
 afterward. Dependency and GitHub Actions updates are managed by Dependabot
 (`.github/dependabot.yml`), weekly.
+
+`action-pins` ("Action pins are immutable") fails the build when any `uses:` reference in
+`.github/workflows` or `.github/actions` names a tag or branch rather than a full 40-hex commit SHA.
+A tag can be repointed by its owner at any time, so `@v7` means CI runs whatever that owner last
+pushed to it - and `release.yaml` runs at `contents: write` with `GITHUB_TOKEN` available to the step
+that attaches the `.deb`, so a repointed tag lands next to a write-scoped token. First-party
+`actions/*` are not exempt: the standard makes no exception for them, and the pin costs nothing to
+hold because Dependabot's weekly `github-actions` run bumps the SHA and rewrites the trailing
+`# vX.Y.Z` comment naming the tag it corresponds to. Local `./` actions *are* exempt - they are this
+repo's own code at this repo's own commit, so there is no third party to repoint them. Quoted and
+bare forms are both accepted, since `uses: "owner/action@<sha>"` is exactly as pinned as the bare
+form and a guard that fails a legitimately pinned action is one someone eventually switches off
+wholesale. The job is a port of the identically-named one in
+[L337-org/apt](https://github.com/L337-org/apt), deliberately keeping the same logic rather than a
+second implementation of it; `docker-mcp` is the other precedent.
 
 ## Architecture
 
@@ -923,7 +938,8 @@ CI check names:
 - `main`: no force-pushes/deletion, PR required (1 approval, code-owner review, resolved review
   threads, squash-merge only), Copilot auto-review, CodeQL code scanning, and every check from
   `premerge.yaml` required ("Run flake8", "Run mypy", "Run pytest (3.10)"-"Run pytest (3.14)", "Verify
-  .deb build on arm64", "Verify .deb on Debian 12 (systemd 252)", "Run integration tests (MQTT broker)").
+  .deb build on arm64", "Verify .deb on Debian 12 (systemd 252)", "Run integration tests (MQTT broker)",
+  "Action pins are immutable").
 - `release/**/*`: same PR requirements as `main` (1 approval, code-owner review, resolved threads) but
   merge method widened to squash/merge/rebase, and CodeQL and "Verify .deb build on arm64" dropped from
   the required checks (still run, just not a merge-blocking gate at this tier) - kept for longer-lived
