@@ -41,12 +41,20 @@ jobs:
           # repoint them.
           #
           # Quoting is optional in YAML, so `uses: "owner/action@<sha>"` is exactly as
-          # pinned as the bare form. Both are accepted: a guard that fails a legitimately
-          # pinned action is one someone eventually switches off wholesale, which costs
-          # more than it ever caught.
+          # pinned as the bare form, and hex is case-insensitive, so an uppercase SHA is
+          # equally pinned - GitHub resolves one (verified: both the commits and tarball
+          # API endpoints answer 200 for an upper-cased SHA). All are accepted: a guard
+          # that fails a legitimately pinned action is one someone eventually switches
+          # off wholesale, which costs more than it ever caught. In practice every pin
+          # here is lowercase, because that is what Dependabot writes.
+          #
+          # The trailing "# vX.Y.Z" comment is a convention, not something this guard
+          # enforces - the immutability of the ref is the security property, and the
+          # comment only tells a human which tag the SHA was. Enforcing its format would
+          # fail a legitimate pin for a cosmetic reason, per the paragraph above.
           bad=$(grep -rnE '^[[:space:]]*(-[[:space:]]+)?uses:' .github/workflows .github/actions 2>/dev/null \
                 | grep -vE "uses:[[:space:]]*[\"']?\./" \
-                | grep -vE "uses:[[:space:]]*[\"']?[^[:space:]\"']+@[0-9a-f]{40}[\"']?([[:space:]]|\$)" \
+                | grep -vE "uses:[[:space:]]*[\"']?[^[:space:]\"']+@[0-9a-fA-F]{40}[\"']?([[:space:]]|\$)" \
                 || true)
           if [ -n "$bad" ]; then
             echo "::error::Every action must be pinned to a full 40-hex commit SHA." >&2

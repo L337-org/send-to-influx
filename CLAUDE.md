@@ -46,10 +46,15 @@ that attaches the `.deb`, so a repointed tag lands next to a write-scoped token.
 `actions/*` are not exempt: the standard makes no exception for them, and the pin costs nothing to
 hold because Dependabot's weekly `github-actions` run bumps the SHA and rewrites the trailing
 `# vX.Y.Z` comment naming the tag it corresponds to. Local `./` actions *are* exempt - they are this
-repo's own code at this repo's own commit, so there is no third party to repoint them. Quoted and
-bare forms are both accepted, since `uses: "owner/action@<sha>"` is exactly as pinned as the bare
-form and a guard that fails a legitimately pinned action is one someone eventually switches off
-wholesale. The job is a port of the identically-named one in
+repo's own code at this repo's own commit, so there is no third party to repoint them. Quoted, bare
+and uppercase forms are all accepted: `uses: "owner/action@<sha>"` is exactly as pinned as the bare
+form, and hex is case-insensitive, so GitHub resolves an uppercase SHA too (verified - both the
+commits and tarball API endpoints answer 200 for one). A guard that fails a legitimately pinned
+action is one someone eventually switches off wholesale, which costs more than it ever caught. In
+practice every pin here is lowercase, because that is what Dependabot writes. **The trailing comment
+is convention, not enforced** - the immutability of the ref is the security property, and the comment
+only tells a human which tag the SHA was, so enforcing its format would fail a legitimate pin for a
+cosmetic reason. The job is a port of the identically-named one in
 [L337-org/apt](https://github.com/L337-org/apt), deliberately keeping the same logic rather than a
 second implementation of it; `docker-mcp` is the other precedent.
 
