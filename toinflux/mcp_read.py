@@ -41,7 +41,7 @@ import urllib3
 from mcp.types import ToolAnnotations
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
-from toinflux.general import INSTANCED_SOURCES, expand_sources
+from toinflux.general import INSTANCED_SOURCES, expand_sources, shares_measurement
 from toinflux.mcp_common import close_session, configured_sources, resolve_handler, resolve_handlers
 
 # Every read tool is read-only and scoped to this server's own configured
@@ -1002,17 +1002,30 @@ def resolve_schema(source, settings, settings_file, instance=None):
         # without touching this install's settings.
         instance_values = None
         if handler.MCP_INSTANCE_TAG:
-            instance_values = discover_tag_values(
-                handler.session, influx_settings, db, measurement, handler.MCP_INSTANCE_TAG
-            )
-            # Union with the *configured* targets, for a source that has them. Discovered
-            # values alone would refuse a bridge that is configured but has not collected
-            # yet - which Hue's predecessor `bridge` parameter accepted, since it validated
-            # against configured bridges - and would leave query_history
-            # disagreeing with get_current_state, which reads live from whatever is
-            # configured. Neither direction is enough on its own: a decommissioned bridge
-            # still has history worth querying, and a new one has config but no data.
-            instance_values = instance_values | set(configured_instances(source, settings))
+            configured = set(configured_instances(source, settings))
+            if shares_measurement(source):
+                # Configured only. Where several sources write to one measurement - the three
+                # MyEnergi types, told apart by the same `device` tag that now carries the
+                # operator's label - a value discovered in the data cannot be attributed to
+                # one of them, so a zappi query would otherwise accept an eddi's label. The
+                # config does distinguish them, being separate blocks and separate sources,
+                # so it is the authority here. Discovery is skipped rather than filtered
+                # afterwards, since its answer could not be attributed anyway.
+                #
+                # Consequence worth knowing: a decommissioned MyEnergi device's history stops
+                # being reachable by label, where a decommissioned Hue bridge's does not. The
+                # asymmetry is real and follows from Hue owning its measurement outright.
+                instance_values = configured
+            else:
+                # The union matters in both directions. Discovered alone would refuse a
+                # bridge that is configured but has not collected yet - which Hue's
+                # predecessor `bridge` parameter accepted - and would leave query_history
+                # disagreeing with get_current_state, which reads live from whatever is
+                # configured. Configured alone would lose a decommissioned bridge's history.
+                instance_values = (
+                    discover_tag_values(handler.session, influx_settings, db, measurement, handler.MCP_INSTANCE_TAG)
+                    | configured
+                )
     except Exception:
         # A fresh requests.Session is created per handler (per tool call); close
         # it if discovery fails, or a long-running server accumulates open
@@ -1211,6 +1224,21 @@ def _run_query_history(handler, schema, field, start, end, aggregation, group_by
                 schema.instance_tag,
                 schema.instance_tag,
             )
+            continue
+        # Only report producers this source owns, and only *after* the untagged case above -
+        # filtering first would silently drop an untagged series, which is the very thing that
+        # warning exists to prevent. A grouped query on a shared measurement returns every
+        # source's producers, the three MyEnergi types sharing `myenergi`, so without this a
+        # zappi query would answer with the eddi and harvi devices too. For a source that owns
+        # its measurement the allowlist already holds the discovered values, so nothing is
+        # filtered and behaviour is unchanged. One rule serves both.
+        #
+        # Deliberately not guarded on the allowlist being non-empty. An empty allowlist means
+        # this source owns nothing in the measurement, so the honest answer is nothing -
+        # skipping the filter there reported *every* producer instead, which for a shared
+        # measurement means answering a zappi question with the eddi and harvi devices.
+        # Reproduced before fixing; maximally wrong rather than merely incomplete.
+        if key not in schema.instance_values:
             continue
         instances[key] = {
             "points": annotated["points"],

@@ -7,14 +7,420 @@ __version__ = "1.0"
 
 import logging
 import datetime
+from dataclasses import dataclass
 import requests
 from requests.auth import HTTPDigestAuth
-from toinflux.influx import DataHandler
+from toinflux.influx import DataHandler, escape_key_or_tag_value
 from toinflux.exceptions import ConfigError, SourceConnectionError
+
+# The device types that share the `myenergi` measurement, each its own source and settings
+# block. Used to check label uniqueness across all three, since a label is the `device` tag
+# value and two blocks agreeing on one would merge their series.
+DEVICE_SOURCES = ("zappi", "eddi", "harvi")
+
+# A newline cannot appear in a line protocol tag value: it is what separates points, so
+# one inside a tag ends the point early and turns the rest into a second point. Written
+# with chr() rather than escapes so it cannot be mangled by a shell or an editor.
+NEWLINES = (chr(10), chr(13))
+
+
+@dataclass(frozen=True)
+class MyEnergiDevice:
+    """One configured MyEnergi device: which serial identifies it, what to call it, and
+    which fields to collect.
+
+    ``label`` is the emitted ``device`` tag value, not a display name - see
+    ``enumerate_devices``. ``fields`` is None when everything the API returns should be
+    written.
+    """
+
+    serial: str
+    label: str
+    fields: "list[str] | None"
+
+
+def enumerate_devices(source, source_settings):
+    """
+    Return the devices configured for one MyEnergi source, plus any problems found.
+
+    Two config shapes, and both may appear together. A ``serial`` at the top of the block is
+    the legacy single-device form every existing install has; its ``label`` is optional and
+    **defaults to the source name**, which is what keeps such an install writing
+    ``device=zappi`` exactly as before and is why this feature needs no data migration. A
+    ``devices:`` list adds further devices, and each entry must name its ``label``
+    explicitly - there is no sensible default for the second device, and deriving one from
+    the serial would produce exactly the unreadable tag values that tagging by label exists
+    to avoid.
+
+    ``fields`` resolves device-first, then block-level, then everything the API returns, so
+    a shared list can be written once and overridden per device.
+
+    Follows ``philipshue.enumerate_bridges``' shape - (devices, errors, warnings) - so the
+    two instanced sources report configuration problems the same way, and validation can
+    treat them alike.
+
+    :param source: the source name, used as the legacy device's default label
+    :type source: str
+    :param source_settings: that source's settings block
+    :type source_settings: dict or None
+    :return: (devices, errors, warnings)
+    :rtype: tuple
+    """
+    if not isinstance(source_settings, dict):
+        return [], [f"{source} settings must be a mapping"], []
+    devices, errors, warnings = [], [], []
+    block_fields, block_field_errors = _checked_fields(source, source_settings.get("fields"))
+    errors.extend(block_field_errors)
+
+    if source_settings.get("serial") is not None:
+        serial, serial_errors = _checked_serial(source, source_settings["serial"])
+        errors.extend(serial_errors)
+        label, label_errors = _checked_legacy_label(source, source_settings)
+        errors.extend(label_errors)
+        # Not created when its fields failed validation either, matching the entry path
+        # below. Unreachable while validate_settings() raises on any error, but the
+        # alternative default would be to treat a broken `fields` as "collect everything",
+        # which is the wrong way to fail if this ever became reachable.
+        if serial is not None and label is not None and not block_field_errors:
+            devices.append(MyEnergiDevice(serial=serial, label=label, fields=block_fields))
+
+    raw = source_settings.get("devices")
+    if raw is None:
+        # A bare `devices:` key parses as None. Treated as absent rather than rejected, the
+        # same way the shipped `sources:` key behaves when every entry is commented out. If
+        # that leaves the block with no device at all, the source simply expands to no
+        # worker and the existing nothing-to-collect path explains why.
+        raw = []
+    if not isinstance(raw, list):
+        errors.append(f"{source}.devices must be a list (got {type(raw).__name__})")
+        raw = []
+
+    for index, entry in enumerate(raw):
+        device, entry_errors = _device_from_entry(f"{source}.devices[{index}]", entry, block_fields)
+        errors.extend(entry_errors)
+        if device is not None:
+            devices.append(device)
+
+    errors.extend(_duplicate_errors(source, devices))
+    if not devices:
+        warnings.append(f"no {source} device is configured, so {source} will not be collected")
+    return devices, errors, warnings
+
+
+def _checked_label(position, label, what="label"):
+    """
+    Return a label as a stripped, writable string, or an error saying why not.
+
+    A label becomes the InfluxDB ``device`` tag, and the line protocol has no escape for a
+    newline - a newline is what separates points, so one inside a tag value ends the point
+    early and turns the remainder into a *second* point. Reproduced with a label of
+    "Garage<newline>myenergi,device=Injected fake=1", which produced an extra point nobody
+    configured. Rejected here, at the configuration boundary, where the error can name the
+    key at fault; ``escape_key_or_tag_value()`` refuses one too, as the backstop that makes
+    it unreachable by any route.
+
+    :param position: what to name in the message
+    :type position: str
+    :param label: the configured value
+    :param what: the key name, for the message
+    :type what: str
+    :return: (label, errors); label is None when there are errors
+    :rtype: tuple
+    """
+    if not isinstance(label, str):
+        return None, [f"{position}.{what} must be a name (got {type(label).__name__})"]
+    stripped = label.strip()
+    if not stripped:
+        return None, [f"{position}.{what} is blank"]
+    if any(char in stripped for char in NEWLINES):
+        return None, [
+            f"{position}.{what} must not contain a newline - it becomes an InfluxDB tag, "
+            f"and a newline there would split the point in two"
+        ]
+    return stripped, []
+
+
+def _checked_legacy_label(source, source_settings):
+    """
+    Return the label for the legacy top-of-block device, or an error saying why not.
+
+    An **absent** label defaults to the source name, which is what keeps an existing install
+    writing ``device=zappi`` and is why this feature needed no data migration.
+
+    A **present but blank or non-string** label is an error rather than falling back to that
+    default. The two cases are different intentions: no label means none was wanted, while
+    ``label: "   "`` means one was wanted and got typed wrongly. Falling back there would
+    hand the operator ``device=zappi`` when they asked for a name, so their dashboard would
+    show the wrong thing with nothing saying why - and it would treat the same mistake more
+    leniently than a ``devices:`` entry does, where a blank label is refused.
+
+    :param source: the source name, used as the default and in messages
+    :type source: str
+    :param source_settings: that source's settings block
+    :type source_settings: dict
+    :return: (label, errors); label is None when there are errors
+    :rtype: tuple
+    """
+    if "label" not in source_settings or source_settings["label"] is None:
+        return source, []
+    label, errors = _checked_label(source, source_settings["label"])
+    if not errors:
+        return label, []
+    # The blank case gets an extra hint that removing the key restores the default, which
+    # only applies to this optional legacy form.
+    return None, [
+        e + f" - remove it to fall back to {source!r}, or give it a name" if e.endswith("is blank") else e
+        for e in errors
+    ]
+
+
+def _device_from_entry(position, entry, block_fields):
+    """
+    Build one device from a ``devices:`` entry, or report why it cannot be built.
+
+    Extracted from ``enumerate_devices`` to keep it inside the project's complexity limit
+    once each field gained validation.
+
+    :param position: what to name in messages, e.g. "zappi.devices[0]"
+    :type position: str
+    :param entry: the list entry as parsed from YAML
+    :param block_fields: the block-level fields list, used when the entry names none
+    :return: (device, errors); device is None when there are errors
+    :rtype: tuple
+    """
+    if not isinstance(entry, dict):
+        return None, [f"{position} must be a mapping (got {type(entry).__name__})"]
+    if entry.get("serial") is None:
+        return None, [f"{position} has no serial"]
+    serial, errors = _checked_serial(position, entry["serial"])
+    if errors:
+        return None, errors
+    fields, errors = _checked_fields(position, entry.get("fields", block_fields))
+    if errors:
+        return None, errors
+    if entry.get("label") is None:
+        return None, [
+            f"{position} has no label - every entry in a devices list must name one, "
+            f"since the label is what identifies the device in InfluxDB and in answers"
+        ]
+    label, errors = _checked_label(position, entry["label"])
+    if errors:
+        return None, errors
+    return MyEnergiDevice(serial=serial, label=label, fields=fields), []
+
+
+def _checked_serial(position, value):
+    """
+    Return a device serial as a non-blank string, or an error saying why not.
+
+    A blank serial was accepted before - only ``is None`` was tested - and failed much later
+    at device selection, reported as "no device has serial ''" rather than as the
+    configuration mistake it is.
+
+    :param position: what to name in the message, e.g. "zappi" or "zappi.devices[0]"
+    :type position: str
+    :param value: the configured value
+    :return: (serial, errors); serial is None when there are errors
+    :rtype: tuple
+    """
+    serial = str(value).strip()
+    if not serial:
+        return None, [f"{position} has a blank serial"]
+    return serial, []
+
+
+def _checked_fields(position, value):
+    """
+    Return a validated ``fields`` list, or an error saying why not.
+
+    ``fields: "frq"`` - a bare string rather than a list - was accepted and then iterated
+    character by character when filtering the API response, so the collector ran, wrote
+    *nothing*, and said nothing about why. That is the worst shape a config mistake can take.
+    It applied to the block-level list before devices existed, so this closes a latent bug as
+    well as guarding the new path.
+
+    :param position: what to name in the message
+    :type position: str
+    :param value: the configured value, or None
+    :return: (fields, errors); fields is None both on error and when nothing was configured,
+        the latter meaning collect every field the API returns
+    :rtype: tuple
+    """
+    if value is None:
+        return None, []
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        return None, [
+            f"{position}.fields must be a list of field names (got {type(value).__name__}); "
+            f'a single field still needs to be a list, e.g. ["frq"]'
+        ]
+    bad = [item for item in value if not isinstance(item, str)]
+    if bad:
+        return None, [f"{position}.fields must contain only field names (got {', '.join(repr(b) for b in bad)})"]
+    if any(not item.strip() for item in value):
+        return None, [f"{position}.fields must not contain a blank field name"]
+    # Stripped, because a padded name silently matches nothing in the API response: the field
+    # would simply be missing from the written point with nothing saying why.
+    return [item.strip() for item in value], []
+
+
+def _duplicate_errors(source, devices):
+    """
+    Return errors for duplicate labels or serials within one source's devices.
+
+    A repeated label means two devices writing to one series, silently interleaving two
+    devices' readings; a repeated serial means two workers collecting the same device and
+    overwriting each other at second precision. Both are self-contradictory config rather
+    than something to warn about and continue past.
+
+    :param source: source name, for the messages
+    :type source: str
+    :param devices: the devices enumerated so far
+    :type devices: list
+    :return: error strings, empty when there are none
+    :rtype: list
+    """
+    errors = []
+    for attribute, description in (("label", "label"), ("serial", "serial")):
+        seen, repeated = set(), set()
+        for device in devices:
+            value = getattr(device, attribute)
+            if value in seen:
+                repeated.add(value)
+            seen.add(value)
+        for value in sorted(repeated):
+            errors.append(
+                f"{source} has more than one device with {description} {value!r}; "
+                f"each device needs its own {description}"
+            )
+    return errors
+
+
+def duplicate_label_errors(settings):
+    """
+    Return errors for a label used by more than one MyEnergi source.
+
+    Uniqueness has to span all three blocks, not just one: the types share the ``myenergi``
+    measurement and the label is the ``device`` tag value, so a zappi and an eddi both
+    labelled "Garage" would merge into a single series carrying both devices' fields.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: error strings, empty when there are none
+    :rtype: list
+    """
+    owners = {}
+    for source in DEVICE_SOURCES:
+        devices, _, _ = enumerate_devices(source, settings.get(source))
+        for device in devices:
+            owners.setdefault(device.label, []).append(source)
+    errors = []
+    for label, sources in sorted(owners.items()):
+        if len(sources) > 1:
+            errors.append(
+                f"MyEnergi label {label!r} is used by more than one source ({', '.join(sorted(sources))}); "
+                f"labels are the shared `device` tag, so they must be unique across zappi, eddi and harvi"
+            )
+    return errors
 
 
 class MyEnergi(DataHandler):
     """Child class of DataHandler to get data from MyEnergi"""
+
+    # All three types share the `myenergi` measurement, and `device` is the tag that tells
+    # them apart - now carrying the operator's label rather than the type name. Naming it as
+    # the instance axis is what lets a read scope to one device and report per device.
+    # MCP_TAG_FILTERS is deliberately empty now: the filter is per instance, so it comes from
+    # mcp_tag_filters() below rather than a class constant that cannot vary.
+    MCP_INSTANCE_TAG = "device"
+    MCP_TAG_FILTERS: dict = {}
+
+    def device(self):
+        """
+        Return the configured device this handler collects from.
+
+        ``self.instance`` is a device label; ``None`` means the first configured device, which
+        is what keeps a single-device install - and every caller that builds a handler without
+        an instance - behaving exactly as it did before this existed.
+
+        :return: the device
+        :rtype: MyEnergiDevice
+        :raises ConfigError: nothing is configured, or the named label is not configured.
+            Fatal rather than transient, so a worker whose device has been removed stops
+            instead of retrying a doomed lookup forever
+        """
+        devices, errors, _ = enumerate_devices(self.source, self.source_settings)
+        if errors:
+            raise ConfigError("; ".join(errors))
+        if not devices:
+            raise ConfigError(f"no {self.source} device is configured")
+        if self.instance is None:
+            return devices[0]
+        for device in devices:
+            if device.label == self.instance:
+                return device
+        known = ", ".join(sorted(device.label for device in devices))
+        raise ConfigError(f"no {self.source} device is labelled {self.instance!r}; configured labels: {known}")
+
+    def mcp_tag_filters(self):
+        """
+        Scope reads to this handler's own device.
+
+        A method rather than the class attribute because the answer depends on which device
+        this handler serves. It also carries the type discrimination that
+        ``MCP_TAG_FILTERS = {"device": "zappi"}`` used to: the three types share one
+        measurement, so without a device filter a read of "the myenergi measurement" would
+        return all three types' devices.
+
+        :return: tag filters for this handler's reads
+        :rtype: dict
+        """
+        return {"device": self.device().label}
+
+    def heartbeat_tags(self):
+        """
+        Tag the heartbeat with this device, matching the tag its own data carries.
+
+        The base implementation would tag ``host=<instance>``, which for MyEnergi is a device
+        label and not a host at all - so the health series would disagree with the
+        measurement it reports on, and could not be joined to it. Several devices of one type
+        would otherwise also share ``collector_status,source=zappi`` and overwrite each other
+        at second precision, the same defect Speedtest had across hosts.
+
+        This adds a ``device`` tag to a legacy install's heartbeat, where previously there was
+        none. A deliberate emitted-data change on a liveness signal, noted in UNITS.md: old
+        heartbeat points sit in an untagged series.
+
+        :return: ``{"device": <this device's label>}``
+        :rtype: dict
+        """
+        return {"device": self.device().label}
+
+    def auth_serial(self):
+        """
+        Return the serial used as the MyEnergi API's digest username.
+
+        The credential is account-scoped rather than per device: the real zappi serial
+        authenticates against the zappi, eddi *and* harvi endpoints alike, verified against
+        the live account. So this defaults to the device's own serial, which is what every
+        existing install already sends.
+
+        ``myenergi.auth_serial`` overrides it, and exists because that account-scoping is not
+        *proven* for a second device of one type - the test account has one zappi. If a
+        second device's own serial turns out not to authenticate, this is already here and no
+        one needs a config change to work around it.
+
+        :return: the serial to authenticate with
+        :rtype: str
+        """
+        # Stripped, and ignored when that leaves nothing: `auth_serial: "   "` is truthy, so
+        # it was sent as the Digest username and authentication simply failed, with nothing
+        # pointing at three spaces in the config as the cause. Falling back is safe here -
+        # unlike a blank `label`, which is refused, because the fallback for this *is* the
+        # normal behaviour rather than a different answer.
+        override = str(self.settings.get("myenergi", {}).get("auth_serial") or "").strip()
+        if override:
+            return override
+        return self.device().serial
 
     def get_data_from_myenergi(self, url):
         """
@@ -26,8 +432,7 @@ class MyEnergi(DataHandler):
         :rtype: dict
         """
         # Get the data for the given serial from the MyEnergi API
-        serial = self.source_settings["serial"]
-        auth = HTTPDigestAuth(serial, self.settings["myenergi"]["apikey"])
+        auth = HTTPDigestAuth(self.auth_serial(), self.settings["myenergi"]["apikey"])
         try:
             response = self.session.get(url, auth=auth, timeout=self.settings["myenergi"].get("timeout", 5))
         except requests.exceptions.RequestException as e:
@@ -74,15 +479,17 @@ class MyEnergi(DataHandler):
             wrong, and no amount of waiting fixes that - this stops the worker instead of
             backing off forever
         """
+        device = self.device()
         myenergi_data = self.get_data_from_myenergi(self.settings["myenergi"][url_key])
-        device_data = self._select_device(myenergi_data, device_key)
+        device_data = self._select_device(myenergi_data, device_key, device)
 
-        device_settings = self.settings[device_key]
-        if "fields" in device_settings:
-            return {k: device_data[k] for k in device_settings["fields"] if k in device_data}
+        # Fields resolve device-first, then block-level, then everything the API returned -
+        # see enumerate_devices, which does that resolution once so this cannot disagree.
+        if device.fields is not None:
+            return {k: device_data[k] for k in device.fields if k in device_data}
         return device_data
 
-    def _select_device(self, myenergi_data, device_key):
+    def _select_device(self, myenergi_data, device_key, device=None):
         """
         Pick the device matching this source's configured serial out of the API response.
 
@@ -106,7 +513,7 @@ class MyEnergi(DataHandler):
         # SourceConnectionError/ConfigError split the worker loop relies on exactly as the
         # IndexError did.
         devices = myenergi_data.get(device_key) or []
-        serial = str(self.source_settings["serial"])
+        serial = (device or self.device()).serial
         for device in devices:
             if str(device.get("sno")) == serial:
                 return device
@@ -145,8 +552,9 @@ class MyEnergi(DataHandler):
         :return: Charge, Import, Export and Genera values in kWh
         :rtype: dict
         """
-        # Get the Day/Hour data from the MyEnergi API
-        serial = self.source_settings["serial"]
+        # Get the Day/Hour data from the MyEnergi API - this handler's own device, so a
+        # second zappi's day totals are its own rather than the first one's.
+        serial = self.device().serial
         dayhour_url = self.settings["myenergi"]["dayhour_url"] + serial
         response_data = self.get_data_from_myenergi(dayhour_url + "-" + str(year) + "-" + str(month) + "-" + str(day))
         charge_amount = 0
@@ -188,7 +596,6 @@ class Zappi(MyEnergi):
     # by the device tag - so the read schema needs both the measurement override
     # and the tag filter, or a query for one device would return all three.
     MCP_MEASUREMENT = "myenergi"
-    MCP_TAG_FILTERS = {"device": "zappi"}
     MCP_FIELD_METADATA = {
         "frq": {"unit": "Hz"},
         "gen": {"unit": "W"},
@@ -207,7 +614,11 @@ class Zappi(MyEnergi):
         :return: data
         :rtype: dict
         """
-        self.influx_header = "myenergi,device=zappi "
+        # The label, escaped: send_data() takes the header verbatim, so a label
+        # containing a comma, space or equals would end the tag set early and
+        # silently corrupt the point. A legacy install's label defaults to the
+        # source name, so this stays byte-identical to what it already writes.
+        self.influx_header = f"myenergi,device={escape_key_or_tag_value(self.device().label)} "
         self.data = self.parse_zappi_data()
         return self.data
 
@@ -240,7 +651,6 @@ class Eddi(MyEnergi):
 
     MCP_DESCRIPTION = "MyEnergi Eddi hot-water diverter: diversion power, tank temperatures, and status."
     MCP_MEASUREMENT = "myenergi"
-    MCP_TAG_FILTERS = {"device": "eddi"}
     MCP_FIELD_METADATA = {
         "frq": {"unit": "Hz"},
         "div": {"unit": "W"},
@@ -256,7 +666,11 @@ class Eddi(MyEnergi):
         :return: data
         :rtype: dict
         """
-        self.influx_header = "myenergi,device=eddi "
+        # The label, escaped: send_data() takes the header verbatim, so a label
+        # containing a comma, space or equals would end the tag set early and
+        # silently corrupt the point. A legacy install's label defaults to the
+        # source name, so this stays byte-identical to what it already writes.
+        self.influx_header = f"myenergi,device={escape_key_or_tag_value(self.device().label)} "
         self.data = self.parse_eddi_data()
         return self.data
 
@@ -275,7 +689,6 @@ class Harvi(MyEnergi):
 
     MCP_DESCRIPTION = "MyEnergi Harvi energy monitor: CT-clamp power readings per channel."
     MCP_MEASUREMENT = "myenergi"
-    MCP_TAG_FILTERS = {"device": "harvi"}
     MCP_FIELD_METADATA = {
         "ectp1": {"unit": "W"},
         "ectp2": {"unit": "W"},
@@ -289,7 +702,11 @@ class Harvi(MyEnergi):
         :return: data
         :rtype: dict
         """
-        self.influx_header = "myenergi,device=harvi "
+        # The label, escaped: send_data() takes the header verbatim, so a label
+        # containing a comma, space or equals would end the tag set early and
+        # silently corrupt the point. A legacy install's label defaults to the
+        # source name, so this stays byte-identical to what it already writes.
+        self.influx_header = f"myenergi,device={escape_key_or_tag_value(self.device().label)} "
         self.data = self.parse_harvi_data()
         return self.data
 

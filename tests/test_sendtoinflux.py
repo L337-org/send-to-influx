@@ -132,7 +132,7 @@ class TestMain:
         ):
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
-            mock_get_class.assert_called_once_with("zappi", None, instance=None)
+            mock_get_class.assert_called_once_with("zappi", None, instance="zappi")
 
     def test_main_uses_settings_arg(self, mock_main_deps):
         """main with --settings passes the path through to load_settings and get_class."""
@@ -146,7 +146,7 @@ class TestMain:
         ):
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
-            mock_get_class.assert_called_once_with("zappi", "/etc/send-to-influx/settings.yaml", instance=None)
+            mock_get_class.assert_called_once_with("zappi", "/etc/send-to-influx/settings.yaml", instance="zappi")
 
     def test_main_registers_sigterm_handler(self, mock_main_deps):
         """main registers signal_handler for both SIGINT and SIGTERM."""
@@ -174,13 +174,18 @@ class TestMain:
                 "stagger_seconds": 3,
                 # A real bridge: hue expands to one worker per *configured* bridge, so a
                 # hue with no block at all would correctly expand to no worker and drop
-                # out of the list these tests are checking.
+                # out of the list these tests are checking. zappi is instanced the same way
+                # now - one worker per configured device - so it needs a real device here for
+                # the same reason.
                 "hue": {"db": "hue_db", "interval": 60, "host": "hue.example.com", "user": "tok"},
+                "zappi": {"db": "zappi_db", "interval": 60, "serial": "12345"},
             }
             sendtoinflux.main()
             mock_run_workers.assert_called_once()
             call_args = mock_run_workers.call_args[0]
-            assert call_args[0] == [("hue", "hue.example.com"), ("zappi", None), ("speedtest", None)]
+            # zappi carries its device label, which for a legacy single-device block defaults
+            # to the source name; speedtest has no instances at all and stays None.
+            assert call_args[0] == [("hue", "hue.example.com"), ("zappi", "zappi"), ("speedtest", None)]
             assert call_args[2] == 3
 
     def test_main_logs_sources_on_multi_source_startup(self, caplog):
@@ -197,8 +202,11 @@ class TestMain:
                 "stagger_seconds": 3,
                 # A real bridge: hue expands to one worker per *configured* bridge, so a
                 # hue with no block at all would correctly expand to no worker and drop
-                # out of the list these tests are checking.
+                # out of the list these tests are checking. zappi is instanced the same way
+                # now - one worker per configured device - so it needs a real device here for
+                # the same reason.
                 "hue": {"db": "hue_db", "interval": 60, "host": "hue.example.com", "user": "tok"},
+                "zappi": {"db": "zappi_db", "interval": 60, "serial": "12345"},
             }
             sendtoinflux.main()
             assert any("workers=hue@hue.example.com, zappi, speedtest" in record.message for record in caplog.records)
