@@ -249,19 +249,32 @@ def test_every_ci_job_has_a_timeout():
 def test_ci_job_timeouts_are_sane():
     """A timeout so large it never fires is the same as not having one, and one so small it
     fires on a healthy run gets raised until it is the former. These are sized at roughly ten
-    times the observed maximum, so the bound is meaningful without being flaky."""
+    times the observed maximum, so the bound is meaningful without being flaky.
+
+    Values must be literal, for the same reason: a `${{ }}` expression is legal in Actions but
+    its value is unknowable here, so it would satisfy the check while leaving the job
+    effectively unbounded.
+    """
     for path, name, job in _workflow_jobs():
         minutes = job.get("timeout-minutes")
         if minutes is None:
             continue  # reported by the test above
         if isinstance(minutes, str):
-            # YAML keeps a quoted value a string, and Actions accepts that. An expression is
-            # resolved at run time and cannot be checked here - the presence test above still
-            # guarantees the job is bounded, which is the property that matters.
-            if "${{" in minutes:
-                continue
+            # YAML keeps a quoted value a string and Actions accepts that, so a digit string is
+            # a valid timeout and is coerced.
+            #
+            # A `${{ }}` expression is refused, and NOT because Actions rejects it - it does
+            # not. GitHub's context-availability table lists jobs.<job_id>.timeout-minutes as
+            # accepting the github, needs, strategy, matrix, vars and inputs contexts, so an
+            # expression is perfectly legal there. It is refused because its value is unknowable
+            # at review time, which is precisely what this test checks: a timeout resolving to
+            # 600 at run time would satisfy a static bound while leaving the job effectively
+            # unbounded. Nothing here needs one, so the bound stays real; if a job ever does,
+            # change this deliberately rather than working around it.
             assert minutes.strip().isdigit(), (
-                f"{path}:{name} has timeout-minutes={minutes!r}, which is neither a number nor a " f"GitHub expression"
+                f"{path}:{name} has timeout-minutes={minutes!r}, which is not a literal number. "
+                f"An expression is valid Actions, but its value cannot be checked here, so the "
+                f"bound would stop meaning anything"
             )
             minutes = int(minutes)
         assert isinstance(minutes, int) and not isinstance(
