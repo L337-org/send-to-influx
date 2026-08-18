@@ -684,8 +684,8 @@ The read tools treat that tag as a dimension rather than flattening it:
   "Kitchen" reading that could be either of two bridges. An unknown value is an error, not an empty
   result; the accepted values are the producers found in the data plus any target that is configured
   but has not collected yet, so a newly added bridge and a decommissioned one are both queryable.
-  Hue's older `bridge` parameter still works but is deprecated since 5.3 and will be removed in 6.0
-  - use `instance`, which behaves the same way for every source rather than for Hue alone.
+  Hue's older `bridge` parameter is gone, replaced by `instance`, which behaves the same way
+  for every source rather than for Hue alone.
 - `get_current_state` and `get_data_range` likewise report per producer. The range is worth having
   per host: a machine added last week and one collecting for a year share a merged span that is
   true of the measurement and false of both.

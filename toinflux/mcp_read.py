@@ -1007,7 +1007,8 @@ def resolve_schema(source, settings, settings_file, instance=None):
             )
             # Union with the *configured* targets, for a source that has them. Discovered
             # values alone would refuse a bridge that is configured but has not collected
-            # yet - which the `bridge` parameter accepted - and would leave query_history
+            # yet - which Hue's predecessor `bridge` parameter accepted, since it validated
+            # against configured bridges - and would leave query_history
             # disagreeing with get_current_state, which reads live from whatever is
             # configured. Neither direction is enough on its own: a decommissioned bridge
             # still has history worth querying, and a new one has config but no data.
@@ -1075,52 +1076,13 @@ def list_fields_result(source, settings, settings_file):
         close_session(handler.session)
 
 
-def _resolve_deprecated_bridge(source, bridge, instance):
-    """Fold the deprecated ``bridge`` parameter into ``instance``.
-
-    ``bridge`` was Hue's bespoke way of scoping a read to one bridge, predating the shared
-    instance mechanism. Both name a value of the source's instance tag, so keeping two
-    parameters would mean two names for one thing on a model-facing surface - which costs
-    context on every session and invites a caller to pass both.
-
-    Kept working for one release rather than removed outright, per the project's
-    compatibility rule, and it emits a real ``DeprecationWarning`` rather than only a
-    docstring note: a note is invisible to an existing caller. The message names the
-    replacement, when it was deprecated and when it goes, because an open-ended deprecation
-    never gets actioned.
-
-    :param source: source name, for the message only
-    :param bridge: the deprecated argument, or None
-    :param instance: the current argument, or None
-    :return: the effective instance value
-    :raises ToolParamError: both were given, which is ambiguous rather than merely redundant
-    """
-    if bridge is None:
-        return instance
-    if instance is not None and instance != bridge:
-        raise ToolParamError(
-            f"pass either 'instance' or the deprecated 'bridge', not both - they name the same "
-            f"thing and were given different values ({instance!r} and {bridge!r}), so which one "
-            f"was meant cannot be guessed"
-        )
-    message = (
-        "'bridge' is deprecated since 5.3 and will be removed in 6.0; use 'instance' instead, "
-        "which does the same thing for every source with more than one producer, not only Hue"
-    )
-    warnings.warn(message, DeprecationWarning, stacklevel=3)
-    # Also logged: a DeprecationWarning is silent by default in an application, so the
-    # warning alone would never reach an operator running the packaged service.
-    logging.warning("MCP read for %r used the deprecated 'bridge' parameter. %s", source, message)
-    return bridge
-
-
 def _validate_instance(schema, instance):
     """Check an ``instance`` argument against the source's live tag values.
 
     Two separate refusals, and both matter. A source with no instance axis is told so
     outright rather than having the value ignored - accepting it, running an unscoped
     query and echoing it back would tell the caller the answer was narrowed when it was
-    not, the same dishonesty the ``bridge`` guard exists to prevent. A value the tag has
+    not, the same dishonesty Hue's predecessor ``bridge`` guard existed to prevent. A value the tag has
     never held is refused with the known values listed, because the alternative is a
     confidently empty result that reads as "no data" rather than "no such producer".
 
@@ -1149,13 +1111,15 @@ def _validate_instance(schema, instance):
 
 
 def _query_history_result(
-    settings, settings_file, *, source, field, start, end, aggregation, group_by, limit, bridge=None, instance=None
+    settings, settings_file, *, source, field, start, end, aggregation, group_by, limit, instance=None
 ):
     """Build the query_history tool payload (runs in a worker thread).
 
-    ``bridge`` is the deprecated spelling of ``instance``, kept working for one release -
-    see :func:`_resolve_deprecated_bridge`. Both name the same thing now: a value of the
-    source's instance tag, which for Hue is the bridge's ``host``.
+    ``instance`` names a value of the source's instance tag, which for Hue is the bridge's
+    ``host``. Hue's older ``bridge`` parameter is gone rather than deprecated: an MCP client
+    fetches the tool schema at session start, so there is no persisted caller to keep
+    compatible, and a second name for one concept would cost context on every session to
+    serve a window shorter than one conversation.
 
     Scoping happens in one place, ``build_query``, via the shared instance mechanism.
     Previously ``bridge`` took a different route - ``resolve_schema(instance=...)``, which
@@ -1163,19 +1127,8 @@ def _query_history_result(
     implementations that could drift. The handler is now resolved unscoped and the filter
     applied at the query, which is also why the Hue-specific branch here is gone.
     """
-    # Resolve the schema *before* judging `bridge`, so an unusable source fails on being an
-    # unusable source and nothing else. The other order warned about a deprecated parameter
-    # for a call that never ran - and named the bad source while doing it, producing
-    # "MCP read for '' used the deprecated 'bridge' parameter". The predecessor guard
-    # deferred the same judgement for the same reason; this rewrite had dropped that
-    # ordering, and the parametrised bad-source test did not catch it because it only
-    # asserted which error was raised, not that nothing was logged.
     handler, schema = resolve_schema(source, settings, settings_file)
     try:
-        # Keep the caller's own spelling, so the payload echoes back what was passed and
-        # nothing else - see the echo block below.
-        requested_instance = instance
-        instance = _resolve_deprecated_bridge(source, bridge, instance)
         # `instance` names a value of a tag in the *data*, which is not the same question as
         # resolve_schema's own `instance` (a collector work unit in INSTANCED_SOURCES - a
         # bridge with its own credentials and worker). A read from InfluxDB needs no
@@ -1185,16 +1138,8 @@ def _query_history_result(
         result = _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit, instance=instance)
         # Say what was actually queried: without this the model cannot tell a single-producer
         # answer from an estate-wide one, and the two mean different things.
-        #
-        # Echo back the caller's *own* spelling and nothing else. Echoing `instance` for a
-        # caller who only passed `bridge` would add two keys to their payload - which is
-        # precisely the churn the alias exists to avoid, and it made the claim that an
-        # existing client's payload is unchanged simply untrue. `instance` is derived from
-        # `bridge` internally, so the derived value must not be mistaken for a request.
-        if bridge is not None:
-            result["bridge"] = bridge
-        if requested_instance is not None:
-            result["instance"] = requested_instance
+        if instance is not None:
+            result["instance"] = instance
             result["instance_tag"] = schema.instance_tag
         return result
     finally:
@@ -1703,7 +1648,6 @@ def register_read_tools(server, settings, settings_file=None):
         aggregation: str = "raw",
         group_by: "str | None" = None,
         limit: int = DEFAULT_RESULT_POINTS,
-        bridge: "str | None" = None,
         instance: "str | None" = None,
     ) -> dict:
         """Query a field's history for a source from InfluxDB. Reads only; to
@@ -1721,9 +1665,6 @@ def register_read_tools(server, settings, settings_file=None):
           sum/count/first/last/spread/stddev, which each require a group_by interval.
         - group_by: a bucket interval like '5m'/'1h'/'1d' (only with aggregation).
         - limit: max points returned, 1..5000 (values outside are clamped).
-        - bridge: **deprecated since 5.3, removed in 6.0** - use `instance`, which does the
-          same thing for every multi-producer source rather than Hue alone. Still accepted
-          for now; passing both is an error unless they agree.
 
         - instance: for a source whose measurement holds several producers, restricts
           the query to one of them - Speedtest tags each point with the collecting
@@ -1757,7 +1698,6 @@ def register_read_tools(server, settings, settings_file=None):
                 aggregation=aggregation,
                 group_by=group_by,
                 limit=limit,
-                bridge=bridge,
                 instance=instance,
             )
         )

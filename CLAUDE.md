@@ -317,12 +317,15 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     and is still load-bearing (it is what forces `Hue.bridge()` to resolve, so `resolve_handler` refuses an
     unconfigured bridge), but the read tools no longer depend on it for scoping - one concept, one
     implementation.
-    - **`bridge` is the deprecated spelling of `instance`**, kept working for one release
-      (`_resolve_deprecated_bridge`): deprecated in 5.3, removed in 6.0. It emits a real
-      `DeprecationWarning` *and* logs, because that warning class is suppressed by default in an application
-      and would otherwise never reach an operator running the packaged service. Both spellings with different
-      values is refused as ambiguous rather than resolved by picking one; the result echoes back whichever
-      spelling the caller used, so an existing client's payload is unchanged while it migrates.
+    - **`bridge` was removed outright rather than deprecated**, and the reasoning generalises to any
+      model-facing parameter. The compatibility rule about accepting a renamed key for a release exists for
+      interfaces whose *caller* persists across an upgrade - a settings key, a library signature, an emitted
+      metric name. An MCP tool schema is the opposite: the client fetches it with `tools/list` at session
+      start, so after an upgrade the next session already uses the new name and there is no stored caller to
+      break. An alias would therefore have cost context on every session - which a tool description is
+      explicitly a budget for - to cover a window shorter than one conversation. It was never a documented
+      parameter in the README either, so no user was following it. **Do not add a deprecation window to a
+      tool parameter by reflex; ask first whether the caller persists.**
     - **An unscoped Hue query now reports per bridge rather than merging.** A deliberate reversal of the
       earlier span-everything default: two bridges can each hold a "Kitchen", so a merged series is a wrong
       answer, not an estate-wide one.

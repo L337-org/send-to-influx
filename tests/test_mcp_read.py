@@ -2,7 +2,6 @@
 time parsing, field discovery, result annotation, and tool registration)."""
 
 import datetime
-import warnings
 from unittest.mock import MagicMock, patch
 
 import anyio
@@ -32,7 +31,6 @@ from toinflux.mcp_read import (
     run_query,
     single_series,
     configured_instances,
-    _resolve_deprecated_bridge,
     _validate_instance,
     _annotate_state_field,
     _influx_read_request,
@@ -1021,61 +1019,6 @@ class TestMultiBridgeReads:
         value - leaking it into the allowlist would make None an acceptable argument."""
         assert configured_instances("speedtest", {"sources": ["speedtest"]}) == []
 
-    def _history(self, **kwargs):
-        from toinflux.mcp_read import _query_history_result
-
-        schema = ReadSchema(
-            source="hue",
-            measurement="hue",
-            db="h",
-            allowed_fields={"Kitchen"},
-            instance_tag="host",
-            instance_values={"a.example.com"},
-        )
-        handler = MagicMock()
-        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
-        with (
-            patch("toinflux.mcp_read.resolve_schema", return_value=(handler, schema)),
-            patch("toinflux.mcp_read.run_query", return_value=[]),
-            warnings.catch_warnings(),
-        ):
-            warnings.simplefilter("ignore")
-            return _query_history_result(
-                {"sources": ["hue"]},
-                None,
-                source="hue",
-                field="Kitchen",
-                start="-1h",
-                end="now",
-                aggregation="raw",
-                group_by=None,
-                limit=10,
-                **kwargs,
-            )
-
-    def test_a_bridge_only_caller_gets_no_instance_keys(self):
-        """The alias exists so an existing client need not change. Echoing `instance` and
-        `instance_tag` back to a caller who only passed `bridge` adds two keys to their
-        payload - exactly the churn being avoided. `instance` is derived from `bridge`
-        internally, and a derived value must not be reported as if it were requested."""
-        result = self._history(bridge="a.example.com")
-        assert result["bridge"] == "a.example.com"
-        assert "instance" not in result
-        assert "instance_tag" not in result
-
-    def test_an_instance_caller_gets_no_bridge_key(self):
-        result = self._history(instance="a.example.com")
-        assert result["instance"] == "a.example.com"
-        assert result["instance_tag"] == "host"
-        assert "bridge" not in result
-
-    def test_both_spellings_echo_both(self):
-        """Passing both is allowed when they agree, and the answer should not silently drop
-        one of the caller's own arguments."""
-        result = self._history(bridge="a.example.com", instance="a.example.com")
-        assert result["bridge"] == "a.example.com"
-        assert result["instance"] == "a.example.com"
-
     def test_bridge_is_rejected_for_a_source_with_one_producer(self):
         """Silently ignoring it would be worse than refusing: the source would run an
         unscoped query and the result would echo the value back, telling the caller the
@@ -1087,83 +1030,22 @@ class TestMultiBridgeReads:
         single-producer source.
         """
         plain = ReadSchema(source="octopus", measurement="octopus", db="o")
-        effective = _resolve_deprecated_bridge("octopus", "made-up", None)
         with pytest.raises(ToolParamError, match="single producer"):
-            _validate_instance(plain, effective)
-
-    def test_bridge_maps_to_instance_and_warns(self):
-        """Kept working for one release, and the warning is a real DeprecationWarning
-        rather than only a docstring note - a note is invisible to an existing caller."""
-        with pytest.warns(DeprecationWarning, match="deprecated since 5.3"):
-            assert _resolve_deprecated_bridge("hue", "a.example.com", None) == "a.example.com"
-
-    def test_deprecation_message_names_replacement_and_removal(self):
-        """An open-ended deprecation never gets actioned, so the message has to say what to
-        use instead, when it was deprecated, and when it goes."""
-        with pytest.warns(DeprecationWarning) as caught:
-            _resolve_deprecated_bridge("hue", "a.example.com", None)
-        message = str(caught[0].message)
-        assert "use 'instance' instead" in message
-        assert "5.3" in message and "6.0" in message
-
-    def test_bridge_is_also_logged_because_the_warning_is_silent_by_default(self, caplog):
-        """DeprecationWarning is suppressed by default in an application, so the warning
-        alone would never reach an operator running the packaged service."""
-        with caplog.at_level("WARNING"), pytest.warns(DeprecationWarning):
-            _resolve_deprecated_bridge("hue", "a.example.com", None)
-        assert "deprecated 'bridge'" in caplog.text
-
-    def test_both_spellings_with_different_values_is_refused(self):
-        """Ambiguous rather than merely redundant - picking one would silently answer a
-        question the caller did not ask."""
-        with pytest.raises(ToolParamError, match="not both"):
-            _resolve_deprecated_bridge("hue", "a.example.com", "b.example.com")
-
-    def test_both_spellings_agreeing_is_accepted(self):
-        with pytest.warns(DeprecationWarning):
-            assert _resolve_deprecated_bridge("hue", "a.example.com", "a.example.com") == "a.example.com"
+            _validate_instance(plain, "made-up")
 
     @pytest.mark.parametrize("bad_source", [5, None, ["hue"], "", "   "])
-    def test_a_bad_source_does_not_warn_about_the_deprecated_parameter(self, bad_source, caplog):
-        """A call that fails on `source` must not also complain about `bridge`. The other
-        ordering logged "MCP read for '' used the deprecated 'bridge' parameter" - a
-        deprecation notice for a call that never ran, naming the bad source while doing it.
+    def test_a_bad_source_is_reported_as_a_bad_source_not_an_instance_problem(self, bad_source):
+        """Scoping must not be the thing that judges an unusable source name.
 
-        The sibling parametrised test below did not catch this: it asserts which error is
-        raised, and a spurious log line does not change that."""
-        from toinflux.mcp_read import _query_history_result
+        Originally a review finding against the `bridge` guard: it called ``source.lower()``
+        before anything had checked the type, so a non-string raised AttributeError -
+        escaping the ToolParamError/SourceConnectionError split the MCP layer relies on to
+        tell a caller mistake from a transport failure. A blank string was worse in a
+        quieter way: it *is* a string, so it reached the guard and came back blaming the
+        scoping parameter for what was wrong with ``source``.
 
-        with caplog.at_level("WARNING"), warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            with pytest.raises(ToolParamError):
-                _query_history_result(
-                    {"sources": ["hue"]},
-                    None,
-                    source=bad_source,
-                    field="Kitchen",
-                    start="-1h",
-                    end="now",
-                    aggregation="raw",
-                    group_by=None,
-                    limit=10,
-                    bridge="a.example.com",
-                )
-        assert "deprecated" not in caplog.text
-        assert [c for c in caught if c.category is DeprecationWarning] == []
-
-    @pytest.mark.parametrize("bad_source", [5, None, ["hue"], "", "   "])
-    def test_a_bad_source_is_reported_as_a_bad_source_not_a_bridge_problem(self, bad_source):
-        """The bridge guard must not be the thing that judges an unusable source name.
-
-        Review finding: the guard called ``source.lower()`` before anything had checked the
-        type, so a non-string raised AttributeError - escaping the
-        ToolParamError/SourceConnectionError split the MCP layer relies on to tell a caller
-        mistake from a transport failure. A blank string was worse in a quieter way: it *is* a
-        string, so it reached the guard and came back blaming ``bridge`` for what was wrong
-        with ``source``.
-
-        Both now fall through to the source validation, so the message names the parameter
-        actually at fault.
+        Kept after `bridge` was removed, because the concern outlives the parameter name -
+        ``instance`` is now the argument that must not be blamed for a bad source.
         """
         from toinflux.mcp_read import _query_history_result
 
@@ -1178,7 +1060,7 @@ class TestMultiBridgeReads:
                 aggregation=None,
                 group_by=None,
                 limit=None,
-                bridge="anything",
+                instance="anything",
             )
         assert "source must be a non-empty string" in str(excinfo.value)
         assert "does not apply" not in str(excinfo.value)
