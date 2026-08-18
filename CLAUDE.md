@@ -262,6 +262,24 @@ source down to the HTTP boundary - written across every source rather than just 
 break was one subclass violating a shared contract and the next override would break it the same
 way.
 
+- **Statements travel in a POST body, never the URL.** The rewrite phase names every old field
+  key in one `SELECT` - one per lock per field - so a ten-lock estate is kilobytes of statement,
+  and in a request line a reverse proxy can refuse it, failing the migration on a statement
+  InfluxDB would have accepted. The same shape the read layer already hit, which is why
+  `build_edge_time_query` selects `*`. POST verified equivalent to GET on real 1.8 and 2.7 for
+  every statement this script issues.
+- **v2 has no `DROP SERIES`, so phase 2 differs by version.** Its v1-compatibility endpoint
+  answers HTTP *200* carrying `{"error": "not implemented: DROP SERIES"}` (verified on 2.7) - so
+  the error check catches it rather than mistaking it for success, but it can never succeed.
+  Phase 1 works fully on v2, so the operator would be left with migrated data and no way to
+  finish; phase 2 therefore translates that one rejection into the `/api/v2/delete` request that
+  does work. Built with `json.dumps`, because the predicate's own value contains double quotes
+  and hand-assembly produced invalid JSON that would have failed if pasted - the emitted command
+  was run verbatim against a real 2.7 (204, old `host=` series gone, migrated `device=` kept).
+  Deliberately *not* run automatically: it needs the organisation, which the script cannot know
+  and must not guess for a delete that cannot be undone. Only "not implemented" is translated;
+  any other failure surfaces as itself.
+
 **Changing emitted data means sweeping `tests/integration/` too, and that is easy to miss.**
 Integration tests are deselected from the default `pytest` run (by design - they need a broker),
 so a local green run says nothing about them. Worse, running `pytest -m integration` *without* a

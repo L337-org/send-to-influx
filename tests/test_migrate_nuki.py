@@ -42,6 +42,11 @@ def _load_migration():
 migration = _load_migration()
 
 
+def _no_get(*args, **kwargs):
+    """Fail loudly if any statement still travels by GET - see the transport test."""
+    raise AssertionError("query() used GET; statements must travel in a POST body")
+
+
 # One collection cycle as a real pre-5.3 install recorded it: a named lock carrying the full
 # field set, plus a second device known only by its Nuki ID because no retained `name` topic
 # had arrived for it. Both shapes are present in real data and the second is the one a
@@ -600,7 +605,10 @@ class TestQueryReadsEverySeries:
             def json():
                 return payload
 
-        influx.session = type("S", (), {"get": staticmethod(lambda *a, **k: Response())})()
+        # Stubs post(), and makes get() an error: the statement must travel in the body.
+        influx.session = type(
+            "S", (), {"post": staticmethod(lambda *a, **k: Response()), "get": staticmethod(_no_get)}
+        )()
         return influx
 
     def test_rows_from_every_series_are_returned(self):
@@ -660,6 +668,87 @@ class TestOldFieldKeys:
         underscore cannot be an old prefixed key."""
         influx = self._influx([["stateValue", "float"], ["a_stateValue", "float"], ["firmware", "string"]])
         assert migration.old_field_keys(influx) == ["a_stateValue"]
+
+
+class TestTransportAndInfluxVersion:
+    """How statements travel, and what differs between InfluxDB v1 and v2."""
+
+    def test_statements_go_in_a_post_body_not_the_url(self):
+        """The rewrite phase names every old field key in one SELECT - one per lock per field -
+        so a ten-lock estate is several kilobytes of statement. In a URL that is a request line
+        a reverse proxy can refuse, failing the migration on a statement InfluxDB would have
+        accepted. This project already hit that shape in the read layer's edge-time query.
+        """
+        influx = migration.Influx("http://influx.example.com:8086", "test", None)
+        calls = {}
+
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return {"results": [{}]}
+
+        def post(url, **kwargs):
+            calls["url"] = url
+            calls["kwargs"] = kwargs
+            return Response()
+
+        influx.session = type("S", (), {"post": staticmethod(post), "get": staticmethod(_no_get)})()
+        influx.query('SELECT "a" FROM "nuki"')
+        assert calls["url"] == "http://influx.example.com:8086/query"
+        assert calls["kwargs"]["data"]["q"] == 'SELECT "a" FROM "nuki"'
+        assert "params" not in calls["kwargs"], "the statement must not travel in the query string"
+
+    def test_a_v2_target_gets_the_request_that_actually_works(self):
+        """InfluxDB v2 has no DROP SERIES: its v1-compatibility endpoint answers HTTP 200 with
+        {"error": "not implemented: DROP SERIES"} (verified on 2.7), so it is caught rather than
+        mistaken for success - but it can never succeed.
+
+        Phase 1 works fully on v2, so the operator has migrated data and only this last step
+        left. Rather than an opaque rejection they get the /api/v2/delete request that does work
+        - which was run verbatim against a real 2.7 and returned 204, removing the old host=
+        series and keeping the migrated device= one.
+        """
+        influx = migration.Influx("http://influx.example.com:8086", "test", None)
+
+        def query(statement):
+            raise migration.MigrationError(f"InfluxDB rejected {statement!r}: not implemented: DROP SERIES")
+
+        influx.query = query
+        args = type("Args", (), {"url": "http://influx.example.com:8086", "database": "nuki_db"})()
+
+        with pytest.raises(migration.MigrationError) as caught:
+            migration._drop_old_series(influx, ["mqtt.example.com"], args)
+
+        message = str(caught.value)
+        assert "v2 has no DROP SERIES" in message
+        assert "Nothing has been deleted" in message
+        assert "/api/v2/delete?org=YOUR_ORG&bucket=nuki_db" in message
+        # The payload must be valid JSON - hand-assembling it produced a command that would
+        # have failed if pasted, because the predicate's own value contains double quotes.
+        payload = message.split("-d '", 1)[1].split("'", 1)[0]
+        decoded = json.loads(payload)
+        assert decoded["predicate"] == '_measurement="nuki" AND host="mqtt.example.com"'
+        assert decoded["start"] and decoded["stop"]
+
+    def test_a_delete_failure_that_is_not_the_v2_case_still_propagates(self):
+        """Only the "not implemented" rejection is translated. Anything else - auth, a network
+        failure, a real InfluxDB error - must surface as itself rather than being explained away
+        as a version difference."""
+        influx = migration.Influx("http://influx.example.com:8086", "test", None)
+
+        def query(statement):
+            raise migration.MigrationError("InfluxDB rejected it: retention policy not found")
+
+        influx.query = query
+        args = type("Args", (), {"url": "http://x", "database": "d"})()
+        with pytest.raises(migration.MigrationError, match="retention policy not found"):
+            migration._drop_old_series(influx, ["h"], args)
 
 
 class TestPhaseRewrite:

@@ -282,9 +282,21 @@ class Influx:
         :raises MigrationError: InfluxDB rejected the statement, or its series disagree on
             columns
         """
-        response = self.session.get(
+        # POST with the statement in a form-encoded body, never GET with it in the query
+        # string. The rewrite phase names every old field key in one SELECT, and there is one
+        # key per lock per field - a ten-lock estate is ~170 keys and several kilobytes of
+        # statement. In the URL that is a request line a reverse proxy can refuse, failing the
+        # migration on a statement InfluxDB would have accepted. This project already hit that
+        # shape once: build_edge_time_query in the read layer selects * rather than enumerating
+        # fields because a 120-field measurement produced a 3.4 KB query string.
+        #
+        # Verified equivalent on real InfluxDB 1.8 and 2.7's v1-compatibility endpoint, for
+        # SHOW FIELD KEYS, SHOW TAG VALUES, SELECT and DROP SERIES: identical status and series
+        # count either way. Deliberately not switched only for the long statement - one
+        # transport for every statement means the tested path is the used path.
+        response = self.session.post(
             f"{self.url}/query",
-            params={"db": self.database, "q": statement, "epoch": "ns"},
+            data={"db": self.database, "q": statement, "epoch": "ns"},
             auth=self._auth,
             headers=self._headers,
             verify=self.verify,
@@ -606,6 +618,93 @@ def phase_rewrite(influx, args):
     return 0
 
 
+def _v2_delete_help(hosts, args):
+    """The remedy text for an InfluxDB v2 target, where DROP SERIES does not exist.
+
+    Verified against InfluxDB 2.7: ``DROP SERIES`` on the v1-compatibility endpoint answers
+    HTTP **200** carrying ``{"error": "not implemented: DROP SERIES"}`` - so it is caught by the
+    error check rather than passing as success, but it can never succeed. ``/api/v2/delete``
+    with a tag predicate does work (204, series gone).
+
+    That call is not made automatically for two reasons. It needs the organisation, which this
+    script has no way to know and must not guess for an irreversible delete; and the project's
+    rule is that a destructive operation names its target explicitly rather than inheriting
+    context. So the exact request is printed for the operator to run and own.
+
+    Phase 1 works fully on v2 - reads, writes and the manifest, all verified - so only this last
+    step needs doing by hand.
+
+    :param hosts: the old host tag values recorded in the manifest
+    :type hosts: list
+    :param args: the parsed arguments, for the url and database
+    :return: the message body
+    :rtype: str
+    """
+    lines = [
+        "this InfluxDB is v2, and v2 has no DROP SERIES - the v1-compatibility endpoint "
+        "answers 'not implemented'. Nothing has been deleted.",
+        "",
+        "Phase 1 has already migrated your data successfully; only this last step differs. "
+        "Delete the old series with v2's own endpoint, once per host below, substituting your "
+        "organisation and token:",
+        "",
+    ]
+    for host in hosts:
+        # Built with json.dumps rather than assembled by hand: the predicate's own value
+        # contains double quotes, and hand-quoting produced a payload that was invalid JSON and
+        # would have failed if pasted. The outer shell quoting is single, so the JSON's double
+        # quotes need no further escaping.
+        payload = json.dumps(
+            {
+                "start": "1970-01-01T00:00:00Z",
+                "stop": "2100-01-01T00:00:00Z",
+                "predicate": f'_measurement="{MEASUREMENT}" AND host="{host}"',
+            }
+        )
+        lines += [
+            f"  curl -X POST '{args.url}/api/v2/delete?org=YOUR_ORG&bucket={args.database}' \\",
+            "    -H 'Authorization: Token YOUR_TOKEN' \\",
+            "    -H 'Content-Type: application/json' \\",
+            f"    -d '{payload}'",
+            "",
+        ]
+    lines += [
+        "That predicate names the old broker tag, so it removes only the pre-5.3 series - the "
+        "migrated points carry a device tag instead and are not matched.",
+        "",
+        "This is not run for you because it needs your organisation, which this script cannot "
+        "know and must not guess for a delete that cannot be undone.",
+    ]
+    return "\n".join(lines)
+
+
+def _drop_old_series(influx, hosts, args):
+    """Drop each old series named in the manifest, scoped by its host tag.
+
+    Scoped by tag, never a bare ``DROP SERIES FROM`` the measurement: the migrated points live in
+    the same measurement, so an unscoped drop would destroy this migration's own output along
+    with the history it was preserving.
+
+    :param influx: the connection to delete through
+    :param hosts: the old host tag values recorded in the manifest
+    :type hosts: list
+    :param args: the parsed arguments, for the remedy text on v2
+    :return: None
+    :raises MigrationError: the delete failed, or the target is v2 - in which case the message
+        is the request that does work, since v2 has no DROP SERIES
+    """
+    for host in hosts:
+        try:
+            influx.query(f"""DROP SERIES FROM "{MEASUREMENT}" WHERE "host" = '{escape_influxql_string(host)}'""")
+        except MigrationError as exc:
+            if "not implemented" not in str(exc):
+                raise
+            # v2. Turn an opaque "not implemented: DROP SERIES" into the request that works,
+            # rather than leaving the operator with migrated data they cannot finish tidying.
+            raise MigrationError(_v2_delete_help(hosts, args)) from exc
+        print(f"  dropped host={host}")
+
+
 def phase_delete(influx, args):
     """Phase 2: drop the old prefixed field keys named in the manifest.
 
@@ -648,12 +747,7 @@ def phase_delete(influx, args):
         if confirm.strip() != "delete":
             print("Aborted - nothing dropped.")
             return 1
-    for host in hosts:
-        # Scoped by tag, never a bare DROP SERIES FROM the measurement: the migrated points
-        # live in the same measurement, so an unscoped drop would destroy this migration's own
-        # output along with the history it was preserving.
-        influx.query(f"""DROP SERIES FROM "{MEASUREMENT}" WHERE "host" = '{escape_influxql_string(host)}'""")
-        print(f"  dropped host={host}")
+    _drop_old_series(influx, hosts, args)
     print("\nDropped the pre-5.3 series. The migrated points remain.")
     return 0
 

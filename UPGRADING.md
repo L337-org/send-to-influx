@@ -53,7 +53,9 @@ shape shows no history. The migration below joins them back together.
   examples below do. A bare `python3` works only if that machine happens to have
   `python3-requests` installed. In a source checkout, use that checkout's `.venv/bin/python`.
 - **Know your InfluxDB details.** You need the URL, the database (v1) or bucket (v2) holding
-  the `nuki` measurement, and a credential that can both read and write it. The script asks for
+  the `nuki` measurement, and a credential that can both read and write it. Both versions are
+  supported, with one difference at the very last step: see the note under "Phase 2" about v2
+  having no `DROP SERIES`. The script asks for
   the credential every time and never reads it from `settings.yaml` or systemd-creds - see
   "Why it asks for the credential" below.
 - **You can leave the collector running.** The migration writes to different series from the
@@ -163,6 +165,14 @@ Only once you are satisfied. This is irreversible.
 
 It prints what it is about to drop, then asks you to type `delete` to confirm. `--dry-run`
 shows the same summary and drops nothing; `--yes` skips the prompt, for a scripted run.
+
+**On InfluxDB v2 this last step is done by hand.** v2 has no `DROP SERIES` - its
+v1-compatibility endpoint answers "not implemented" - so the script stops without deleting
+anything and prints the `/api/v2/delete` request that does work, one per host, ready to run
+once you substitute your organisation and token. It does not run that for you because it needs
+your organisation, which the script cannot know and must not guess for a delete that cannot be
+undone. Everything before this point, including the rewrite and the manifest, works on v2
+exactly as on v1.
 
 It drops only the series the manifest recorded, identified by the old broker `host` tag. The
 migrated points carry a `device` tag instead, so they are in different series and are not
