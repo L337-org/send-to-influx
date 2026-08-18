@@ -913,27 +913,36 @@ class TestMultiBridgeReads:
     def test_a_single_target_source_keeps_the_flat_shape(self):
         """Every non-instanced source is untouched - instance None means no grouping.
 
-        Exercised through a genuinely single-target source (Nuki: live state, one broker),
-        not through Hue with a None instance. That combination cannot occur in production -
-        for Hue, resolve_handlers always yields host instances or raises - so asserting the
-        flat shape that way would prove it using a scenario nothing produces, and would not
-        notice a regression in the real single-target path.
+        Exercised through a genuinely single-target source, not through Hue with a None
+        instance. That combination cannot occur in production - for Hue, resolve_handlers
+        always yields host instances or raises - so asserting the flat shape that way would
+        prove it using a scenario nothing produces, and would not notice a regression in the
+        real single-target path.
+
+        Uses openmeteo since SI-35: Nuki was the example here precisely because it was
+        single-target, and it now has a device axis covering every lock.
         """
-        handler = MagicMock(MCP_LIVE_STATE=True, MCP_DESCRIPTION="Nuki smart lock", MCP_FIELD_METADATA={})
-        handler.source = "nuki"
+        handler = MagicMock(
+            MCP_LIVE_STATE=True,
+            MCP_INSTANCE_TAG=None,
+            MCP_LIVE_STATE_COVERS_ALL_INSTANCES=False,
+            MCP_DESCRIPTION="Weather",
+            MCP_FIELD_METADATA={},
+        )
+        handler.source = "openmeteo"
         handler.instance = None
-        handler.worker_label = "nuki"
-        handler.get_data.return_value = {"Front_Door_stateValue": 1}
+        handler.worker_label = "openmeteo"
+        handler.get_data.return_value = {"temperature_2m": 18.5}
         handler.session = MagicMock()
         settings = {
-            "sources": ["nuki"],
+            "sources": ["openmeteo"],
             "influx": {"url": "http://x", "user": "u", "password": "p"},
-            "nuki": {"db": "nuki_db"},
+            "openmeteo": {"db": "weather_db"},
         }
         with patch("toinflux.mcp_read.resolve_handlers", return_value=[(None, handler)]):
-            result = current_state_result("nuki", settings, None)
-        assert result["source"] == "nuki"
-        assert result["fields"]["Front_Door_stateValue"]["value"] == 1
+            result = current_state_result("openmeteo", settings, None)
+        assert result["source"] == "openmeteo"
+        assert result["fields"]["temperature_2m"]["value"] == 18.5
         assert "as_of" in result
         assert "instances" not in result
 

@@ -396,3 +396,45 @@ class TestPerLockPoints:
             handler.send_data()
         base.assert_called_once()
         assert base.call_args.kwargs["data"] == {}
+
+
+class TestLiveStatePerLock:
+    """SI-35. Nuki is the only source whose single live read covers every producer: the locks
+    all arrive over one MQTT subscription. Hue reads live per bridge with a handler each, and
+    Speedtest's live read can only speak for the local host - so this third shape needed
+    distinguishing rather than assuming."""
+
+    def test_the_flag_is_set_only_where_it_is_true(self):
+        from toinflux.general import source_class
+
+        assert source_class("nuki").MCP_LIVE_STATE_COVERS_ALL_INSTANCES is True
+        for other in ("hue", "speedtest", "zappi", "openmeteo", "octopus"):
+            assert source_class(other).MCP_LIVE_STATE_COVERS_ALL_INSTANCES is False, other
+
+    def test_current_state_reports_every_lock_from_one_live_read(self, sample_settings):
+        from toinflux.mcp_read import current_state_result
+
+        settings = {**_nuki_settings(sample_settings), "sources": ["nuki"]}
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Nuki("nuki")
+        handler.session = MagicMock()
+        with (
+            patch.object(
+                Nuki,
+                "get_data",
+                return_value={
+                    "Front_Door": {"stateValue": 1, "batteryChargeState": 90},
+                    "Back_Door": {"stateValue": 3},
+                },
+            ),
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+        ):
+            result = current_state_result("nuki", settings, None)
+        assert result["state"] == "live"
+        assert result["instance_tag"] == "device"
+        assert set(result["instances"]) == {"Front_Door", "Back_Door"}
+        # Coded values still read back as labels, and units still attach.
+        assert result["instances"]["Front_Door"]["fields"]["stateValue"]["label"] == "locked"
+        assert result["instances"]["Front_Door"]["fields"]["batteryChargeState"]["unit"] == "%"
+        assert result["instances"]["Back_Door"]["fields"]["stateValue"]["label"] == "unlocked"
+        assert "fields" not in result, "the flat shape must not be returned alongside instances"

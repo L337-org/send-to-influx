@@ -217,6 +217,13 @@ class DataHandler:
     # means different things (Speedtest's collecting host, a Hue bridge, a Nuki
     # lock, a MyEnergi device), and most sources genuinely have only one producer.
     MCP_INSTANCE_TAG: "str | None" = None
+    # Whether one live get_data() covers *every* producer of this source, or only the one
+    # this handler serves. Three shapes exist and they are genuinely different: Speedtest
+    # reads live but can only speak for the local host; Hue reads live per bridge, each
+    # bridge having its own handler; Nuki reads every lock over one MQTT subscription, so a
+    # single handler's live read covers them all. Only the third can report per instance
+    # from a live read, which is what this distinguishes.
+    MCP_LIVE_STATE_COVERS_ALL_INSTANCES = False
 
     def mcp_tag_filters(self):
         """Return the tag filters that scope this handler's reads.
