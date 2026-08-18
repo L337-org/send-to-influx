@@ -668,6 +668,23 @@ class TestMultiDevice:
             handler = Zappi("zappi", instance="Garage")
         assert handler.auth_serial() == "hub-99"
 
+    def test_mcp_reads_are_scoped_to_this_devices_label(self):
+        """Acceptance question 3. Returning the source name instead would be invisible on a
+        legacy install, where the label defaults to the source name - and would silently
+        return every device of the type for a named one. Mutation testing found this
+        unguarded."""
+        zappi = {
+            "db": "z",
+            "interval": 300,
+            "devices": [{"serial": "1", "label": "Garage"}, {"serial": "2", "label": "Driveway"}],
+        }
+        assert self._handler(zappi, instance="Garage").mcp_tag_filters() == {"device": "Garage"}
+        assert self._handler(zappi, instance="Driveway").mcp_tag_filters() == {"device": "Driveway"}
+
+    def test_mcp_reads_for_a_legacy_device_use_the_default_label(self):
+        handler = self._handler({"db": "z", "interval": 300, "serial": "1"})
+        assert handler.mcp_tag_filters() == {"device": "zappi"}
+
     def test_the_heartbeat_tags_the_device_not_a_host(self):
         """The base implementation would tag host=<instance>, but a MyEnergi instance is a
         device label - the health series must carry the same tag as the data it reports on,
