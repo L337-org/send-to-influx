@@ -108,24 +108,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # Runs the broker as a container rather than installing it with apt. The apt route
+      # wedged a run for 12+ minutes on `apt-get update` against an unresponsive mirror, with
+      # nothing to stop it: the readiness loop below is bounded, but the install above it was
+      # not, so the job would have burned to the 6-hour default limit on an infrastructure
+      # problem unrelated to the change under test. Docker is preinstalled on the runner and
+      # the image is registry-cached, so this removes the apt mirror from the path entirely.
+      #
+      # The image denies anonymous access by default, hence the explicit config; readiness is a
+      # plain TCP connect, because `mosquitto_pub` came from mosquitto-clients and apt is what
+      # we are removing. timeout-minutes on the step is the backstop for anything still hanging.
       - name: Start a local MQTT broker (anonymous)
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y mosquitto mosquitto-clients
-          # Stop the packaged service (its default config isn't anonymous) and run our own
-          # explicit anonymous config instead - 1883 is unprivileged, so no root needed.
-          sudo systemctl stop mosquitto 2>/dev/null || true
-          printf 'listener 1883 127.0.0.1\nallow_anonymous true\n' > /tmp/mosquitto-ci.conf
-          /usr/sbin/mosquitto -c /tmp/mosquitto-ci.conf -d
-          for i in $(seq 1 10); do
-            if mosquitto_pub -h localhost -t ci/health -m ok 2>/dev/null; then
+          docker run -d --name mosquitto-ci -p 1883:1883 eclipse-mosquitto:2 \
+            sh -c 'printf "listener 1883 0.0.0.0\nallow_anonymous true\n" \
+              > /mosquitto/config/mosquitto.conf \
+              && exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf'
+          for i in $(seq 1 30); do
+            if python -c "import socket,sys; socket.create_connection(('localhost',1883),timeout=2).close()" \
+                 2>/dev/null; then
               echo "broker up after ${i}s"; exit 0
             fi
             sleep 1
           done
-          echo "MQTT broker did not come up on localhost:1883" >&2; exit 1
+          echo "MQTT broker did not come up on localhost:1883" >&2
+          docker logs mosquitto-ci 2>&1 | tail -20 >&2
+          exit 1
 
       - name: Run integration tests
+        timeout-minutes: 10
         env:
           MQTT_TEST_BROKER_HOST: localhost
           MQTT_TEST_BROKER_PORT: "1883"
