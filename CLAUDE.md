@@ -309,15 +309,31 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     a single bridge - so nothing reading the payload depends on the bridge count; a single-*target* source keeps
     the historical flat `fields`/`as_of` shape untouched. One failing bridge gets an `error` entry while the
     others still report `fields`, a partial answer *with* its failure status; only when every bridge fails is
-    `SourceConnectionError` raised, since then there is nothing useful to return. `query_history` gains an
-    optional `bridge`, which scopes the query by adding that bridge's `host` tag - the same tag Hue's own writes
-    carry - via `DataHandler.mcp_tag_filters()`, a *method* rather than the `MCP_TAG_FILTERS` class attribute
-    precisely because the answer depends on which instance the handler serves. Omitted, the query spans every
-    bridge: deliberate and documented in the tool description, since Hue writes all of them to one measurement
-    and an unqualified question about the estate should get an answer about the estate. The result echoes
-    `bridge` when one was used, so a single-bridge answer is distinguishable from an estate-wide one. The bridge
-    value never reaches a query as given - it is resolved through `Hue.bridge()` first, so an unconfigured
-    bridge is refused as a `ToolParamError`, and the existing tag-filter path then quotes and escapes it.
+    `SourceConnectionError` raised, since then there is nothing useful to return. **Scoping a history read runs through the shared
+    instance mechanism, not a Hue-specific path** (SI-33). Hue sets `MCP_INSTANCE_TAG = "host"`, so
+    `query_history`'s `instance` scopes to one bridge exactly as it scopes Speedtest to one collecting host -
+    the handler is resolved *unscoped* and the filter applied at the query, rather than the older route of
+    `resolve_schema(instance=...)` adding the tag through `Hue.mcp_tag_filters()`. That override still exists
+    and is still load-bearing (it is what forces `Hue.bridge()` to resolve, so `resolve_handler` refuses an
+    unconfigured bridge), but the read tools no longer depend on it for scoping - one concept, one
+    implementation.
+    - **`bridge` is the deprecated spelling of `instance`**, kept working for one release
+      (`_resolve_deprecated_bridge`): deprecated in 5.3, removed in 6.0. It emits a real
+      `DeprecationWarning` *and* logs, because that warning class is suppressed by default in an application
+      and would otherwise never reach an operator running the packaged service. Both spellings with different
+      values is refused as ambiguous rather than resolved by picking one; the result echoes back whichever
+      spelling the caller used, so an existing client's payload is unchanged while it migrates.
+    - **An unscoped Hue query now reports per bridge rather than merging.** A deliberate reversal of the
+      earlier span-everything default: two bridges can each hold a "Kitchen", so a merged series is a wrong
+      answer, not an estate-wide one.
+    - **The instance allowlist is the union of the values present in the data and the targets currently
+      configured.** Discovered values alone would refuse a bridge configured but not yet collecting - which
+      `bridge` accepted - and would leave `query_history` disagreeing with `get_current_state`, which reads
+      live from whatever is configured. Neither half suffices: a decommissioned bridge still has history worth
+      querying, a new one has config but no data. `configured_instances()` supplies the configured half via
+      `expand_sources()`, the same function the collectors use. The refusal message therefore says *accepted*
+      values, never *recorded* - the union includes targets that have recorded nothing, and calling them
+      recorded would state something untrue about the very value offered as the alternative.
   - **Multi-bridge Hue**: both write tools cover *every* configured bridge, via
     `resolve_handlers()` in `toinflux/mcp_common.py` - one handler per bridge, built from the same
     `expand_sources()` the collectors use so the MCP surface and the collectors cannot disagree about which
