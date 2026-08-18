@@ -349,3 +349,54 @@ def test_the_supported_python_floor_is_declared_consistently():
     assert len(set(declared.values())) == 1, "the supported Python floor is declared inconsistently:\n  " + "\n  ".join(
         f"{source}: 3.{minor}" for source, minor in sorted(declared.items())
     )
+
+
+def test_every_dynamic_tag_value_in_a_header_is_escaped():
+    """No `influx_header` may be built from a computed value without escaping it.
+
+    Line protocol gives a tag value's spaces, commas and equals signs structural meaning, and
+    has no escape for a newline at all - so an unescaped value can silently truncate a point
+    or forge a second one. Every source that builds a header from data therefore passes it
+    through ``escape_key_or_tag_value()``.
+
+    Written as a sweep because remembering did not work: Hue, MyEnergi and Nuki were all done
+    in one pass and Speedtest's own header was missed, because its value comes from the OS
+    rather than from configuration and so did not look like input. It was found in review,
+    not here, which is the argument for the check existing at all.
+
+    Scoped to the enclosing function rather than the single line, deliberately. The heartbeat
+    builds its tag string over several lines and splices the finished string into the header,
+    which a line-level check flags as a false positive - and an over-broad guard is one
+    someone eventually switches off wholesale, which costs more than it ever caught. Asking
+    "does this function escape anything at all?" allows that shape while still catching a
+    value interpolated straight into the header, which is the bug that actually happened.
+    """
+    import ast
+
+    offenders = []
+    for path in _tracked_files():
+        if path.suffix != ".py" or "tests" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            body = ast.dump(node)
+            # Does this function assign a header built by interpolation at all?
+            builds_header = any(
+                isinstance(inner, ast.Assign)
+                and any(
+                    (isinstance(t, ast.Attribute) and t.attr == "influx_header")
+                    or (isinstance(t, ast.Name) and t.id == "influx_header")
+                    for t in inner.targets
+                )
+                and isinstance(inner.value, ast.JoinedStr)
+                and any(isinstance(v, ast.FormattedValue) for v in inner.value.values)
+                for inner in ast.walk(node)
+            )
+            if builds_header and "escape_key_or_tag_value" not in body:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}: {node.name}()")
+    assert not offenders, (
+        "these functions build an influx_header by interpolation without escaping anything, so "
+        "a space, comma or newline in the value would corrupt or split the point:\n  " + "\n  ".join(offenders)
+    )

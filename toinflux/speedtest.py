@@ -9,7 +9,7 @@ import logging
 import threading
 from socket import gethostname
 import speedtest
-from toinflux.influx import DataHandler, InfluxWriteError
+from toinflux.influx import DataHandler, InfluxWriteError, escape_key_or_tag_value
 from toinflux.general import flatten_dict
 from toinflux.exceptions import SourceConnectionError, ToolParamError
 
@@ -120,8 +120,16 @@ class Speedtest(DataHandler):
         else:
             self.data = flattened_data
 
-        # use the local hostname as the host tag
-        self.influx_header = f"speedtest,host={self.collector_host()} "
+        # Escaped, like every other dynamic tag value this project writes. The hostname comes
+        # from the OS rather than from configuration, which is why this was the one header the
+        # newline sweep missed - but it is still a value this code does not control, and the
+        # same value already goes through escape_key_or_tag_value() on the heartbeat path via
+        # heartbeat_tags(). One value escaped on one path and not the other is the bug: a
+        # hostname containing a space or comma ends the tag set early and silently corrupts
+        # the point, and one containing a newline forged a second point outright, since a
+        # newline is what separates them. escape_key_or_tag_value refuses that rather than
+        # escaping it, so the write fails loudly instead of inventing data.
+        self.influx_header = f"speedtest,host={escape_key_or_tag_value(self.collector_host())} "
 
         return self.data
 
