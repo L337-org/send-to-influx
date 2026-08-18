@@ -717,7 +717,7 @@ class TestMultiDevice:
         thing with nothing saying why - and it would treat the same mistake more leniently
         than a devices entry, where a blank label is refused."""
         _, errors, _ = enumerate_devices("zappi", {"serial": "1", "label": "   "})
-        assert "set but blank" in errors[0]
+        assert "is blank" in errors[0]
         assert "remove it to fall back" in errors[0]
 
     def test_a_non_string_label_says_so_rather_than_calling_it_blank(self):
@@ -740,6 +740,35 @@ class TestMultiDevice:
     def test_a_blank_field_name_is_refused(self):
         _, errors, _ = enumerate_devices("zappi", {"serial": "1", "fields": ["frq", ""]})
         assert "must not contain a blank field name" in errors[0]
+
+    def test_a_newline_in_a_label_is_refused(self):
+        """Review finding, reproduced first. A newline cannot appear in a line protocol tag
+        value - it is what separates points - so a label containing one ends the point early
+        and turns the remainder into a second point nobody configured:
+
+            myenergi,device=Garage
+            myenergi\\,device\\=Injected\\ fake\\=1 frq=50
+
+        Rejected at the configuration boundary, where the error can name the key at fault."""
+        evil = "Garage" + chr(10) + "myenergi,device=Injected fake=1"
+        for block in ({"serial": "1", "label": evil}, {"devices": [{"serial": "1", "label": evil}]}):
+            devices, errors, _ = enumerate_devices("zappi", block)
+            assert devices == []
+            assert "must not contain a newline" in errors[0]
+
+    def test_a_carriage_return_in_a_label_is_refused_too(self):
+        _, errors, _ = enumerate_devices("zappi", {"serial": "1", "label": "G" + chr(13) + "x"})
+        assert "must not contain a newline" in errors[0]
+
+    def test_the_escaper_refuses_a_newline_as_a_backstop(self):
+        """Config validation is the useful error; this is what makes the injection
+        unreachable by any route, including one added later."""
+        from toinflux.influx import escape_key_or_tag_value, InfluxWriteError
+
+        with pytest.raises(InfluxWriteError, match="split the point in two"):
+            escape_key_or_tag_value("Garage" + chr(10) + "injected")
+        # Normal escaping is untouched.
+        assert escape_key_or_tag_value("odd label,x") == "odd\\ label\\,x"
 
     # --- resolution and auth ---
 

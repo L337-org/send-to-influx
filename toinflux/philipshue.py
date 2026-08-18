@@ -171,6 +171,20 @@ def _bridge_for_slot(hue_settings, slot):
         # bool. Neither can address a bridge, and both would otherwise be str()-ed into a
         # doomed URL.
         return (None, f"hue.{host_field} must be a string (got {host!r})", None, None)
+    if any(char in host for char in (chr(10), chr(13))):
+        # The host is written verbatim as the `host` tag, and the line protocol has no
+        # escape for a newline - it is what separates points, so one here would end the
+        # point early and turn the rest into a second point nobody configured.
+        # escape_key_or_tag_value() refuses it too, but failing at write time names no
+        # settings key; caught here it does. Found by sweeping for the pattern after review
+        # raised the same defect against MyEnergi labels, rather than waiting to be told.
+        return (
+            None,
+            f"hue.{host_field} must not contain a newline - it is written as the InfluxDB "
+            f"host tag, and a newline there would split the point in two",
+            None,
+            None,
+        )
     if not _usable_token(user):
         return (
             None,

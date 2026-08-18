@@ -96,11 +96,27 @@ def escape_key_or_tag_value(value):
     backslash-escaped in measurement/tag/field keys and tag values (field
     *values* follow different quoting rules, handled by _format_field_value).
 
+    **A newline cannot be escaped** - the line protocol has no escape for one, because a
+    newline is what separates points. A tag value containing one therefore terminates the
+    point early and turns the remainder into a *second* point, which reached InfluxDB as
+    data the operator never configured. Demonstrated with a Hue host or MyEnergi label of
+    ``"Garage\nmyenergi,device=Injected fake=1"``.
+
+    So this refuses rather than escapes. Callers should reject such a value at the
+    configuration boundary, where the error can name the settings key at fault - this is the
+    backstop that makes it impossible to reach a write by any route, present and future.
+
     :param value: key or tag value to escape
     :return: escaped line protocol representation
     :rtype: str
+    :raises InfluxWriteError: the value contains a character that cannot appear in a tag
     """
     value = str(value)
+    if any(char in value for char in "\n\r"):
+        raise InfluxWriteError(
+            f"a line protocol key or tag value cannot contain a newline (got {value!r}); "
+            f"it would split the point in two"
+        )
     return value.replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
 
 

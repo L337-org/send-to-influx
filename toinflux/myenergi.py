@@ -18,6 +18,11 @@ from toinflux.exceptions import ConfigError, SourceConnectionError
 # value and two blocks agreeing on one would merge their series.
 DEVICE_SOURCES = ("zappi", "eddi", "harvi")
 
+# A newline cannot appear in a line protocol tag value: it is what separates points, so
+# one inside a tag ends the point early and turns the rest into a second point. Written
+# with chr() rather than escapes so it cannot be mangled by a shell or an editor.
+NEWLINES = (chr(10), chr(13))
+
 
 @dataclass(frozen=True)
 class MyEnergiDevice:
@@ -102,6 +107,39 @@ def enumerate_devices(source, source_settings):
     return devices, errors, warnings
 
 
+def _checked_label(position, label, what="label"):
+    """
+    Return a label as a stripped, writable string, or an error saying why not.
+
+    A label becomes the InfluxDB ``device`` tag, and the line protocol has no escape for a
+    newline - a newline is what separates points, so one inside a tag value ends the point
+    early and turns the remainder into a *second* point. Reproduced with a label of
+    "Garage<newline>myenergi,device=Injected fake=1", which produced an extra point nobody
+    configured. Rejected here, at the configuration boundary, where the error can name the
+    key at fault; ``escape_key_or_tag_value()`` refuses one too, as the backstop that makes
+    it unreachable by any route.
+
+    :param position: what to name in the message
+    :type position: str
+    :param label: the configured value
+    :param what: the key name, for the message
+    :type what: str
+    :return: (label, errors); label is None when there are errors
+    :rtype: tuple
+    """
+    if not isinstance(label, str):
+        return None, [f"{position}.{what} must be a name (got {type(label).__name__})"]
+    stripped = label.strip()
+    if not stripped:
+        return None, [f"{position}.{what} is blank"]
+    if any(char in stripped for char in NEWLINES):
+        return None, [
+            f"{position}.{what} must not contain a newline - it becomes an InfluxDB tag, "
+            f"and a newline there would split the point in two"
+        ]
+    return stripped, []
+
+
 def _checked_legacy_label(source, source_settings):
     """
     Return the label for the legacy top-of-block device, or an error saying why not.
@@ -125,14 +163,15 @@ def _checked_legacy_label(source, source_settings):
     """
     if "label" not in source_settings or source_settings["label"] is None:
         return source, []
-    label = source_settings["label"]
-    if not isinstance(label, str):
-        # Reporting a non-string as "blank" is untrue of `label: 5` and would send the reader
-        # looking for whitespace that is not there.
-        return None, [f"{source}.label must be a name (got {type(label).__name__})"]
-    if not label.strip():
-        return None, [f"{source}.label is set but blank - remove it to fall back to {source!r}, or give it a name"]
-    return label.strip(), []
+    label, errors = _checked_label(source, source_settings["label"])
+    if not errors:
+        return label, []
+    # The blank case gets an extra hint that removing the key restores the default, which
+    # only applies to this optional legacy form.
+    return None, [
+        e + f" - remove it to fall back to {source!r}, or give it a name" if e.endswith("is blank") else e
+        for e in errors
+    ]
 
 
 def _device_from_entry(position, entry, block_fields):
@@ -159,13 +198,15 @@ def _device_from_entry(position, entry, block_fields):
     fields, errors = _checked_fields(position, entry.get("fields", block_fields))
     if errors:
         return None, errors
-    label = entry.get("label")
-    if not (isinstance(label, str) and label.strip()):
+    if entry.get("label") is None:
         return None, [
             f"{position} has no label - every entry in a devices list must name one, "
             f"since the label is what identifies the device in InfluxDB and in answers"
         ]
-    return MyEnergiDevice(serial=serial, label=label.strip(), fields=fields), []
+    label, errors = _checked_label(position, entry["label"])
+    if errors:
+        return None, errors
+    return MyEnergiDevice(serial=serial, label=label, fields=fields), []
 
 
 def _checked_serial(position, value):

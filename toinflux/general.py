@@ -132,11 +132,12 @@ def get_class(source, settings_file=None, instance=None):
     :param settings_file: path to the settings file (default: settings.yaml in the project root)
     :type settings_file: str or None
     :param instance: which instance of the source this handler serves, for a source that
-        can have several targets behind one settings block (only Hue today, whose instance
-        is a bridge host). ``None`` - the default, and what every caller that does not care
-        about instances passes - means the source's single target, or for Hue the first
-        configured bridge, which is what keeps single-bridge installs and the MCP tools
-        behaving exactly as they did before slots existed.
+        can have several targets behind one settings block - Hue, whose instance is a
+        bridge host, and each MyEnergi type, whose instance is a device label. ``None`` -
+        the default, and what every caller that does not care about instances passes -
+        means the source's single target, or the first configured bridge or device, which
+        is what keeps single-target installs and the MCP tools behaving exactly as they
+        did before instances existed.
     :return: class object
     :rtype: DataHandler
     """
@@ -306,8 +307,8 @@ def _hue_bridge_hosts(settings):
 
 # Sources that can have more than one target behind a single settings block, and so run one
 # worker per target rather than one per source - mapped to the function that enumerates
-# those targets. Only Hue today: one worker per bridge, so that one unreachable bridge
-# cannot stop the others.
+# those targets. Hue runs one worker per bridge and each MyEnergi type one per configured
+# device, so that one unreachable target cannot stop the others.
 #
 # The mapping *is* the registration: membership and expansion behaviour are the same
 # structure, so a source cannot be listed as instanced while still being expanded as a
