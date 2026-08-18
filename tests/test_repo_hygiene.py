@@ -221,8 +221,15 @@ def _workflow_jobs():
         relative = path.relative_to(REPO_ROOT)
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert isinstance(document, dict), f"{relative} does not parse as a YAML mapping"
-        jobs = document.get("jobs") or {}
-        assert isinstance(jobs, dict), f"{relative} has a `jobs:` key that is not a mapping"
+        # Not `document.get("jobs") or {}`: a missing or null `jobs:` would become an empty
+        # mapping, and the workflow would be skipped silently while the timeout checks reported
+        # success - a guard that quietly stops guarding. A workflow with no jobs is invalid to
+        # Actions anyway, so there is no legitimate case to accommodate.
+        jobs = document.get("jobs")
+        assert isinstance(jobs, dict) and jobs, (
+            f"{relative} has no usable `jobs:` mapping (got {jobs!r}). Every workflow must "
+            f"declare its jobs, or the timeout checks would pass without inspecting it"
+        )
         for name, job in jobs.items():
             assert isinstance(job, dict), f"{relative}:{name} has no body, or a body that is not a mapping"
             yield relative, name, job
