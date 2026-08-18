@@ -108,8 +108,10 @@ class Nuki(MqttDataHandler):
     flag set on every state topic, so a short subscribe window per collection cycle
     receives the full last-known state of every provisioned lock - equivalent to an
     HTTP GET against the other sources' APIs. Every device the broker knows about is
-    reported automatically, with field keys prefixed by the device's own Nuki-app
-    name, so multiple locks need no per-lock configuration.
+    reported automatically, as its own point tagged ``device=<the lock's Nuki-app name>``
+    with bare field keys, so multiple locks need no per-lock configuration. Before 5.3 the
+    name was built into each field key instead (``Front_Door_stateValue``), which is why the
+    lock could not be queried as a dimension - see ``UPGRADING.md`` for the migration.
     """
 
     MCP_DESCRIPTION = "Nuki smart locks and door sensors: lock state, door state and battery levels."
@@ -140,7 +142,7 @@ class Nuki(MqttDataHandler):
         super().__init__(*args, **kwargs)
         # Per-device name memory for the streaming path. Retained `name` topics arrive as
         # their own messages, so decode_stream_message remembers each device's name to
-        # prefix that device's later state messages with (the snapshot path consumes
+        # label that device's later state messages with (the snapshot path consumes
         # `name` inline instead). Keyed by device ID; refreshed whenever a `name` message
         # arrives, including the retained one redelivered on every (re)subscribe.
         self._device_names = {}
@@ -245,15 +247,15 @@ class Nuki(MqttDataHandler):
 
     def parse_nuki_data(self):
         """
-        Collect retained MQTT messages and parse them into InfluxDB fields.
+        Collect retained MQTT messages and parse them into per-lock InfluxDB fields.
 
         Messages are grouped per device by the ID segment of the topic
-        (``nuki/<id>/<field>``); each device's ``name`` topic is consumed as its
-        field-key prefix (falling back to the ID if no name arrived) rather than
-        written as a field of its own, and the remaining fields are merged into one
-        flat dict for a single point per collection cycle.
+        (``nuki/<id>/<field>``); each device's ``name`` topic is consumed as its label
+        (falling back to the ID if no name arrived) rather than written as a field of its
+        own, and its remaining fields become that lock's own entry. ``send_data()`` writes
+        one point per entry, tagged with the label.
 
-        :return: data
+        :return: per-device state, ``{device: {field: value}}``
         :rtype: dict
         """
         timeout = self.settings["nuki"].get("timeout", 3)
