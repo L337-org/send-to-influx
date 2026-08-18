@@ -676,7 +676,8 @@ name.
 
 The read tools treat that tag as a dimension rather than flattening it:
 
-- `list_sources` names the tag (`instance_tag`); `list_fields` lists the values recorded for it.
+- `list_sources` names the tag (`instance_tag`); `list_fields` lists the values it accepts -
+  those present in the data plus any target configured but not yet collecting.
 - `query_history` takes an `instance` to scope a query to one producer. Left out, it reports each
   producer **separately** under `instances`, keyed by value - never merged, because two hosts' ping
   interleaved in one unlabelled series is a wrong answer rather than an incomplete one, as is one

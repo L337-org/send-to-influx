@@ -1672,9 +1672,12 @@ def register_read_tools(server, settings, settings_file=None):
         source name from `list_sources`; an unknown one returns an error.
 
         Where the source's measurement holds several producers, also returns
-        `instance_tag` (what tells them apart, e.g. 'host') and `instances` (the values
-        recorded). Those are the accepted values for `query_history`'s `instance`, so
-        this is where to look before scoping a query or comparing producers."""
+        `instance_tag` (what tells them apart, e.g. 'host') and `instances` - the values
+        `query_history`'s `instance` accepts, which are the producers present in the data
+        plus any target that is configured but has not collected yet. So a newly added Hue
+        bridge appears here before it has written anything, and a decommissioned one still
+        appears while its history remains. This is where to look before scoping a query or
+        comparing producers."""
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file)
 
     @server.tool(title="Query Historical Data", annotations=_READ_ONLY)
