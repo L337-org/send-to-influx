@@ -281,3 +281,58 @@ def test_ci_job_timeouts_are_sane():
             minutes, bool
         ), f"{path}:{name} has timeout-minutes={minutes!r} of type {type(minutes).__name__}, expected a number"
         assert 1 <= minutes <= 60, f"{path}:{name} has timeout-minutes={minutes}, outside 1-60"
+
+
+def _declared_minimum_pythons():
+    """The minimum supported Python minor, as each place that declares it states it.
+
+    Read with regexes rather than a TOML parser on purpose: ``tomllib`` is stdlib only from
+    3.11, and the suite runs on 3.10 in CI. Each pattern asserts it matched, so a file
+    reshuffled beyond their reach fails loudly instead of quietly checking nothing.
+
+    :return: ``{source description: minor version}``
+    :rtype: dict
+    """
+    found = {}
+
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    requires = re.search(r'^requires-python\s*=\s*"[>=~^]*3\.(\d+)"', pyproject, re.M)
+    assert requires, "could not find requires-python in pyproject.toml"
+    found["pyproject requires-python"] = int(requires.group(1))
+
+    targets = re.search(r"^target-version\s*=\s*\[([^\]]*)\]", pyproject, re.M)
+    assert targets, "could not find [tool.black] target-version in pyproject.toml"
+    minors = [int(m) for m in re.findall(r'"py3(\d+)"', targets.group(1))]
+    assert minors, f"target-version {targets.group(1)!r} names no py3XX version"
+    found["black target-version"] = min(minors)
+
+    build = (REPO_ROOT / "packaging" / "deb" / "build-deb.sh").read_text(encoding="utf-8")
+    deb = re.search(r"^PYTHON_MIN_SUPPORTED_MINOR=(\d+)", build, re.M)
+    assert deb, "could not find PYTHON_MIN_SUPPORTED_MINOR in build-deb.sh"
+    found["deb PYTHON_MIN_SUPPORTED_MINOR"] = int(deb.group(1))
+
+    for path, name, job in _workflow_jobs():
+        matrix = ((job.get("strategy") or {}).get("matrix") or {}).get("python-version")
+        if matrix:
+            found[f"{path}:{name} matrix"] = min(int(str(v).split(".")[1]) for v in matrix)
+
+    return found
+
+
+def test_the_supported_python_floor_is_declared_consistently():
+    """Four places state the minimum supported Python, and they must agree.
+
+    `requires-python` gates installation, the .deb's PYTHON_MIN_SUPPORTED_MINOR drives its
+    `Depends:` and the venv symlinks, the CI matrix decides what is actually tested, and
+    black's target-version decides what syntax the formatter may emit. Raise the floor in one
+    and forget another, and the failure is remote from the cause: a package that installs on a
+    version nothing tested, or formatting a supported interpreter cannot parse.
+
+    Cheap to check, easy to forget, and the project already keeps the .deb's own range in one
+    place for exactly this reason - this extends that to the rest.
+    """
+    declared = _declared_minimum_pythons()
+    assert len(declared) >= 4, f"expected at least four declarations, found {sorted(declared)}"
+    assert len(set(declared.values())) == 1, "the supported Python floor is declared inconsistently:\n  " + "\n  ".join(
+        f"{source}: 3.{minor}" for source, minor in sorted(declared.items())
+    )

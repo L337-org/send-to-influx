@@ -197,6 +197,8 @@ except requests.exceptions.RequestException as e:
 - **Note**: read-only - command/event topics are filtered out and never published to; `state`/`doorsensorState` are renamed to `stateValue`/`doorsensorStateValue` and always written as their raw numeric code (Grafana handles numeric fields far better than text) - see UNITS.md for what each code means
 - **InfluxDB measurement**: `nuki`, one point per lock, tagged `device`
 
+- **The supported Python floor is declared in four places, kept consistent by a test**: `requires-python`, `build-deb.sh`'s `PYTHON_MIN_SUPPORTED_MINOR`, the CI matrix, and `[tool.black] target-version`. Raising one alone fails remotely from the cause, so `test_the_supported_python_floor_is_declared_consistently` reads all four and names whichever disagrees. `target-version` is pinned rather than inferred - black otherwise picks one from the syntax and the running interpreter (seen inferring `py315` on 3.14), so "correctly formatted" could differ between a developer's machine and CI.
+
 ## Dependencies
 
 ### Core Dependencies
