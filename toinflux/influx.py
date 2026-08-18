@@ -119,13 +119,21 @@ def worker_label(source, instance=None):
     disagree with ``worker_key``, which keeps the value verbatim - so the label shows it
     (as ``source@``) instead of silently swallowing it.
 
+    An instance equal to the source name collapses to the bare source, because that is what
+    a MyEnergi device's label defaults to on a legacy single-device install: without this
+    every log line for such an install would read ``zappi@zappi``, changing the output an
+    operator greps for no reason. ``worker_key`` is unaffected and keeps the instance, since
+    it is an identity rather than a label.
+
     :param source: source name
     :type source: str
     :param instance: the worker's instance, or None for a single-target source
     :return: label for log output
     :rtype: str
     """
-    return f"{source}" if instance is None else f"{source}@{instance}"
+    if instance is None or instance == source:
+        return f"{source}"
+    return f"{source}@{instance}"
 
 
 class DataHandler:

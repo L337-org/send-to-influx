@@ -539,7 +539,9 @@ class TestRegisterReadTools:
         return {
             "sources": ["zappi"],
             "influx": {"url": "http://x", "user": "u", "password": "p"},
-            "zappi": {"db": "zappi_db"},
+            # A serial, because zappi is instanced since SI-34: one worker per configured
+            # device, so a block with no device expands to nothing.
+            "zappi": {"db": "zappi_db", "serial": "12345"},
         }
 
     def _handler(self):
@@ -773,14 +775,20 @@ class TestCurrentStateResult:
         return handler
 
     def test_live_annotates_and_reports_state(self):
+        """MyEnergi is instanced since SI-34 - one worker per configured device - so the
+        payload is keyed by device label rather than flat, even for the single legacy device.
+        Same rule as Hue's per-bridge map: the shape must not depend on how many devices
+        happen to be configured."""
         handler = self._live_handler()
+        settings = {"sources": ["zappi"], "zappi": {"db": "z", "interval": 300, "serial": "12345"}}
         with patch("toinflux.mcp_common.get_class", return_value=handler):
-            result = current_state_result("zappi", {"sources": ["zappi"]}, None)
+            result = current_state_result("zappi", settings, None)
         assert result["source"] == "zappi"
         assert result["state"] == "live"
         assert result["description"] == "Zappi desc"
-        assert result["fields"]["gen"] == {"value": 1234, "unit": "W"}
-        assert result["fields"]["sta"] == {"value": 3, "label": "charging"}
+        fields = result["instances"]["zappi"]["fields"]
+        assert fields["gen"] == {"value": 1234, "unit": "W"}
+        assert fields["sta"] == {"value": 3, "label": "charging"}
         handler.session.close.assert_called_once()
 
     def test_non_live_reads_latest_from_influx_without_get_data(self):

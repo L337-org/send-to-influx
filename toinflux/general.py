@@ -313,7 +313,39 @@ def _hue_bridge_hosts(settings):
 # structure, so a source cannot be listed as instanced while still being expanded as a
 # single unit. Add a source by adding its enumerator here, and nothing else can be
 # forgotten.
-_INSTANCE_ENUMERATORS = {"hue": _hue_bridge_hosts}
+def _myenergi_device_labels(source):
+    """
+    Return an enumerator giving the labels of every configured device for one MyEnergi source.
+
+    One worker per device, so a second zappi collects on its own schedule with its own
+    backoff and write buffer, and one unreachable device delays only itself.
+
+    Imported inside the returned function for the same circular-import reason as
+    ``_hue_bridge_hosts``. Enumeration errors are dropped here exactly as they are there:
+    ``validate_settings()`` has already reported them fatally, and this function's only job
+    is to say what will actually run.
+
+    :param source: the source name this enumerator serves
+    :type source: str
+    :return: a function taking settings and returning device labels
+    :rtype: callable
+    """
+
+    def enumerate_labels(settings):
+        from toinflux.myenergi import enumerate_devices
+
+        devices, _, _ = enumerate_devices(source, settings.get(source))
+        return [device.label for device in devices]
+
+    return enumerate_labels
+
+
+_INSTANCE_ENUMERATORS = {
+    "hue": _hue_bridge_hosts,
+    "zappi": _myenergi_device_labels("zappi"),
+    "eddi": _myenergi_device_labels("eddi"),
+    "harvi": _myenergi_device_labels("harvi"),
+}
 
 # Derived, never hand-maintained - see above.
 INSTANCED_SOURCES = frozenset(_INSTANCE_ENUMERATORS)
@@ -752,6 +784,41 @@ def _log_config_warnings(warnings_found, settings_path, warn):
         logging.warning("%s: %s", settings_path, warning)
 
 
+def _validate_myenergi_devices(settings, sources):
+    """
+    Validate the configured MyEnergi devices for every selected device source.
+
+    Same severity split as the Hue bridges: self-contradictory configuration is fatal (a
+    devices entry with no label, a duplicate label or serial, a non-list devices key), while
+    "nothing configured yet" is only a warning, because ``example_settings.yaml`` ships the
+    blocks with placeholder serials and a fresh install is exactly that state.
+
+    Label uniqueness is checked across all three blocks whenever *any* of them is selected,
+    not per block: the label is the shared ``device`` tag, so a zappi and an eddi agreeing on
+    one would merge into a single series carrying both devices' fields. Checking it per block
+    would miss precisely the collision that matters.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :param sources: the configured (lowercased) source names
+    :type sources: list
+    :return: (errors, warnings)
+    :rtype: tuple
+    """
+    from toinflux.myenergi import DEVICE_SOURCES, duplicate_label_errors, enumerate_devices
+
+    selected = [source for source in DEVICE_SOURCES if source in sources]
+    if not selected:
+        return [], []
+    errors, warnings = [], []
+    for source in selected:
+        _, source_errors, source_warnings = enumerate_devices(source, settings.get(source))
+        errors.extend(source_errors)
+        warnings.extend(source_warnings)
+    errors.extend(duplicate_label_errors(settings))
+    return errors, warnings
+
+
 def validate_settings(settings, source=None, settings_path="settings.yaml", warn=False):
     """Validate required keys in a parsed settings dictionary.
 
@@ -824,6 +891,9 @@ def validate_settings(settings, source=None, settings_path="settings.yaml", warn
         errors.extend(_validate_source_block(src, settings, is_v2))
     hue_errors, hue_warnings = _validate_hue_bridges(settings, sources)
     errors.extend(hue_errors)
+    myenergi_errors, myenergi_warnings = _validate_myenergi_devices(settings, sources)
+    errors.extend(myenergi_errors)
+    hue_warnings.extend(myenergi_warnings)
     errors.extend(_validate_mqtt_block(settings, sources))
     errors.extend(mcp_block_errors(settings))
     _log_config_warnings(hue_warnings, settings_path, warn)
