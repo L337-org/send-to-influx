@@ -604,19 +604,38 @@ def run_query(session, influx_settings, db, query):
 
 
 def single_series(series):
-    """Flatten a :func:`run_query` result known to hold at most one series.
+    """Flatten a :func:`run_query` result that must hold at most one series.
 
-    For queries that cannot produce more than one - no ``GROUP BY``, so InfluxQL
-    merges every tag value into a single series - this restores the plain
-    ``(columns, values)`` shape. Naming the assumption is the point: dropping
-    series is a decision the call site takes deliberately, never a default hidden
-    inside the query helper.
+    For queries that cannot produce more than one - no ``GROUP BY`` on a tag, so
+    InfluxQL merges every tag value into a single series - this restores the plain
+    ``(columns, values)`` shape.
+
+    **Raises rather than truncating if the assumption is violated.** Silently
+    keeping the first series is the exact defect this module was just fixed for, so
+    re-introducing it behind a helper would defeat the change: a later edit adding a
+    tag ``GROUP BY`` without updating its consumer would go back to losing data
+    invisibly. Failing loudly turns that into an immediate, obvious error instead.
+
+    The condition is unreachable today - verified against a real InfluxDB 1.8 that
+    every current caller's query returns exactly one series, including the
+    aggregation path's ``GROUP BY time(...)``, which splits rows rather than series.
+    So the guard costs nothing now and only fires on a genuine programming error.
+    ``ValueError`` matches ``_build_single_point_query``'s existing internal-guard
+    idiom; it is not a caller- or transport-level failure and must not be mapped to
+    ToolParamError or SourceConnectionError.
 
     :param series: list of QuerySeries from run_query
     :return: (columns, values), or ([], []) when there is no series
+    :raises ValueError: if given more than one series
     """
     if not series:
         return [], []
+    if len(series) > 1:
+        raise ValueError(
+            f"single_series() got {len(series)} series, expected at most one - the query "
+            f"grouped by a tag, so its consumer must handle every series (tag sets: "
+            f"{[s.tags for s in series]})"
+        )
     return series[0].columns, series[0].values
 
 

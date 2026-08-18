@@ -435,6 +435,21 @@ class TestRunQuery:
     def test_single_series_helper_on_empty_result(self):
         assert single_series([]) == ([], [])
 
+    def test_single_series_refuses_to_truncate(self):
+        # Truncating here would re-introduce, behind a helper, exactly the silent
+        # series loss this module was fixed for: a later edit adding a tag GROUP BY
+        # without updating its consumer would go back to losing data invisibly.
+        # Unreachable from any current caller (verified against a real InfluxDB 1.8:
+        # every one of their queries returns a single series, including the
+        # aggregation path's GROUP BY time(), which splits rows not series), so this
+        # only ever fires on a programming error.
+        grouped = [
+            QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 12.3]]),
+            QuerySeries({"host": "hostB"}, ["time", "ping"], [[1, 45.6]]),
+        ]
+        with pytest.raises(ValueError, match="expected at most one"):
+            single_series(grouped)
+
 
 class TestResolveSchema:
     def test_unknown_source_rejected(self):
