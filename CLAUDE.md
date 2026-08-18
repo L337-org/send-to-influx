@@ -247,6 +247,17 @@ debugging:
   skipped key is data silently left behind that phase 2 would then delete, and it would look like
   success.
 
+**Changing emitted data means sweeping `tests/integration/` too, and that is easy to miss.**
+Integration tests are deselected from the default `pytest` run (by design - they need a broker),
+so a local green run says nothing about them. Worse, running `pytest -m integration` *without* a
+broker skips cleanly rather than failing, so it also proves nothing. The Nuki device-tag change
+left `test_mqtt_streaming.py` asserting the old prefixed field key *and* `startswith("nuki,host=")`
+- the exact tag the change removed - and only CI caught it. When a change alters a measurement,
+tag set or field key: grep `tests/integration/` for the old names, and run that suite against a
+real broker (`MQTT_TEST_BROKER_HOST`/`MQTT_TEST_BROKER_PORT` point it anywhere, so a throwaway
+`eclipse-mosquitto:2` container is enough). Then mutate the product back and confirm the test
+fails, since an assertion that survives the old behaviour was never testing the new one.
+
 **Streaming (5.1):** MQTT sources are event-driven, not timer-polled. `MqttDataHandler` sets
 `STREAMING = True` and `stream_mqtt_messages()` holds the subscription open, so a state change is
 written the instant its (retained) message arrives rather than only when a poll happens to land on
