@@ -5,9 +5,12 @@ be re-broken by whoever did not read it. The project's standing preference is a 
 over a note asking someone to be careful.
 """
 
+import os
 import re
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -50,12 +53,27 @@ WIKI_HOSTS = ("atlassian.net", "/wiki/spaces/")
 
 def _tracked_files():
     """Every source file git tracks that the conventions below apply to."""
-    listing = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
-        capture_output=True,
-        check=True,
-        text=True,
-    )
+    try:
+        listing = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        # No git, or not a checkout - a source tarball, say. That is a fact about the
+        # environment, not about the repo's hygiene, and failing here would report the wrong
+        # thing and take the whole suite down with it. An over-broad guard is one someone
+        # eventually switches off wholesale.
+        #
+        # But a skip must never be how the guard quietly stops running where it is the actual
+        # gate, so under CI this is an error rather than a skip. GitHub Actions always sets CI.
+        if os.environ.get("CI"):
+            raise RuntimeError(
+                f"cannot list tracked files with git ({exc}), and CI is set - this check is a "
+                f"merge gate there, so it must fail rather than skip"
+            ) from exc
+        pytest.skip(f"not a git checkout, or git is unavailable ({exc}) - repo hygiene is not checkable here")
     paths = []
     for name in listing.stdout.split("\0"):
         if not name or Path(name).name == SELF:
