@@ -29,6 +29,7 @@ from toinflux.mcp_read import (
     QuerySeries,
     run_query,
     single_series,
+    _resolve_deprecated_bridge,
     _validate_instance,
     _annotate_state_field,
     _influx_read_request,
@@ -951,30 +952,52 @@ class TestMultiBridgeReads:
         # Each bridge paired with its own error, not merely both hostnames present somewhere.
         assert "down.example.com: down" in message and "up.example.com: also down" in message
 
-    def test_bridge_is_rejected_for_a_source_with_one_target(self):
-        """Silently ignoring it would be worse than refusing.
+    def test_bridge_is_rejected_for_a_source_with_one_producer(self):
+        """Silently ignoring it would be worse than refusing: the source would run an
+        unscoped query and the result would echo the value back, telling the caller the
+        answer was narrowed when it was not.
 
-        A non-instanced source accepts any instance, ignores it (its tag filters do not
-        vary), runs an unscoped query - and the result would then echo `bridge` back,
-        telling the caller the query was scoped when it was not.
+        Still refused after `bridge` became an alias for `instance` - just through the one
+        shared guard rather than a Hue-specific branch, which is the point of the change.
+        Uses octopus because speedtest now *has* an axis and is no longer an example of a
+        single-producer source.
         """
-        from toinflux.mcp_read import _query_history_result
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o")
+        effective = _resolve_deprecated_bridge("octopus", "made-up", None)
+        with pytest.raises(ToolParamError, match="single producer"):
+            _validate_instance(plain, effective)
 
-        with pytest.raises(ToolParamError) as excinfo:
-            _query_history_result(
-                {"sources": ["speedtest"]},
-                None,
-                source="speedtest",
-                field="ping",
-                start="-1h",
-                end="now",
-                aggregation="raw",
-                group_by=None,
-                limit=10,
-                bridge="made-up",
-            )
-        assert "does not apply" in str(excinfo.value)
-        assert "hue" in str(excinfo.value)  # names the sources it does apply to
+    def test_bridge_maps_to_instance_and_warns(self):
+        """Kept working for one release, and the warning is a real DeprecationWarning
+        rather than only a docstring note - a note is invisible to an existing caller."""
+        with pytest.warns(DeprecationWarning, match="deprecated since 5.3"):
+            assert _resolve_deprecated_bridge("hue", "a.example.com", None) == "a.example.com"
+
+    def test_deprecation_message_names_replacement_and_removal(self):
+        """An open-ended deprecation never gets actioned, so the message has to say what to
+        use instead, when it was deprecated, and when it goes."""
+        with pytest.warns(DeprecationWarning) as caught:
+            _resolve_deprecated_bridge("hue", "a.example.com", None)
+        message = str(caught[0].message)
+        assert "use 'instance' instead" in message
+        assert "5.3" in message and "6.0" in message
+
+    def test_bridge_is_also_logged_because_the_warning_is_silent_by_default(self, caplog):
+        """DeprecationWarning is suppressed by default in an application, so the warning
+        alone would never reach an operator running the packaged service."""
+        with caplog.at_level("WARNING"), pytest.warns(DeprecationWarning):
+            _resolve_deprecated_bridge("hue", "a.example.com", None)
+        assert "deprecated 'bridge'" in caplog.text
+
+    def test_both_spellings_with_different_values_is_refused(self):
+        """Ambiguous rather than merely redundant - picking one would silently answer a
+        question the caller did not ask."""
+        with pytest.raises(ToolParamError, match="not both"):
+            _resolve_deprecated_bridge("hue", "a.example.com", "b.example.com")
+
+    def test_both_spellings_agreeing_is_accepted(self):
+        with pytest.warns(DeprecationWarning):
+            assert _resolve_deprecated_bridge("hue", "a.example.com", "a.example.com") == "a.example.com"
 
     @pytest.mark.parametrize("bad_source", [5, None, ["hue"], "", "   "])
     def test_a_bad_source_is_reported_as_a_bad_source_not_a_bridge_problem(self, bad_source):
@@ -1083,9 +1106,17 @@ class TestInstanceAxis:
         assert "GROUP BY" not in q
         assert q.endswith("LIMIT 100")
 
-    def test_unknown_instance_value_is_refused_with_the_known_ones(self):
-        with pytest.raises(ToolParamError, match="recorded values: hostA, hostB"):
+    def test_unknown_instance_value_is_refused_with_the_accepted_ones(self):
+        with pytest.raises(ToolParamError, match="accepted values: hostA, hostB"):
             _validate_instance(self._schema(), "typo")
+
+    def test_refusal_does_not_call_the_allowlist_recorded(self):
+        """The allowlist is the union of present-in-data and configured, so a configured
+        target that has not collected yet appears in it. Calling the list "recorded" would
+        state something untrue about the very value being offered as an alternative."""
+        with pytest.raises(ToolParamError) as excinfo:
+            _validate_instance(self._schema(), "typo")
+        assert "recorded values" not in str(excinfo.value)
 
     def test_instance_refused_for_a_single_producer_source(self):
         plain = ReadSchema(source="octopus", measurement="octopus", db="o")

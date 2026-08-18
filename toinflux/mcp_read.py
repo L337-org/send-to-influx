@@ -41,7 +41,7 @@ import urllib3
 from mcp.types import ToolAnnotations
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
-from toinflux.general import INSTANCED_SOURCES
+from toinflux.general import INSTANCED_SOURCES, expand_sources
 from toinflux.mcp_common import close_session, configured_sources, resolve_handler, resolve_handlers
 
 # Every read tool is read-only and scoped to this server's own configured
@@ -952,6 +952,23 @@ def _retention_for(session, influx_settings, db):
         return {"known": False, "reason": str(exc)}
 
 
+def configured_instances(source, settings):
+    """Return the instance values configured for a source, or an empty list.
+
+    The configured half of an instance allowlist. Uses ``expand_sources()`` - the same
+    function the collectors use to decide what runs - so the read tools and the collectors
+    cannot disagree about which targets exist. A source with no separate targets expands to
+    a single ``None`` instance, which is not a value and is filtered out.
+
+    :param source: source name (already validated as configured)
+    :param settings: parsed settings dict
+    :return: list of configured instance values, empty for a single-target source
+    """
+    if source.lower() not in INSTANCED_SOURCES:
+        return []
+    return [instance for _, instance in expand_sources([source.lower()], settings) if instance is not None]
+
+
 def resolve_schema(source, settings, settings_file, instance=None):
     """Build a fully-populated ReadSchema for a source: its static class metadata
     plus the live field allowlist discovered from InfluxDB. Constructs a handler
@@ -988,6 +1005,13 @@ def resolve_schema(source, settings, settings_file, instance=None):
             instance_values = discover_tag_values(
                 handler.session, influx_settings, db, measurement, handler.MCP_INSTANCE_TAG
             )
+            # Union with the *configured* targets, for a source that has them. Discovered
+            # values alone would refuse a bridge that is configured but has not collected
+            # yet - which the `bridge` parameter accepted - and would leave query_history
+            # disagreeing with get_current_state, which reads live from whatever is
+            # configured. Neither direction is enough on its own: a decommissioned bridge
+            # still has history worth querying, and a new one has config but no data.
+            instance_values = instance_values | set(configured_instances(source, settings))
     except Exception:
         # A fresh requests.Session is created per handler (per tool call); close
         # it if discovery fails, or a long-running server accumulates open
@@ -1051,6 +1075,45 @@ def list_fields_result(source, settings, settings_file):
         close_session(handler.session)
 
 
+def _resolve_deprecated_bridge(source, bridge, instance):
+    """Fold the deprecated ``bridge`` parameter into ``instance``.
+
+    ``bridge`` was Hue's bespoke way of scoping a read to one bridge, predating the shared
+    instance mechanism. Both name a value of the source's instance tag, so keeping two
+    parameters would mean two names for one thing on a model-facing surface - which costs
+    context on every session and invites a caller to pass both.
+
+    Kept working for one release rather than removed outright, per the project's
+    compatibility rule, and it emits a real ``DeprecationWarning`` rather than only a
+    docstring note: a note is invisible to an existing caller. The message names the
+    replacement, when it was deprecated and when it goes, because an open-ended deprecation
+    never gets actioned.
+
+    :param source: source name, for the message only
+    :param bridge: the deprecated argument, or None
+    :param instance: the current argument, or None
+    :return: the effective instance value
+    :raises ToolParamError: both were given, which is ambiguous rather than merely redundant
+    """
+    if bridge is None:
+        return instance
+    if instance is not None and instance != bridge:
+        raise ToolParamError(
+            f"pass either 'instance' or the deprecated 'bridge', not both - they name the same "
+            f"thing and were given different values ({instance!r} and {bridge!r}), so which one "
+            f"was meant cannot be guessed"
+        )
+    message = (
+        "'bridge' is deprecated since 5.3 and will be removed in 6.0; use 'instance' instead, "
+        "which does the same thing for every source with more than one producer, not only Hue"
+    )
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
+    # Also logged: a DeprecationWarning is silent by default in an application, so the
+    # warning alone would never reach an operator running the packaged service.
+    logging.warning("MCP read for %r used the deprecated 'bridge' parameter. %s", source, message)
+    return bridge
+
+
 def _validate_instance(schema, instance):
     """Check an ``instance`` argument against the source's live tag values.
 
@@ -1075,9 +1138,13 @@ def _validate_instance(schema, instance):
             f"producer, so there is nothing to scope to"
         )
     if instance not in schema.instance_values:
-        known = ", ".join(sorted(schema.instance_values)) or "(none recorded yet)"
+        # "accepted", not "recorded": the allowlist is the union of what is present in the
+        # data and what is configured, so a configured target that has not collected yet is
+        # in this list without ever having been recorded. Calling it recorded would state
+        # something untrue about the very value being offered as an alternative.
+        known = ", ".join(sorted(schema.instance_values)) or "(none configured or recorded yet)"
         raise ToolParamError(
-            f"unknown {schema.instance_tag} {instance!r} for source {schema.source!r}; " f"recorded values: {known}"
+            f"unknown {schema.instance_tag} {instance!r} for source {schema.source!r}; " f"accepted values: {known}"
         )
 
 
@@ -1086,42 +1153,30 @@ def _query_history_result(
 ):
     """Build the query_history tool payload (runs in a worker thread).
 
-    ``bridge`` scopes the query to one Hue bridge by adding its ``host`` tag to the filter.
-    Left out, the query spans every bridge - deliberately, since Hue writes all of them to
-    one measurement and an unqualified question about the estate should get an answer about
-    the estate. The value never reaches the query as given: it is resolved against the
-    configured bridges first, so an unknown one is refused.
+    ``bridge`` is the deprecated spelling of ``instance``, kept working for one release -
+    see :func:`_resolve_deprecated_bridge`. Both name the same thing now: a value of the
+    source's instance tag, which for Hue is the bridge's ``host``.
 
-    It is rejected outright for a source that has no instances. Such a source would accept
-    the instance, ignore it (its tag filters do not vary), run an unscoped query - and then
-    the result would echo ``bridge`` back, telling the caller the query was scoped when it
-    was not. Refusing is the only honest answer.
+    Scoping happens in one place, ``build_query``, via the shared instance mechanism.
+    Previously ``bridge`` took a different route - ``resolve_schema(instance=...)``, which
+    added the tag through ``Hue.mcp_tag_filters()`` - so the same idea had two
+    implementations that could drift. The handler is now resolved unscoped and the filter
+    applied at the query, which is also why the Hue-specific branch here is gone.
     """
-    # Only judge 'bridge' once the source is a usable name. A non-string would raise
-    # AttributeError from .lower() here, escaping the ToolParamError/SourceConnectionError
-    # contract the MCP layer uses to tell a caller mistake from a transport failure; a blank
-    # one would be reported as a 'bridge' problem when the source is what is wrong. Either way
-    # the condition matches resolve_handler()'s, so skipping the guard hands the value to that
-    # validation and the message names the parameter actually at fault.
-    usable_source = isinstance(source, str) and source.strip()
-    if bridge is not None and usable_source and source.lower() not in INSTANCED_SOURCES:
-        raise ToolParamError(
-            f"'bridge' does not apply to source {source!r} - it has a single target. "
-            f"Only these sources have separate targets to scope to: {', '.join(sorted(INSTANCED_SOURCES))}"
-        )
-    handler, schema = resolve_schema(source, settings, settings_file, instance=bridge)
+    instance = _resolve_deprecated_bridge(source, bridge, instance)
+    handler, schema = resolve_schema(source, settings, settings_file)
     try:
-        # Deliberately not routed through resolve_schema's own `instance`: that one names a
-        # collector *work unit* (INSTANCED_SOURCES - a Hue bridge with its own credentials
-        # and worker) and would reject Speedtest outright. This one names a value of a tag
-        # in the *data*, which is a different question - Speedtest runs one worker per host
-        # and each host is its own process, so the axis exists in InfluxDB without the
-        # collector having any notion of instances. SI-33 folds the two parameters into one
-        # for callers; they stay distinct concepts underneath.
+        # `instance` names a value of a tag in the *data*, which is not the same question as
+        # resolve_schema's own `instance` (a collector work unit in INSTANCED_SOURCES - a
+        # bridge with its own credentials and worker). A read from InfluxDB needs no
+        # credentials, so the handler is resolved unscoped and the scoping is a query
+        # predicate. The two concepts stay distinct underneath; callers see one parameter.
         _validate_instance(schema, instance)
         result = _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit, instance=instance)
-        # Say what was actually queried: without this the model cannot tell a single-bridge
-        # answer from an estate-wide one, and the two mean different things.
+        # Say what was actually queried: without this the model cannot tell a single-producer
+        # answer from an estate-wide one, and the two mean different things. `bridge` is
+        # echoed back only when the caller used that spelling, so an existing client's
+        # payload is unchanged while it migrates.
         if bridge is not None:
             result["bridge"] = bridge
         if instance is not None:
@@ -1649,23 +1704,21 @@ def register_read_tools(server, settings, settings_file=None):
           sum/count/first/last/spread/stddev, which each require a group_by interval.
         - group_by: a bucket interval like '5m'/'1h'/'1d' (only with aggregation).
         - limit: max points returned, 1..5000 (values outside are clamped).
-        - bridge: Hue only - rejected for any other source, which has a single target.
-          Only useful with more than one bridge configured. Restricts the
-          query to that bridge; omitted, the query covers every bridge, since they share one
-          measurement. Two bridges can hold the same field name (a "Kitchen" per floor), so
-          an unqualified query can mix them - pass `bridge` when the answer must be about
-          one. `get_current_state` lists the configured bridges. The result echoes `bridge`
-          when one was used, so a single-bridge answer is distinguishable from an
-          estate-wide one.
+        - bridge: **deprecated since 5.3, removed in 6.0** - use `instance`, which does the
+          same thing for every multi-producer source rather than Hue alone. Still accepted
+          for now; passing both is an error unless they agree.
 
         - instance: for a source whose measurement holds several producers, restricts
           the query to one of them - Speedtest tags each point with the collecting
-          host, so `instance='pi4'` asks only about that machine. Omit it to get
-          every producer reported *separately* under `instances`, keyed by tag value:
-          results are never merged, because two hosts' ping in one unlabelled list
-          would be a wrong answer rather than an incomplete one. `list_fields` reports
-          the tag name and its recorded values; an unrecorded value is an error, and
-          so is passing this for a single-producer source.
+          host, so `instance='pi4'` asks only about that machine, and Hue tags each
+          point with the bridge, so `instance='hue.example.com'` asks about one bridge.
+          Omit it to get every producer reported *separately* under `instances`, keyed
+          by tag value: results are never merged, because two producers' values in one
+          unlabelled list would be a wrong answer rather than an incomplete one - two
+          Hue bridges can each hold a "Kitchen", and two hosts each hold a ping.
+          `list_fields` reports the tag name and its accepted values, which are the
+          producers found in the data plus any configured but not yet collecting. An
+          unknown value is an error, and so is passing this for a single-producer source.
 
         Points come back newest-first, each with a unix-seconds `time` and
         `value`; coded fields (e.g. Nuki lock state) also carry a decoded `label`.
