@@ -388,6 +388,12 @@ class Hue(DataHandler):
     # already uses). The MCP write tool is still only registered when the
     # operator sets hue.mcp_read_write: true - see DataHandler.mcp_write_enabled.
     MCP_WRITABLE = True
+    # Every point carries host=<the bridge it came from>, which with more than one bridge
+    # is what separates them: field names are unprefixed, so two bridges with a light of
+    # the same name write the same field key under different host tags. Naming the axis
+    # here replaces the bespoke `bridge` parameter with the shared instance mechanism, so
+    # there is one scoping path rather than two implementations of the same idea.
+    MCP_INSTANCE_TAG = "host"
 
     # Hue brightness ("bri") is 1-254; the MCP tool speaks 0-100 % and maps here.
     HUE_BRI_MIN = 1

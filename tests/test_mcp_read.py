@@ -9,6 +9,7 @@ import pytest
 import requests
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
+from toinflux.philipshue import Hue
 from toinflux.mcp_read import (
     DEFAULT_RESULT_POINTS,
     MAX_RESULT_POINTS,
@@ -29,6 +30,7 @@ from toinflux.mcp_read import (
     QuerySeries,
     run_query,
     single_series,
+    configured_instances,
     _validate_instance,
     _annotate_state_field,
     _influx_read_request,
@@ -951,44 +953,99 @@ class TestMultiBridgeReads:
         # Each bridge paired with its own error, not merely both hostnames present somewhere.
         assert "down.example.com: down" in message and "up.example.com: also down" in message
 
-    def test_bridge_is_rejected_for_a_source_with_one_target(self):
-        """Silently ignoring it would be worse than refusing.
+    def test_hue_declares_the_host_axis_so_scoping_uses_the_shared_path(self):
+        """The core of SI-33: without the axis on the class, Hue falls back to the old
+        merged behaviour and `instance` is refused as not applying. Driven through
+        resolve_schema and the real Hue class rather than asserting the attribute, so it
+        fails if the plumbing stops reading it as well as if the value changes."""
+        settings = {
+            "sources": ["hue"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "hue": {"db": "h", "interval": 300, "host": "a.example.com", "user": "tok"},
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Hue("hue")
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"Kitchen"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"a.example.com"}),
+        ):
+            _, schema = resolve_schema("hue", settings, None)
+        assert schema.instance_tag == "host"
+        query = build_query(schema, field="Kitchen", start="-1h", end="now", instance="a.example.com")
+        assert "\"host\" = 'a.example.com'" in query
 
-        A non-instanced source accepts any instance, ignores it (its tag filters do not
-        vary), runs an unscoped query - and the result would then echo `bridge` back,
-        telling the caller the query was scoped when it was not.
+    def test_allowlist_unions_configured_targets_with_recorded_ones(self):
+        """Acceptance question 1 turns on this. Discovered values alone would refuse a
+        bridge that is configured but has not collected yet - which `bridge` accepted - and
+        would leave query_history disagreeing with get_current_state, which reads live from
+        whatever is configured. A decommissioned bridge still has history worth querying."""
+        settings = {
+            "sources": ["hue"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "hue": {
+                "db": "h",
+                "interval": 300,
+                "host": "configured-and-recording.example.com",
+                "user": "tok",
+                "host2": "configured-no-data-yet.example.com",
+                "user2": "tok2",
+            },
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Hue("hue")
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"Kitchen"}),
+            patch(
+                "toinflux.mcp_read.discover_tag_values",
+                return_value={"configured-and-recording.example.com", "decommissioned.example.com"},
+            ),
+        ):
+            _, schema = resolve_schema("hue", settings, None)
+        assert schema.instance_values == {
+            "configured-and-recording.example.com",
+            "configured-no-data-yet.example.com",
+            "decommissioned.example.com",
+        }
+        # Both edge cases must be accepted, not merely present in the set.
+        assert _validate_instance(schema, "configured-no-data-yet.example.com") is None
+        assert _validate_instance(schema, "decommissioned.example.com") is None
+
+    def test_configured_instances_is_empty_for_a_single_target_source(self):
+        """A source with no separate targets expands to one None instance, which is not a
+        value - leaking it into the allowlist would make None an acceptable argument."""
+        assert configured_instances("speedtest", {"sources": ["speedtest"]}) == []
+
+    def test_bridge_is_rejected_for_a_source_with_one_producer(self):
+        """Silently ignoring it would be worse than refusing: the source would run an
+        unscoped query and the result would echo the value back, telling the caller the
+        answer was narrowed when it was not.
+
+        Still refused after `bridge` became an alias for `instance` - just through the one
+        shared guard rather than a Hue-specific branch, which is the point of the change.
+        Uses octopus because speedtest now *has* an axis and is no longer an example of a
+        single-producer source.
         """
-        from toinflux.mcp_read import _query_history_result
-
-        with pytest.raises(ToolParamError) as excinfo:
-            _query_history_result(
-                {"sources": ["speedtest"]},
-                None,
-                source="speedtest",
-                field="ping",
-                start="-1h",
-                end="now",
-                aggregation="raw",
-                group_by=None,
-                limit=10,
-                bridge="made-up",
-            )
-        assert "does not apply" in str(excinfo.value)
-        assert "hue" in str(excinfo.value)  # names the sources it does apply to
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o")
+        with pytest.raises(ToolParamError, match="single producer"):
+            _validate_instance(plain, "made-up")
 
     @pytest.mark.parametrize("bad_source", [5, None, ["hue"], "", "   "])
-    def test_a_bad_source_is_reported_as_a_bad_source_not_a_bridge_problem(self, bad_source):
-        """The bridge guard must not be the thing that judges an unusable source name.
+    def test_a_bad_source_is_reported_as_a_bad_source_not_an_instance_problem(self, bad_source):
+        """Scoping must not be the thing that judges an unusable source name.
 
-        Review finding: the guard called ``source.lower()`` before anything had checked the
-        type, so a non-string raised AttributeError - escaping the
-        ToolParamError/SourceConnectionError split the MCP layer relies on to tell a caller
-        mistake from a transport failure. A blank string was worse in a quieter way: it *is* a
-        string, so it reached the guard and came back blaming ``bridge`` for what was wrong
-        with ``source``.
+        Originally a review finding against the `bridge` guard: it called ``source.lower()``
+        before anything had checked the type, so a non-string raised AttributeError -
+        escaping the ToolParamError/SourceConnectionError split the MCP layer relies on to
+        tell a caller mistake from a transport failure. A blank string was worse in a
+        quieter way: it *is* a string, so it reached the guard and came back blaming the
+        scoping parameter for what was wrong with ``source``.
 
-        Both now fall through to the source validation, so the message names the parameter
-        actually at fault.
+        Kept after `bridge` was removed, because the concern outlives the parameter name -
+        ``instance`` is now the argument that must not be blamed for a bad source.
         """
         from toinflux.mcp_read import _query_history_result
 
@@ -1003,7 +1060,7 @@ class TestMultiBridgeReads:
                 aggregation=None,
                 group_by=None,
                 limit=None,
-                bridge="anything",
+                instance="anything",
             )
         assert "source must be a non-empty string" in str(excinfo.value)
         assert "does not apply" not in str(excinfo.value)
@@ -1083,9 +1140,17 @@ class TestInstanceAxis:
         assert "GROUP BY" not in q
         assert q.endswith("LIMIT 100")
 
-    def test_unknown_instance_value_is_refused_with_the_known_ones(self):
-        with pytest.raises(ToolParamError, match="recorded values: hostA, hostB"):
+    def test_unknown_instance_value_is_refused_with_the_accepted_ones(self):
+        with pytest.raises(ToolParamError, match="accepted values: hostA, hostB"):
             _validate_instance(self._schema(), "typo")
+
+    def test_refusal_does_not_call_the_allowlist_recorded(self):
+        """The allowlist is the union of present-in-data and configured, so a configured
+        target that has not collected yet appears in it. Calling the list "recorded" would
+        state something untrue about the very value being offered as an alternative."""
+        with pytest.raises(ToolParamError) as excinfo:
+            _validate_instance(self._schema(), "typo")
+        assert "recorded values" not in str(excinfo.value)
 
     def test_instance_refused_for_a_single_producer_source(self):
         plain = ReadSchema(source="octopus", measurement="octopus", db="o")
