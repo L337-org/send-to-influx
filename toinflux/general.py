@@ -140,6 +140,50 @@ def get_class(source, settings_file=None, instance=None):
     :return: class object
     :rtype: DataHandler
     """
+    return source_class(source)(source.lower(), settings_file=settings_file, instance=instance)
+
+
+def source_class(source):
+    """
+    Return the DataHandler subclass for a source name, without constructing it.
+
+    Separated from ``get_class()`` so a caller that only needs the class's static domain
+    knowledge - the MCP read layer asking which measurement a source writes to - can get it
+    without building a handler, which loads and validates settings and opens a session. One
+    mapping serves both, so the two cannot disagree about which class a name means.
+
+    Imports live inside the function for the same reason they do in ``get_class()``: these
+    modules import ``influx``, which imports this one, so a module-level import is circular.
+
+    :param source: data source name, any case
+    :type source: str
+    :return: the DataHandler subclass
+    :rtype: type
+    :raises ConfigError: the name is not a known source
+    """
+    classes = _source_classes()
+    class_name = next((k for k in classes if k.lower() == source.lower()), source)
+    try:
+        return classes[class_name]
+    except KeyError:
+        raise ConfigError(f"Source {class_name} not found") from None
+
+
+def _source_classes():
+    """
+    Return the source-name to class mapping - the single registration point.
+
+    Every caller that needs to know what sources exist, or which class one means, reads it
+    from here: ``get_class()``, ``source_class()`` and ``known_sources()``. A second copy of
+    the names would drift the moment a source was added, which is precisely why the mapping
+    *is* the registration rather than being accompanied by a list.
+
+    Imports live inside the function because these modules import ``influx``, which imports
+    this one, so a module-level import is circular.
+
+    :return: class name to class
+    :rtype: dict
+    """
     from toinflux.carbonintensity import CarbonIntensity
     from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
     from toinflux.nuki import Nuki
@@ -148,7 +192,7 @@ def get_class(source, settings_file=None, instance=None):
     from toinflux.philipshue import Hue
     from toinflux.speedtest import Speedtest
 
-    classes = {
+    return {
         "CarbonIntensity": CarbonIntensity,
         "Eddi": Eddi,
         "Harvi": Harvi,
@@ -161,13 +205,73 @@ def get_class(source, settings_file=None, instance=None):
         "Zappi": Zappi,
     }
 
-    class_name = next((k for k in classes if k.lower() == source.lower()), source)
-    source_name = source.lower()
+
+def measurement_for(source):
+    """
+    Return the InfluxDB measurement a source writes to, from its class alone.
+
+    ``MCP_MEASUREMENT`` when the class overrides it, else the source name - the same rule
+    ``build_schema()`` applies, kept here so a caller that has no handler can ask.
+
+    :param source: data source name, any case
+    :type source: str
+    :return: the measurement name
+    :rtype: str
+    :raises ConfigError: the name is not a known source
+    """
+    return source_class(source).MCP_MEASUREMENT or source.lower()
+
+
+def known_sources():
+    """
+    Return every source name this build knows about, lowercased.
+
+    Read from the one class mapping, so it cannot drift from what ``get_class()`` accepts.
+
+    :return: sorted source names
+    :rtype: list
+    """
+    # Read from the one mapping, never a second list - see _source_classes(). MyEnergi is
+    # excluded because it is the abstract parent of the three device types, not a
+    # collectable source of its own; get_class() accepts the name but there is nothing to
+    # collect under it.
+    return sorted(name.lower() for name in _source_classes() if name != "MyEnergi")
+
+
+def shares_measurement(source):
+    """
+    Return True when any *other* known source writes to the same measurement.
+
+    Derived from the classes rather than declared on them, and deliberately from every
+    *known* source rather than the currently configured ones. Sharing is a property of the
+    software, not of one install: a database can still hold eddi history after eddi is
+    removed from ``sources:``, so deciding by what happens to be configured today would let
+    a tag value discovered in the data be attributed to the wrong type tomorrow. Found by
+    testing exactly that case.
+
+    The read layer uses this to know when a discovered tag value cannot be attributed to a
+    single source, and must therefore trust the configuration instead. A class flag would
+    have said the same thing but could fall out of step; this covers a future shared
+    measurement without anyone remembering to mark it.
+
+    :param source: the source in question
+    :type source: str
+    :return: True when the measurement is shared with another known source
+    :rtype: bool
+    """
     try:
-        my_class = classes[class_name](source_name, settings_file=settings_file, instance=instance)
-    except KeyError:
-        raise ConfigError(f"Source {class_name} not found") from None
-    return my_class
+        measurement = measurement_for(source)
+    except ConfigError:
+        return False
+    for other in known_sources():
+        if other == source.lower():
+            continue
+        try:
+            if measurement_for(other) == measurement:
+                return True
+        except ConfigError:
+            continue
+    return False
 
 
 # Sources that collect over MQTT and therefore need the shared top-level mqtt block.
