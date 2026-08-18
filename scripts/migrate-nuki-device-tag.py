@@ -266,7 +266,22 @@ class Influx:
                 self._headers = {"Authorization": f"Token {credential}"}
 
     def query(self, statement):
-        """Run one InfluxQL statement and return its first series' (columns, values)."""
+        """Run one InfluxQL statement and return ``(columns, values)`` across **every** series.
+
+        Reading only the first series is a data-loss bug waiting to happen: none of the
+        statements here use ``GROUP BY``, and InfluxDB merges tag sets into one series for those
+        (verified on 1.8), but that is a property of the statements rather than of this method,
+        and a future statement or version that split them would silently migrate a subset and
+        report success. Columns must match across series - for these statements they always do,
+        and a mismatch halts rather than being stitched together on a guess.
+
+        :param statement: the InfluxQL statement
+        :type statement: str
+        :return: (columns, rows) with the rows of every series concatenated
+        :rtype: tuple
+        :raises MigrationError: InfluxDB rejected the statement, or its series disagree on
+            columns
+        """
         response = self.session.get(
             f"{self.url}/query",
             params={"db": self.database, "q": statement, "epoch": "ns"},
@@ -277,12 +292,22 @@ class Influx:
         )
         response.raise_for_status()
         payload = response.json()
+        columns = []
+        rows = []
         for result in payload.get("results", []):
             if result.get("error"):
                 raise MigrationError(f"InfluxDB rejected {statement!r}: {result['error']}")
             for series in result.get("series", []):
-                return series.get("columns", []), series.get("values", [])
-        return [], []
+                these = series.get("columns", [])
+                if not columns:
+                    columns = these
+                elif these != columns:
+                    raise MigrationError(
+                        f"InfluxDB returned series with differing columns for {statement!r} "
+                        f"({columns} vs {these}). Refusing to guess how to combine them"
+                    )
+                rows.extend(series.get("values", []) or [])
+        return columns, rows
 
     def write(self, lines):
         """Write a batch of line protocol points at nanosecond precision."""
@@ -340,7 +365,14 @@ def read_old_points(influx, keys):
         stamp = row[index["time"]]
         present = {key: row[index[key]] for key in keys if row[index[key]] is not None}
         if present:
-            points[stamp] = present
+            # MERGED, never replaced. InfluxDB returns one row per tag set, so a history
+            # spanning a broker change - or two collectors writing into one database - has
+            # several rows at the same timestamp, each carrying a different lock's fields.
+            # Assigning here dropped every row but the last: verified on 1.8, two locks under
+            # two host tags at one timestamp migrated as one lock and reported success, after
+            # which phase 2 would have deleted the other's history for good. Silent loss in the
+            # tool whose whole purpose is not losing data.
+            points.setdefault(stamp, {}).update(present)
     return points
 
 

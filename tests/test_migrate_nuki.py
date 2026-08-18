@@ -538,6 +538,113 @@ class TestReadOldPoints:
         assert migration.read_old_points(influx, ["a_stateValue"]) == {STAMP: {"a_stateValue": 0}}
 
 
+class TestMultipleRowsAtOneTimestamp:
+    """The silent-loss case: several rows sharing a timestamp.
+
+    InfluxDB returns one row per tag set, so a history spanning a broker change - or two
+    collectors writing into one database, which is what this whole epic is about - has several
+    rows at the same timestamp, each carrying a different lock's fields. Verified on a real
+    InfluxDB 1.8: two locks under two host tags at one timestamp came back as two rows.
+    """
+
+    @staticmethod
+    def _influx(columns, values):
+        influx = migration.Influx("http://influx.example.com:8086", "test", None)
+        influx.query = lambda statement: (columns, values)
+        return influx
+
+    def test_rows_sharing_a_timestamp_are_merged_not_replaced(self):
+        """Assigning instead of merging dropped every row but the last, migrated one lock,
+        and reported success - after which phase 2 would have deleted the other lock's
+        history for good."""
+        influx = self._influx(
+            ["time", "Front_stateValue", "Back_stateValue"],
+            [[STAMP, None, 3], [STAMP, 1, None]],
+        )
+        points = migration.read_old_points(influx, ["Front_stateValue", "Back_stateValue"])
+        assert points == {STAMP: {"Front_stateValue": 1, "Back_stateValue": 3}}
+
+    def test_both_locks_survive_into_the_written_lines(self):
+        """The end the operator actually cares about: two points, not one."""
+        influx = self._influx(
+            ["time", "Front_stateValue", "Back_stateValue"],
+            [[STAMP, None, 3], [STAMP, 1, None]],
+        )
+        points = migration.read_old_points(influx, ["Front_stateValue", "Back_stateValue"])
+        _, counts, _ = migration.rewritten_lines(points)
+        assert dict(counts) == {"Front": 1, "Back": 1}
+
+
+class TestQueryReadsEverySeries:
+    """``Influx.query()`` must not stop at the first series.
+
+    None of this script's statements use ``GROUP BY``, and InfluxDB merges tag sets for those,
+    so today only one series comes back. That is a property of the statements, not of the
+    method - a future statement or version that split them would migrate a subset and report
+    success, which is the failure mode this script exists to prevent.
+    """
+
+    @staticmethod
+    def _influx(payload):
+        influx = migration.Influx("http://influx.example.com:8086", "test", None)
+
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return payload
+
+        influx.session = type("S", (), {"get": staticmethod(lambda *a, **k: Response())})()
+        return influx
+
+    def test_rows_from_every_series_are_returned(self):
+        influx = self._influx(
+            {
+                "results": [
+                    {
+                        "series": [
+                            {"columns": ["time", "v"], "values": [[1, 10]]},
+                            {"columns": ["time", "v"], "values": [[2, 20]]},
+                        ]
+                    }
+                ]
+            }
+        )
+        assert influx.query("SELECT 1") == (["time", "v"], [[1, 10], [2, 20]])
+
+    def test_series_disagreeing_on_columns_halts(self):
+        """Stitching mismatched columns together would corrupt the row indexing silently, so
+        this halts - the same choice as an unparseable field key."""
+        influx = self._influx(
+            {
+                "results": [
+                    {
+                        "series": [
+                            {"columns": ["time", "v"], "values": [[1, 10]]},
+                            {"columns": ["time", "other"], "values": [[2, 20]]},
+                        ]
+                    }
+                ]
+            }
+        )
+        with pytest.raises(migration.MigrationError, match="differing columns"):
+            influx.query("SELECT 1")
+
+    def test_an_error_result_still_halts(self):
+        influx = self._influx({"results": [{"error": "no such measurement"}]})
+        with pytest.raises(migration.MigrationError, match="no such measurement"):
+            influx.query("SELECT 1")
+
+    def test_no_series_is_empty_not_an_error(self):
+        influx = self._influx({"results": [{}]})
+        assert influx.query("SELECT 1") == ([], [])
+
+
 class TestOldFieldKeys:
     """Selecting which keys are old ones."""
 
