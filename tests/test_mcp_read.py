@@ -25,7 +25,9 @@ from toinflux.mcp_read import (
     register_read_tools,
     resolve_db,
     resolve_schema,
+    QuerySeries,
     run_query,
+    single_series,
     _annotate_state_field,
     _influx_read_request,
 )
@@ -372,11 +374,10 @@ class TestDiscoverFields:
 class TestRunQuery:
     def test_returns_columns_and_values(self):
         payload = {"results": [{"series": [{"columns": ["time", "gen"], "values": [[1, 100]]}]}]}
-        cols, vals = run_query(
-            _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1"
-        )
-        assert cols == ["time", "gen"]
-        assert vals == [[1, 100]]
+        series = run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1")
+        assert len(series) == 1
+        assert series[0].columns == ["time", "gen"]
+        assert series[0].values == [[1, 100]]
 
     def test_query_error_raises(self):
         payload = {"results": [{"error": "boom"}]}
@@ -384,10 +385,55 @@ class TestRunQuery:
             run_query(_mock_session(payload), {"url": "http://x", "token": "t", "org": "o"}, "db", "SELECT 1")
 
     def test_no_series_returns_empty(self):
-        cols, vals = run_query(
-            _mock_session({"results": [{}]}), {"url": "http://x", "user": "u", "password": "p"}, "db", "q"
+        assert (
+            run_query(_mock_session({"results": [{}]}), {"url": "http://x", "user": "u", "password": "p"}, "db", "q")
+            == []
         )
-        assert (cols, vals) == ([], [])
+
+    def test_every_series_is_returned_with_its_tags(self):
+        # A GROUP BY on a tag returns one series per tag value. Returning only the
+        # first silently discards every producer but one - the exact failure that
+        # makes a two-host speedtest install unanswerable. Payload captured from a
+        # real InfluxDB 1.8 and confirmed byte-identical on 2.7's v1-compat endpoint.
+        payload = {
+            "results": [
+                {
+                    "statement_id": 0,
+                    "series": [
+                        {
+                            "name": "speedtest",
+                            "tags": {"host": "hostA"},
+                            "columns": ["time", "ping"],
+                            "values": [[1700000000, 12.3], [1700000600, 13.1]],
+                        },
+                        {
+                            "name": "speedtest",
+                            "tags": {"host": "hostB"},
+                            "columns": ["time", "ping"],
+                            "values": [[1700000000, 45.6], [1700000600, 46]],
+                        },
+                    ],
+                }
+            ]
+        }
+        series = run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1")
+        assert [s.tags for s in series] == [{"host": "hostA"}, {"host": "hostB"}]
+        assert [s.values[0][1] for s in series] == [12.3, 45.6]
+
+    def test_untagged_series_has_empty_tags(self):
+        payload = {"results": [{"series": [{"columns": ["time", "gen"], "values": [[1, 100]]}]}]}
+        series = run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1")
+        assert series[0].tags == {}
+
+    def test_single_series_helper_returns_columns_and_values(self):
+        payload = {"results": [{"series": [{"columns": ["time", "gen"], "values": [[1, 100]]}]}]}
+        cols, vals = single_series(
+            run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "q")
+        )
+        assert (cols, vals) == (["time", "gen"], [[1, 100]])
+
+    def test_single_series_helper_on_empty_result(self):
+        assert single_series([]) == ([], [])
 
 
 class TestResolveSchema:
@@ -531,7 +577,7 @@ class TestRegisterReadTools:
         with (
             patch("toinflux.mcp_common.get_class", return_value=self._handler()),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
-            patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], [[100, 42]])),
+            patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], [[100, 42]])]),
         ):
             result = anyio.run(
                 server.call_tool,
@@ -553,7 +599,7 @@ class TestRegisterReadTools:
         with (
             patch("toinflux.mcp_common.get_class", return_value=self._handler()),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
-            patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], rows)),
+            patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], rows)]),
         ):
             result = anyio.run(
                 server.call_tool,
@@ -572,7 +618,7 @@ class TestRegisterReadTools:
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
-            patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], [[1, 2]])),
+            patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], [[1, 2]])]),
         ):
             anyio.run(
                 server.call_tool,
@@ -729,7 +775,7 @@ class TestCurrentStateResult:
             patch("toinflux.mcp_read.discover_fields", return_value={"ping", "download"}),
             patch(
                 "toinflux.mcp_read.run_query",
-                return_value=(["time", "download", "ping"], [[1700, None, 12.5]]),
+                return_value=[QuerySeries({}, ["time", "download", "ping"], [[1700, None, 12.5]])],
             ),
         ):
             result = current_state_result("speedtest", {"sources": ["speedtest"]}, None)

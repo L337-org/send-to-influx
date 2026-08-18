@@ -559,22 +559,65 @@ def discover_fields(session, influx_settings, db, measurement):
     return fields
 
 
-def run_query(session, influx_settings, db, query):
-    """Execute an InfluxQL query and return its first series' (columns, values),
-    or ([], []) when the query matched nothing.
+@dataclass(frozen=True)
+class QuerySeries:
+    """One series from an InfluxQL result: its tag set, columns and rows.
 
-    :return: (columns, values) where columns is a list of names and values is a
-        list of rows
+    ``tags`` is empty for an ungrouped query. A ``GROUP BY`` on a tag returns one
+    of these per tag value, which is what makes a per-instance answer possible.
+    """
+
+    tags: dict
+    columns: list
+    values: list
+
+
+def run_query(session, influx_settings, db, query):
+    """Execute an InfluxQL query and return **every** series it produced.
+
+    A ``GROUP BY`` on a tag yields one series per tag value, each carrying its own
+    ``tags`` map (verified against InfluxDB 1.8 and 2.7's v1-compatibility
+    endpoint, whose responses are identical here). An earlier version returned only
+    the first series, which silently discarded every producer but one - invisible
+    while every query happened to be ungrouped, and wrong the moment one is not.
+    Callers that genuinely cannot produce more than one series use
+    :func:`single_series` to say so explicitly.
+
+    :return: list of QuerySeries, empty when the query matched nothing
     :raises SourceConnectionError: on a transport/parse failure
     """
     url, kwargs = _influx_read_request(influx_settings, db, query)
     payload = _get(session, url, kwargs, "query")
+    found = []
     for result in payload.get("results", []):
         if result.get("error"):
             raise SourceConnectionError(f"InfluxDB rejected the query: {result['error']}")
         for series in result.get("series", []):
-            return series.get("columns", []), series.get("values", [])
-    return [], []
+            found.append(
+                QuerySeries(
+                    tags=dict(series.get("tags") or {}),
+                    columns=series.get("columns", []),
+                    values=series.get("values", []),
+                )
+            )
+    return found
+
+
+def single_series(series):
+    """Flatten a :func:`run_query` result known to hold at most one series.
+
+    For queries that cannot produce more than one - no ``GROUP BY``, so InfluxQL
+    merges every tag value into a single series - this restores the plain
+    ``(columns, values)`` shape. Naming the assumption is the point: dropping
+    series is a decision the call site takes deliberately, never a default hidden
+    inside the query helper.
+
+    :param series: list of QuerySeries from run_query
+    :return: (columns, values), or ([], []) when there is no series
+    """
+    if not series:
+        return [], []
+    return series[0].columns, series[0].values
 
 
 _DURATION_UNIT_SECONDS = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
@@ -682,7 +725,9 @@ def _v1_retention(session, influx_settings, db):
     :raises SourceConnectionError: transport, parse, or an InfluxDB-reported error
     """
     _validate_identifier(db, "database")
-    columns, values = run_query(session, influx_settings, db, f"SHOW RETENTION POLICIES ON {_quote_identifier(db)}")
+    columns, values = single_series(
+        run_query(session, influx_settings, db, f"SHOW RETENTION POLICIES ON {_quote_identifier(db)}")
+    )
     if not values:
         raise SourceConnectionError(f"InfluxDB reported no retention policy for database {db!r}")
     index = {col: i for i, col in enumerate(columns)}
@@ -892,7 +937,9 @@ def _run_query_history(handler, schema, field, start, end, aggregation, group_by
     query = build_query(
         schema, field=field, start=start, end=end, aggregation=aggregation, group_by=group_by, limit=limit
     )
-    columns, values = run_query(handler.session, handler.settings["influx"], schema.db, query)
+    # Ungrouped today, so exactly one series; the per-instance grouping that makes
+    # this return several is the next slice, and changes this consumer with it.
+    columns, values = single_series(run_query(handler.session, handler.settings["influx"], schema.db, query))
     result = annotate_rows(schema, field, columns, values)
     # Surface the effective limit and whether the query hit it. `truncated` means
     # exactly that - the result reached the limit, so more data *may* exist beyond
@@ -919,7 +966,7 @@ def _latest_recorded(handler):
     if not fields:
         return {}, None
     query = build_latest_query(measurement, handler.mcp_tag_filters(), fields)
-    columns, values = run_query(handler.session, influx_settings, db, query)
+    columns, values = single_series(run_query(handler.session, influx_settings, db, query))
     if not values:
         return {}, None
     row = values[0]
@@ -1029,7 +1076,7 @@ def _edge_time(handler, schema, order_query):
     :raises SourceConnectionError: transport failure, unparseable response, or an
         InfluxDB-reported query error
     """
-    columns, values = run_query(handler.session, handler.settings["influx"], schema.db, order_query)
+    columns, values = single_series(run_query(handler.session, handler.settings["influx"], schema.db, order_query))
     if not values:
         return None
     index = {col: i for i, col in enumerate(columns)}
