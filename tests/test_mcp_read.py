@@ -1021,6 +1021,61 @@ class TestMultiBridgeReads:
         value - leaking it into the allowlist would make None an acceptable argument."""
         assert configured_instances("speedtest", {"sources": ["speedtest"]}) == []
 
+    def _history(self, **kwargs):
+        from toinflux.mcp_read import _query_history_result
+
+        schema = ReadSchema(
+            source="hue",
+            measurement="hue",
+            db="h",
+            allowed_fields={"Kitchen"},
+            instance_tag="host",
+            instance_values={"a.example.com"},
+        )
+        handler = MagicMock()
+        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
+        with (
+            patch("toinflux.mcp_read.resolve_schema", return_value=(handler, schema)),
+            patch("toinflux.mcp_read.run_query", return_value=[]),
+            warnings.catch_warnings(),
+        ):
+            warnings.simplefilter("ignore")
+            return _query_history_result(
+                {"sources": ["hue"]},
+                None,
+                source="hue",
+                field="Kitchen",
+                start="-1h",
+                end="now",
+                aggregation="raw",
+                group_by=None,
+                limit=10,
+                **kwargs,
+            )
+
+    def test_a_bridge_only_caller_gets_no_instance_keys(self):
+        """The alias exists so an existing client need not change. Echoing `instance` and
+        `instance_tag` back to a caller who only passed `bridge` adds two keys to their
+        payload - exactly the churn being avoided. `instance` is derived from `bridge`
+        internally, and a derived value must not be reported as if it were requested."""
+        result = self._history(bridge="a.example.com")
+        assert result["bridge"] == "a.example.com"
+        assert "instance" not in result
+        assert "instance_tag" not in result
+
+    def test_an_instance_caller_gets_no_bridge_key(self):
+        result = self._history(instance="a.example.com")
+        assert result["instance"] == "a.example.com"
+        assert result["instance_tag"] == "host"
+        assert "bridge" not in result
+
+    def test_both_spellings_echo_both(self):
+        """Passing both is allowed when they agree, and the answer should not silently drop
+        one of the caller's own arguments."""
+        result = self._history(bridge="a.example.com", instance="a.example.com")
+        assert result["bridge"] == "a.example.com"
+        assert result["instance"] == "a.example.com"
+
     def test_bridge_is_rejected_for_a_source_with_one_producer(self):
         """Silently ignoring it would be worse than refusing: the source would run an
         unscoped query and the result would echo the value back, telling the caller the

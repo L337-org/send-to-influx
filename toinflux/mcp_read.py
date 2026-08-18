@@ -1172,6 +1172,9 @@ def _query_history_result(
     # asserted which error was raised, not that nothing was logged.
     handler, schema = resolve_schema(source, settings, settings_file)
     try:
+        # Keep the caller's own spelling, so the payload echoes back what was passed and
+        # nothing else - see the echo block below.
+        requested_instance = instance
         instance = _resolve_deprecated_bridge(source, bridge, instance)
         # `instance` names a value of a tag in the *data*, which is not the same question as
         # resolve_schema's own `instance` (a collector work unit in INSTANCED_SOURCES - a
@@ -1181,13 +1184,17 @@ def _query_history_result(
         _validate_instance(schema, instance)
         result = _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit, instance=instance)
         # Say what was actually queried: without this the model cannot tell a single-producer
-        # answer from an estate-wide one, and the two mean different things. `bridge` is
-        # echoed back only when the caller used that spelling, so an existing client's
-        # payload is unchanged while it migrates.
+        # answer from an estate-wide one, and the two mean different things.
+        #
+        # Echo back the caller's *own* spelling and nothing else. Echoing `instance` for a
+        # caller who only passed `bridge` would add two keys to their payload - which is
+        # precisely the churn the alias exists to avoid, and it made the claim that an
+        # existing client's payload is unchanged simply untrue. `instance` is derived from
+        # `bridge` internally, so the derived value must not be mistaken for a request.
         if bridge is not None:
             result["bridge"] = bridge
-        if instance is not None:
-            result["instance"] = instance
+        if requested_instance is not None:
+            result["instance"] = requested_instance
             result["instance_tag"] = schema.instance_tag
         return result
     finally:
