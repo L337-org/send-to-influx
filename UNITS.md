@@ -112,8 +112,21 @@ page for the default unit of each one.
 
 ## Nuki Smart Lock (`nuki`)
 
-Field keys are prefixed with the lock's own name from the Nuki app (spaces replaced with
-underscores), e.g. `Front_Door_stateValue`; every lock provisioned to the broker is reported.
+Every **Nuki** point carries a `device` tag holding the lock's own name from the Nuki app (give
+each lock a distinct name), and every lock provisioned to the broker is reported as its own
+point. Field keys are the bare names below, the same for every lock, so filter or group by
+`device` to separate them. A lock that has not published its name to the broker is reported
+under its Nuki device ID instead.
+
+The broker is deliberately not recorded: every lock arrives through one broker, so it
+identifies nothing, and moving to a different broker should not start a new series.
+
+> **Breaking change in 5.3:** before 5.3 each lock's fields were prefixed with its name into a
+> single shared point - `Front_Door_stateValue` rather than `stateValue` tagged
+> `device=Front_Door` - and the point carried a `host` tag naming the broker. The lock could
+> not be queried as a dimension that way. Existing history stays in the old shape and keeps
+> working; `UPGRADING.md` describes the supplied migration that converts it, in two phases with
+> the irreversible one separately invoked.
 
 | Field | Unit | Notes |
 |---|---|---|

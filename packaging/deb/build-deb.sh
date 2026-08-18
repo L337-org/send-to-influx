@@ -370,6 +370,24 @@ VERSION="${DEB_VERSION_OVERRIDE:-$VERSION}"
 # dpkg's records and stays in place on disk.
 cp "$REPO_ROOT/example_settings.yaml" "$PKG_ROOT/usr/share/send-to-influx/example_settings.yaml"
 
+# The Nuki device-tag migration, shipped alongside the example so an apt install can run it
+# without cloning the repo. Deliberately NOT a pyproject.toml entry point and not on $PATH:
+# putting a destructive, irreversible one-off on the path is the wrong signal, and nothing in
+# the package or the service ever invokes it - see UPGRADING.md and the script's own docstring
+# for why it must be a deliberate, hand-run act. It needs `requests`, which this package keeps
+# in its own venv rather than as a system dependency, so UPGRADING.md documents running it with
+# /opt/send-to-influx/venv/bin/python3 - a bare `python3` only works where python3-requests
+# happens to be installed.
+cp "$REPO_ROOT/scripts/migrate-nuki-device-tag.py" "$PKG_ROOT/usr/share/send-to-influx/migrate-nuki-device-tag.py"
+chmod 755 "$PKG_ROOT/usr/share/send-to-influx/migrate-nuki-device-tag.py"
+
+# UPGRADING.md travels with it: the script's summary output means little without the narrative
+# of what changed, when to run each phase, and how to verify before the irreversible one. Kept
+# beside the script rather than in /usr/share/doc, which this package does not otherwise use -
+# adding a directory there would mean dpkg managing its ownership across upgrades for one file,
+# and the instructions are most useful next to the thing they are instructions for.
+cp "$REPO_ROOT/UPGRADING.md" "$PKG_ROOT/usr/share/send-to-influx/UPGRADING.md"
+
 # systemd unit (format-agnostic, stays at the top of packaging/) and .deb-specific maintainer scripts
 cp "$REPO_ROOT/packaging/send-to-influx.service" "$PKG_ROOT/lib/systemd/system/send-to-influx.service"
 cp "$REPO_ROOT/packaging/deb/preinst" "$PKG_ROOT/DEBIAN/preinst"
