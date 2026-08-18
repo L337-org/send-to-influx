@@ -318,6 +318,75 @@ class TestTagEscaping:
             migration.escape_tag(name)
 
 
+class TestInfluxQLEscaping:
+    """The two places a database-supplied value is interpolated into a statement.
+
+    Neither value is a trusted constant: the host tag and the field keys both come out of the
+    database, and the collector's line-protocol escaping does not cover either InfluxQL context
+    (it escapes commas, equals signs, spaces and backslashes - not single or double quotes). Both
+    verified against a real InfluxDB 1.8, where the unescaped forms return 400.
+    """
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("plain.example.com", "plain.example.com"),
+            ("bro'ker", "bro\\'ker"),
+            ("back\\slash", "back\\\\slash"),
+            ("both'\\end", "both\\'\\\\end"),
+        ],
+    )
+    def test_string_literals_are_escaped(self, value, expected):
+        assert migration.escape_influxql_string(value) == expected
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("Gate_stateValue", "Gate_stateValue"),
+            ('Front"Door_stateValue', 'Front\\"Door_stateValue'),
+            ("back\\slash_stateValue", "back\\\\slash_stateValue"),
+        ],
+    )
+    def test_identifiers_are_escaped(self, value, expected):
+        assert migration.escape_influxql_identifier(value) == expected
+
+    def test_the_delete_predicate_escapes_its_host(self, tmp_path):
+        """The one that matters most: this is the irreversible statement, and a host tag
+        carrying a quote made it fail with a parse error, so that series could never be
+        removed by any supported path."""
+        manifest = tmp_path / "m.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "database": "test",
+                    "old_series_hosts": ["bro'ker"],
+                    "new_points": 1,
+                    "devices": {"Gate": 1},
+                }
+            )
+        )
+        influx = migration.Influx("http://influx.example.com:8086", "test", None)
+        influx.statements = []
+        influx.query = lambda statement: (influx.statements.append(statement), ([], []))[1]
+        args = type("Args", (), {"manifest": str(manifest), "database": "test", "dry_run": False, "yes": True})()
+        assert migration.phase_delete(influx, args) == 0
+        assert influx.statements == ["""DROP SERIES FROM "nuki" WHERE "host" = 'bro\\'ker'"""]
+
+    def test_the_select_escapes_its_field_keys(self):
+        """A lock named with a double quote produces a field key carrying it, and the
+        unescaped SELECT returned 400 - the migration failed outright for that install."""
+        influx = migration.Influx("http://influx.example.com:8086", "test", None)
+        influx.statements = []
+
+        def query(statement):
+            influx.statements.append(statement)
+            return ["time", 'Front"Door_stateValue'], [[STAMP, 1]]
+
+        influx.query = query
+        migration.read_old_points(influx, ['Front"Door_stateValue'])
+        assert influx.statements == ['SELECT "Front\\"Door_stateValue" FROM "nuki"']
+
+
 class TestRewrittenLines:
     """Turning a real old cycle into the new format."""
 

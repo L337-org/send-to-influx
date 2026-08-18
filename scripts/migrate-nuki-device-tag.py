@@ -196,6 +196,52 @@ def escape_tag(value):
     return value.replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
 
 
+def escape_influxql_string(value):
+    """Escape a value for use inside an InfluxQL single-quoted string literal.
+
+    The delete phase names its target in a ``WHERE "host" = '...'`` predicate, and the value
+    comes from the database's own tag values via the manifest - not from a trusted constant.
+    ``escape_key_or_tag_value()`` (which the collector used when *writing* that tag) escapes
+    commas, equals signs, spaces and backslashes, but **not single quotes**, so a
+    ``mqtt.broker_host`` containing one reaches the tag intact. Verified against InfluxDB 1.8:
+    the unescaped predicate returns ``400 error parsing query: found ker, expected ;``, so the
+    delete could never succeed and that series could never be removed by any supported path.
+
+    Escaping is required rather than merely tidy. The observed failure is a rejected statement,
+    but that is InfluxDB's parser declining to guess - relying on every hostile value happening
+    to fail closed is not a property worth depending on for an irreversible delete, and the
+    manifest is a file an operator can hand-edit.
+
+    :param value: the literal's contents
+    :type value: str
+    :return: the escaped contents, without the surrounding quotes
+    :rtype: str
+    """
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def escape_influxql_identifier(value):
+    """Escape a value for use inside an InfluxQL double-quoted identifier.
+
+    The same exposure as ``escape_influxql_string()`` one layer over: the rewrite phase selects
+    the old field keys by name, and those names come from the database via ``SHOW FIELD KEYS``.
+    ``escape_key_or_tag_value()`` does not escape double quotes when *writing* a field key, so a
+    lock named ``Front"Door`` produces the field key ``Front"Door_stateValue`` verbatim.
+    Verified against InfluxDB 1.8: ``SELECT "Front"Door_stateValue" FROM "nuki"`` returns
+    ``400 error parsing query``, so the migration failed outright for that install, while the
+    escaped form returns the row.
+
+    Found by sweeping for the pattern after the string-literal case was raised, rather than
+    waiting for the second instance to be reported separately.
+
+    :param value: the identifier
+    :type value: str
+    :return: the escaped identifier, without the surrounding quotes
+    :rtype: str
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 class Influx:
     """The InfluxDB calls this migration needs, over one session.
 
@@ -286,7 +332,7 @@ def read_old_points(influx, keys):
     keys - possible once the new collector has started writing - contributes only its old
     half, and the new half is not rewritten on top of itself.
     """
-    selected = ", ".join(f'"{key}"' for key in keys)
+    selected = ", ".join(f'"{escape_influxql_identifier(key)}"' for key in keys)
     columns, values = influx.query(f'SELECT {selected} FROM "{MEASUREMENT}"')
     index = {name: position for position, name in enumerate(columns)}
     points = {}
@@ -458,7 +504,7 @@ def phase_delete(influx, args):
         # Scoped by tag, never a bare DROP SERIES FROM the measurement: the migrated points
         # live in the same measurement, so an unscoped drop would destroy this migration's own
         # output along with the history it was preserving.
-        influx.query(f"""DROP SERIES FROM "{MEASUREMENT}" WHERE "host" = '{host}'""")
+        influx.query(f"""DROP SERIES FROM "{MEASUREMENT}" WHERE "host" = '{escape_influxql_string(host)}'""")
         print(f"  dropped host={host}")
     print("\nDropped the pre-5.3 series. The migrated points remain.")
     return 0
