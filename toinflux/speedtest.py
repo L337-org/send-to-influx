@@ -40,6 +40,12 @@ class Speedtest(DataHandler):
     # opt-in per install with speedtest.mcp_read_write: true - unlike Hue this
     # controls no external device, it just runs a measurement on the local host.
     MCP_WRITABLE = True
+    # Every point carries host=<short hostname of the collecting machine> (see
+    # _run_speedtest), which is deliberate and load-bearing: separate hosts run
+    # separate collectors into one database precisely so their connectivity can be
+    # compared. Naming it here is what lets the read tools enumerate the hosts,
+    # scope a query to one, and report per host instead of merging them.
+    MCP_INSTANCE_TAG = "host"
     MCP_FIELD_METADATA = {
         "download": {"unit": "bits/s"},
         "upload": {"unit": "bits/s"},

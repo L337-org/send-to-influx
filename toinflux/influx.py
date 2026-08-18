@@ -179,6 +179,20 @@ class DataHandler:
     # disabled capability isn't registered at all (least privilege), never
     # registered-and-refusing.
     MCP_WRITABLE = False
+    # The tag key that distinguishes *producers* within this source's measurement,
+    # or None when the measurement has only one. This is the tag as an **axis** -
+    # something to enumerate and scope by - as opposed to MCP_TAG_FILTERS above,
+    # which pins a tag to one constant value. The distinction is the whole point:
+    # Speedtest deliberately tags every point with the collecting host, and Grafana
+    # separates them, but the MCP read tools used to flatten every host into one
+    # unlabelled series - so a two-host install got answers that silently mixed
+    # them. Naming the axis is what lets a read enumerate it, scope to one value,
+    # and report per value.
+    #
+    # It is deliberately per source rather than one global "collector" tag: the axis
+    # means different things (Speedtest's collecting host, a Hue bridge, a Nuki
+    # lock, a MyEnergi device), and most sources genuinely have only one producer.
+    MCP_INSTANCE_TAG: "str | None" = None
 
     def mcp_tag_filters(self):
         """Return the tag filters that scope this handler's reads.

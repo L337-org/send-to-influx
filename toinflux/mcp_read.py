@@ -113,6 +113,12 @@ class ReadSchema:
     tag_filters: dict = dataclass_field(default_factory=dict)
     allowed_fields: set = dataclass_field(default_factory=set)
     field_metadata: dict = dataclass_field(default_factory=dict)
+    # The tag distinguishing producers within this measurement (from
+    # MCP_INSTANCE_TAG), and the values it currently holds - the live allowlist for
+    # an `instance` argument. None/empty for a source with a single producer, which
+    # keeps every such source's behaviour and payload shape exactly as before.
+    instance_tag: "str | None" = None
+    instance_values: set = dataclass_field(default_factory=set)
 
     def metadata_for(self, field):
         """Return the metadata dict for a field in this schema - see the
@@ -138,7 +144,7 @@ def resolve_db(source_settings, influx_settings):
     return source_settings.get("db")
 
 
-def build_schema(handler, discovered_fields, db):
+def build_schema(handler, discovered_fields, db, instance_values=None):
     """Assemble a ReadSchema from a DataHandler instance's static class metadata,
     the live discovered field set, and the resolved db (see resolve_db).
 
@@ -152,6 +158,8 @@ def build_schema(handler, discovered_fields, db):
     :param handler: a constructed DataHandler subclass instance
     :param discovered_fields: field keys found via discover_fields()
     :param db: the resolved database/bucket name (from resolve_db)
+    :param instance_values: values of the source's instance tag found via
+        discover_tag_values(), or None when it has no instance tag
     :return: ReadSchema
     """
     measurement = handler.MCP_MEASUREMENT or handler.source
@@ -162,6 +170,8 @@ def build_schema(handler, discovered_fields, db):
         tag_filters=handler.mcp_tag_filters(),
         allowed_fields=set(discovered_fields),
         field_metadata=dict(handler.MCP_FIELD_METADATA),
+        instance_tag=handler.MCP_INSTANCE_TAG,
+        instance_values=set(instance_values or ()),
     )
 
 
@@ -572,6 +582,45 @@ class QuerySeries:
     values: list
 
 
+def discover_tag_values(session, influx_settings, db, measurement, tag):
+    """Return the set of values a tag actually holds in a measurement.
+
+    The exact analogue of :func:`discover_fields`, and it carries the same role: the
+    live allowlist an ``instance`` argument is validated against, so a value that was
+    never written is refused rather than producing a confidently empty answer. Being
+    discovered rather than configured also means a collector host that started
+    reporting yesterday is queryable today with no config change.
+
+    Verified against real InfluxDB 1.8 and 2.7 (the latter through its
+    v1-compatibility ``/query`` endpoint, whose response is identical): one series
+    with ``columns: ["key", "value"]`` and one row per value. Worth having checked
+    rather than assumed - that same endpoint reports a bucket's retention as ``0s``,
+    so its answers are not interchangeable with v1's by default.
+
+    :param tag: the tag key to enumerate (from the source class, never model input)
+    :return: set of tag-value strings (possibly empty)
+    :raises SourceConnectionError: on a transport/parse failure
+    """
+    _validate_identifier(measurement, "measurement")
+    _validate_identifier(tag, "tag")
+    query = f"SHOW TAG VALUES FROM {_quote_identifier(measurement)} WITH KEY = {_quote_identifier(tag)}"
+    url, kwargs = _influx_read_request(influx_settings, db, query)
+    payload = _get(session, url, kwargs, f"discover {tag} values for {measurement}")
+    values = set()
+    for result in payload.get("results", []):
+        # Same reasoning as discover_fields: a per-result error arrives in a 200 body,
+        # and swallowing it would make a broken query look like "no instances".
+        if result.get("error"):
+            raise SourceConnectionError(f"InfluxDB rejected the tag-value discovery: {result['error']}")
+        for series in result.get("series", []):
+            columns = series.get("columns", [])
+            index = columns.index("value") if "value" in columns else -1
+            for row in series.get("values", []):
+                if row and isinstance(row[index], str):
+                    values.add(row[index])
+    return values
+
+
 def run_query(session, influx_settings, db, query):
     """Execute an InfluxQL query and return **every** series it produced.
 
@@ -857,6 +906,15 @@ def resolve_schema(source, settings, settings_file, instance=None):
     db = resolve_db(handler.source_settings, influx_settings)
     try:
         fields = discover_fields(handler.session, influx_settings, db, measurement)
+        # Only for a source that declares an instance axis, so nothing else pays for
+        # an extra round trip. Discovered rather than configured: the values are
+        # whatever has actually been written, so a new collector host is queryable
+        # without touching this install's settings.
+        instance_values = None
+        if handler.MCP_INSTANCE_TAG:
+            instance_values = discover_tag_values(
+                handler.session, influx_settings, db, measurement, handler.MCP_INSTANCE_TAG
+            )
     except Exception:
         # A fresh requests.Session is created per handler (per tool call); close
         # it if discovery fails, or a long-running server accumulates open
@@ -864,7 +922,7 @@ def resolve_schema(source, settings, settings_file, instance=None):
         # the returned handler and closes its session when done.
         close_session(handler.session)
         raise
-    return handler, build_schema(handler, fields, db)
+    return handler, build_schema(handler, fields, db, instance_values)
 
 
 def _list_sources_result(settings, settings_file):

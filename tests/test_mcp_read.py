@@ -196,6 +196,7 @@ class TestBuildSchema:
         handler = MagicMock()
         handler.source = "openmeteo"
         handler.MCP_MEASUREMENT = "weather"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {"temperature_2m": {"unit": "°C"}}
         schema = build_schema(handler, {"temperature_2m", "precipitation"}, "weather_db")
@@ -207,6 +208,7 @@ class TestBuildSchema:
         handler = MagicMock()
         handler.source = "hue"
         handler.MCP_MEASUREMENT = None
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
         schema = build_schema(handler, set(), "hue_db")
@@ -466,6 +468,7 @@ class TestResolveSchema:
         handler = MagicMock()
         handler.source = "zappi"
         handler.MCP_MEASUREMENT = "myenergi"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {"device": "zappi"}
         # Tag filters now come from a method, so the mock must return the real value -
         # a MagicMock method call otherwise yields another mock, and any assertion on the
@@ -491,6 +494,7 @@ class TestResolveSchema:
         handler = MagicMock()
         handler.source = "zappi"
         handler.MCP_MEASUREMENT = "myenergi"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
         handler.source_settings = {"db": "zappi_db"}
@@ -538,6 +542,7 @@ class TestRegisterReadTools:
         handler = MagicMock()
         handler.source = "zappi"
         handler.MCP_MEASUREMENT = "myenergi"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {"device": "zappi"}
         # Tag filters now come from a method, so the mock must return the real value -
         # a MagicMock method call otherwise yields another mock, and any assertion on the
@@ -779,6 +784,7 @@ class TestCurrentStateResult:
         handler.source = "speedtest"
         handler.MCP_LIVE_STATE = False
         handler.MCP_MEASUREMENT = None
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_DESCRIPTION = "speed"
         handler.MCP_FIELD_METADATA = {"ping": {"unit": "ms"}}
@@ -1081,6 +1087,12 @@ class TestDataRangeResult:
     def _point(ts):
         return {"results": [{"series": [{"columns": ["time", "ping"], "values": [[ts, 12.0]]}]}]}
 
+    @staticmethod
+    def _tag_values(*values):
+        """Speedtest declares an instance tag, so resolve_schema enumerates it - one
+        extra round trip between field discovery and the edge-time queries."""
+        return {"results": [{"series": [{"columns": ["key", "value"], "values": [["host", v] for v in values]}]}]}
+
     def test_v1_reports_range_and_retention(self):
         """Acceptance question 2: v1 reports the configured duration and shard duration.
 
@@ -1100,7 +1112,9 @@ class TestDataRangeResult:
                 }
             ]
         }
-        result, _ = self._run(self.V1, [self._fields("ping"), self._point(1000), self._point(5000), retention])
+        result, _ = self._run(
+            self.V1, [self._fields("ping"), self._tag_values("hostA"), self._point(1000), self._point(5000), retention]
+        )
         assert (result["earliest"], result["latest"], result["span_seconds"]) == (1000, 5000, 4000)
         assert result["points_present"] is True
         assert result["retention"]["known"] is True
@@ -1128,7 +1142,9 @@ class TestDataRangeResult:
                 }
             ]
         }
-        result, _ = self._run(self.V1, [self._fields("ping"), self._point(1), self._point(2), retention])
+        result, _ = self._run(
+            self.V1, [self._fields("ping"), self._tag_values("hostA"), self._point(1), self._point(2), retention]
+        )
         assert result["retention"]["policy"] == "keep"
 
     def test_v2_reads_retention_from_the_management_api_not_the_query_path(self):
@@ -1149,7 +1165,9 @@ class TestDataRangeResult:
                 }
             ]
         }
-        result, calls = self._run(self.V2, [self._fields("ping"), self._point(10), self._point(20), buckets])
+        result, calls = self._run(
+            self.V2, [self._fields("ping"), self._tag_values("hostA"), self._point(10), self._point(20), buckets]
+        )
         assert result["retention"]["known"] is True
         assert result["retention"]["duration_seconds"] == 2592000
         # Rendered in v1's own style, so an answer is comparable across versions.
@@ -1182,6 +1200,7 @@ class TestDataRangeResult:
             self.V2,
             [
                 self._fields("ping"),
+                self._tag_values("hostA"),
                 self._point(100),
                 self._point(200),
                 requests.exceptions.HTTPError("403 Forbidden"),
@@ -1195,7 +1214,9 @@ class TestDataRangeResult:
     def test_v2_missing_bucket_degrades_rather_than_reporting_infinite(self):
         """v2 answers 200 with an empty list for a name matching nothing, so this is not
         caught by raise_for_status - and must not be read as 'no retention rules'."""
-        result, _ = self._run(self.V2, [self._fields("ping"), self._point(1), self._point(2), {"buckets": []}])
+        result, _ = self._run(
+            self.V2, [self._fields("ping"), self._tag_values("hostA"), self._point(1), self._point(2), {"buckets": []}]
+        )
         assert result["retention"]["known"] is False
         assert "no bucket named" in result["retention"]["reason"]
 
@@ -1262,8 +1283,12 @@ class TestDataRangeResult:
                 }
             ]
         }
-        v1, _ = self._run(self.V1, [self._fields("ping"), self._point(1), self._point(2), v1_retention])
-        v2, _ = self._run(self.V2, [self._fields("ping"), self._point(1), self._point(2), v2_buckets])
+        v1, _ = self._run(
+            self.V1, [self._fields("ping"), self._tag_values("hostA"), self._point(1), self._point(2), v1_retention]
+        )
+        v2, _ = self._run(
+            self.V2, [self._fields("ping"), self._tag_values("hostA"), self._point(1), self._point(2), v2_buckets]
+        )
         for key in ("duration", "duration_seconds", "shard_group_duration", "shard_group_duration_seconds"):
             assert v1["retention"][key] == v2["retention"][key], key
 
