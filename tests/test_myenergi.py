@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
-from toinflux.exceptions import SourceConnectionError
+from toinflux.exceptions import ConfigError, SourceConnectionError
 
 
 def _eddi_settings(base):
@@ -187,7 +187,7 @@ class TestZappi:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             zappi = Zappi(source="zappi")
-            myenergi_data = {"zappi": [{"frq": 50, "vol": 240, "gen": 100, "other": "ignored"}]}
+            myenergi_data = {"zappi": [{"sno": "12345", "frq": 50, "vol": 240, "gen": 100, "other": "ignored"}]}
             day_data = {"Charge": 1.0, "Import": 2.0, "Export": 0.0, "Genera": 0.5}
             with patch.object(Zappi, "get_data_from_myenergi", return_value=myenergi_data):
                 with patch.object(Zappi, "dayhour_results", return_value=day_data):
@@ -207,7 +207,7 @@ class TestZappi:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             zappi = Zappi(source="zappi")
-            myenergi_data = {"zappi": [{"frq": 50, "vol": 240, "custom": "yes"}]}
+            myenergi_data = {"zappi": [{"sno": "12345", "frq": 50, "vol": 240, "custom": "yes"}]}
             day_data = {"Charge": 0, "Import": 0, "Export": 0, "Genera": 0}
             with patch.object(Zappi, "get_data_from_myenergi", return_value=myenergi_data):
                 with patch.object(Zappi, "dayhour_results", return_value=day_data):
@@ -226,7 +226,7 @@ class TestZappi:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = sample_settings
             zappi = Zappi(source="zappi")
-            myenergi_data = {"zappi": [{"frq": 50}]}
+            myenergi_data = {"zappi": [{"sno": "12345", "frq": 50}]}
             fixed_utc_now = datetime.datetime(2025, 6, 30, 23, 30, tzinfo=datetime.timezone.utc)
             day_data = {"Charge": 0, "Import": 0, "Export": 0, "Genera": 0}
             with patch.object(Zappi, "get_data_from_myenergi", return_value=myenergi_data):
@@ -261,7 +261,9 @@ class TestEddi:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             eddi = Eddi(source="eddi")
-            myenergi_data = {"eddi": [{"frq": 50, "div": 100, "che": 0.5, "sta": 1, "other": "ignored"}]}
+            myenergi_data = {
+                "eddi": [{"sno": "67890", "frq": 50, "div": 100, "che": 0.5, "sta": 1, "other": "ignored"}]
+            }
             with patch.object(Eddi, "get_data_from_myenergi", return_value=myenergi_data):
                 result = eddi.parse_eddi_data()
                 assert result == {"frq": 50, "div": 100, "che": 0.5}
@@ -275,10 +277,10 @@ class TestEddi:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             eddi = Eddi(source="eddi")
-            myenergi_data = {"eddi": [{"frq": 50, "div": 100, "custom": "yes"}]}
+            myenergi_data = {"eddi": [{"sno": "67890", "frq": 50, "div": 100, "custom": "yes"}]}
             with patch.object(Eddi, "get_data_from_myenergi", return_value=myenergi_data):
                 result = eddi.parse_eddi_data()
-                assert result == {"frq": 50, "div": 100, "custom": "yes"}
+                assert result == {"sno": "67890", "frq": 50, "div": 100, "custom": "yes"}
 
 
 class TestHarvi:
@@ -303,7 +305,7 @@ class TestHarvi:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             harvi = Harvi(source="harvi")
-            myenergi_data = {"harvi": [{"ectp1": 500, "ectp2": 0, "ectp3": 200, "ectt1": "Grid"}]}
+            myenergi_data = {"harvi": [{"sno": "99999", "ectp1": 500, "ectp2": 0, "ectp3": 200, "ectt1": "Grid"}]}
             with patch.object(Harvi, "get_data_from_myenergi", return_value=myenergi_data):
                 result = harvi.parse_harvi_data()
                 assert result == {"ectp1": 500, "ectp2": 0}
@@ -317,7 +319,107 @@ class TestHarvi:
         with patch("toinflux.influx.load_settings") as mock_load_settings:
             mock_load_settings.return_value = settings
             harvi = Harvi(source="harvi")
-            myenergi_data = {"harvi": [{"ectp1": 500, "ectp2": 100, "ectt1": "Grid"}]}
+            myenergi_data = {"harvi": [{"sno": "99999", "ectp1": 500, "ectp2": 100, "ectt1": "Grid"}]}
             with patch.object(Harvi, "get_data_from_myenergi", return_value=myenergi_data):
                 result = harvi.parse_harvi_data()
-                assert result == {"ectp1": 500, "ectp2": 100, "ectt1": "Grid"}
+                assert result == {"sno": "99999", "ectp1": 500, "ectp2": 100, "ectt1": "Grid"}
+
+
+class TestDeviceSelection:
+    """SI-36. The device was picked out of the API response by a hardcoded index, so a
+    second device of the same type was silently ignored and an account with none of that
+    type raised IndexError - caught by the worker's broad handler and retried forever
+    logging only "list index out of range"."""
+
+    @staticmethod
+    def _zappi(settings, serial="12345"):
+        settings = {**settings}
+        settings["zappi"] = {**settings["zappi"], "serial": serial}
+        settings["zappi"].pop("fields", None)
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Zappi("zappi")
+        handler.session = MagicMock()
+        return handler
+
+    def test_selects_the_device_matching_the_configured_serial(self, sample_settings):
+        """Acceptance question 1. The serial field is `sno`, verified against the live
+        MyEnergi API - it is the only key whose value equals the configured serial."""
+        zappi = self._zappi(sample_settings, serial="22222")
+        response = {"zappi": [{"sno": "11111", "frq": 49.0}, {"sno": "22222", "frq": 50.0}]}
+        with patch.object(Zappi, "get_data_from_myenergi", return_value=response):
+            result = zappi._parse_device_data("zappi", "zappi_url")
+        assert result["frq"] == 50.0, "picked the wrong device - index 0 rather than the serial"
+
+    def test_a_second_device_of_the_same_type_is_no_longer_ignored(self, sample_settings):
+        """The defect in its original form: with two devices, only the first was ever
+        collected, whichever serial was configured."""
+        response = {"zappi": [{"sno": "first", "frq": 1.0}, {"sno": "second", "frq": 2.0}]}
+        for serial, expected in (("first", 1.0), ("second", 2.0)):
+            zappi = self._zappi(sample_settings, serial=serial)
+            with patch.object(Zappi, "get_data_from_myenergi", return_value=response):
+                assert zappi._parse_device_data("zappi", "zappi_url")["frq"] == expected
+
+    def test_serial_is_matched_as_a_string_whatever_yaml_produced(self, sample_settings):
+        """An all-digit serial in settings.yaml is an int unless quoted, while the API
+        returns whatever it returns - comparing them raw would silently never match and
+        look exactly like a wrong serial."""
+        zappi = self._zappi(sample_settings, serial=22222)
+        response = {"zappi": [{"sno": 11111, "frq": 49.0}, {"sno": "22222", "frq": 50.0}]}
+        with patch.object(Zappi, "get_data_from_myenergi", return_value=response):
+            assert zappi._parse_device_data("zappi", "zappi_url")["frq"] == 50.0
+
+    def test_no_device_of_that_type_names_the_cause(self, sample_settings):
+        """Acceptance question 2. Verified against the live account: an endpoint for a
+        device type you do not own answers 200 with an empty list. A transient failure
+        rather than fatal, because a device can legitimately be mid-provisioning."""
+        zappi = self._zappi(sample_settings)
+        with patch.object(Zappi, "get_data_from_myenergi", return_value={"zappi": []}):
+            with pytest.raises(SourceConnectionError) as excinfo:
+                zappi._parse_device_data("zappi", "zappi_url")
+        message = str(excinfo.value)
+        assert "list index out of range" not in message
+        assert "zappi" in message
+        assert "no zappi" in message.lower() or "returned no" in message.lower()
+
+    def test_a_missing_key_is_treated_the_same_as_an_empty_list(self, sample_settings):
+        """The account response is not contractually guaranteed to include the key at all,
+        and a KeyError would escape the SourceConnectionError/ConfigError split the worker
+        loop relies on just as the IndexError did."""
+        zappi = self._zappi(sample_settings)
+        with patch.object(Zappi, "get_data_from_myenergi", return_value={}):
+            with pytest.raises(SourceConnectionError):
+                zappi._parse_device_data("zappi", "zappi_url")
+
+    def test_a_serial_matching_nothing_is_fatal_not_retried(self, sample_settings):
+        """Acceptance question 3. Devices came back, so the account is reachable and the
+        type exists - the configured serial is simply wrong, which no amount of waiting
+        fixes. ConfigError is what stops the worker instead of backing off forever."""
+        zappi = self._zappi(sample_settings, serial="not-my-serial")
+        response = {"zappi": [{"sno": "11111"}, {"sno": "22222"}]}
+        with patch.object(Zappi, "get_data_from_myenergi", return_value=response):
+            with pytest.raises(ConfigError) as excinfo:
+                zappi._parse_device_data("zappi", "zappi_url")
+        message = str(excinfo.value)
+        assert "not-my-serial" in message
+        # Naming what the account does have is the difference between a message you can act
+        # on and one that just says no.
+        assert "11111" in message and "22222" in message
+
+    def test_the_two_failures_are_different_exception_types(self, sample_settings):
+        """The split is the whole point: one is worth retrying and one never is, and the
+        worker loop treats ConfigError and SourceConnectionError differently."""
+        assert not issubclass(ConfigError, SourceConnectionError)
+        assert not issubclass(SourceConnectionError, ConfigError)
+
+    def test_eddi_and_harvi_get_the_same_treatment(self, sample_settings):
+        """One shared code path, so a fix that only covered Zappi would be a trap for the
+        next reader."""
+        for name, factory in (("eddi", _eddi_settings), ("harvi", _harvi_settings)):
+            settings = factory(sample_settings)
+            cls = Eddi if name == "eddi" else Harvi
+            with patch("toinflux.influx.load_settings", return_value=settings):
+                handler = cls(name)
+            handler.session = MagicMock()
+            with patch.object(cls, "get_data_from_myenergi", return_value={name: []}):
+                with pytest.raises(SourceConnectionError):
+                    handler._parse_device_data(name, f"{name}_url")
