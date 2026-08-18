@@ -199,15 +199,33 @@ def test_the_assistant_instruction_files_both_exist():
 
 
 def _workflow_jobs():
-    """Every CI job, as ``(workflow path, job name, job body)``."""
+    """Every CI job, as ``(workflow path, job name, job body)``.
+
+    Sourced from ``_tracked_files()`` rather than a filesystem glob, for the same reason
+    everything else here is: an untracked or gitignored workflow file a developer left in the
+    directory is not part of the repo and must not fail their suite.
+
+    Each job body is checked for being a mapping as it is yielded. A workflow with ``jobname:``
+    and no body parses as ``None``, and the callers would then fail with an AttributeError from
+    ``job.get(...)`` - which says nothing about which workflow or job is malformed.
+    """
     import yaml
 
-    workflows = sorted((REPO_ROOT / ".github" / "workflows").glob("*.y*ml"))
+    workflows = [
+        path
+        for path in _tracked_files()
+        if path.parent == REPO_ROOT / ".github" / "workflows" and path.suffix in (".yml", ".yaml")
+    ]
     assert workflows, "no workflow files found - this check would pass while verifying nothing"
     for path in workflows:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        for name, job in (document.get("jobs") or {}).items():
-            yield path.relative_to(REPO_ROOT), name, job
+        relative = path.relative_to(REPO_ROOT)
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert isinstance(document, dict), f"{relative} does not parse as a YAML mapping"
+        jobs = document.get("jobs") or {}
+        assert isinstance(jobs, dict), f"{relative} has a `jobs:` key that is not a mapping"
+        for name, job in jobs.items():
+            assert isinstance(job, dict), f"{relative}:{name} has no body, or a body that is not a mapping"
+            yield relative, name, job
 
 
 def test_every_ci_job_has_a_timeout():
@@ -236,4 +254,17 @@ def test_ci_job_timeouts_are_sane():
         minutes = job.get("timeout-minutes")
         if minutes is None:
             continue  # reported by the test above
+        if isinstance(minutes, str):
+            # YAML keeps a quoted value a string, and Actions accepts that. An expression is
+            # resolved at run time and cannot be checked here - the presence test above still
+            # guarantees the job is bounded, which is the property that matters.
+            if "${{" in minutes:
+                continue
+            assert minutes.strip().isdigit(), (
+                f"{path}:{name} has timeout-minutes={minutes!r}, which is neither a number nor a " f"GitHub expression"
+            )
+            minutes = int(minutes)
+        assert isinstance(minutes, int) and not isinstance(
+            minutes, bool
+        ), f"{path}:{name} has timeout-minutes={minutes!r} of type {type(minutes).__name__}, expected a number"
         assert 1 <= minutes <= 60, f"{path}:{name} has timeout-minutes={minutes}, outside 1-60"
