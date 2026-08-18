@@ -600,7 +600,7 @@ class TestHueMultiBridgeWrites:
                     color=None,
                 )
         message = str(excinfo.value)
-        assert "bridge upstairs.example.com" in message and "could not be reached" in message
+        assert "bridge 'upstairs.example.com'" in message and "could not be reached" in message
         assert "Pass 'bridge'" in message
         # The match that *was* found is reported, so the caller knows what naming a bridge
         # would get them rather than having to guess.

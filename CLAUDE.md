@@ -262,6 +262,16 @@ source down to the HTTP boundary - written across every source rather than just 
 break was one subclass violating a shared contract and the next override would break it the same
 way.
 
+- **External values are named with `!r` in every message, never raw.** A lock name comes from the
+  retained MQTT `name` topic, and one containing a newline turned the per-lock failure message
+  into *two* journal lines - the worker logs `Source '%s' failed: %s`, so a forged entry with its
+  own timestamp and ERROR level appeared as though the daemon had written it, and the same text
+  reaches an MCP client as a tool error. `escape_key_or_tag_value`'s own message was already safe
+  for exactly this reason; the prefix wrapped around it was not. Swept rather than patched at the
+  one reported line: the same shape existed in `mcp_write`'s unreachable-bridge list and
+  `mcp_read`'s all-instances-failed message, both of which reach a client. The name is still
+  reported, just escaped - a failure has to stay diagnosable from its output alone.
+
 - **The backlog is flushed once per cycle, not once per lock.** The write buffer is keyed by
   *worker*, so calling the base `send_data()` per lock flushed it per lock too, charging the head
   buffered point one rejection each time. With `MAX_POINT_REJECTIONS` at 5, a five-lock install

@@ -969,7 +969,7 @@ class TestMultiBridgeReads:
                 current_state_result("hue", self._settings(), None)
         message = str(excinfo.value)
         # Each bridge paired with its own error, not merely both hostnames present somewhere.
-        assert "down.example.com: down" in message and "up.example.com: also down" in message
+        assert "'down.example.com': down" in message and "'up.example.com': also down" in message
 
     def test_hue_declares_the_host_axis_so_scoping_uses_the_shared_path(self):
         """The core of per-bridge scoping: without the axis on the class, Hue falls back to the old

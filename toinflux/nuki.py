@@ -229,7 +229,14 @@ class Nuki(MqttDataHandler):
                     # its own point on failure; only the flush is done once.
                     super().send_data(data=fields, timestamp=timestamp, use_buffer=use_buffer, flush=index == 0)
                 except InfluxWriteError as exc:
-                    failures.append(f"{label}: {exc}")
+                    # label!r, never the raw label. A lock name comes from the retained MQTT
+                    # `name` topic, and one containing a newline turned this message into two
+                    # log lines - the worker loop logs it as "Source '%s' failed: %s", so a
+                    # forged line with its own timestamp and ERROR level appeared in the journal
+                    # as though the daemon had written it. The same text reaches an MCP client.
+                    # escape_key_or_tag_value's own message was already safe for this reason;
+                    # this prefix was not.
+                    failures.append(f"{label!r}: {exc}")
         finally:
             self.influx_header = original_header
         if failures:
@@ -265,8 +272,10 @@ class Nuki(MqttDataHandler):
         for device_id, fields in sorted(devices.items()):
             label = self._device_label(fields.pop("name", ""), device_id)
             if label in data:
+                # %r, not '%s': a lock name is external input and a newline in it would
+                # otherwise split this warning into two journal lines - see send_data().
                 logging.warning(
-                    "Duplicate Nuki device name '%s' - one lock's readings will overwrite the"
+                    "Duplicate Nuki device name %r - one lock's readings will overwrite the"
                     " other's; give each lock a distinct name in the Nuki app",
                     label,
                 )
@@ -366,8 +375,9 @@ class Nuki(MqttDataHandler):
         label = self._device_label(name, device_id)
         for other_id, other_name in self._device_names.items():
             if other_id != device_id and self._device_label(other_name, other_id) == label:
+                # %r for the same reason as the snapshot path above.
                 logging.warning(
-                    "Duplicate Nuki device name '%s' - devices %s and %s share one series, so their"
+                    "Duplicate Nuki device name %r - devices %s and %s share one series, so their"
                     " readings will interleave; give each lock a distinct name in the Nuki app",
                     label,
                     other_id,

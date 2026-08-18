@@ -1415,7 +1415,8 @@ def current_state_result(source, settings, settings_file):
         if failures == len(handlers):
             raise SourceConnectionError(
                 f"could not read current state for any configured target of {source!r}: "
-                + "; ".join(f"{instance}: {entry['error']}" for instance, entry in instances.items())
+                # instance!r for the same reason as mcp_write's unreachable list.
+                + "; ".join(f"{instance!r}: {entry['error']}" for instance, entry in instances.items())
             )
         result["instances"] = instances
         return result

@@ -383,7 +383,9 @@ class TestPerLockPoints:
                 raise InfluxWriteError("boom")
 
         with patch.object(Nuki.__mro__[2], "send_data", side_effect=flaky):
-            with pytest.raises(InfluxWriteError, match="B: boom"):
+            # The lock is named with !r, so a name containing a newline cannot forge a log
+            # line - see test_a_lock_name_cannot_forge_a_log_line.
+            with pytest.raises(InfluxWriteError, match="'B': boom"):
                 handler.send_data()
         assert len(attempted) == 3, "a failure must not abandon the remaining locks"
 
@@ -466,6 +468,30 @@ class TestPerLockPoints:
         headers = [header for header, _, _ in written]
         assert headers == ["nuki,device=Aaa_Good ", "nuki,device=Zzz_Good "], headers
         assert not any("Injected" in header for header in headers)
+
+    def test_a_lock_name_cannot_forge_a_log_line(self, sample_settings):
+        """The failure message names the lock, and a lock name is external input.
+
+        Interpolated raw, a newline in it split the worker loop's own
+        ``Source '%s' failed: %s`` line in two, so a forged entry - complete with its own
+        timestamp and ERROR level - appeared in the journal as though the daemon had written it.
+        The same text reaches an MCP client as a tool error. escape_key_or_tag_value's message
+        was already safe for this reason; the prefix added around it was not.
+        """
+        from toinflux.influx import InfluxWriteError
+
+        handler = self._handler(sample_settings)
+        forged = "Gate\n2026-08-18 12:00:00 ERROR forged by an attacker"
+        handler.data = {forged: {"stateValue": 1}}
+        with patch.object(Nuki.__mro__[2], "_post_line"):
+            with pytest.raises(InfluxWriteError) as caught:
+                handler.send_data(timestamp=1700000000)
+
+        message = str(caught.value)
+        assert "\n" not in message, f"the failure message spans several lines: {message!r}"
+        # The name is still reported, just escaped - a failure has to stay diagnosable.
+        assert "Gate" in message
+        assert "forged by an attacker" in message
 
     def test_the_backlog_is_flushed_once_per_cycle_not_once_per_lock(self, sample_settings):
         """The write buffer is per *worker*, so flushing on every lock charged the head

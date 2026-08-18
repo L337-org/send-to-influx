@@ -146,10 +146,24 @@ query_history("nuki", "stateValue") -> per-lock results
 ```
 
 **If something looks wrong, stop here.** Do not run phase 2. The old data is untouched, so you
-can delete the migration's own output instead and be exactly where you started:
+can delete the migration's own output instead and be exactly where you started.
+
+On InfluxDB v1:
 
 ```
 DROP SERIES FROM "nuki" WHERE "device" != ''
+```
+
+On InfluxDB v2, which has no `DROP SERIES`, delete by predicate instead - substituting your
+organisation, bucket and token. This removes the series carrying a `device` tag, which is
+exactly what the migration wrote, and leaves your original `host`-tagged history alone:
+
+```bash
+curl -X POST 'https://influx.example.com/api/v2/delete?org=YOUR_ORG&bucket=YOUR_BUCKET' \
+    -H 'Authorization: Token YOUR_TOKEN' \
+    -H 'Content-Type: application/json' \
+    -d '{"start": "1970-01-01T00:00:00Z", "stop": "2100-01-01T00:00:00Z",
+         "predicate": "_measurement=\"nuki\" AND device!=\"\""}'
 ```
 
 #### Phase 2: delete the old series
