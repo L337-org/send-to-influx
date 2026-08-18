@@ -29,7 +29,7 @@ the README's "Multiple Hue bridges" section.
 
 The `collector_status` heartbeat for `hue` also carries a `host` tag, so each bridge's
 `ok`/`consecutive_failures` are recorded separately. Grouping by `source` alone aggregates
-across bridges, which can hide a failing one behind a healthy one — group by `source, host`
+across bridges, which can hide a failing one behind a healthy one - group by `source, host`
 (or `*`) for a series per bridge.
 
 ## MyEnergi Zappi (`zappi`)
