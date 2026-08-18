@@ -815,6 +815,25 @@ class TestMultiDevice:
         handler = self._handler({"db": "z", "interval": 300, "serial": "1"})
         assert handler.mcp_tag_filters() == {"device": "zappi"}
 
+    def test_a_blank_auth_serial_override_falls_back_to_the_device(self):
+        """`auth_serial: "   "` is truthy, so it was sent as the Digest username and
+        authentication simply failed, with nothing pointing at three spaces in the config.
+
+        Falling back is safe here, unlike a blank `label` which is refused, because the
+        fallback for this *is* the normal behaviour rather than a different answer."""
+        settings = self._settings({"db": "z", "interval": 300, "serial": "77"})
+        settings["myenergi"]["auth_serial"] = "   "
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Zappi("zappi")
+        assert handler.auth_serial() == "77"
+
+    def test_a_padded_auth_serial_override_is_stripped(self):
+        settings = self._settings({"db": "z", "interval": 300, "serial": "77"})
+        settings["myenergi"]["auth_serial"] = "  hub-99  "
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Zappi("zappi")
+        assert handler.auth_serial() == "hub-99"
+
     def test_the_heartbeat_tags_the_device_not_a_host(self):
         """The base implementation would tag host=<instance>, but a MyEnergi instance is a
         device label - the health series must carry the same tag as the data it reports on,

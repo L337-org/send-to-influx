@@ -412,9 +412,14 @@ class MyEnergi(DataHandler):
         :return: the serial to authenticate with
         :rtype: str
         """
-        override = self.settings.get("myenergi", {}).get("auth_serial")
+        # Stripped, and ignored when that leaves nothing: `auth_serial: "   "` is truthy, so
+        # it was sent as the Digest username and authentication simply failed, with nothing
+        # pointing at three spaces in the config as the cause. Falling back is safe here -
+        # unlike a blank `label`, which is refused, because the fallback for this *is* the
+        # normal behaviour rather than a different answer.
+        override = str(self.settings.get("myenergi", {}).get("auth_serial") or "").strip()
         if override:
-            return str(override)
+            return override
         return self.device().serial
 
     def get_data_from_myenergi(self, url):
