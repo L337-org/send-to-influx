@@ -247,6 +247,21 @@ debugging:
   skipped key is data silently left behind that phase 2 would then delete, and it would look like
   success.
 
+**`Nuki.send_data()` must not capture every caller, and the discriminator is the payload's
+shape.** `send_heartbeat()` sets its own `collector_status` header and passes a flat
+`{field: value}` dict through the *same* `send_data()`; the streaming path passes per-device data
+explicitly. So "was `data` given?" cannot tell them apart - `_is_per_device()` decides on every
+value being a mapping, since a lock always carries a dict of fields and a field never does.
+Getting this wrong treated `ok`/`consecutive_failures` as lock names whose scalar values were
+then skipped as non-dicts, so **Nuki wrote no heartbeat at all**, silently, with only warnings -
+exactly the silent gap the heartbeat exists to prevent. Found in review, not by the tests, because
+every existing heartbeat test used a `MagicMock` handler: a mock's `send_data` never runs the
+source's own override, so those tests assert what `send_heartbeat` *asked for* and never what the
+handler *did*. `test_every_source_actually_writes_a_heartbeat_point` now drives a real handler per
+source down to the HTTP boundary - written across every source rather than just Nuki, because the
+break was one subclass violating a shared contract and the next override would break it the same
+way.
+
 **Changing emitted data means sweeping `tests/integration/` too, and that is easy to miss.**
 Integration tests are deselected from the default `pytest` run (by design - they need a broker),
 so a local green run says nothing about them. Worse, running `pytest -m integration` *without* a

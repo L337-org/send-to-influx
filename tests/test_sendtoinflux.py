@@ -790,6 +790,66 @@ class TestSendHeartbeat:
 
         assert captured["header"] == "collector_status,source=hue "
 
+    # Minimal settings that let every source construct, so the contract test below can use a
+    # real handler per source rather than a mock. A mock is exactly what let a real regression
+    # through: MagicMock.send_data never runs the source's own override.
+    _EVERY_SOURCE_SETTINGS = {
+        "influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"},
+        "mqtt": {"broker_host": "broker.example.com"},
+        "hue": {"db": "d", "host": "bridge.example.com", "user": "token"},
+        "nuki": {"db": "d", "interval": 300},
+        "speedtest": {"db": "d"},
+        "openmeteo": {"db": "d", "latitude": 51.5, "longitude": -0.1},
+        "octopus": {"db": "d", "api_key": "k", "mpan": "1", "serial": "s"},
+        "carbonintensity": {"db": "d"},
+        "zappi": {"db": "d", "serial": "10000001"},
+        "eddi": {"db": "d", "serial": "10000002"},
+        "harvi": {"db": "d", "serial": "10000003"},
+        "myenergi": {"apikey": "k"},
+    }
+
+    def test_every_source_actually_writes_a_heartbeat_point(self):
+        """The heartbeat must survive any source's own send_data() override.
+
+        Every other test in this class uses a MagicMock handler, so it asserts what
+        send_heartbeat *asked for* and never what the handler *did*. That is precisely how a
+        real regression shipped: Nuki's per-lock override treated the heartbeat's flat
+        ``{ok, consecutive_failures}`` payload as lock names, whose scalar values were then
+        skipped as non-dicts, so Nuki wrote no heartbeat at all - silently, and only warnings
+        in the log. A collector with no heartbeat is the exact silent gap the heartbeat exists
+        to prevent.
+
+        So this drives a *real* handler per source down to the HTTP boundary and asserts a
+        collector_status line arrives. It covers every source rather than just Nuki, because
+        the failure was a shared contract being broken by one subclass, and the next override
+        would break it the same way.
+        """
+        from toinflux.general import known_sources
+
+        for name in known_sources():
+            posted = self._heartbeat_lines(name)
+            assert len(posted) == 1, f"{name} wrote {len(posted)} heartbeat lines, expected 1: {posted}"
+            line = posted[0]
+            assert line.startswith("collector_status,"), f"{name} wrote {line!r}"
+            assert f"source={name}" in line, f"{name} wrote {line!r}"
+            assert "ok=1" in line and "consecutive_failures=0" in line, f"{name} wrote {line!r}"
+
+    @classmethod
+    def _heartbeat_lines(cls, name):
+        """Drive one source's real handler through send_heartbeat and return the lines it
+        posted. A method rather than an inline loop body so nothing closes over a loop
+        variable."""
+        from toinflux.general import source_class
+
+        with patch("toinflux.influx.load_settings", return_value=cls._EVERY_SOURCE_SETTINGS):
+            handler = source_class(name)(name)
+        handler.session = MagicMock()
+        posted = []
+        base = type(handler).__mro__[-2]  # DataHandler, wherever it sits in each source's chain
+        with patch.object(base, "_post_line", side_effect=lambda line, *a, **k: posted.append(line)):
+            sendtoinflux.send_heartbeat(handler, name, ok=True, consecutive_failures=0)
+        return posted
+
     def test_uses_current_time_not_a_stale_self_timestamp(self, sample_settings):
         """send_heartbeat writes with the current time, not a stale self.timestamp set by an earlier get_data() cycle.
 

@@ -397,6 +397,47 @@ class TestPerLockPoints:
         base.assert_called_once()
         assert base.call_args.kwargs["data"] == {}
 
+    def test_a_flat_payload_goes_to_the_base_with_the_callers_header(self, sample_settings):
+        """The override must not capture every caller of send_data().
+
+        send_heartbeat() sets its own collector_status header and passes a flat
+        {field: value} dict; the streaming path passes per-device data explicitly. So "was
+        data given?" cannot tell them apart - the shape is what does. Treating the flat
+        payload as per-device made Nuki write no heartbeat at all.
+        """
+        handler = self._handler(sample_settings)
+        handler.influx_header = "collector_status,source=nuki "
+        written, patcher = self._captured(handler)
+        with patcher:
+            handler.send_data(data={"ok": 1, "consecutive_failures": 0}, timestamp=1700000000)
+        assert len(written) == 1
+        header, data, _ = written[0]
+        # The base receives the flat payload untouched, under the caller's own header - not a
+        # per-lock header built from the field names.
+        assert data == {"ok": 1, "consecutive_failures": 0}
+        assert header == "collector_status,source=nuki "
+        assert handler.influx_header == "collector_status,source=nuki ", "the caller's header was not restored"
+
+    @pytest.mark.parametrize(
+        "payload,per_device",
+        [
+            ({"Front_Door": {"stateValue": 1}}, True),
+            ({"Front_Door": {}}, True),
+            ({"ok": 1, "consecutive_failures": 0}, False),
+            ({"ok": 1}, False),
+            ({}, False),
+            (None, False),
+            ("not a dict", False),
+            # A payload no code path produces. The conservative direction is the base, which
+            # honours the caller's header rather than overwriting it with a lock's.
+            ({"Front_Door": {"stateValue": 1}, "ok": 1}, False),
+        ],
+    )
+    def test_the_shape_discriminator(self, payload, per_device):
+        from toinflux.nuki import _is_per_device
+
+        assert _is_per_device(payload) is per_device
+
     def test_the_header_is_restored_after_writing(self, sample_settings):
         """send_data() swaps a per-lock header in for each write, and must put back what it
         found. Left dirty, the handler holds the *last* lock's header, and any later write that

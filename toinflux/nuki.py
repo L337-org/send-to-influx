@@ -79,6 +79,27 @@ DOORSENSOR_STATE_CODES = {
 }
 
 
+def _is_per_device(payload):
+    """Whether a payload is this source's ``{device: {field: value}}`` shape.
+
+    Decided by shape rather than by which argument was passed, because both are legitimate:
+    the streaming path passes per-device data explicitly, and ``send_heartbeat()`` passes a
+    flat ``{field: value}`` point with its own header already set. Every value being a mapping
+    is what separates them - a lock always carries a dict of fields, and a field never does.
+
+    Deliberately strict: anything else, including a mixed payload no code path produces, goes
+    to the base implementation, which is the conservative direction (it honours the header the
+    caller set instead of overwriting it with a lock's).
+
+    :param payload: the data handed to ``send_data()``
+    :return: True if it should be written as one point per lock
+    :rtype: bool
+    """
+    if not payload or not isinstance(payload, dict):
+        return False
+    return all(isinstance(fields, dict) for fields in payload.values())
+
+
 class Nuki(MqttDataHandler):
     """
     Child class of MqttDataHandler to get lock/door-sensor state from Nuki smart locks.
@@ -158,7 +179,17 @@ class Nuki(MqttDataHandler):
         Points are idempotent - same measurement, tag set and timestamp overwrite - so the
         retry re-writing a lock that already succeeded is harmless.
 
-        :param data: per-device data to send; defaults to ``self.data``
+        **A flat ``{field: value}`` payload is passed straight to the base**, because this
+        override must not capture every caller of ``send_data()``. ``send_heartbeat()`` sets its
+        own ``collector_status`` header and passes a flat dict, and the streaming path passes
+        per-device data explicitly - so "was ``data`` given?" cannot tell them apart, and the
+        shape is what actually distinguishes them. Getting this wrong meant the heartbeat's
+        ``ok``/``consecutive_failures`` were treated as *lock names* whose scalar values were
+        then skipped as non-dicts: Nuki wrote no heartbeat at all, silently, which is precisely
+        the "silent gap" the heartbeat exists to prevent.
+
+        :param data: per-device ``{device: {field: value}}`` data, or a flat
+            ``{field: value}`` point for the caller's own header; defaults to ``self.data``
         :type data: dict or None
         :param timestamp: unix epoch seconds for every point in this snapshot
         :type timestamp: int or None
@@ -168,9 +199,10 @@ class Nuki(MqttDataHandler):
         :raises InfluxWriteError: if any lock's write failed
         """
         per_device = self.data if data is None else data
-        if not per_device or not isinstance(per_device, dict):
-            # Nothing collected: hand it to the base so the empty-reading logging and the
-            # buffer flush both still happen exactly as for any other source.
+        if not _is_per_device(per_device):
+            # Either nothing collected - hand it to the base so the empty-reading logging and
+            # the buffer flush still happen exactly as for any other source - or a flat point
+            # from a caller that set its own header, which is the base's contract, not ours.
             return super().send_data(data=per_device, timestamp=timestamp, use_buffer=use_buffer)
         if timestamp is None:
             timestamp = self.timestamp if self.timestamp is not None else int(time.time())
