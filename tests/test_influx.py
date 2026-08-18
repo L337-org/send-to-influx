@@ -831,3 +831,41 @@ class TestWorkerIdentity:
             assert mock_post.call_count == 1  # its own point only, no bridge-a backlog
 
         assert len(DataHandler._write_buffers[("hue", "bridge-a")]) == 1
+
+
+def test_no_source_narrows_the_base_send_data_signature():
+    """Every override must accept everything ``DataHandler.send_data()`` accepts.
+
+    Written after the second time this went wrong: a parameter was added to the base for one
+    source's benefit, and that source's own override was left on the old signature - so a call
+    valid for all nine sources raised TypeError on one. The failure is invisible until a
+    generic caller iterates handlers, which is exactly the kind of thing that surfaces in
+    production rather than in a unit test of either class.
+
+    Compared as accepted keyword names rather than by calling, so it stays true for parameters
+    added later without anyone remembering this test exists.
+    """
+    import inspect
+
+    from toinflux.general import known_sources, source_class
+    from toinflux.influx import DataHandler
+
+    base = inspect.signature(DataHandler.send_data)
+    expected = {
+        name
+        for name, param in base.parameters.items()
+        if param.kind in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY)
+    }
+    narrowed = []
+    for source in known_sources():
+        override = source_class(source).send_data
+        params = inspect.signature(override).parameters
+        if any(p.kind is p.VAR_KEYWORD for p in params.values()):
+            continue  # **kwargs accepts anything the base does
+        missing = expected - set(params)
+        if missing:
+            narrowed.append(f"{source}: missing {sorted(missing)}")
+    assert not narrowed, (
+        "these overrides do not accept everything DataHandler.send_data() does, so a generic "
+        "caller breaks on them alone:\n  " + "\n  ".join(narrowed)
+    )

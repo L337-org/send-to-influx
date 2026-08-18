@@ -163,7 +163,7 @@ class Nuki(MqttDataHandler):
         # anything, and changing broker should not change the data.
         return self.data
 
-    def send_data(self, data=None, timestamp=None, use_buffer=True):
+    def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True):
         """
         Write one point per lock, rather than one point carrying every lock's fields.
 
@@ -199,6 +199,12 @@ class Nuki(MqttDataHandler):
         :type timestamp: int or None
         :param use_buffer: as the base implementation
         :type use_buffer: bool
+        :param flush: as the base implementation. Accepted and honoured rather than merely
+            tolerated: the signature has to stay call-compatible with the base, or a generic
+            caller doing ``handler.send_data(..., flush=...)`` - valid for every other source -
+            raises TypeError on this one alone. False means no flush at all; True means once
+            for the whole snapshot rather than once per lock (see the loop below).
+        :type flush: bool
         :return: None
         :raises InfluxWriteError: if any lock's write failed
         """
@@ -207,7 +213,7 @@ class Nuki(MqttDataHandler):
             # Either nothing collected - hand it to the base so the empty-reading logging and
             # the buffer flush still happen exactly as for any other source - or a flat point
             # from a caller that set its own header, which is the base's contract, not ours.
-            return super().send_data(data=per_device, timestamp=timestamp, use_buffer=use_buffer)
+            return super().send_data(data=per_device, timestamp=timestamp, use_buffer=use_buffer, flush=flush)
         if timestamp is None:
             timestamp = self.timestamp if self.timestamp is not None else int(time.time())
         original_header = self.influx_header
@@ -229,7 +235,13 @@ class Nuki(MqttDataHandler):
                     # cycle instead of five, defeating the guarantee that a middlebox answering
                     # 4xx for a down InfluxDB cannot mass-discard it. Every lock still buffers
                     # its own point on failure; only the flush is done once.
-                    super().send_data(data=fields, timestamp=timestamp, use_buffer=use_buffer, flush=index == 0)
+                    # ...and not at all when the caller asked for no flush.
+                    super().send_data(
+                        data=fields,
+                        timestamp=timestamp,
+                        use_buffer=use_buffer,
+                        flush=flush and index == 0,
+                    )
                 except InfluxWriteError as exc:
                     # label!r, never the raw label. A lock name comes from the retained MQTT
                     # `name` topic, and one containing a newline turned this message into two

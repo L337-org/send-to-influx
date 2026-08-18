@@ -493,6 +493,43 @@ class TestPerLockPoints:
         assert "Gate" in message
         assert "forged by an attacker" in message
 
+    def test_the_override_accepts_and_honours_the_base_flush_parameter(self, sample_settings):
+        """The override must stay call-compatible with the base it replaces.
+
+        `flush` was added to DataHandler.send_data() for this very source, and the override
+        was left on the old signature - so `handler.send_data(..., flush=...)`, valid for
+        every other source, raised TypeError on this one alone. A generic caller iterating
+        handlers would break on exactly one of them.
+
+        Honoured rather than merely accepted: False means no flush at all, True (or omitted)
+        means once for the whole snapshot.
+        """
+        from collections import deque
+
+        from toinflux.influx import DataHandler, MAX_BUFFERED_POINTS
+
+        def flushes_for(**kwargs):
+            handler = self._handler(sample_settings)
+            DataHandler._write_buffers.clear()
+            buffer = DataHandler._write_buffers.setdefault(handler.worker_key, deque(maxlen=MAX_BUFFERED_POINTS))
+            buffer.append(["nuki,device=Old stateValue=9 1699999999", 0])
+            handler.data = {f"Lock{index}": {"stateValue": index} for index in range(5)}
+            counted = {"n": 0}
+            real = DataHandler._flush_buffer
+
+            def counting(self, buf, url, request_kwargs):
+                counted["n"] += 1
+                return real(self, buf, url, request_kwargs)
+
+            with patch.object(DataHandler, "_flush_buffer", counting), patch.object(DataHandler, "_post_line"):
+                handler.send_data(timestamp=1700000000, **kwargs)
+            return counted["n"]
+
+        assert flushes_for() == 1, "omitted should flush once for the snapshot"
+        assert flushes_for(flush=True) == 1
+        assert flushes_for(flush=False) == 0, "flush=False must be honoured, not merely accepted"
+        DataHandler._write_buffers.clear()
+
     def test_the_backlog_is_flushed_once_per_cycle_not_once_per_lock(self, sample_settings):
         """The write buffer is per *worker*, so flushing on every lock charged the head
         buffered point one rejection per lock.
