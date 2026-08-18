@@ -196,3 +196,44 @@ def test_the_assistant_instruction_files_both_exist():
     takes effect - and they are meant to move together, which is the most-forgotten step."""
     assert (REPO_ROOT / "CLAUDE.md").is_file()
     assert (REPO_ROOT / ".github" / "copilot-instructions.md").is_file()
+
+
+def _workflow_jobs():
+    """Every CI job, as ``(workflow path, job name, job body)``."""
+    import yaml
+
+    workflows = sorted((REPO_ROOT / ".github" / "workflows").glob("*.y*ml"))
+    assert workflows, "no workflow files found - this check would pass while verifying nothing"
+    for path in workflows:
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for name, job in (document.get("jobs") or {}).items():
+            yield path.relative_to(REPO_ROOT), name, job
+
+
+def test_every_ci_job_has_a_timeout():
+    """An unbounded job can block a PR for six hours on an infrastructure problem.
+
+    GitHub's default job timeout is 360 minutes, and nothing here needs more than a few. That
+    is not hypothetical: the integration job once wedged on `apt-get update` against an
+    unresponsive mirror and sat there until it was cancelled by hand, with the merge blocked
+    throughout and no signal about what was wrong.
+
+    A timeout converts that into a failure in minutes, naming the step it died in. Enforced
+    here rather than written down, because the failure mode of forgetting is invisible until
+    the day something hangs.
+    """
+    unbounded = [f"{path}:{name}" for path, name, job in _workflow_jobs() if job.get("timeout-minutes") is None]
+    assert (
+        not unbounded
+    ), "these CI jobs have no timeout-minutes and would run to GitHub's 6-hour default:\n  " + "\n  ".join(unbounded)
+
+
+def test_ci_job_timeouts_are_sane():
+    """A timeout so large it never fires is the same as not having one, and one so small it
+    fires on a healthy run gets raised until it is the former. These are sized at roughly ten
+    times the observed maximum, so the bound is meaningful without being flaky."""
+    for path, name, job in _workflow_jobs():
+        minutes = job.get("timeout-minutes")
+        if minutes is None:
+            continue  # reported by the test above
+        assert 1 <= minutes <= 60, f"{path}:{name} has timeout-minutes={minutes}, outside 1-60"
