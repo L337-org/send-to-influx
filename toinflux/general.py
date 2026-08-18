@@ -765,8 +765,11 @@ def _unusable_source_block(source, settings):
     # that will never run. get_class() raises the same way at runtime, but only once a
     # worker tries to collect - so without this, --check-config reported "Configuration OK"
     # for a source that then failed on every cycle forever.
-    if source not in known_sources():
-        return f"'{source}' is not a known source (known: {', '.join(known_sources())})"
+    # Once, not twice: the membership test and the message must describe the same set, and
+    # each call rebuilds the registry.
+    collectable = known_sources()
+    if source not in collectable:
+        return f"'{source}' is not a known source (known: {', '.join(collectable)})"
     if source not in settings:
         return f"no configuration section found for source '{source}'"
     source_cfg = settings[source]
