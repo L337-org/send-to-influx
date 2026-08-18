@@ -64,18 +64,26 @@ def enumerate_devices(source, source_settings):
     if not isinstance(source_settings, dict):
         return [], [f"{source} settings must be a mapping"], []
     devices, errors, warnings = [], [], []
-    block_fields = source_settings.get("fields")
+    block_fields, block_field_errors = _checked_fields(source, source_settings.get("fields"))
+    errors.extend(block_field_errors)
 
     if source_settings.get("serial") is not None:
-        devices.append(
-            MyEnergiDevice(
-                serial=str(source_settings["serial"]),
-                # An explicit top-level label is honoured; without one the source name keeps
-                # the emitted tag identical to what this install already writes.
-                label=str(source_settings.get("label") or source),
-                fields=block_fields,
+        serial, serial_errors = _checked_serial(source, source_settings["serial"])
+        errors.extend(serial_errors)
+        # Not created when its fields failed validation either, matching the entry path
+        # below. Unreachable while validate_settings() raises on any error, but the
+        # alternative default would be to treat a broken `fields` as "collect everything",
+        # which is the wrong way to fail if this ever became reachable.
+        if serial is not None and not block_field_errors:
+            devices.append(
+                MyEnergiDevice(
+                    serial=serial,
+                    # An explicit top-level label is honoured; without one the source name
+                    # keeps the emitted tag identical to what this install already writes.
+                    label=str(source_settings.get("label") or source),
+                    fields=block_fields,
+                )
             )
-        )
 
     raw = source_settings.get("devices")
     if raw is None:
@@ -96,6 +104,14 @@ def enumerate_devices(source, source_settings):
         if entry.get("serial") is None:
             errors.append(f"{position} has no serial")
             continue
+        serial, serial_errors = _checked_serial(position, entry["serial"])
+        if serial_errors:
+            errors.extend(serial_errors)
+            continue
+        entry_fields, field_errors = _checked_fields(position, entry.get("fields", block_fields))
+        if field_errors:
+            errors.extend(field_errors)
+            continue
         label = entry.get("label")
         if not (isinstance(label, str) and label.strip()):
             errors.append(
@@ -103,14 +119,62 @@ def enumerate_devices(source, source_settings):
                 f"since the label is what identifies the device in InfluxDB and in answers"
             )
             continue
-        devices.append(
-            MyEnergiDevice(serial=str(entry["serial"]), label=label.strip(), fields=entry.get("fields", block_fields))
-        )
+        devices.append(MyEnergiDevice(serial=serial, label=label.strip(), fields=entry_fields))
 
     errors.extend(_duplicate_errors(source, devices))
     if not devices:
         warnings.append(f"no {source} device is configured, so {source} will not be collected")
     return devices, errors, warnings
+
+
+def _checked_serial(position, value):
+    """
+    Return a device serial as a non-blank string, or an error saying why not.
+
+    A blank serial was accepted before - only ``is None`` was tested - and failed much later
+    at device selection, reported as "no device has serial ''" rather than as the
+    configuration mistake it is.
+
+    :param position: what to name in the message, e.g. "zappi" or "zappi.devices[0]"
+    :type position: str
+    :param value: the configured value
+    :return: (serial, errors); serial is None when there are errors
+    :rtype: tuple
+    """
+    serial = str(value).strip()
+    if not serial:
+        return None, [f"{position} has a blank serial"]
+    return serial, []
+
+
+def _checked_fields(position, value):
+    """
+    Return a validated ``fields`` list, or an error saying why not.
+
+    ``fields: "frq"`` - a bare string rather than a list - was accepted and then iterated
+    character by character when filtering the API response, so the collector ran, wrote
+    *nothing*, and said nothing about why. That is the worst shape a config mistake can take.
+    It applied to the block-level list before devices existed, so this closes a latent bug as
+    well as guarding the new path.
+
+    :param position: what to name in the message
+    :type position: str
+    :param value: the configured value, or None
+    :return: (fields, errors); fields is None both on error and when nothing was configured,
+        the latter meaning collect every field the API returns
+    :rtype: tuple
+    """
+    if value is None:
+        return None, []
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        return None, [
+            f"{position}.fields must be a list of field names (got {type(value).__name__}); "
+            f'a single field still needs to be a list, e.g. ["frq"]'
+        ]
+    bad = [item for item in value if not isinstance(item, str)]
+    if bad:
+        return None, [f"{position}.fields must contain only field names (got {', '.join(repr(b) for b in bad)})"]
+    return list(value), []
 
 
 def _duplicate_errors(source, devices):
@@ -139,7 +203,8 @@ def _duplicate_errors(source, devices):
             seen.add(value)
         for value in sorted(repeated):
             errors.append(
-                f"{source} has more than one device with {description} {value!r}; " f"each device needs its own"
+                f"{source} has more than one device with {description} {value!r}; "
+                f"each device needs its own {description}"
             )
     return errors
 

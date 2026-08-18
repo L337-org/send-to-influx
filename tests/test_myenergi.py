@@ -4,7 +4,7 @@ import datetime
 from unittest.mock import MagicMock, patch
 import pytest
 import requests
-from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
+from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi, enumerate_devices
 from toinflux.exceptions import ConfigError, SourceConnectionError
 
 
@@ -639,6 +639,69 @@ class TestMultiDevice:
         settings = self._settings({"db": "z", "interval": 300, "devices": [{"serial": "1"}]})
         with pytest.raises(ConfigError, match="must name one"):
             validate_settings(settings)
+
+    # --- configuration that is wrong in quiet ways ---
+
+    def test_fields_as_a_bare_string_is_refused(self):
+        """Review finding, reproduced first: `fields: "frq"` was accepted and then iterated
+        character by character when filtering the response, so the collector ran, wrote
+        nothing, and said nothing about why. The worst shape a config mistake can take.
+
+        Applied to the block-level list before devices existed, so this closes a latent bug
+        as well as guarding the new path."""
+        from toinflux.general import validate_settings
+
+        settings = self._settings({"db": "z", "interval": 300, "serial": "1", "fields": "frq"})
+        with pytest.raises(ConfigError, match="must be a list of field names"):
+            validate_settings(settings)
+
+    def test_the_message_says_a_single_field_still_needs_a_list(self):
+        _, errors, _ = enumerate_devices("zappi", {"serial": "1", "fields": "frq"})
+        assert 'e.g. ["frq"]' in errors[0]
+
+    def test_per_device_fields_as_a_bare_string_is_refused(self):
+        from toinflux.general import validate_settings
+
+        settings = self._settings(
+            {"db": "z", "interval": 300, "devices": [{"serial": "1", "label": "G", "fields": "frq"}]}
+        )
+        with pytest.raises(ConfigError, match=r"devices\[0\]\.fields must be a list"):
+            validate_settings(settings)
+
+    def test_fields_containing_a_non_name_is_refused(self):
+        _, errors, _ = enumerate_devices("zappi", {"serial": "1", "fields": ["frq", 5]})
+        assert "only field names" in errors[0]
+
+    def test_a_blank_serial_is_refused_where_it_is_written(self):
+        """Previously only `is None` was tested, so a blank serial reached device selection
+        and was reported as "no device has serial ''" - blaming the account for a
+        configuration mistake."""
+        from toinflux.general import validate_settings
+
+        for block in (
+            {"db": "z", "interval": 300, "serial": "   "},
+            {"db": "z", "interval": 300, "devices": [{"serial": "", "label": "G"}]},
+        ):
+            with pytest.raises(ConfigError, match="blank serial"):
+                validate_settings(self._settings(block))
+
+    def test_an_invalid_fields_list_does_not_fall_back_to_collecting_everything(self):
+        """The wrong way to fail: a broken `fields` must not quietly widen what is written."""
+        devices, errors, _ = enumerate_devices("zappi", {"serial": "1", "fields": "frq"})
+        assert errors
+        assert devices == []
+
+    def test_the_duplicate_message_names_what_must_be_unique(self):
+        """It read "each device needs its own" with the noun missing, which made the error
+        less actionable."""
+        _, errors, _ = enumerate_devices(
+            "zappi", {"serial": "1", "label": "G", "devices": [{"serial": "2", "label": "G"}]}
+        )
+        assert errors[0].endswith("each device needs its own label")
+        _, errors, _ = enumerate_devices(
+            "zappi", {"devices": [{"serial": "1", "label": "G"}, {"serial": "1", "label": "D"}]}
+        )
+        assert errors[0].endswith("each device needs its own serial")
 
     # --- resolution and auth ---
 
