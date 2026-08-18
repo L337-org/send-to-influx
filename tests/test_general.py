@@ -897,3 +897,42 @@ class TestUnknownSourceName:
 
         assert measurement_for(source) == "myenergi"
         assert shares_measurement(source) is True
+
+
+class TestFactoryVersusClassLookup:
+    """`get_class()` constructs; `source_class()` does not.
+
+    Two functions one word apart, and the docstring on the first said "class object" long
+    after it became a factory - which is exactly the sort of thing that costs someone an
+    AttributeError on the first attribute they reach for. Pinning the distinction so a later
+    tidy-up cannot quietly turn one into the other.
+    """
+
+    SETTINGS = {
+        "influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"},
+        "speedtest": {"db": "sdb", "interval": 3600},
+    }
+
+    def test_get_class_returns_a_constructed_handler(self):
+        from toinflux.speedtest import Speedtest
+
+        with patch("toinflux.influx.load_settings", return_value=self.SETTINGS):
+            handler = get_class("speedtest")
+        assert isinstance(handler, Speedtest)
+        assert not isinstance(handler, type), "get_class must construct, not return the class"
+
+    def test_source_class_returns_the_class_without_constructing_it(self):
+        from toinflux.general import source_class
+        from toinflux.speedtest import Speedtest
+
+        # No load_settings patch: this must not touch configuration at all, which is the
+        # reason it exists - callers with no handler need the class's own metadata.
+        assert source_class("speedtest") is Speedtest
+
+    def test_both_match_the_name_case_insensitively(self):
+        from toinflux.general import source_class
+        from toinflux.speedtest import Speedtest
+
+        assert source_class("SpeedTest") is Speedtest
+        with patch("toinflux.influx.load_settings", return_value=self.SETTINGS):
+            assert isinstance(get_class("SpeedTest"), Speedtest)

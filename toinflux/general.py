@@ -119,13 +119,17 @@ def flatten_dict(data, parent_key="", sep="_"):
 
 def get_class(source, settings_file=None, instance=None):
     """
-    Create and return a class object for the given data source name
+    Construct and return a DataHandler for the given data source name.
 
-    This function modifies the case of the source so that the user can
-    input this in any case and it will still work.
+    Returns an *instance*, not the class - ``source_class()`` is the one that returns the
+    type, without constructing it. The wording here said "class object" long after this
+    became a factory, which is actively misleading now that both functions exist side by
+    side, and costs whoever believes it an ``AttributeError`` on the first attribute they
+    reach for.
 
-    When adding a new data source, import its class inside this function
-    and add it to the classes dictionary.
+    The source name is matched case-insensitively, so it can be given in any case.
+
+    A new data source is registered in ``_source_classes()``, not here.
 
     :param source: data source name
     :type source: str
@@ -138,8 +142,9 @@ def get_class(source, settings_file=None, instance=None):
         means the source's single target, or the first configured bridge or device, which
         is what keeps single-target installs and the MCP tools behaving exactly as they
         did before instances existed.
-    :return: class object
+    :return: a constructed handler for the source
     :rtype: DataHandler
+    :raises ConfigError: the name is not a known source
     """
     return source_class(source)(source.lower(), settings_file=settings_file, instance=instance)
 
