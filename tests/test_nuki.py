@@ -397,6 +397,34 @@ class TestPerLockPoints:
         base.assert_called_once()
         assert base.call_args.kwargs["data"] == {}
 
+    def test_the_header_is_restored_after_writing(self, sample_settings):
+        """send_data() swaps a per-lock header in for each write, and must put back what it
+        found. Left dirty, the handler holds the *last* lock's header, and any later write that
+        reads it - a heartbeat's own save/restore, an empty-reading delegation to the base -
+        silently carries one lock's identity into something that is not that lock.
+        """
+        handler = self._handler(sample_settings)
+        handler.data = {"Front_Door": {"stateValue": 1}, "Back_Door": {"stateValue": 3}}
+        before = handler.influx_header
+        written, patcher = self._captured(handler)
+        with patcher:
+            handler.send_data()
+        assert len(written) == 2
+        assert handler.influx_header == before
+
+    def test_the_header_is_restored_even_when_a_write_fails(self, sample_settings):
+        """The restore is in a finally for this case: a failing lock must not leave the header
+        dirty either, or one InfluxDB outage permanently mislabels the handler."""
+        handler = self._handler(sample_settings)
+        handler.data = {"Front_Door": {"stateValue": 1}, "Back_Door": {"stateValue": 3}}
+        before = handler.influx_header
+        from toinflux.influx import InfluxWriteError
+
+        with patch.object(Nuki.__mro__[2], "send_data", side_effect=InfluxWriteError("boom")):
+            with pytest.raises(InfluxWriteError):
+                handler.send_data()
+        assert handler.influx_header == before
+
 
 class TestLiveStatePerLock:
     """Nuki is the only source whose single live read covers every producer: the locks
