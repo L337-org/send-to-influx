@@ -303,9 +303,15 @@ def _declared_minimum_pythons():
     found = {}
 
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    requires = re.search(r'^requires-python\s*=\s*"[>=~^]*3\.(\d+)"', pyproject, re.M)
+    # Capture the whole specifier, then find the floor inside it. Matching the minor directly
+    # against the closing quote would reject the perfectly ordinary ">=3.10,<4" - and would do
+    # so as "could not find requires-python", sending the reader hunting for a line that is
+    # plainly there. The floor is whatever `>=` or `~=` states; an upper bound is not a floor.
+    requires = re.search(r'^requires-python\s*=\s*"([^"]*)"', pyproject, re.M)
     assert requires, "could not find requires-python in pyproject.toml"
-    found["pyproject requires-python"] = int(requires.group(1))
+    floor = re.search(r"(?:>=|~=)\s*3\.(\d+)", requires.group(1))
+    assert floor, f"requires-python is {requires.group(1)!r}, which states no 3.x lower bound"
+    found["pyproject requires-python"] = int(floor.group(1))
 
     targets = re.search(r"^target-version\s*=\s*\[([^\]]*)\]", pyproject, re.M)
     assert targets, "could not find [tool.black] target-version in pyproject.toml"
