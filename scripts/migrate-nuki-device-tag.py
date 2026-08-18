@@ -110,12 +110,21 @@ class MigrationError(Exception):
 def split_field_key(key):
     """Split a pre-5.3 field key into its lock label and field name.
 
-    Matches the *longest* known field name the key ends with. The field set is closed and no
-    member contains an underscore, so the split is exact: ``Front_Door_stateValue`` can only
-    be ``Front_Door`` + ``stateValue``. Longest-match matters because camelCase is what keeps
-    the set unambiguous - ``keypadBatteryCritical`` does not end with ``batteryCritical``
-    (capital B) and ``doorsensorStateValue`` does not end with ``stateValue`` (capital S) - so
-    a case-insensitive comparison would break this, as would ``rsplit("_", 1)``.
+    The suffix must be preceded by an underscore, which is the load-bearing part: the old keys
+    were always built as ``<lock>_<field>``, so a key merely *ending* in a field name -
+    ``MyLockstate`` - is not one of them and must halt rather than be split three characters
+    short of its real name. ``rsplit("_", 1)`` would be wrong for the opposite reason: it would
+    cut a lock name containing underscores, which every one of them does.
+
+    Matches the *longest* candidate. Note this cannot currently change any answer and no test
+    can kill it: two known fields could only both match one key if one ended with
+    ``_<the other>``, and no member contains an underscore at all - the invariant
+    ``test_no_known_field_contains_an_underscore`` pins, and the real reason the split is
+    exact. Longest-match is kept as the guard that keeps it exact if an underscored field name
+    is ever added, not because it is exercised today. camelCase is what makes the set
+    unambiguous even so: ``keypadBatteryCritical`` does not end with ``_batteryCritical`` and
+    ``doorsensorStateValue`` does not end with ``_stateValue``, so a case-insensitive
+    comparison would break the split.
 
     :param key: the old field key
     :type key: str
@@ -155,6 +164,13 @@ def line_protocol_value(field, value):
     duplicates it rather than importing it, because the script has to run standalone under a
     system Python that may not have ``toinflux`` importable at all - and a test asserts the
     two agree for every value shape, so the duplication cannot drift silently.
+
+    One deliberate divergence from the collector: a value that arrives numeric for a field the
+    collector holds as text is still written quoted. InfluxDB reports the type it stored, so
+    this cannot happen for data any current release wrote - but if it ever did, writing it bare
+    would put a float into the same series the collector writes strings to, and the collector's
+    next write would fail with the 400 type conflict described above. The stricter answer is
+    the safe one, and it is why ``field`` is a parameter at all.
 
     :param field: the bare field name, to decide whether it must stay text
     :type field: str

@@ -216,6 +216,14 @@ class TestSplitFieldKey:
         ``connected``, leaving the name intact - this is where a wrong split would land."""
         assert migration.split_field_key("Back_Door_state_connected") == ("Back_Door_state", "connected")
 
+    @pytest.mark.parametrize("key", ["MyLockstate", "Lockconnected", "Gatefirmware"])
+    def test_a_field_name_not_preceded_by_an_underscore_halts(self, key):
+        """The old keys were always built as ``<lock>_<field>``, so a key merely ending in a
+        field name is not one of them. Without the underscore in the comparison these split
+        three characters short and would migrate a corrupted lock name."""
+        with pytest.raises(migration.MigrationError, match="does not end with any field name"):
+            migration.split_field_key(key)
+
     def test_unknown_suffix_halts(self):
         """Skipping an unrecognised key is how data gets lost while reporting success."""
         with pytest.raises(migration.MigrationError, match="does not end with any field name"):
@@ -259,6 +267,20 @@ class TestValueFormatting:
     @pytest.mark.parametrize("field", ["stateName", "doorsensorStateName"])
     def test_the_legacy_name_fields_stay_quoted(self, field):
         assert migration.line_protocol_value(field, "locked") == '"locked"'
+
+    @pytest.mark.parametrize("field,value", [("firmware", 4.0), ("timestamp", 20260818)])
+    def test_a_numeric_value_on_a_text_field_is_still_written_as_text(self, field, value):
+        """The one deliberate divergence from the collector's formatter, and the reason the
+        field name is a parameter.
+
+        InfluxDB reports the type it stored, so no current release's data reaches this - but
+        writing such a value bare would put a float into the same series the collector writes
+        strings to, and the collector's very next write would fail with a 400 type conflict.
+        That is the failure this migration already caused once via the integer suffix; being
+        stricter than the collector here is what keeps the second route to it closed.
+        """
+        assert migration.line_protocol_value(field, value) == f'"{value}"'
+        assert _format_field_value(value) == str(value)
 
     def test_quotes_and_backslashes_are_escaped(self):
         assert migration.line_protocol_value("firmware", 'a"b\\c') == '"a\\"b\\\\c"'
