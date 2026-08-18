@@ -485,6 +485,70 @@ class TestOldFieldKeys:
         assert migration.old_field_keys(influx) == ["a_stateValue"]
 
 
+class TestPhaseRewrite:
+    """Phase 1's own guards, as distinct from the transform."""
+
+    @staticmethod
+    def _influx(points, manifest_path):
+        """An Influx that reports one old point and records what gets written."""
+        influx = migration.Influx("http://influx.example.com:8086", "test", None)
+        influx.written = []
+
+        def query(statement):
+            if "SHOW FIELD KEYS" in statement:
+                return ["fieldKey", "fieldType"], [["Gate_stateValue", "float"]]
+            if "SHOW TAG VALUES" in statement:
+                return ["key", "value"], [["host", "mqtt.example.com"]]
+            return ["time", "Gate_stateValue"], [[STAMP, 1]]
+
+        influx.query = query
+        influx.write = influx.written.append
+        return influx
+
+    @staticmethod
+    def _args(manifest, dry_run=False):
+        return type("Args", (), {"manifest": str(manifest), "database": "test", "dry_run": dry_run})()
+
+    def test_writes_the_points_and_the_manifest(self, tmp_path):
+        manifest = tmp_path / "m.json"
+        influx = self._influx(None, manifest)
+        assert migration.phase_rewrite(influx, self._args(manifest)) == 0
+        assert influx.written
+        recorded = json.loads(manifest.read_text())
+        assert recorded["database"] == "test"
+        assert recorded["old_series_hosts"] == ["mqtt.example.com"]
+        assert recorded["devices"] == {"Gate": 1}
+
+    def test_an_unwritable_manifest_stops_before_anything_is_written(self, tmp_path):
+        """The gap this closes: the manifest used to be written after every point, so an
+        unwritable path left the data migrated with no manifest - and phase 2 refuses to run
+        without one, so the old points could never be removed. Failing first means the operator
+        can simply fix the path and re-run.
+        """
+        unwritable = tmp_path / "no-such-directory" / "m.json"
+        influx = self._influx(None, unwritable)
+        with pytest.raises(migration.MigrationError, match="cannot be written"):
+            migration.phase_rewrite(influx, self._args(unwritable))
+        assert influx.written == [], "points were written despite the manifest being unwritable"
+
+    def test_a_dry_run_writes_nothing_and_needs_no_writable_manifest(self, tmp_path):
+        """A dry run must not be blocked by the manifest check - it produces no manifest."""
+        unwritable = tmp_path / "no-such-directory" / "m.json"
+        influx = self._influx(None, unwritable)
+        assert migration.phase_rewrite(influx, self._args(unwritable, dry_run=True)) == 0
+        assert influx.written == []
+
+    def test_nothing_to_migrate_is_reported_not_failed(self, tmp_path):
+        """An install with no pre-5.3 data - or one already migrated - must exit cleanly, since
+        the operator is told to run this and may well have nothing to convert."""
+        influx = migration.Influx("http://influx.example.com:8086", "test", None)
+        influx.written = []
+        influx.query = lambda statement: (["fieldKey", "fieldType"], [["stateValue", "float"]])
+        influx.write = influx.written.append
+        assert migration.phase_rewrite(influx, self._args(tmp_path / "m.json")) == 0
+        assert influx.written == []
+
+
 class TestPhaseDelete:
     """Phase 2 is the irreversible one, so its guards are the ones that matter."""
 

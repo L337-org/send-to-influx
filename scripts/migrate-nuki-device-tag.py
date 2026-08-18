@@ -322,6 +322,34 @@ def rewritten_lines(points):
     return lines, counts, keys_by_label
 
 
+def check_manifest_writable(path):
+    """Fail before writing any points if the manifest cannot be written afterwards.
+
+    Phase 2 is driven by the manifest and refuses to run without it, so a manifest that cannot
+    be written strands the operator: the points are migrated, the old ones are still there, and
+    there is no supported way to remove them. Re-running phase 1 is safe (it is idempotent), but
+    finding that out from a traceback after a long write is a poor way to learn it.
+
+    Checked by actually opening the path for append rather than by inspecting permissions, which
+    is the only way to be right about a read-only mount, a missing parent directory, a directory
+    in the way, or an ACL.
+
+    :param path: the manifest path phase 1 will write
+    :type path: str
+    :return: None
+    :raises MigrationError: the path cannot be opened for writing
+    """
+    try:
+        with open(path, "a", encoding="utf-8"):
+            pass
+    except OSError as exc:
+        raise MigrationError(
+            f"the manifest path {path!r} cannot be written ({exc}). Phase 2 is driven by the "
+            f"manifest and will not run without it, so this is checked before anything is "
+            f"written rather than after. Pass --manifest with a writable path"
+        ) from exc
+
+
 def phase_rewrite(influx, args):
     """Phase 1: write the new-format points, leaving every old point in place.
 
@@ -349,6 +377,8 @@ def phase_rewrite(influx, args):
         for line in lines[:3]:
             print(f"  {line}")
         return 0
+    # Before the first write, not after the last: see check_manifest_writable.
+    check_manifest_writable(args.manifest)
     for start in range(0, len(lines), CHUNK):
         influx.write(lines[start : start + CHUNK])
         print(f"  written {min(start + CHUNK, len(lines))}/{len(lines)}")
@@ -364,8 +394,19 @@ def phase_rewrite(influx, args):
         "new_points": len(lines),
         "devices": {label: counts[label] for label in sorted(counts)},
     }
-    with open(args.manifest, "w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, indent=2, sort_keys=True)
+    try:
+        with open(args.manifest, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+    except OSError as exc:
+        # The pre-check above makes this unlikely, but the window between them is real (a full
+        # disk, a path removed mid-run). The points are already written, so say what state
+        # things are in and what fixes it, rather than raising a bare traceback.
+        raise MigrationError(
+            f"the points were migrated successfully, but the manifest could not be written to "
+            f"{args.manifest!r} ({exc}). Nothing is lost and no old data was touched. Phase 2 "
+            f"needs the manifest, so re-run this same rewrite phase with a writable --manifest "
+            f"path - it is idempotent, and will rewrite the same points and produce the manifest"
+        ) from exc
     print(f"\nWrote {len(lines)} point(s). Manifest: {args.manifest}")
     print("The old points are untouched. Verify in Grafana, then run the delete phase.")
     return 0
