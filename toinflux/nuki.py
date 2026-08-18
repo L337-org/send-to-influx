@@ -6,6 +6,8 @@ __license__ = "MIT License"
 __version__ = "1.0"
 
 import logging
+import time
+from toinflux.influx import InfluxWriteError, escape_key_or_tag_value
 from toinflux.mqtt import MqttDataHandler
 
 # The read-only per-device state topics from the Nuki MQTT API spec (v1.6). Anything
@@ -90,8 +92,17 @@ class Nuki(MqttDataHandler):
     """
 
     MCP_DESCRIPTION = "Nuki smart locks and door sensors: lock state, door state and battery levels."
-    # Fields carry a per-lock name prefix (Front_Door_stateValue), so the read
-    # tool's metadata keys on the suffix - see ReadSchema.metadata_for.
+    # Each lock is its own point, tagged with the lock. Before this, every lock's state was
+    # flattened into one point per cycle with keys like Front_Door_stateValue, so the device
+    # was encoded in the field key and could not be queried as a dimension at all.
+    MCP_INSTANCE_TAG = "device"
+    # One MQTT subscription receives every lock's retained state, so a single live read
+    # covers every producer - unlike Hue, where each bridge has its own handler, or Speedtest,
+    # where a live read can only speak for the local host. That is what lets the live
+    # current-state path report per lock rather than only the handler's own.
+    MCP_LIVE_STATE_COVERS_ALL_INSTANCES = True
+    # Field keys are bare now (stateValue, not Front_Door_stateValue), so the metadata keys
+    # on the field name directly with no suffix matching.
     MCP_FIELD_METADATA = {
         "stateValue": {"codes": STATE_VALUE_CODES},
         "doorsensorStateValue": {"codes": DOORSENSOR_STATE_CODES},
@@ -115,16 +126,68 @@ class Nuki(MqttDataHandler):
 
     def get_data(self):
         """
-        Get the current state of every Nuki device from the MQTT broker
+        Get the current state of every Nuki device from the MQTT broker.
 
-        :return: data
+        Returns ``{device: {field: value}}`` - one entry per lock - rather than the single
+        flattened dict this used to return. ``send_data()`` writes one point per entry.
+
+        :return: per-device state
         :rtype: dict
         """
-        # Parse first: collect_mqtt_messages raises ConfigError for a missing mqtt
-        # block/broker_host before the header would need to read it.
         self.data = self.parse_nuki_data()
-        self.influx_header = f"nuki,host={self.settings['mqtt']['broker_host']} "
+        # No header set here: there is one per device now, built by send_data(). The broker
+        # host tag is gone - every lock arrives via the one broker, so it never distinguished
+        # anything, and changing broker should not change the data.
         return self.data
+
+    def send_data(self, data=None, timestamp=None, use_buffer=True):
+        """
+        Write one point per lock, rather than one point carrying every lock's fields.
+
+        ``self.data`` is ``{device: {field: value}}``, so this walks it and delegates each
+        entry to the base implementation with that lock's header swapped in - the same
+        header-swap idiom ``send_heartbeat()`` uses, which keeps buffering, retry and the
+        InfluxWriteError contract exactly as they are rather than reimplementing them.
+
+        Every lock in one cycle shares a single timestamp. Letting each call default
+        independently would scatter one snapshot across a second or two, so a query asking
+        "what was the state at time T" could see one lock's reading and not another's.
+
+        A failure on one lock does not stop the rest: each is attempted, and one
+        InfluxWriteError is raised at the end if any failed, so the worker still backs off.
+        Points are idempotent - same measurement, tag set and timestamp overwrite - so the
+        retry re-writing a lock that already succeeded is harmless.
+
+        :param data: per-device data to send; defaults to ``self.data``
+        :type data: dict or None
+        :param timestamp: unix epoch seconds for every point in this snapshot
+        :type timestamp: int or None
+        :param use_buffer: as the base implementation
+        :type use_buffer: bool
+        :return: None
+        :raises InfluxWriteError: if any lock's write failed
+        """
+        per_device = self.data if data is None else data
+        if not per_device or not isinstance(per_device, dict):
+            # Nothing collected: hand it to the base so the empty-reading logging and the
+            # buffer flush both still happen exactly as for any other source.
+            return super().send_data(data=per_device, timestamp=timestamp, use_buffer=use_buffer)
+        if timestamp is None:
+            timestamp = self.timestamp if self.timestamp is not None else int(time.time())
+        original_header = self.influx_header
+        failures = []
+        try:
+            for label, fields in sorted(per_device.items()):
+                self.influx_header = f"nuki,device={escape_key_or_tag_value(label)} "
+                try:
+                    super().send_data(data=fields, timestamp=timestamp, use_buffer=use_buffer)
+                except InfluxWriteError as exc:
+                    failures.append(f"{label}: {exc}")
+        finally:
+            self.influx_header = original_header
+        if failures:
+            raise InfluxWriteError("; ".join(failures))
+        return None
 
     def parse_nuki_data(self):
         """
@@ -153,19 +216,18 @@ class Nuki(MqttDataHandler):
         # keeps "last wins" deterministic (highest device ID) across cycles rather
         # than letting fields flap between devices.
         for device_id, fields in sorted(devices.items()):
-            # A blank/whitespace name gets the same device-ID fallback as an absent one -
-            # an empty prefix would produce keys like "_stateValue" and collide across devices.
-            prefix = (fields.pop("name", "").strip() or device_id).replace(" ", "_")
+            label = self._device_label(fields.pop("name", ""), device_id)
+            if label in data:
+                logging.warning(
+                    "Duplicate Nuki device name '%s' - one lock's readings will overwrite the"
+                    " other's; give each lock a distinct name in the Nuki app",
+                    label,
+                )
+            decoded = {}
             for field, raw in fields.items():
                 key, value = self._decode_field(field, raw)
-                if f"{prefix}_{key}" in data:
-                    logging.warning(
-                        "Duplicate Nuki device name '%s' - field %s overwritten; give each lock a"
-                        " distinct name in the Nuki app",
-                        prefix,
-                        key,
-                    )
-                data[f"{prefix}_{key}"] = value
+                decoded[key] = value
+            data[label] = decoded
         if not data:
             # DEBUG, not WARNING: send_data()'s central _log_missing_data path already
             # warns once per empty cycle - a second warning here would just duplicate it.
@@ -177,24 +239,27 @@ class Nuki(MqttDataHandler):
         Decode one streamed Nuki message into a single InfluxDB field (the interrupt path).
 
         The event-driven counterpart to parse_nuki_data's per-topic handling: a ``name``
-        topic is remembered as that device's field-key prefix and produces no point of its
-        own; any other known state topic is decoded via ``_decode_field`` and returned as a
-        one-field dict keyed ``<device name or id>_<field>``. Control/event topics
-        (lockAction, ...) and malformed topics are ignored (return None).
+        topic is remembered as that device's label and produces no point of its own; any
+        other known state topic is decoded via ``_decode_field`` and returned in the same
+        ``{device: {field: value}}`` shape the snapshot path uses, so one write path serves
+        both. Control/event topics (lockAction, ...) and malformed topics are ignored.
 
-        The device-name prefix falls back to the device ID until a ``name`` message has been
-        seen, exactly as parse_nuki_data falls back for a device with no name. Because Nuki
-        publishes ``name`` retained, it's redelivered on every (re)subscribe ahead of the
-        state topics, so in practice the fallback is only ever hit for a device that has no
-        name set at all.
+        Returning the same shape as the snapshot is what stopped these two paths drifting:
+        they previously agreed only by both happening to build the same ``prefix_field``
+        string, in two separate places.
+
+        The label falls back to the device ID until a ``name`` message has been seen, exactly
+        as parse_nuki_data falls back for a device with no name. Because Nuki publishes
+        ``name`` retained, it is redelivered on every (re)subscribe ahead of the state topics,
+        so in practice the fallback is only ever hit for a device with no name set at all.
 
         :param topic: the message's MQTT topic (e.g. ``nuki/2BB28570/state``)
         :type topic: str
         :param payload: the payload as received (UTF-8 decoded)
         :type payload: str
-        :return: a single ``{field_key: value}`` to write immediately, or None to ignore
-            the message (a control/event/malformed topic, or a ``name`` update consumed as
-            a prefix)
+        :return: ``{device: {field: value}}`` for the one field this message carries, or None
+            to ignore the message (a control/event/malformed topic, or a ``name`` update
+            consumed as a label)
         :rtype: dict or None
         """
         parts = topic.split("/")
@@ -205,39 +270,45 @@ class Nuki(MqttDataHandler):
         if field == "name":
             self._remember_device_name(device_id, payload)
             return None
-        # A per-message write can arrive before the first periodic snapshot's get_data()
-        # has set the header, so set it here too (send_data reads influx_header).
-        self.influx_header = f"nuki,host={self.settings['mqtt']['broker_host']} "
-        prefix = self._name_prefix(self._device_names.get(device_id, ""), device_id)
+        label = self._device_label(self._device_names.get(device_id, ""), device_id)
         key, value = self._decode_field(field, payload)
-        return {f"{prefix}_{key}": value}
+        return {label: {key: value}}
 
     @staticmethod
-    def _name_prefix(name, device_id):
+    def _device_label(name, device_id):
         """
-        The field-key prefix for a device: its name with spaces underscored, or the device
-        ID when the name is blank/absent (an empty prefix would produce keys like
-        ``_stateValue`` and collide across devices). Matches parse_nuki_data's prefix rule.
+        The ``device`` tag value for a lock: its Nuki-app name with spaces underscored, or the
+        device ID when the name is blank or absent.
+
+        **The underscores stay, even though a tag value does not need them.** They were
+        originally there because the name was part of a field key. The migration for existing
+        data can only recover the underscored form - the old key was ``Front_Door_stateValue``,
+        so the original spaces are gone for good - and if the collector wrote ``Front Door``
+        while migrated history said ``Front_Door``, every lock would end up with two series
+        that never join. Keeping them is what makes the migrated history usable.
+
+        A blank or whitespace name falls back to the device ID, as an empty label would make
+        every unnamed lock the same series.
 
         :param name: the device's Nuki-app name (may be blank/whitespace)
         :type name: str
-        :param device_id: the device's ID, used as the fallback prefix
+        :param device_id: the device's ID, used as the fallback
         :type device_id: str
-        :return: the field-key prefix
+        :return: the tag value identifying this lock
         :rtype: str
         """
         return (name.strip() or device_id).replace(" ", "_")
 
     def _remember_device_name(self, device_id, name):
         """
-        Record a device's name for use as its streaming field-key prefix.
+        Record a device's name for use as its streaming label.
 
-        Warns if the name resolves to a prefix already claimed by a *different* device -
-        two locks sharing a Nuki-app name would silently merge their field keys into one
-        ambiguous time series. The snapshot path (parse_nuki_data) warns on the same
-        condition per cycle; this surfaces it on the streaming path too, when the name is
-        set, rather than silently. A device re-sending its own retained name (e.g. on
-        reconnect) is not a collision.
+        Warns if the name resolves to a label already claimed by a *different* device - two
+        locks sharing a Nuki-app name now share one series, so their readings interleave
+        rather than their field keys colliding, but it is the same ambiguity and the same
+        remedy. The snapshot path warns on the condition per cycle; this surfaces it on the
+        streaming path too, when the name is set, rather than silently. A device re-sending
+        its own retained name (e.g. on reconnect) is not a collision.
 
         :param device_id: the device the name belongs to
         :type device_id: str
@@ -245,13 +316,13 @@ class Nuki(MqttDataHandler):
         :type name: str
         :return: None
         """
-        prefix = self._name_prefix(name, device_id)
+        label = self._device_label(name, device_id)
         for other_id, other_name in self._device_names.items():
-            if other_id != device_id and self._name_prefix(other_name, other_id) == prefix:
+            if other_id != device_id and self._device_label(other_name, other_id) == label:
                 logging.warning(
-                    "Duplicate Nuki device name '%s' - devices %s and %s share a field-key prefix, so"
-                    " their fields will collide; give each lock a distinct name in the Nuki app",
-                    prefix,
+                    "Duplicate Nuki device name '%s' - devices %s and %s share one series, so their"
+                    " readings will interleave; give each lock a distinct name in the Nuki app",
+                    label,
                     other_id,
                     device_id,
                 )

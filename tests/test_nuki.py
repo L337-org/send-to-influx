@@ -1,6 +1,7 @@
 """Unit tests for toinflux.nuki (Nuki smart lock via MQTT)."""
 
 from unittest.mock import MagicMock, patch
+import pytest
 
 from toinflux.nuki import Nuki
 
@@ -49,27 +50,30 @@ def _nuki(settings, messages):
 class TestNuki:
     """Tests for the Nuki class."""
 
-    def test_get_data_sets_header_and_parses_state(self, sample_settings):
-        """Happy path: one device, fields prefixed by its name, state codes renamed."""
+    def test_get_data_returns_state_keyed_by_lock(self, sample_settings):
+        """Happy path: one entry per lock, bare field keys, state codes renamed.
+
+        get_data no longer sets a header, because there is one per lock now and send_data
+        builds them - see test_writes_one_point_per_lock."""
         nuki = _nuki(_nuki_settings(sample_settings), FRONT_DOOR)
         result = nuki.get_data()
-        assert nuki.influx_header == "nuki,host=mqtt.example.com "
+        assert nuki.influx_header is None
         assert nuki.data == result
-        assert result["Front_Door_stateValue"] == 1
-        assert result["Front_Door_doorsensorStateValue"] == 2
-        assert result["Front_Door_batteryCritical"] is False
-        assert result["Front_Door_batteryChargeState"] == 85
-        assert result["Front_Door_connected"] is True
-        assert result["Front_Door_timestamp"] == "2026-07-17T10:00:00+00:00"
+        assert result["Front_Door"]["stateValue"] == 1
+        assert result["Front_Door"]["doorsensorStateValue"] == 2
+        assert result["Front_Door"]["batteryCritical"] is False
+        assert result["Front_Door"]["batteryChargeState"] == 85
+        assert result["Front_Door"]["connected"] is True
+        assert result["Front_Door"]["timestamp"] == "2026-07-17T10:00:00+00:00"
 
     def test_raw_field_names_and_name_field_absent_from_output(self, sample_settings):
         """state/doorsensorState are renamed to their *Value counterparts, and the
         name topic is consumed as the prefix rather than written as a redundant field."""
         nuki = _nuki(_nuki_settings(sample_settings), FRONT_DOOR)
         result = nuki.get_data()
-        assert "Front_Door_state" not in result
-        assert "Front_Door_doorsensorState" not in result
-        assert "Front_Door_name" not in result
+        assert "state" not in result["Front_Door"]
+        assert "doorsensorState" not in result["Front_Door"]
+        assert "name" not in result["Front_Door"]
 
     def test_transport_called_with_nuki_filter_and_timeout(self, sample_settings):
         """The nuki topic filter and the nuki.timeout collection window are used."""
@@ -86,9 +90,9 @@ class TestNuki:
         ]
         nuki = _nuki(_nuki_settings(sample_settings), FRONT_DOOR + back_door)
         result = nuki.get_data()
-        assert result["Front_Door_stateValue"] == 1
-        assert result["Back_Door_stateValue"] == 3
-        assert result["Back_Door_doorsensorStateValue"] == 3
+        assert result["Front_Door"]["stateValue"] == 1
+        assert result["Back_Door"]["stateValue"] == 3
+        assert result["Back_Door"]["doorsensorStateValue"] == 3
 
     def test_control_and_event_topics_filtered_out(self, sample_settings):
         """A command/event topic arriving during the window must not become a field."""
@@ -105,14 +109,14 @@ class TestNuki:
         """A device whose name topic didn't arrive is still reported, keyed by its ID."""
         messages = [("nuki/2BB28570/state", "1")]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
-        assert nuki.get_data() == {"2BB28570_stateValue": 1}
+        assert nuki.get_data() == {"2BB28570": {"stateValue": 1}}
 
     def test_blank_name_payload_falls_back_to_hex_id(self, sample_settings):
         """A blank/whitespace name payload gets the ID fallback too - an empty prefix
         would produce keys like _stateValue and collide across devices."""
         messages = [("nuki/2BB28570/name", "   "), ("nuki/2BB28570/state", "1")]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
-        assert nuki.get_data() == {"2BB28570_stateValue": 1}
+        assert nuki.get_data() == {"2BB28570": {"stateValue": 1}}
 
     def test_duplicate_device_names_warn_and_last_wins(self, sample_settings, caplog):
         """Two devices with the same Nuki-app name collide - highest device ID wins
@@ -130,7 +134,7 @@ class TestNuki:
             result = nuki.get_data()
         # BBBB0002 sorts after AAAA0001, so it wins (state 3 = unlocked) regardless of
         # the reversed arrival order above.
-        assert result["Door_stateValue"] == 3
+        assert result["Door"]["stateValue"] == 3
         assert any("Duplicate Nuki device name" in record.message for record in caplog.records)
 
     def test_empty_window_returns_empty_dict_with_debug_log(self, sample_settings, caplog):
@@ -149,8 +153,8 @@ class TestNuki:
         messages = [("nuki/2BB28570/state", "42"), ("nuki/2BB28570/doorsensorState", "99")]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
         result = nuki.get_data()
-        assert result["2BB28570_stateValue"] == 42
-        assert result["2BB28570_doorsensorStateValue"] == 99
+        assert result["2BB28570"]["stateValue"] == 42
+        assert result["2BB28570"]["doorsensorStateValue"] == 99
 
     def test_textual_fields_never_shape_cast(self, sample_settings):
         """firmware/timestamp stay strings even when they happen to look numeric - a
@@ -162,8 +166,8 @@ class TestNuki:
         ]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
         result = nuki.get_data()
-        assert result["2BB28570_firmware"] == "4.0"
-        assert result["2BB28570_timestamp"] == "20260718"
+        assert result["2BB28570"]["firmware"] == "4.0"
+        assert result["2BB28570"]["timestamp"] == "20260718"
 
     def test_timestamp_left_none(self, sample_settings):
         """Nuki reports current state - send_data() should default to poll time."""
@@ -175,7 +179,7 @@ class TestNuki:
         """Topics that don't match nuki/<id>/<field> are skipped, not fatal."""
         messages = [("nuki/oddness", "x"), ("nuki/2BB28570/state/extra", "1")] + FRONT_DOOR
         nuki = _nuki(_nuki_settings(sample_settings), messages)
-        assert nuki.get_data()["Front_Door_stateValue"] == 1
+        assert nuki.get_data()["Front_Door"]["stateValue"] == 1
 
     def test_decodes_float_and_non_numeric_payloads(self, sample_settings):
         """_decode_scalar's float and string-fallback branches: MQTT payloads are bare
@@ -186,8 +190,8 @@ class TestNuki:
         ]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
         result = nuki.get_data()
-        assert result["2BB28570_batteryChargeState"] == 85.5
-        assert result["2BB28570_mode"] == "door mode"
+        assert result["2BB28570"]["batteryChargeState"] == 85.5
+        assert result["2BB28570"]["mode"] == "door mode"
 
     def test_bool_payload_never_renamed_into_the_numeric_value_field(self, sample_settings):
         """A malformed "true"/"false" payload on the state topic is shape-cast to
@@ -198,8 +202,8 @@ class TestNuki:
         messages = [("nuki/2BB28570/state", "true")]
         nuki = _nuki(_nuki_settings(sample_settings), messages)
         result = nuki.get_data()
-        assert result["2BB28570_state"] is True
-        assert "2BB28570_stateValue" not in result
+        assert result["2BB28570"]["state"] is True
+        assert "stateValue" not in result["2BB28570"]
 
 
 class TestNukiStreaming:
@@ -218,18 +222,18 @@ class TestNukiStreaming:
         that device's later state messages."""
         nuki = self._handler(sample_settings)
         assert nuki.decode_stream_message("nuki/2BB28570/name", "Front Door") is None
-        assert nuki.decode_stream_message("nuki/2BB28570/state", "1") == {"Front_Door_stateValue": 1}
+        assert nuki.decode_stream_message("nuki/2BB28570/state", "1") == {"Front_Door": {"stateValue": 1}}
 
     def test_state_before_any_name_falls_back_to_device_id(self, sample_settings):
         """Until a name is seen, fields are keyed by the device ID (same fallback as the
         snapshot path); in practice the retained name arrives first on subscribe."""
         nuki = self._handler(sample_settings)
-        assert nuki.decode_stream_message("nuki/2BB28570/state", "1") == {"2BB28570_stateValue": 1}
+        assert nuki.decode_stream_message("nuki/2BB28570/state", "1") == {"2BB28570": {"stateValue": 1}}
 
     def test_doorsensor_state_is_renamed(self, sample_settings):
         nuki = self._handler(sample_settings)
         result = nuki.decode_stream_message("nuki/2BB28570/doorsensorState", "3")
-        assert result == {"2BB28570_doorsensorStateValue": 3}
+        assert result == {"2BB28570": {"doorsensorStateValue": 3}}
 
     def test_control_and_event_topics_are_ignored(self, sample_settings):
         nuki = self._handler(sample_settings)
@@ -241,38 +245,41 @@ class TestNukiStreaming:
         assert nuki.decode_stream_message("nuki/2BB28570/state/extra", "1") is None
         assert nuki.decode_stream_message("nuki/oddness", "x") is None
 
-    def test_sets_influx_header_for_the_immediate_write(self, sample_settings):
-        """A message can arrive before the first periodic snapshot has set the header, so
-        decode_stream_message sets it itself (send_data reads influx_header)."""
+    def test_returns_the_same_shape_as_the_snapshot_path(self, sample_settings):
+        """The two paths previously agreed only by both happening to build the same
+        prefix_field string in two separate places. Returning the same {device: {field:
+        value}} shape means one write path serves both and they cannot drift."""
         nuki = self._handler(sample_settings)
+        nuki.decode_stream_message("nuki/2BB28570/name", "Front Door")
+        streamed = nuki.decode_stream_message("nuki/2BB28570/state", "1")
+        assert streamed == {"Front_Door": {"stateValue": 1}}
+        # No header is set here either; send_data builds one per lock.
         assert nuki.influx_header is None
-        nuki.decode_stream_message("nuki/2BB28570/state", "1")
-        assert nuki.influx_header == "nuki,host=mqtt.example.com "
 
     def test_name_with_spaces_becomes_underscores(self, sample_settings):
         nuki = self._handler(sample_settings)
         nuki.decode_stream_message("nuki/2BB28570/name", "Front Door")
         result = nuki.decode_stream_message("nuki/2BB28570/batteryChargeState", "85")
-        assert result == {"Front_Door_batteryChargeState": 85}
+        assert result == {"Front_Door": {"batteryChargeState": 85}}
 
     def test_blank_name_falls_back_to_device_id(self, sample_settings):
         nuki = self._handler(sample_settings)
         assert nuki.decode_stream_message("nuki/2BB28570/name", "   ") is None
-        assert nuki.decode_stream_message("nuki/2BB28570/state", "1") == {"2BB28570_stateValue": 1}
+        assert nuki.decode_stream_message("nuki/2BB28570/state", "1") == {"2BB28570": {"stateValue": 1}}
 
     def test_bool_state_payload_kept_under_original_key(self, sample_settings):
         """Same guard as the snapshot path: a stray bool state payload isn't renamed into
         the numeric stateValue field (which InfluxDB would then type-lock as boolean)."""
         nuki = self._handler(sample_settings)
-        assert nuki.decode_stream_message("nuki/2BB28570/state", "true") == {"2BB28570_state": True}
+        assert nuki.decode_stream_message("nuki/2BB28570/state", "true") == {"2BB28570": {"state": True}}
 
     def test_name_memory_is_per_device(self, sample_settings):
         """Each device's remembered name prefixes only its own fields."""
         nuki = self._handler(sample_settings)
         nuki.decode_stream_message("nuki/AAAA0001/name", "Front Door")
         nuki.decode_stream_message("nuki/BBBB0002/name", "Back Door")
-        assert nuki.decode_stream_message("nuki/AAAA0001/state", "1") == {"Front_Door_stateValue": 1}
-        assert nuki.decode_stream_message("nuki/BBBB0002/state", "3") == {"Back_Door_stateValue": 3}
+        assert nuki.decode_stream_message("nuki/AAAA0001/state", "1") == {"Front_Door": {"stateValue": 1}}
+        assert nuki.decode_stream_message("nuki/BBBB0002/state", "3") == {"Back_Door": {"stateValue": 3}}
 
     def test_duplicate_device_name_warns(self, sample_settings, caplog):
         """Two devices sharing a name (same field-key prefix) would silently merge their
@@ -291,3 +298,101 @@ class TestNukiStreaming:
         with caplog.at_level("WARNING"):
             nuki.decode_stream_message("nuki/AAAA0001/name", "Front Door")
         assert not any("Duplicate Nuki device name" in r.message for r in caplog.records)
+
+
+class TestPerLockPoints:
+    """SI-35, acceptance question 1. Each lock is its own point, tagged with the lock, on
+    both the snapshot and the streaming path."""
+
+    @staticmethod
+    def _handler(sample_settings):
+        settings = _nuki_settings(sample_settings)
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Nuki("nuki")
+        handler.session = MagicMock()
+        return handler
+
+    @staticmethod
+    def _captured(handler):
+        """Record what the base send_data would have written, per call."""
+        written = []
+        base = Nuki.__mro__[2]
+        patcher = patch.object(
+            base,
+            "send_data",
+            side_effect=lambda **kw: written.append((handler.influx_header, kw["data"], kw["timestamp"])),
+        )
+        return written, patcher
+
+    def test_writes_one_point_per_lock(self, sample_settings):
+        handler = self._handler(sample_settings)
+        handler.data = {
+            "Front_Door": {"stateValue": 1, "batteryChargeState": 90},
+            "Back_Door": {"stateValue": 3},
+        }
+        written, patcher = self._captured(handler)
+        with patcher:
+            handler.send_data()
+        assert [header for header, _, _ in written] == ["nuki,device=Back_Door ", "nuki,device=Front_Door "]
+        assert [fields for _, fields, _ in written] == [{"stateValue": 3}, {"stateValue": 1, "batteryChargeState": 90}]
+
+    def test_the_broker_host_tag_is_gone(self, sample_settings):
+        """Deliberate: every lock arrives via the one broker, so the tag never distinguished
+        anything, and changing broker should not change the data."""
+        handler = self._handler(sample_settings)
+        handler.data = {"Front_Door": {"stateValue": 1}}
+        written, patcher = self._captured(handler)
+        with patcher:
+            handler.send_data()
+        assert "host=" not in written[0][0]
+
+    def test_every_lock_in_a_snapshot_shares_one_timestamp(self, sample_settings):
+        """Letting each write default independently would scatter one snapshot across a
+        second or two, so a query asking what the state was at time T could see one lock's
+        reading and not another's."""
+        handler = self._handler(sample_settings)
+        handler.data = {f"Lock_{n}": {"stateValue": n} for n in range(5)}
+        written, patcher = self._captured(handler)
+        with patcher:
+            handler.send_data()
+        assert len({timestamp for _, _, timestamp in written}) == 1
+
+    def test_a_label_needing_escaping_is_escaped(self, sample_settings):
+        """The header is written verbatim, so an unescaped space or comma would end the tag
+        set early and silently corrupt the point."""
+        handler = self._handler(sample_settings)
+        handler.data = {"odd label,x": {"stateValue": 1}}
+        written, patcher = self._captured(handler)
+        with patcher:
+            handler.send_data()
+        assert written[0][0] == "nuki,device=odd\\ label\\,x "
+
+    def test_one_failing_lock_does_not_stop_the_others(self, sample_settings):
+        """And the worker still backs off, because an InfluxWriteError is raised at the end.
+        Points are idempotent, so the retry re-writing a lock that already succeeded is
+        harmless."""
+        from toinflux.influx import InfluxWriteError
+
+        handler = self._handler(sample_settings)
+        handler.data = {"A": {"stateValue": 1}, "B": {"stateValue": 2}, "C": {"stateValue": 3}}
+        attempted = []
+
+        def flaky(**kw):
+            attempted.append(handler.influx_header)
+            if "B" in handler.influx_header:
+                raise InfluxWriteError("boom")
+
+        with patch.object(Nuki.__mro__[2], "send_data", side_effect=flaky):
+            with pytest.raises(InfluxWriteError, match="B: boom"):
+                handler.send_data()
+        assert len(attempted) == 3, "a failure must not abandon the remaining locks"
+
+    def test_an_empty_reading_still_reaches_the_base_implementation(self, sample_settings):
+        """So the empty-reading logging and the buffer flush both still happen, exactly as
+        for any other source."""
+        handler = self._handler(sample_settings)
+        handler.data = {}
+        with patch.object(Nuki.__mro__[2], "send_data") as base:
+            handler.send_data()
+        base.assert_called_once()
+        assert base.call_args.kwargs["data"] == {}
