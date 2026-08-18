@@ -260,11 +260,11 @@ def _hue_set_light_result(settings, settings_file, *, device, on, brightness_pct
             close_session(handler.session)
 
 
-def _speedtest_run_result(settings, settings_file):
+def _speedtest_run_result(settings, settings_file, host=None):
     """Build the speedtest_run payload (runs in a worker thread)."""
     handler = _resolve_writable_handler("speedtest", settings, settings_file)
     try:
-        return handler.mcp_trigger_run()
+        return handler.mcp_trigger_run(host=host)
     finally:
         close_session(handler.session)
 
@@ -367,18 +367,26 @@ def _register_speedtest_write_tools(server, settings, settings_file):
             read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
         ),
     )
-    async def speedtest_run() -> dict:
+    async def speedtest_run(host: "str | None" = None) -> dict:
         """Run an internet speed test now, on the host this server runs on, and
         return the result (download/upload throughput and latency). Use this for an
         on-demand check; `get_current_state`/`query_history` report the last
         recorded run without starting a new one.
 
+        The result names the machine that ran it in `host`, which matters when several
+        hosts collect into one database: it can only ever measure *this* machine's
+        connection, because each collecting host runs its own process with no listener
+        for the others to be reached through. Passing `host` asserts which machine you
+        expect; naming a different one is refused rather than measured here and returned
+        as though it were that host's. To ask about another host, query its recorded
+        history with `query_history` and `instance` instead.
+
         A run takes up to a couple of minutes and saturates the connection while it
         runs. Only one runs at a time per host: if a scheduled or triggered run is
         already in progress, that's reported rather than a second test started. The
         result is also recorded to InfluxDB like a scheduled run (best-effort; a
-        failed recording is flagged, not fatal). Takes no arguments."""
-        return await anyio.to_thread.run_sync(_speedtest_run_result, settings, settings_file)
+        failed recording is flagged, not fatal)."""
+        return await anyio.to_thread.run_sync(_speedtest_run_result, settings, settings_file, host)
 
     return server
 

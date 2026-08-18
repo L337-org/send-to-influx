@@ -20,12 +20,16 @@ from toinflux.mcp_read import (
     build_schema,
     current_state_result,
     discover_fields,
+    discover_tag_values,
     metadata_for,
     parse_time_bound,
     register_read_tools,
     resolve_db,
     resolve_schema,
+    QuerySeries,
     run_query,
+    single_series,
+    _validate_instance,
     _annotate_state_field,
     _influx_read_request,
 )
@@ -194,6 +198,7 @@ class TestBuildSchema:
         handler = MagicMock()
         handler.source = "openmeteo"
         handler.MCP_MEASUREMENT = "weather"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {"temperature_2m": {"unit": "°C"}}
         schema = build_schema(handler, {"temperature_2m", "precipitation"}, "weather_db")
@@ -205,6 +210,7 @@ class TestBuildSchema:
         handler = MagicMock()
         handler.source = "hue"
         handler.MCP_MEASUREMENT = None
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
         schema = build_schema(handler, set(), "hue_db")
@@ -372,11 +378,10 @@ class TestDiscoverFields:
 class TestRunQuery:
     def test_returns_columns_and_values(self):
         payload = {"results": [{"series": [{"columns": ["time", "gen"], "values": [[1, 100]]}]}]}
-        cols, vals = run_query(
-            _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1"
-        )
-        assert cols == ["time", "gen"]
-        assert vals == [[1, 100]]
+        series = run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1")
+        assert len(series) == 1
+        assert series[0].columns == ["time", "gen"]
+        assert series[0].values == [[1, 100]]
 
     def test_query_error_raises(self):
         payload = {"results": [{"error": "boom"}]}
@@ -384,10 +389,70 @@ class TestRunQuery:
             run_query(_mock_session(payload), {"url": "http://x", "token": "t", "org": "o"}, "db", "SELECT 1")
 
     def test_no_series_returns_empty(self):
-        cols, vals = run_query(
-            _mock_session({"results": [{}]}), {"url": "http://x", "user": "u", "password": "p"}, "db", "q"
+        assert (
+            run_query(_mock_session({"results": [{}]}), {"url": "http://x", "user": "u", "password": "p"}, "db", "q")
+            == []
         )
-        assert (cols, vals) == ([], [])
+
+    def test_every_series_is_returned_with_its_tags(self):
+        # A GROUP BY on a tag returns one series per tag value. Returning only the
+        # first silently discards every producer but one - the exact failure that
+        # makes a two-host speedtest install unanswerable. Payload captured from a
+        # real InfluxDB 1.8 and confirmed byte-identical on 2.7's v1-compat endpoint.
+        payload = {
+            "results": [
+                {
+                    "statement_id": 0,
+                    "series": [
+                        {
+                            "name": "speedtest",
+                            "tags": {"host": "hostA"},
+                            "columns": ["time", "ping"],
+                            "values": [[1700000000, 12.3], [1700000600, 13.1]],
+                        },
+                        {
+                            "name": "speedtest",
+                            "tags": {"host": "hostB"},
+                            "columns": ["time", "ping"],
+                            "values": [[1700000000, 45.6], [1700000600, 46]],
+                        },
+                    ],
+                }
+            ]
+        }
+        series = run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1")
+        assert [s.tags for s in series] == [{"host": "hostA"}, {"host": "hostB"}]
+        assert [s.values[0][1] for s in series] == [12.3, 45.6]
+
+    def test_untagged_series_has_empty_tags(self):
+        payload = {"results": [{"series": [{"columns": ["time", "gen"], "values": [[1, 100]]}]}]}
+        series = run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1")
+        assert series[0].tags == {}
+
+    def test_single_series_helper_returns_columns_and_values(self):
+        payload = {"results": [{"series": [{"columns": ["time", "gen"], "values": [[1, 100]]}]}]}
+        cols, vals = single_series(
+            run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "q")
+        )
+        assert (cols, vals) == (["time", "gen"], [[1, 100]])
+
+    def test_single_series_helper_on_empty_result(self):
+        assert single_series([]) == ([], [])
+
+    def test_single_series_refuses_to_truncate(self):
+        # Truncating here would re-introduce, behind a helper, exactly the silent
+        # series loss this module was fixed for: a later edit adding a tag GROUP BY
+        # without updating its consumer would go back to losing data invisibly.
+        # Unreachable from any current caller (verified against a real InfluxDB 1.8:
+        # every one of their queries returns a single series, including the
+        # aggregation path's GROUP BY time(), which splits rows not series), so this
+        # only ever fires on a programming error.
+        grouped = [
+            QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 12.3]]),
+            QuerySeries({"host": "hostB"}, ["time", "ping"], [[1, 45.6]]),
+        ]
+        with pytest.raises(ValueError, match="expected at most one"):
+            single_series(grouped)
 
 
 class TestResolveSchema:
@@ -405,6 +470,7 @@ class TestResolveSchema:
         handler = MagicMock()
         handler.source = "zappi"
         handler.MCP_MEASUREMENT = "myenergi"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {"device": "zappi"}
         # Tag filters now come from a method, so the mock must return the real value -
         # a MagicMock method call otherwise yields another mock, and any assertion on the
@@ -430,6 +496,7 @@ class TestResolveSchema:
         handler = MagicMock()
         handler.source = "zappi"
         handler.MCP_MEASUREMENT = "myenergi"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
         handler.source_settings = {"db": "zappi_db"}
@@ -477,6 +544,7 @@ class TestRegisterReadTools:
         handler = MagicMock()
         handler.source = "zappi"
         handler.MCP_MEASUREMENT = "myenergi"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {"device": "zappi"}
         # Tag filters now come from a method, so the mock must return the real value -
         # a MagicMock method call otherwise yields another mock, and any assertion on the
@@ -531,7 +599,7 @@ class TestRegisterReadTools:
         with (
             patch("toinflux.mcp_common.get_class", return_value=self._handler()),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
-            patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], [[100, 42]])),
+            patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], [[100, 42]])]),
         ):
             result = anyio.run(
                 server.call_tool,
@@ -553,7 +621,7 @@ class TestRegisterReadTools:
         with (
             patch("toinflux.mcp_common.get_class", return_value=self._handler()),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
-            patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], rows)),
+            patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], rows)]),
         ):
             result = anyio.run(
                 server.call_tool,
@@ -572,7 +640,7 @@ class TestRegisterReadTools:
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
-            patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], [[1, 2]])),
+            patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], [[1, 2]])]),
         ):
             anyio.run(
                 server.call_tool,
@@ -718,6 +786,7 @@ class TestCurrentStateResult:
         handler.source = "speedtest"
         handler.MCP_LIVE_STATE = False
         handler.MCP_MEASUREMENT = None
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_DESCRIPTION = "speed"
         handler.MCP_FIELD_METADATA = {"ping": {"unit": "ms"}}
@@ -729,7 +798,7 @@ class TestCurrentStateResult:
             patch("toinflux.mcp_read.discover_fields", return_value={"ping", "download"}),
             patch(
                 "toinflux.mcp_read.run_query",
-                return_value=(["time", "download", "ping"], [[1700, None, 12.5]]),
+                return_value=[QuerySeries({}, ["time", "download", "ping"], [[1700, None, 12.5]])],
             ),
         ):
             result = current_state_result("speedtest", {"sources": ["speedtest"]}, None)
@@ -962,6 +1031,199 @@ class TestMultiBridgeReads:
         assert "host" not in query
 
 
+class TestInstanceAxis:
+    """The instance axis: scoping a query to one producer, and never merging producers.
+
+    Every query shape asserted here was executed against a real InfluxDB 1.8 while this
+    was written, so the SQL is known to parse and to return the series counts assumed -
+    including the composed `GROUP BY time(1h), "host"`, which is the one most likely to
+    be wrong by inspection.
+    """
+
+    @staticmethod
+    def _schema(values=("hostA", "hostB"), tag="host"):
+        return ReadSchema(
+            source="speedtest",
+            measurement="speedtest",
+            db="sdb",
+            allowed_fields={"ping"},
+            field_metadata={"ping": {"unit": "ms"}},
+            instance_tag=tag,
+            instance_values=set(values),
+        )
+
+    def test_scoped_query_filters_on_the_instance_tag(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now", instance="hostA")
+        assert "\"host\" = 'hostA'" in q
+        # Scoped means one series already, so grouping would be noise.
+        assert "GROUP BY" not in q
+
+    def test_unscoped_query_groups_by_the_instance_tag(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now")
+        assert 'GROUP BY "host"' in q
+        assert "'hostA'" not in q
+
+    def test_unscoped_aggregation_groups_by_time_and_tag(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now", aggregation="mean", group_by="1h")
+        assert 'GROUP BY time(1h), "host" fill(none)' in q
+
+    def test_limit_is_divided_across_instances_when_grouping(self):
+        # InfluxDB applies LIMIT per series once grouped, so an undivided limit would
+        # let N producers multiply the result cap - the bound would stop bounding.
+        q = build_query(self._schema(values=("a", "b", "c", "d")), field="ping", start="-1h", end="now", limit=100)
+        assert q.endswith("LIMIT 25")
+
+    def test_scoped_limit_is_not_divided(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now", limit=100, instance="hostA")
+        assert q.endswith("LIMIT 100")
+
+    def test_source_without_an_axis_is_unchanged(self):
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o", allowed_fields={"cost"})
+        q = build_query(plain, field="cost", start="-1h", end="now", limit=100)
+        assert "GROUP BY" not in q
+        assert q.endswith("LIMIT 100")
+
+    def test_unknown_instance_value_is_refused_with_the_known_ones(self):
+        with pytest.raises(ToolParamError, match="recorded values: hostA, hostB"):
+            _validate_instance(self._schema(), "typo")
+
+    def test_instance_refused_for_a_single_producer_source(self):
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o")
+        with pytest.raises(ToolParamError, match="single producer"):
+            _validate_instance(plain, "anything")
+
+    def test_no_instance_is_always_allowed(self):
+        assert _validate_instance(self._schema(), None) is None
+
+    def test_build_query_refuses_an_instance_on_a_source_with_no_axis(self):
+        """build_query is public and reachable without _validate_instance. Unguarded it
+        reached _quote_identifier(None) and raised a bare AttributeError - neither
+        ToolParamError nor SourceConnectionError, so the MCP layer could not tell a caller
+        mistake from a transport failure."""
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o", allowed_fields={"cost"})
+        with pytest.raises(ToolParamError, match="single producer"):
+            build_query(plain, field="cost", start="-1h", end="now", instance="whatever")
+
+
+class TestPerInstanceHistoryShape:
+    """Acceptance question 2: an unscoped result must say which producer each point
+    came from, and must not merge them."""
+
+    @staticmethod
+    def _handler():
+        handler = MagicMock()
+        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
+        handler.session = MagicMock()
+        return handler
+
+    def _run(self, series, instance=None, limit=DEFAULT_RESULT_POINTS):
+        from toinflux.mcp_read import _run_query_history
+
+        schema = TestInstanceAxis._schema()
+        with patch("toinflux.mcp_read.run_query", return_value=series):
+            return _run_query_history(
+                self._handler(), schema, "ping", "-1h", "now", "raw", None, limit, instance=instance
+            )
+
+    def test_unscoped_reports_each_producer_separately(self):
+        result = self._run(
+            [
+                QuerySeries({"host": "hostA"}, ["time", "ping"], [[2, 13.1], [1, 12.3]]),
+                QuerySeries({"host": "hostB"}, ["time", "ping"], [[2, 46.0], [1, 45.6]]),
+            ]
+        )
+        assert set(result["instances"]) == {"hostA", "hostB"}
+        assert [p["value"] for p in result["instances"]["hostA"]["points"]] == [13.1, 12.3]
+        assert [p["value"] for p in result["instances"]["hostB"]["points"]] == [46.0, 45.6]
+        assert result["instance_tag"] == "host"
+        # Field-level metadata stays at the top rather than repeating per producer.
+        assert result["unit"] == "ms"
+        assert "points" not in result
+
+    def test_keyed_even_with_one_producer(self):
+        # So nothing reading the payload depends on how many producers exist - the same
+        # reasoning as Hue's per-bridge map.
+        result = self._run([QuerySeries({"host": "only"}, ["time", "ping"], [[1, 5.0]])])
+        assert set(result["instances"]) == {"only"}
+
+    def test_scoped_returns_the_flat_shape(self):
+        result = self._run([QuerySeries({}, ["time", "ping"], [[1, 12.3]])], instance="hostA")
+        assert [p["value"] for p in result["points"]] == [12.3]
+        assert "instances" not in result
+
+    def test_limit_reported_is_the_one_actually_applied_per_instance(self):
+        # Reporting the caller's figure would make `truncated` a comparison against a
+        # limit InfluxDB never used.
+        result = self._run(
+            [
+                QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 1.0]]),
+                QuerySeries({"host": "hostB"}, ["time", "ping"], [[1, 2.0]]),
+            ],
+            limit=10,
+        )
+        assert result["limit_per_instance"] == 5
+        assert "limit" not in result
+
+    def test_truncation_is_per_instance_and_summarised(self):
+        result = self._run(
+            [
+                QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 1.0], [2, 2.0]]),
+                QuerySeries({"host": "hostB"}, ["time", "ping"], [[1, 3.0]]),
+            ],
+            limit=4,
+        )
+        assert result["instances"]["hostA"]["truncated"] is True
+        assert result["instances"]["hostB"]["truncated"] is False
+        assert result["truncated"] is True
+
+    def test_untagged_series_is_reported_not_silently_dropped(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = self._run(
+                [
+                    QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 1.0]]),
+                    QuerySeries({}, ["time", "ping"], [[1, 9.0]]),
+                ]
+            )
+        assert set(result["instances"]) == {"hostA"}
+        assert "no host tag" in caplog.text
+
+
+class TestDiscoverTagValues:
+    def test_parses_values(self):
+        payload = {
+            "results": [{"series": [{"columns": ["key", "value"], "values": [["host", "hostA"], ["host", "hostB"]]}]}]
+        }
+        values = discover_tag_values(
+            _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "speedtest", "host"
+        )
+        assert values == {"hostA", "hostB"}
+
+    def test_empty_when_nothing_recorded(self):
+        values = discover_tag_values(
+            _mock_session({"results": [{}]}), {"url": "http://x", "user": "u", "password": "p"}, "db", "m", "host"
+        )
+        assert values == set()
+
+    def test_series_without_a_value_column_is_skipped_not_misread(self, caplog):
+        """A -1 fallback read each row's last cell, which is right for today's
+        ["key", "value"] shape and would silently invent tag values if that changed. A
+        wrong allowlist refuses real producers and accepts ones that do not exist."""
+        payload = {"results": [{"series": [{"columns": ["key"], "values": [["host"]]}]}]}
+        with caplog.at_level("WARNING"):
+            values = discover_tag_values(
+                _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "m", "host"
+            )
+        assert values == set()
+        assert "no 'value' column" in caplog.text
+
+    def test_result_error_surfaces_rather_than_looking_like_no_instances(self):
+        payload = {"results": [{"error": "database not found: sdb"}]}
+        with pytest.raises(SourceConnectionError, match="rejected the tag-value discovery"):
+            discover_tag_values(
+                _mock_session(payload), {"url": "http://x", "token": "t", "org": "o"}, "db", "m", "host"
+            )
+
+
 class TestDataRangeResult:
     """get_data_range: how far back data goes, and how long InfluxDB keeps it.
 
@@ -1020,6 +1282,27 @@ class TestDataRangeResult:
     def _point(ts):
         return {"results": [{"series": [{"columns": ["time", "ping"], "values": [[ts, 12.0]]}]}]}
 
+    @staticmethod
+    def _grouped_point(**per_host):
+        """Speedtest has an instance axis, so the range is also read per producer -
+        two extra grouped round trips (oldest, newest) before the overall pair."""
+        return {
+            "results": [
+                {
+                    "series": [
+                        {"tags": {"host": h}, "columns": ["time", "ping"], "values": [[ts, 12.0]]}
+                        for h, ts in per_host.items()
+                    ]
+                }
+            ]
+        }
+
+    @staticmethod
+    def _tag_values(*values):
+        """Speedtest declares an instance tag, so resolve_schema enumerates it - one
+        extra round trip between field discovery and the edge-time queries."""
+        return {"results": [{"series": [{"columns": ["key", "value"], "values": [["host", v] for v in values]}]}]}
+
     def test_v1_reports_range_and_retention(self):
         """Acceptance question 2: v1 reports the configured duration and shard duration.
 
@@ -1039,7 +1322,18 @@ class TestDataRangeResult:
                 }
             ]
         }
-        result, _ = self._run(self.V1, [self._fields("ping"), self._point(1000), self._point(5000), retention])
+        result, _ = self._run(
+            self.V1,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1000),
+                self._point(5000),
+                retention,
+            ],
+        )
         assert (result["earliest"], result["latest"], result["span_seconds"]) == (1000, 5000, 4000)
         assert result["points_present"] is True
         assert result["retention"]["known"] is True
@@ -1048,6 +1342,10 @@ class TestDataRangeResult:
         assert result["retention"]["duration_seconds"] == 2592000
         assert result["retention"]["shard_group_duration_seconds"] == 3600
         assert result["retention"]["read_from"] == "v1 SHOW RETENTION POLICIES"
+        # Per producer as well as overall: a host added last week and one collecting for a
+        # year share a merged span that is true of the measurement and false of both.
+        assert result["instance_tag"] == "host"
+        assert result["instances"]["hostA"] == {"earliest": 1000, "latest": 5000, "span_seconds": 4000}
 
     def test_v1_prefers_the_default_policy(self):
         """Writes with no explicit policy land in the default one, so that is the policy
@@ -1067,7 +1365,18 @@ class TestDataRangeResult:
                 }
             ]
         }
-        result, _ = self._run(self.V1, [self._fields("ping"), self._point(1), self._point(2), retention])
+        result, _ = self._run(
+            self.V1,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                retention,
+            ],
+        )
         assert result["retention"]["policy"] == "keep"
 
     def test_v2_reads_retention_from_the_management_api_not_the_query_path(self):
@@ -1088,7 +1397,18 @@ class TestDataRangeResult:
                 }
             ]
         }
-        result, calls = self._run(self.V2, [self._fields("ping"), self._point(10), self._point(20), buckets])
+        result, calls = self._run(
+            self.V2,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(10),
+                self._point(20),
+                buckets,
+            ],
+        )
         assert result["retention"]["known"] is True
         assert result["retention"]["duration_seconds"] == 2592000
         # Rendered in v1's own style, so an answer is comparable across versions.
@@ -1121,6 +1441,9 @@ class TestDataRangeResult:
             self.V2,
             [
                 self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
                 self._point(100),
                 self._point(200),
                 requests.exceptions.HTTPError("403 Forbidden"),
@@ -1134,7 +1457,18 @@ class TestDataRangeResult:
     def test_v2_missing_bucket_degrades_rather_than_reporting_infinite(self):
         """v2 answers 200 with an empty list for a name matching nothing, so this is not
         caught by raise_for_status - and must not be read as 'no retention rules'."""
-        result, _ = self._run(self.V2, [self._fields("ping"), self._point(1), self._point(2), {"buckets": []}])
+        result, _ = self._run(
+            self.V2,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                {"buckets": []},
+            ],
+        )
         assert result["retention"]["known"] is False
         assert "no bucket named" in result["retention"]["reason"]
 
@@ -1201,8 +1535,30 @@ class TestDataRangeResult:
                 }
             ]
         }
-        v1, _ = self._run(self.V1, [self._fields("ping"), self._point(1), self._point(2), v1_retention])
-        v2, _ = self._run(self.V2, [self._fields("ping"), self._point(1), self._point(2), v2_buckets])
+        v1, _ = self._run(
+            self.V1,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                v1_retention,
+            ],
+        )
+        v2, _ = self._run(
+            self.V2,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                v2_buckets,
+            ],
+        )
         for key in ("duration", "duration_seconds", "shard_group_duration", "shard_group_duration_seconds"):
             assert v1["retention"][key] == v2["retention"][key], key
 
