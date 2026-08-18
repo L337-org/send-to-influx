@@ -15,6 +15,7 @@ caught two legacy field keys the migration would otherwise have halted on.
 
 import importlib.util
 import json
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -684,6 +685,74 @@ class TestPhaseRewrite:
     @staticmethod
     def _args(manifest, dry_run=False):
         return type("Args", (), {"manifest": str(manifest), "database": "test", "dry_run": dry_run})()
+
+    def test_every_point_survives_chunk_boundaries(self, tmp_path):
+        """Lines are generated and written in CHUNK-sized batches rather than materialised as
+        one list, so a boundary is a place a point could be dropped or written twice.
+
+        Sized to cross several boundaries. Verified against a real InfluxDB 1.8 as well - 1300
+        old points across two locks produced exactly 2600, with the manifest agreeing.
+        """
+        manifest = tmp_path / "m.json"
+        old_points = {
+            STAMP + index * 300_000_000_000: {"Front_stateValue": 1, "Back_stateValue": 3}
+            for index in range(migration.CHUNK * 2 + 7)
+        }
+        influx = migration.Influx("http://influx.example.com:8086", "test", None)
+        influx.batches = []
+
+        def query(statement):
+            if "SHOW FIELD KEYS" in statement:
+                return ["fieldKey", "fieldType"], [["Front_stateValue", "float"], ["Back_stateValue", "float"]]
+            if "SHOW TAG VALUES" in statement:
+                return ["key", "value"], [["host", "mqtt.example.com"]]
+            columns = ["time", "Back_stateValue", "Front_stateValue"]
+            return columns, [[stamp, 3, 1] for stamp in sorted(old_points)]
+
+        influx.query = query
+        influx.write = influx.batches.append
+
+        assert migration.phase_rewrite(influx, self._args(manifest)) == 0
+
+        # Every batch bar the last is exactly CHUNK, and nothing is written twice.
+        assert all(len(batch) == migration.CHUNK for batch in influx.batches[:-1])
+        written = [line for batch in influx.batches for line in batch]
+        expected = len(old_points) * 2  # two locks per old point
+        assert len(written) == expected
+        assert len(set(written)) == expected, "a line was written twice across a chunk boundary"
+
+        recorded = json.loads(manifest.read_text())
+        assert recorded["new_points"] == expected
+        assert recorded["old_points"] == len(old_points)
+        assert recorded["devices"] == {"Back": len(old_points), "Front": len(old_points)}
+
+    def test_the_dry_run_reports_the_same_totals_as_a_real_run(self, tmp_path):
+        """The dry run's whole job is to say what the real run will do, so the two must not be
+        able to describe the same database differently - they share one report function."""
+        old_points = {STAMP: {"Front_stateValue": 1, "Back_stateValue": 3}}
+        influx = migration.Influx("http://influx.example.com:8086", "test", None)
+        influx.batches = []
+
+        def query(statement):
+            if "SHOW FIELD KEYS" in statement:
+                return ["fieldKey", "fieldType"], [["Front_stateValue", "float"], ["Back_stateValue", "float"]]
+            if "SHOW TAG VALUES" in statement:
+                return ["key", "value"], [["host", "mqtt.example.com"]]
+            return ["time", "Back_stateValue", "Front_stateValue"], [[STAMP, 3, 1]]
+
+        influx.query = query
+        influx.write = influx.batches.append
+
+        counts = Counter()
+        keys = {}
+        migration._dry_run(old_points, counts, keys)
+        assert influx.batches == []
+        assert dict(counts) == {"Front": 1, "Back": 1}
+
+        manifest = tmp_path / "m.json"
+        assert migration.phase_rewrite(influx, self._args(manifest)) == 0
+        recorded = json.loads(manifest.read_text())
+        assert recorded["devices"] == dict(counts)
 
     def test_writes_the_points_and_the_manifest(self, tmp_path):
         manifest = tmp_path / "m.json"

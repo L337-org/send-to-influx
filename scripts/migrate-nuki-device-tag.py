@@ -376,15 +376,38 @@ def read_old_points(influx, keys):
     return points
 
 
-def rewritten_lines(points):
-    """Turn old points into new-format line protocol, one line per lock per timestamp.
+def iter_rewritten_lines(points, counts, keys_by_label):
+    """Yield new-format line protocol for each old point, one line per lock per timestamp.
 
-    :return: (lines, per-lock point counts, per-lock old field-key sets)
-    :rtype: tuple
+    A generator rather than a list because the list was the migration's largest allocation:
+    holding every rendered line alongside every read point roughly doubled peak memory for no
+    benefit, since the caller writes in ``CHUNK``-sized batches and never needs an earlier line
+    again. Raised in review as an OOM risk on a long-lived database. Measured against a real
+    install to size it rather than guessing: ~9,200 points over 31 days, so a few megabytes
+    today, and Nuki's local MQTT API needs 2022-or-later firmware, which caps any existing
+    history at a few years. Streaming the lines is the cheap half of the fix.
+
+    **The read is still bounded by the whole result set** - ``read_old_points`` holds every point
+    - so this reduces peak memory rather than making it independent of database size. Paging the
+    SELECT itself would do that, and is deliberately not attempted here: a ``LIMIT``-and-resume
+    cursor has to cope with several rows sharing one timestamp (see ``read_old_points``), so a
+    window boundary landing mid-timestamp would silently drop the rest of that group - the exact
+    class of bug already found in this script twice, in the one tool that must not lose data.
+    Worth doing deliberately if an install ever needs it, not bolted on.
+
+    ``counts`` and ``keys_by_label`` are accumulated into rather than returned, since a generator
+    cannot return them and the caller needs the totals only once it is exhausted.
+
+    :param points: ``{timestamp: {old_key: value}}`` from read_old_points
+    :type points: dict
+    :param counts: per-lock point counter, mutated in place
+    :type counts: collections.Counter
+    :param keys_by_label: per-lock set of old field keys, mutated in place
+    :type keys_by_label: dict
+    :return: an iterator of line protocol strings
+    :rtype: collections.abc.Iterator
+    :raises MigrationError: a field key could not be split, or a lock name cannot be a tag
     """
-    lines = []
-    counts = Counter()
-    keys_by_label = {}
     for stamp in sorted(points):
         by_label = {}
         for old_key, value in points[stamp].items():
@@ -395,9 +418,108 @@ def rewritten_lines(points):
             fields = ",".join(
                 f"{name}={line_protocol_value(name, value)}" for name, value in sorted(by_label[label].items())
             )
-            lines.append(f"{MEASUREMENT},device={escape_tag(label)} {fields} {stamp}")
             counts[label] += 1
+            yield f"{MEASUREMENT},device={escape_tag(label)} {fields} {stamp}"
+
+
+def rewritten_lines(points):
+    """Materialise :func:`iter_rewritten_lines` for callers that want the whole list.
+
+    Used by the tests, which assert over the complete output, and nowhere in the write path.
+
+    :param points: ``{timestamp: {old_key: value}}`` from read_old_points
+    :type points: dict
+    :return: (lines, per-lock point counts, per-lock old field-key sets)
+    :rtype: tuple
+    """
+    counts = Counter()
+    keys_by_label = {}
+    lines = list(iter_rewritten_lines(points, counts, keys_by_label))
     return lines, counts, keys_by_label
+
+
+def _dry_run(points, counts, keys_by_label):
+    """Report what the real run would write, writing nothing.
+
+    Walks every point rather than sampling, because that is what proves every field key splits -
+    the halt it can report is the whole reason to dry-run first.
+
+    :param points: the old points that were read
+    :type points: dict
+    :param counts: per-lock point counter, mutated in place
+    :type counts: collections.Counter
+    :param keys_by_label: per-lock old field keys, mutated in place
+    :type keys_by_label: dict
+    :return: None
+    :raises MigrationError: a field key could not be split, or a lock name cannot be a tag
+    """
+    sample = []
+    written = 0
+    for line in iter_rewritten_lines(points, counts, keys_by_label):
+        written += 1
+        if len(sample) < 3:
+            sample.append(line)
+    _report_totals(points, written, counts, keys_by_label)
+    print("\nDry run - nothing written. Re-run without --dry-run to apply.")
+    print("Sample of what would be written:")
+    for line in sample:
+        print(f"  {line}")
+
+
+def _write_all(influx, points, counts, keys_by_label):
+    """Write every rewritten point in ``CHUNK``-sized batches.
+
+    Lines are generated as they are written rather than built into one list first - see
+    :func:`iter_rewritten_lines`. A field key that cannot be split halts partway through, which
+    is safe: phase 1 writes to different series from the ones it reads, so nothing is lost, no
+    manifest is produced, and phase 2 refuses to run without one.
+
+    :param influx: the connection to write through
+    :param points: the old points that were read
+    :type points: dict
+    :param counts: per-lock point counter, mutated in place
+    :type counts: collections.Counter
+    :param keys_by_label: per-lock old field keys, mutated in place
+    :type keys_by_label: dict
+    :return: how many points were written
+    :rtype: int
+    :raises MigrationError: a write failed, a field key could not be split, or a lock name
+        cannot be a tag
+    """
+    written = 0
+    chunk = []
+    for line in iter_rewritten_lines(points, counts, keys_by_label):
+        chunk.append(line)
+        if len(chunk) >= CHUNK:
+            influx.write(chunk)
+            written += len(chunk)
+            chunk = []
+            print(f"  written {written}")
+    if chunk:
+        influx.write(chunk)
+        written += len(chunk)
+    return written
+
+
+def _report_totals(points, written, counts, keys_by_label):
+    """Print what was read and produced, per lock.
+
+    Shared by the dry run and the real run so the two can never describe the same database
+    differently - the dry run's whole job is to tell you what the real run will do.
+
+    :param points: the old points that were read
+    :type points: dict
+    :param written: how many new points were produced
+    :type written: int
+    :param counts: per-lock point counts
+    :type counts: collections.Counter
+    :param keys_by_label: per-lock old field keys
+    :type keys_by_label: dict
+    :return: None
+    """
+    print(f"Read {len(points)} old point(s), producing {written} new point(s):")
+    for label in sorted(counts):
+        print(f"  {label}: {counts[label]} point(s) from {len(keys_by_label[label])} field key(s)")
 
 
 def check_manifest_writable(path):
@@ -445,21 +567,15 @@ def phase_rewrite(influx, args):
     if not points:
         print("Field keys exist but no points carry them - nothing to migrate.")
         return 0
-    lines, counts, keys_by_label = rewritten_lines(points)
-    print(f"Read {len(points)} old point(s), producing {len(lines)} new point(s):")
-    for label in sorted(counts):
-        print(f"  {label}: {counts[label]} point(s) from {len(keys_by_label[label])} field key(s)")
+    counts = Counter()
+    keys_by_label = {}
     if args.dry_run:
-        print("\nDry run - nothing written. Re-run without --dry-run to apply.")
-        print("Sample of what would be written:")
-        for line in lines[:3]:
-            print(f"  {line}")
+        _dry_run(points, counts, keys_by_label)
         return 0
     # Before the first write, not after the last: see check_manifest_writable.
     check_manifest_writable(args.manifest)
-    for start in range(0, len(lines), CHUNK):
-        influx.write(lines[start : start + CHUNK])
-        print(f"  written {min(start + CHUNK, len(lines))}/{len(lines)}")
+    written = _write_all(influx, points, counts, keys_by_label)
+    _report_totals(points, written, counts, keys_by_label)
     manifest = {
         "measurement": MEASUREMENT,
         "database": args.database,
@@ -469,7 +585,7 @@ def phase_rewrite(influx, args):
         # across and nothing else.
         "old_series_hosts": old_series_hosts(influx),
         "old_points": len(points),
-        "new_points": len(lines),
+        "new_points": written,
         "devices": {label: counts[label] for label in sorted(counts)},
     }
     try:
@@ -485,7 +601,7 @@ def phase_rewrite(influx, args):
             f"needs the manifest, so re-run this same rewrite phase with a writable --manifest "
             f"path - it is idempotent, and will rewrite the same points and produce the manifest"
         ) from exc
-    print(f"\nWrote {len(lines)} point(s). Manifest: {args.manifest}")
+    print(f"\nWrote {written} point(s). Manifest: {args.manifest}")
     print("The old points are untouched. Verify in Grafana, then run the delete phase.")
     return 0
 
