@@ -457,7 +457,7 @@ def _select_and_group(field, aggregation, group_by, instance_clause):
     return f"{func}({_quote_identifier(field)})", f" GROUP BY time({group_by}){instance_clause} fill(none)"
 
 
-def _build_single_point_query(measurement, tag_filters, fields, order):
+def _build_single_point_query(measurement, tag_filters, fields, order, group_by_tag=None):
     """Build an InfluxQL SELECT for one point at either end of a measurement.
 
     Shared by :func:`build_latest_query` and :func:`build_edge_time_query` - kept as one
@@ -492,10 +492,16 @@ def _build_single_point_query(measurement, tag_filters, fields, order):
         conditions.append(f"{_quote_identifier(tag_key)} = {_quote_string_literal(tag_value)}")
     if conditions:
         query += f" WHERE {' AND '.join(conditions)}"
+    if group_by_tag:
+        # LIMIT 1 becomes one row *per series* once grouped, which is exactly what a
+        # per-producer "latest" or "oldest" needs - verified against a real InfluxDB
+        # 1.8, where this returned the newest point for each host in one round trip.
+        _validate_identifier(group_by_tag, "tag")
+        query += f" GROUP BY {_quote_identifier(group_by_tag)}"
     return query + f" ORDER BY time {order} LIMIT 1"
 
 
-def build_latest_query(measurement, tag_filters, fields):
+def build_latest_query(measurement, tag_filters, fields, group_by_tag=None):
     """Build an InfluxQL SELECT for the single most recent point of a measurement -
     the current-state read for a non-live source (see MCP_LIVE_STATE).
 
@@ -504,10 +510,10 @@ def build_latest_query(measurement, tag_filters, fields):
     :param fields: the field keys to select (non-empty)
     :return: the InfluxQL query string
     """
-    return _build_single_point_query(measurement, tag_filters, fields, "DESC")
+    return _build_single_point_query(measurement, tag_filters, fields, "DESC", group_by_tag)
 
 
-def build_edge_time_query(measurement, tag_filters, order):
+def build_edge_time_query(measurement, tag_filters, order, group_by_tag=None):
     """Build an InfluxQL SELECT for the timestamp at one end of a measurement's data.
 
     ``ORDER BY time ASC`` answers "when did collection start, or where has older data aged
@@ -528,7 +534,7 @@ def build_edge_time_query(measurement, tag_filters, order):
     :param order: ``"ASC"`` for the oldest point, ``"DESC"`` for the newest
     :return: the InfluxQL query string
     """
-    return _build_single_point_query(measurement, tag_filters, None, order)
+    return _build_single_point_query(measurement, tag_filters, None, order, group_by_tag)
 
 
 def _influx_read_request(influx_settings, db, query):
@@ -1190,6 +1196,14 @@ def _latest_recorded(handler):
         return {}, None
     query = build_latest_query(measurement, handler.mcp_tag_filters(), fields)
     columns, values = single_series(run_query(handler.session, influx_settings, db, query))
+    return _row_to_state(fields, columns, values)
+
+
+def _row_to_state(fields, columns, values):
+    """Turn a single-point result row into ``({field: value}, as_of)``.
+
+    :return: empty dict and None when there is no row
+    """
     if not values:
         return {}, None
     row = values[0]
@@ -1197,8 +1211,43 @@ def _latest_recorded(handler):
     # Skip a field that came back NULL (a field written in some points but not the
     # latest one) rather than reporting a meaningless None as its current value.
     data = {name: _cell(row, index, name) for name in sorted(fields) if _cell(row, index, name) is not None}
-    as_of = _cell(row, index, "time")
-    return data, as_of
+    return data, _cell(row, index, "time")
+
+
+def _latest_recorded_per_instance(handler):
+    """Read the latest recorded point *per producer* for a non-live source with an
+    instance axis.
+
+    Speedtest is the case: several hosts write to one measurement, so a single
+    ungrouped "latest point" answers with whichever host happened to write most
+    recently and says nothing about which - a plausible-looking answer that is simply
+    the wrong question. Grouping by the tag gets every host's own latest in one round
+    trip, because InfluxDB applies LIMIT 1 per series once grouped.
+
+    :param handler: a constructed DataHandler whose MCP_INSTANCE_TAG is set
+    :return: ``{tag value: (fields, as_of)}``, empty when nothing is recorded yet
+    :raises SourceConnectionError: on a transport/parse failure
+    """
+    influx_settings = handler.settings["influx"]
+    db = resolve_db(handler.source_settings, influx_settings)
+    measurement = handler.MCP_MEASUREMENT or handler.source
+    fields = discover_fields(handler.session, influx_settings, db, measurement)
+    if not fields:
+        return {}
+    tag = handler.MCP_INSTANCE_TAG
+    query = build_latest_query(measurement, handler.mcp_tag_filters(), fields, group_by_tag=tag)
+    out = {}
+    for one in run_query(handler.session, influx_settings, db, query):
+        key = one.tags.get(tag)
+        if key is None:
+            logging.warning(
+                "Latest-state query for %r grouped by %r returned an untagged series; ignoring it",
+                handler.source,
+                tag,
+            )
+            continue
+        out[key] = _row_to_state(fields, one.columns, one.values)
+    return out
 
 
 def current_state_result(source, settings, settings_file):
@@ -1234,6 +1283,19 @@ def current_state_result(source, settings, settings_file):
             result["description"] = first.MCP_DESCRIPTION
 
         if len(handlers) == 1 and handlers[0][0] is None:
+            # A source with a data axis but a single collector work unit - Speedtest,
+            # where each host is its own process, so the producers exist in InfluxDB
+            # rather than in this install's config. Only answerable per producer when
+            # the state comes *from* InfluxDB: a live read reflects this machine alone
+            # and could not speak for the others, so a live source keeps the flat shape.
+            if first.MCP_INSTANCE_TAG and not first.MCP_LIVE_STATE:
+                per_instance = _latest_recorded_per_instance(first)
+                result["instance_tag"] = first.MCP_INSTANCE_TAG
+                result["instances"] = {
+                    key: {"fields": _annotate_state(first, fields), "as_of": as_of}
+                    for key, (fields, as_of) in sorted(per_instance.items())
+                }
+                return result
             # Single-target source: the historical flat shape, unchanged.
             fields, as_of = _instance_state(first)
             result["fields"] = fields
@@ -1277,11 +1339,22 @@ def _instance_state(handler):
         as_of = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
     else:
         data, as_of = _latest_recorded(handler)
+    return _annotate_state(handler, data), as_of
+
+
+def _annotate_state(handler, data):
+    """Annotate a ``{field: value}`` map with units and decoded labels.
+
+    Shared by the flat and the per-instance current-state paths so a coded value reads
+    back as its label in both - a second copy would eventually annotate one and not the
+    other.
+
+    :param handler: the source's DataHandler, for its MCP_FIELD_METADATA
+    :param data: raw field name -> value
+    :return: field name -> annotated value
+    """
     field_metadata = handler.MCP_FIELD_METADATA
-    return (
-        {name: _annotate_state_field(field_metadata, name, value) for name, value in sorted(data.items())},
-        as_of,
-    )
+    return {name: _annotate_state_field(field_metadata, name, value) for name, value in sorted(data.items())}
 
 
 def _edge_time(handler, schema, order_query):

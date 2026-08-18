@@ -121,9 +121,34 @@ class Speedtest(DataHandler):
             self.data = flattened_data
 
         # use the local hostname as the host tag
-        self.influx_header = f"speedtest,host={gethostname().split('.')[0]} "
+        self.influx_header = f"speedtest,host={self.collector_host()} "
 
         return self.data
+
+    @staticmethod
+    def collector_host():
+        """The short hostname used as this collector's ``host`` tag.
+
+        One implementation for the data and the heartbeat: the two must agree, or a
+        health series and its measurement would disagree about which machine wrote what.
+
+        :return: the local hostname up to the first dot
+        :rtype: str
+        """
+        return gethostname().split(".")[0]
+
+    def heartbeat_tags(self):
+        """Tag the heartbeat with the collecting machine, matching the data's own tag.
+
+        Speedtest's producers are separate processes on separate hosts, so ``instance``
+        is None and the base implementation would return no tag - leaving every host
+        writing ``collector_status,source=speedtest`` and overwriting each other, so one
+        host dying looked exactly like a healthy estate.
+
+        :return: ``{"host": <this machine>}``
+        :rtype: dict
+        """
+        return {"host": self.collector_host()}
 
     def mcp_trigger_run(self):
         """Run a speed test now (the MCP write action for this source) and return

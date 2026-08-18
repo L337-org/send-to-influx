@@ -210,6 +210,28 @@ class DataHandler:
         """
         return dict(self.MCP_TAG_FILTERS)
 
+    def heartbeat_tags(self):
+        """Return extra tags for this handler's ``collector_status`` heartbeat.
+
+        The heartbeat must be distinguishable per *writer*, or several writers overwrite
+        one another's ok/consecutive_failures at second precision and a dead one is
+        invisible - which is exactly what happened with two Speedtest hosts sharing
+        ``collector_status,source=speedtest``.
+
+        The base answer covers an instanced source, tagging its own instance (a Hue
+        bridge). A source whose producers are separate *processes* rather than separate
+        targets has ``instance`` None and overrides this instead - see Speedtest, which
+        tags the collecting machine. Either way the tag has to match what the source's own
+        data carries, or the health series and the measurement disagree about who wrote
+        what.
+
+        :return: extra tag key/value pairs, empty for a single-writer source
+        :rtype: dict
+        """
+        if self.instance is not None:
+            return {"host": self.instance}
+        return {}
+
     def mcp_write_enabled(self):
         """Return True only when this source is writable *and* the operator has
         opted in with ``<source>.mcp_read_write: true`` (strict ``is True``, so a

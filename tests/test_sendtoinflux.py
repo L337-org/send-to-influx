@@ -7,11 +7,12 @@ import signal
 import sys
 import threading
 import time
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 import pytest
 import sendtoinflux
 from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.speedtest import Speedtest
 from toinflux.influx import DataHandler, InfluxWriteError
 
 
@@ -1620,6 +1621,10 @@ class TestMultiBridgeWorkers:
         ok/consecutive_failures on the same series at second precision."""
         captured = {}
         handler = MagicMock(STREAMING=False, instance="b.example.com")
+        # Bind the real base implementation rather than letting the mock invent a
+        # return value: the point of the test is that DataHandler decides the tag, and
+        # a canned mock answer would pass even if that logic were removed.
+        handler.heartbeat_tags = MethodType(DataHandler.heartbeat_tags, handler)
         handler.influx_header = "hue,host=b.example.com "
         handler.send_data.side_effect = lambda **kw: captured.update(header=handler.influx_header)
         sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
@@ -1630,10 +1635,40 @@ class TestMultiBridgeWorkers:
         line-protocol special must be escaped or the point is silently corrupt."""
         captured = {}
         handler = MagicMock(STREAMING=False, instance="odd host,x")
+        handler.heartbeat_tags = MethodType(DataHandler.heartbeat_tags, handler)
         handler.influx_header = "hue "
         handler.send_data.side_effect = lambda **kw: captured.update(header=handler.influx_header)
         sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
         assert captured["header"] == "collector_status,source=hue,host=odd\\ host\\,x "
+
+    def test_heartbeat_distinguishes_speedtest_collectors_by_host(self):
+        """Acceptance question 4. Two hosts running Speedtest into one database shared
+        `collector_status,source=speedtest` and overwrote one another at second
+        precision, so a dead collector was indistinguishable from a healthy estate.
+
+        Speedtest's writers are separate processes rather than separate targets, so
+        `instance` is None and the base implementation contributes nothing - the source
+        has to name the machine itself. The real override is exercised here, not a mock
+        value, and the tag must match what its own data carries."""
+        captured = {}
+        handler = MagicMock(STREAMING=False, instance=None)
+        handler.collector_host = Speedtest.collector_host
+        handler.heartbeat_tags = MethodType(Speedtest.heartbeat_tags, handler)
+        handler.influx_header = "speedtest "
+        handler.send_data.side_effect = lambda **kw: captured.update(header=handler.influx_header)
+        with patch("toinflux.speedtest.gethostname", return_value="pi4.lan"):
+            sendtoinflux.send_heartbeat(handler, "speedtest", ok=True, consecutive_failures=0)
+        assert captured["header"] == "collector_status,source=speedtest,host=pi4 "
+
+    def test_speedtest_data_and_heartbeat_agree_on_the_host_tag(self):
+        """The two must not drift: a health series tagged differently from the
+        measurement it reports on would make per-host health unjoinable to per-host
+        data. One implementation serves both, and this is what fails if that changes."""
+        with patch("toinflux.speedtest.gethostname", return_value="nas.local"):
+            assert Speedtest.collector_host() == "nas"
+            handler = MagicMock(instance=None)
+            handler.collector_host = Speedtest.collector_host
+            assert MethodType(Speedtest.heartbeat_tags, handler)() == {"host": "nas"}
 
     def test_dump_emits_every_bridge_keyed_by_host(self):
         """--dump covers all bridges, keyed by host even for one bridge, so nothing

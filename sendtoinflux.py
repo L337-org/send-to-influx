@@ -261,14 +261,18 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
     if data_handler is None:
         return
     original_header = data_handler.influx_header
-    # An instanced source tags its own instance too, so per-bridge health is visible
-    # instead of several workers overwriting one another's ok/consecutive_failures at
-    # second precision. This adds a tag to an existing series for Hue - a deliberate
-    # emitted-data change, noted in the release notes: `GROUP BY source` now returns one
-    # series per bridge. Every single-target source has instance None and is untouched.
+    # Extra tags come from the source itself (DataHandler.heartbeat_tags), because what
+    # distinguishes one writer from another differs by source: an instanced source tags
+    # its bridge, while Speedtest tags the collecting machine, since its writers are
+    # separate processes on separate hosts rather than separate targets. Without this the
+    # writers share one series and overwrite each other's ok/consecutive_failures at
+    # second precision, so a dead collector is indistinguishable from a healthy one.
+    # Adding a tag to an existing series is a deliberate emitted-data change: pre-change
+    # heartbeat points sit in an untagged series, and `GROUP BY source` now returns one
+    # series per writer. Accepted for a liveness signal whose old data was already wrong.
     tags = f"source={source}"
-    if data_handler.instance is not None:
-        tags += f",host={escape_key_or_tag_value(data_handler.instance)}"
+    for key, value in sorted(data_handler.heartbeat_tags().items()):
+        tags += f",{key}={escape_key_or_tag_value(value)}"
     data_handler.influx_header = f"collector_status,{tags} "
     try:
         data_handler.send_data(
