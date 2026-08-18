@@ -23,6 +23,7 @@ from toinflux.mcp_read import (
     current_state_result,
     discover_fields,
     discover_tag_values,
+    list_fields_result,
     metadata_for,
     parse_time_bound,
     register_read_tools,
@@ -821,6 +822,141 @@ class TestCurrentStateResult:
         # A field that came back NULL in the latest point is omitted, not reported None.
         assert "download" not in result["fields"]
         handler.session.close.assert_called_once()
+
+
+class TestInstancedReadsWithARealHandler:
+    """The per-producer read paths, driven by the real Speedtest class.
+
+    These exist because the rest of this file builds handlers with MagicMock, and a mock is
+    exactly what hid these two paths: the non-live current-state test sets
+    ``MCP_INSTANCE_TAG = None``, so it exercises Speedtest as it behaved *before* this axis
+    existed, and nothing reached ``list_fields_result`` at all. Both paths were correct when
+    probed by hand - the gap was in the tests, not the code - but an untested path is one a
+    later change can break silently, and between them they answer "does get_current_state
+    report both hosts separately" and "does list_fields report the values an instance may
+    take".
+
+    Using the real class also means ``MCP_INSTANCE_TAG``, ``MCP_LIVE_STATE`` and the field
+    metadata come from the source rather than from whatever the test asserts they are.
+    """
+
+    SETTINGS = {
+        "influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"},
+        "speedtest": {"db": "sdb", "interval": 3600},
+        "sources": ["speedtest"],
+    }
+
+    def _handler(self):
+        from toinflux.speedtest import Speedtest
+
+        with patch("toinflux.influx.load_settings", return_value=self.SETTINGS):
+            handler = Speedtest("speedtest")
+        handler.session = MagicMock()
+        return handler
+
+    def test_current_state_reports_each_host_separately(self):
+        """Speedtest is not live (its get_data runs a full test), so current state comes from
+        the latest recorded point per host - which is the whole point of the story: one
+        merged answer was wrong rather than incomplete."""
+        handler = self._handler()
+        series = [
+            QuerySeries({"host": "alpha"}, ["time", "download", "ping"], [[1700, 5.0, 12.5]]),
+            QuerySeries({"host": "beta"}, ["time", "download", "ping"], [[1701, 6.0, 40.0]]),
+        ]
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"ping", "download"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"alpha", "beta"}),
+            patch("toinflux.mcp_read.run_query", return_value=series),
+        ):
+            result = current_state_result("speedtest", self.SETTINGS, None)
+
+        assert result["state"] == "last_recorded"
+        assert result["instance_tag"] == "host"
+        assert set(result["instances"]) == {"alpha", "beta"}
+        assert result["instances"]["alpha"]["fields"]["ping"] == {"value": 12.5, "unit": "ms"}
+        assert result["instances"]["beta"]["fields"]["ping"] == {"value": 40.0, "unit": "ms"}
+        # Each host's reading carries its own timestamp, not one shared "now".
+        assert result["instances"]["alpha"]["as_of"] == 1700
+        assert result["instances"]["beta"]["as_of"] == 1701
+        # Never both shapes: a caller must not have to guess which to read.
+        assert "fields" not in result
+        handler.session.close.assert_called_once()
+
+    def test_current_state_never_runs_a_speed_test(self):
+        """The guard that matters most on this path: get_data() would saturate the link."""
+        handler = self._handler()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch.object(type(handler), "get_data", side_effect=AssertionError("get_data was called")),
+            patch("toinflux.mcp_read.discover_fields", return_value={"ping"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"alpha"}),
+            patch(
+                "toinflux.mcp_read.run_query",
+                return_value=[QuerySeries({"host": "alpha"}, ["time", "ping"], [[1700, 12.5]])],
+            ),
+        ):
+            result = current_state_result("speedtest", self.SETTINGS, None)
+        assert set(result["instances"]) == {"alpha"}
+
+    def test_an_untagged_series_is_skipped_rather_than_keyed_as_none(self):
+        """A grouped query should not return an untagged series, but if one arrives it must
+        not become a producer called ``None`` in the payload."""
+        handler = self._handler()
+        series = [
+            QuerySeries({}, ["time", "ping"], [[1699, 1.0]]),
+            QuerySeries({"host": "alpha"}, ["time", "ping"], [[1700, 12.5]]),
+        ]
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"ping"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"alpha"}),
+            patch("toinflux.mcp_read.run_query", return_value=series),
+        ):
+            result = current_state_result("speedtest", self.SETTINGS, None)
+        assert set(result["instances"]) == {"alpha"}
+
+    def test_list_fields_reports_the_axis_and_the_values_it_accepts(self):
+        """list_fields is where a caller learns which values `instance` may take - the tool
+        description points them here, and nothing asserted it did so."""
+        handler = self._handler()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"ping", "download"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"beta", "alpha"}),
+        ):
+            result = list_fields_result("speedtest", self.SETTINGS, None)
+
+        assert result["source"] == "speedtest"
+        assert result["measurement"] == "speedtest"
+        assert result["instance_tag"] == "host"
+        assert result["instances"] == ["alpha", "beta"], "instances must be sorted for a stable payload"
+        # Field metadata still comes through, from the source class rather than the test.
+        by_name = {entry["field"]: entry for entry in result["fields"]}
+        assert by_name["ping"]["unit"] == "ms"
+        assert [entry["field"] for entry in result["fields"]] == ["download", "ping"]
+        handler.session.close.assert_called_once()
+
+    def test_list_fields_omits_the_axis_for_a_source_without_one(self):
+        """A single-producer source keeps the historical shape, so nothing reading the payload
+        has to special-case its absence."""
+        from toinflux.carbonintensity import CarbonIntensity
+
+        settings = {
+            "influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"},
+            "carbonintensity": {"db": "cdb", "interval": 1800},
+            "sources": ["carbonintensity"],
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = CarbonIntensity("carbonintensity")
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"intensity"}),
+        ):
+            result = list_fields_result("carbonintensity", settings, None)
+        assert "instance_tag" not in result
+        assert "instances" not in result
 
 
 class TestBuildDocumentation:
