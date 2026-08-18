@@ -9,6 +9,7 @@ import pytest
 import requests
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
+from toinflux.general import get_class
 from toinflux.philipshue import Hue
 from toinflux.mcp_read import (
     DEFAULT_RESULT_POINTS,
@@ -1216,8 +1217,10 @@ class TestPerInstanceHistoryShape:
     def test_keyed_even_with_one_producer(self):
         # So nothing reading the payload depends on how many producers exist - the same
         # reasoning as Hue's per-bridge map.
-        result = self._run([QuerySeries({"host": "only"}, ["time", "ping"], [[1, 5.0]])])
-        assert set(result["instances"]) == {"only"}
+        # The tag value has to be one the schema knows about, since a producer outside the
+        # allowlist is deliberately not reported - see the shared-measurement filter.
+        result = self._run([QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 5.0]])])
+        assert set(result["instances"]) == {"hostA"}
 
     def test_scoped_returns_the_flat_shape(self):
         result = self._run([QuerySeries({}, ["time", "ping"], [[1, 12.3]])], instance="hostA")
@@ -1259,6 +1262,99 @@ class TestPerInstanceHistoryShape:
             )
         assert set(result["instances"]) == {"hostA"}
         assert "no host tag" in caplog.text
+
+
+class TestSharedMeasurementInstances:
+    """SI-34, acceptance questions 3 and 6. The three MyEnergi types share the `myenergi`
+    measurement and are told apart by the same `device` tag that now carries the operator's
+    label - so a discovered value cannot be attributed to a type, and the config is the
+    authority. The config does distinguish them: separate blocks, separate sources."""
+
+    SETTINGS = {
+        "sources": ["zappi", "eddi"],
+        "influx": {"url": "http://x", "user": "u", "password": "p"},
+        "zappi": {
+            "db": "m",
+            "interval": 300,
+            "serial": "1",
+            "devices": [{"serial": "2", "label": "Driveway"}],
+        },
+        "eddi": {"db": "m", "interval": 300, "serial": "3", "label": "Hot Water"},
+        "myenergi": {"apikey": "k", "zappi_url": "u", "eddi_url": "u", "dayhour_url": "u"},
+    }
+
+    def _schema(self, source="zappi"):
+        with patch("toinflux.influx.load_settings", return_value=self.SETTINGS):
+            handler = get_class(source, None)
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"frq"}),
+            # Every device in the measurement, whichever type wrote it - which is exactly
+            # what SHOW TAG VALUES returns and why it cannot be trusted here.
+            patch(
+                "toinflux.mcp_read.discover_tag_values",
+                return_value={"zappi", "Driveway", "Hot Water", "gone-device"},
+            ) as discover,
+        ):
+            _, schema = resolve_schema(source, self.SETTINGS, None)
+        return schema, discover
+
+    def test_the_allowlist_is_the_configured_devices_of_that_source_only(self):
+        """Acceptance question 6: a query for zappi covers the named device and the
+        legacy-labelled one, and nothing belonging to another type."""
+        schema, _ = self._schema("zappi")
+        assert schema.instance_values == {"zappi", "Driveway"}
+        assert "Hot Water" not in schema.instance_values
+
+    def test_discovery_is_not_consulted_for_a_shared_measurement(self):
+        """Not merely filtered afterwards - the round trip is skipped, since its answer
+        could not be attributed to a type anyway."""
+        _, discover = self._schema("zappi")
+        discover.assert_not_called()
+
+    def test_an_eddi_label_is_refused_for_a_zappi_query(self):
+        schema, _ = self._schema("zappi")
+        with pytest.raises(ToolParamError, match="accepted values: Driveway, zappi"):
+            _validate_instance(schema, "Hot Water")
+
+    def test_a_grouped_query_reports_only_this_sources_devices(self):
+        """The measurement holds every type's devices, so an unfiltered grouped query would
+        answer a zappi question with the eddi's readings."""
+        from toinflux.mcp_read import _run_query_history
+
+        schema, _ = self._schema("zappi")
+        handler = MagicMock()
+        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
+        series = [
+            QuerySeries({"device": "zappi"}, ["time", "frq"], [[1, 50.0]]),
+            QuerySeries({"device": "Driveway"}, ["time", "frq"], [[1, 49.0]]),
+            QuerySeries({"device": "Hot Water"}, ["time", "frq"], [[1, 48.0]]),
+            QuerySeries({"device": "gone-device"}, ["time", "frq"], [[1, 47.0]]),
+        ]
+        with patch("toinflux.mcp_read.run_query", return_value=series):
+            result = _run_query_history(handler, schema, "frq", "-1h", "now", "raw", None, 100)
+        assert set(result["instances"]) == {"zappi", "Driveway"}
+
+    def test_a_source_owning_its_measurement_still_uses_discovery(self):
+        """The rule must not have quietly changed Speedtest or Hue: they own their
+        measurements, so a discovered value is unambiguous and the union still applies."""
+        settings = {
+            "sources": ["speedtest"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "speedtest": {"db": "s", "interval": 600},
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = get_class("speedtest", None)
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"ping"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"pi4", "nas"}) as discover,
+        ):
+            _, schema = resolve_schema("speedtest", settings, None)
+        discover.assert_called_once()
+        assert schema.instance_values == {"pi4", "nas"}
 
 
 class TestDiscoverTagValues:

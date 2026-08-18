@@ -423,3 +423,274 @@ class TestDeviceSelection:
             with patch.object(cls, "get_data_from_myenergi", return_value={name: []}):
                 with pytest.raises(SourceConnectionError):
                     handler._parse_device_data(name, f"{name}_url")
+
+
+class TestMultiDevice:
+    """SI-34: several devices of one type, each named by the operator."""
+
+    BASE = {
+        "influx": {"url": "http://x", "token": "t", "org": "o"},
+        "myenergi": {
+            "apikey": "k",
+            "zappi_url": "https://s18.myenergi.net/cgi-jstatus-Z",
+            "dayhour_url": "https://s18.myenergi.net/cgi-jdayhour-Z",
+        },
+    }
+
+    def _settings(self, zappi):
+        return {**self.BASE, "sources": ["zappi"], "zappi": zappi}
+
+    def _handler(self, zappi, instance=None):
+        with patch("toinflux.influx.load_settings", return_value=self._settings(zappi)):
+            handler = Zappi("zappi", instance=instance)
+        handler.session = MagicMock()
+        return handler
+
+    # --- Acceptance question 1: its own worker and its own series ---
+
+    def test_each_device_gets_its_own_work_unit(self):
+        from toinflux.general import expand_sources
+
+        settings = self._settings(
+            {
+                "db": "z",
+                "interval": 300,
+                "devices": [{"serial": "1", "label": "Garage"}, {"serial": "2", "label": "Driveway"}],
+            }
+        )
+        assert expand_sources(["zappi"], settings) == [("zappi", "Driveway"), ("zappi", "Garage")] or expand_sources(
+            ["zappi"], settings
+        ) == [("zappi", "Garage"), ("zappi", "Driveway")]
+
+    def test_each_device_writes_its_own_series(self):
+        """The label is the emitted `device` tag, so two devices are separate series."""
+        zappi = {
+            "db": "z",
+            "interval": 300,
+            "fields": ["frq"],
+            "devices": [{"serial": "1", "label": "Garage"}, {"serial": "2", "label": "Driveway"}],
+        }
+        headers = []
+        for label in ("Garage", "Driveway"):
+            handler = self._handler(zappi, instance=label)
+            with (
+                patch.object(
+                    Zappi,
+                    "get_data_from_myenergi",
+                    return_value={"zappi": [{"sno": "1", "frq": 50}, {"sno": "2", "frq": 49}]},
+                ),
+                patch.object(Zappi, "dayhour_results", return_value={}),
+            ):
+                handler.get_data()
+            headers.append(handler.influx_header)
+        assert headers == ["myenergi,device=Garage ", "myenergi,device=Driveway "]
+
+    def test_each_device_collects_its_own_readings(self):
+        zappi = {
+            "db": "z",
+            "interval": 300,
+            "fields": ["frq"],
+            "devices": [{"serial": "1", "label": "Garage"}, {"serial": "2", "label": "Driveway"}],
+        }
+        response = {"zappi": [{"sno": "1", "frq": 50}, {"sno": "2", "frq": 49}]}
+        for label, expected in (("Garage", 50), ("Driveway", 49)):
+            handler = self._handler(zappi, instance=label)
+            with (
+                patch.object(Zappi, "get_data_from_myenergi", return_value=response),
+                patch.object(Zappi, "dayhour_results", return_value={}),
+            ):
+                assert handler.get_data()["frq"] == expected
+
+    def test_a_label_with_line_protocol_specials_is_escaped(self):
+        """The header is written verbatim, so an unescaped comma or space would end the tag
+        set early and silently corrupt the point."""
+        handler = self._handler(
+            {"db": "z", "interval": 300, "devices": [{"serial": "1", "label": "odd label,x"}]},
+            instance="odd label,x",
+        )
+        with (
+            patch.object(Zappi, "get_data_from_myenergi", return_value={"zappi": [{"sno": "1"}]}),
+            patch.object(Zappi, "dayhour_results", return_value={}),
+        ):
+            handler.get_data()
+        assert handler.influx_header == "myenergi,device=odd\\ label\\,x "
+
+    # --- Acceptance question 2: per-device fields, falling back to block level ---
+
+    def test_per_device_fields_are_honoured(self):
+        zappi = {
+            "db": "z",
+            "interval": 300,
+            "devices": [
+                {"serial": "1", "label": "Garage", "fields": ["frq"]},
+                {"serial": "2", "label": "Driveway", "fields": ["vol"]},
+            ],
+        }
+        response = {"zappi": [{"sno": "1", "frq": 50, "vol": 240}, {"sno": "2", "frq": 49, "vol": 239}]}
+        for label, expected in (("Garage", {"frq": 50}), ("Driveway", {"vol": 239})):
+            handler = self._handler(zappi, instance=label)
+            with (
+                patch.object(Zappi, "get_data_from_myenergi", return_value=response),
+                patch.object(Zappi, "dayhour_results", return_value={}),
+            ):
+                assert handler.get_data() == expected
+
+    def test_block_level_fields_are_the_fallback(self):
+        zappi = {
+            "db": "z",
+            "interval": 300,
+            "fields": ["frq"],
+            "devices": [{"serial": "1", "label": "Garage"}, {"serial": "2", "label": "Driveway", "fields": ["vol"]}],
+        }
+        response = {"zappi": [{"sno": "1", "frq": 50, "vol": 240}, {"sno": "2", "frq": 49, "vol": 239}]}
+        garage = self._handler(zappi, instance="Garage")
+        driveway = self._handler(zappi, instance="Driveway")
+        with (
+            patch.object(Zappi, "get_data_from_myenergi", return_value=response),
+            patch.object(Zappi, "dayhour_results", return_value={}),
+        ):
+            assert garage.get_data() == {"frq": 50}
+            assert driveway.get_data() == {"vol": 239}
+
+    # --- Acceptance question 4: an existing single-device install is unchanged ---
+
+    def test_a_legacy_block_writes_exactly_the_same_tag_as_before(self):
+        """The whole reason this needs no migration: the label defaults to the source name."""
+        handler = self._handler({"db": "z", "interval": 300, "serial": "12345", "fields": ["frq"]})
+        with (
+            patch.object(Zappi, "get_data_from_myenergi", return_value={"zappi": [{"sno": "12345", "frq": 50}]}),
+            patch.object(Zappi, "dayhour_results", return_value={}),
+        ):
+            handler.get_data()
+        assert handler.influx_header == "myenergi,device=zappi "
+
+    def test_a_legacy_block_logs_under_the_bare_source_name(self):
+        """Without this a legacy install's every log line would read zappi@zappi."""
+        from toinflux.general import expand_sources
+        from toinflux.influx import worker_label
+
+        settings = self._settings({"db": "z", "interval": 300, "serial": "12345"})
+        units = expand_sources(["zappi"], settings)
+        assert units == [("zappi", "zappi")]
+        assert worker_label(*units[0]) == "zappi"
+
+    def test_an_explicit_label_on_the_legacy_form_is_honoured(self):
+        handler = self._handler({"db": "z", "interval": 300, "serial": "12345", "label": "Garage"})
+        with (
+            patch.object(Zappi, "get_data_from_myenergi", return_value={"zappi": [{"sno": "12345"}]}),
+            patch.object(Zappi, "dayhour_results", return_value={}),
+        ):
+            handler.get_data()
+        assert handler.influx_header == "myenergi,device=Garage "
+
+    def test_legacy_and_a_devices_list_can_coexist(self):
+        settings = self._settings(
+            {"db": "z", "interval": 300, "serial": "1", "devices": [{"serial": "2", "label": "Driveway"}]}
+        )
+        from toinflux.general import expand_sources
+
+        assert sorted(expand_sources(["zappi"], settings)) == [("zappi", "Driveway"), ("zappi", "zappi")]
+
+    # --- Acceptance question 5: duplicate labels refused ---
+
+    def test_duplicate_labels_across_blocks_are_refused(self):
+        from toinflux.general import validate_settings
+
+        settings = {
+            **self.BASE,
+            "sources": ["zappi", "eddi"],
+            "zappi": {"db": "z", "interval": 300, "serial": "1", "label": "Garage"},
+            "eddi": {"db": "e", "interval": 300, "serial": "2", "label": "Garage"},
+        }
+        with pytest.raises(ConfigError, match="used by more than one source"):
+            validate_settings(settings)
+
+    def test_duplicate_labels_within_one_block_are_refused(self):
+        from toinflux.general import validate_settings
+
+        settings = self._settings(
+            {
+                "db": "z",
+                "interval": 300,
+                "devices": [{"serial": "1", "label": "Garage"}, {"serial": "2", "label": "Garage"}],
+            }
+        )
+        with pytest.raises(ConfigError, match="more than one device with label"):
+            validate_settings(settings)
+
+    def test_duplicate_serials_within_one_block_are_refused(self):
+        """Two workers collecting the same device would overwrite each other at second
+        precision."""
+        from toinflux.general import validate_settings
+
+        settings = self._settings(
+            {
+                "db": "z",
+                "interval": 300,
+                "devices": [{"serial": "1", "label": "Garage"}, {"serial": "1", "label": "Driveway"}],
+            }
+        )
+        with pytest.raises(ConfigError, match="more than one device with serial"):
+            validate_settings(settings)
+
+    def test_a_devices_entry_without_a_label_is_refused(self):
+        from toinflux.general import validate_settings
+
+        settings = self._settings({"db": "z", "interval": 300, "devices": [{"serial": "1"}]})
+        with pytest.raises(ConfigError, match="must name one"):
+            validate_settings(settings)
+
+    # --- resolution and auth ---
+
+    def test_an_unknown_label_is_a_config_error_not_a_connection_error(self):
+        """A worker whose device has been removed must stop, not retry a doomed lookup."""
+        handler = self._handler({"db": "z", "interval": 300, "serial": "1", "label": "Garage"}, instance="Gone")
+        with pytest.raises(ConfigError, match="configured labels: Garage"):
+            handler.device()
+
+    def test_no_instance_means_the_first_configured_device(self):
+        """Keeps every caller that builds a handler without an instance working as before."""
+        handler = self._handler({"db": "z", "interval": 300, "serial": "1", "label": "Garage"})
+        assert handler.device().label == "Garage"
+
+    def test_auth_uses_the_devices_own_serial_by_default(self):
+        handler = self._handler(
+            {"db": "z", "interval": 300, "devices": [{"serial": "77", "label": "Garage"}]}, instance="Garage"
+        )
+        assert handler.auth_serial() == "77"
+
+    def test_an_account_level_auth_serial_overrides_it(self):
+        """Here in case a second device's own serial turns out not to authenticate - the
+        account-scoping is evidenced but not proven for a second device of one type."""
+        settings = self._settings({"db": "z", "interval": 300, "devices": [{"serial": "77", "label": "Garage"}]})
+        settings["myenergi"]["auth_serial"] = "hub-99"
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Zappi("zappi", instance="Garage")
+        assert handler.auth_serial() == "hub-99"
+
+    def test_the_heartbeat_tags_the_device_not_a_host(self):
+        """The base implementation would tag host=<instance>, but a MyEnergi instance is a
+        device label - the health series must carry the same tag as the data it reports on,
+        or the two cannot be joined."""
+        handler = self._handler(
+            {"db": "z", "interval": 300, "devices": [{"serial": "1", "label": "Garage"}]}, instance="Garage"
+        )
+        assert handler.heartbeat_tags() == {"device": "Garage"}
+
+    def test_each_device_gets_its_own_dayhour_totals(self):
+        """A second zappi's day totals must be its own, not the first one's."""
+        zappi = {
+            "db": "z",
+            "interval": 300,
+            "devices": [{"serial": "111", "label": "Garage"}, {"serial": "222", "label": "Driveway"}],
+        }
+        seen = []
+
+        def fake_get(url):
+            seen.append(url)
+            return {"U222": [{"hr": 0, "h1d": 3600000, "imp": 0, "exp": 0, "gep": 0}]}
+
+        handler = self._handler(zappi, instance="Driveway")
+        with patch.object(Zappi, "get_data_from_myenergi", side_effect=fake_get):
+            handler.dayhour_results("2026", "01", "01", 0)
+        assert any("222" in url for url in seen), seen
