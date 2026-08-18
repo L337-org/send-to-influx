@@ -532,6 +532,49 @@ advertises a capability that isn't there. `home_status`/`usage_trends` are alway
 falls back to computing it when called standalone), so the per-source handler construction that
 computation costs isn't done twice at startup.
 
+### MyEnergi multiple devices (SI-34)
+
+Each of `zappi`/`eddi`/`harvi` collects **one worker per configured device**, registered through
+`_INSTANCE_ENUMERATORS` like Hue's bridges. `enumerate_devices()` in `toinflux/myenergi.py` is the
+single source of "which devices are configured", shared by validation, the worker spawner and the
+handler's own `device()` resolution - the same shape as `enumerate_bridges()`, returning
+`(devices, errors, warnings)` so the two instanced sources report problems alike.
+
+- **Two config shapes, and both may appear together.** A `serial` at the top of the block is the
+  legacy single-device form; its `label` is optional and **defaults to the source name**, which is
+  what keeps such an install writing `device=zappi` exactly as before and is why this needed no
+  data migration. A `devices:` list adds more, each naming its `label` explicitly - there is no
+  sensible default for a second device, and deriving one from the serial would give exactly the
+  unreadable tag values that tagging by label exists to avoid. `fields` resolves device-first,
+  then block-level, then everything the API returns.
+- **Labels are the emitted `device` tag and must be unique across all three blocks.** The types
+  share the `myenergi` measurement, so a zappi and an eddi agreeing on a label would merge into
+  one series carrying both devices' fields. Checked whenever any of the three is selected, never
+  per block, because per-block checking misses precisely the collision that matters.
+- **`MCP_TAG_FILTERS` on the three subclasses is gone**; `mcp_tag_filters()` supplies
+  `{"device": <this device's label>}` per instance. That method also carries the type
+  discrimination the old static filter provided: without a device filter, a read of the
+  `myenergi` measurement returns all three types.
+- **`shares_measurement()` decides whether discovered tag values can be trusted.** Once `device`
+  carries an arbitrary label, a value found in the data cannot be attributed to a type - so for a
+  shared measurement the *configured* devices are the allowlist and `discover_tag_values()` is not
+  even called. The config is the authority precisely because it does distinguish the types. A
+  source owning its measurement still unions discovered with configured. Reported series are then
+  filtered to the allowlist, one rule that reads correctly for both. Consequence: a decommissioned
+  MyEnergi device's history stops being reachable by label where a Hue bridge's does not.
+- **`heartbeat_tags()` is overridden** to tag `device`, not the base's `host`: a MyEnergi instance
+  is a device label, and a health series tagged differently from the measurement it reports on
+  cannot be joined to it. This adds a tag to a legacy install's heartbeat where there was none -
+  a deliberate emitted-data change on a liveness signal, noted in UNITS.md.
+- **`worker_label()` collapses an instance equal to the source name.** A legacy install's label
+  defaults to the source name, so without this every log line would read `zappi@zappi`.
+  `worker_key` keeps the instance, being an identity rather than a label.
+- **`myenergi.auth_serial` optionally overrides the digest username**, defaulting to the device's
+  own serial as every install already sends. The credential is account-scoped - the real zappi
+  serial authenticates against all three endpoints, verified live - but that is *evidenced, not
+  proven* for a second device of one type, since the test account has one zappi. The override
+  exists so discovering otherwise needs no config change.
+
 ### MyEnergi device selection (`toinflux/myenergi.py`)
 
 The status endpoints are per device **type** (`cgi-jstatus-Z`/`-E`/`-H`) and each returns *every*

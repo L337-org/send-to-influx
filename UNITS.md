@@ -32,6 +32,19 @@ The `collector_status` heartbeat for `hue` also carries a `host` tag, so each br
 across bridges, which can hide a failing one behind a healthy one - group by `source, host`
 (or `*`) for a series per bridge.
 
+Every **MyEnergi** point carries a `device` tag. With a single device configured per type it
+holds the type name (`zappi`, `eddi`, `harvi`), exactly as it always has. Configure more than
+one device of a type and the tag holds the `label` you gave each one, so the tag identifies
+the device rather than the type - filter or group by `device` to separate them. Labels must be
+unique across the three blocks, since all three types write to the one `myenergi` measurement.
+Note that renaming a label starts a new series, and that a decommissioned device's history
+stays under its old label.
+
+The `collector_status` heartbeat for a MyEnergi source also carries the `device` tag, so each
+device's `ok`/`consecutive_failures` are recorded separately rather than several devices
+overwriting one another at second precision. Heartbeat points written before this existed sit
+in an untagged series.
+
 ## MyEnergi Zappi (`zappi`)
 
 | Field | Unit | Notes |

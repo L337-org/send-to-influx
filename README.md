@@ -666,13 +666,45 @@ Once connected, the client has these read tools:
 - **`get_documentation`** - a one-call reference of what every source reports and what its coded
   values mean.
 
+### Several MyEnergi devices of one type
+
+Each of `zappi`, `eddi` and `harvi` collects one device by default, using the `serial` at the top
+of its block, and tags it `device=<type>` as it always has. To collect more than one, add a
+`devices:` list:
+
+```yaml
+zappi:
+  db: "zappi_db"
+  interval: 300
+  fields: ["frq", "vol", "gen"]
+  devices:
+    - serial: "first_serial"
+      label: "Garage"
+    - serial: "second_serial"
+      label: "Driveway"
+      fields: ["frq"]
+```
+
+Each device gets its own collector, so one unreachable device delays only itself. Every entry
+needs a `label`, which becomes the `device` tag and the name the MCP tools use; a device declared
+at the top of the block may take an optional `label` too, defaulting to the type name so existing
+installs keep writing the same tag. `fields` resolves per device first, then the block-level list,
+then everything the API returns.
+
+Labels must be unique across all three blocks, because the three types share the one `myenergi`
+measurement - two devices with the same label would merge into a single series. Renaming a label
+starts a new series.
+
+Existing single-device configurations need no change and write exactly the same data as before.
+
 ### Several collectors writing to one measurement
 
 Some measurements hold points from more than one producer. Speedtest is the clearest case: running
 a collector on several hosts into one database is exactly how their connections get compared, and
 every point carries the `host` tag that tells them apart. Hue is the other: every point carries the
 bridge it came from, and with more than one bridge that tag is what separates two lights sharing a
-name.
+name. MyEnergi is the third: configure more than one Zappi and each carries the `label` you gave it
+in its `device` tag.
 
 The read tools treat that tag as a dimension rather than flattening it:
 

@@ -225,6 +225,11 @@ myenergi:
   apikey: "your_api_key"
   # Timeout for requests to the Myenergi API
   timeout: 5
+  # Optional. The serial sent as the API's digest username for every device. Normally
+  # unnecessary: each device authenticates with its own serial, and the credential is
+  # account-scoped rather than per device. Set this only if a device turns out not to
+  # authenticate as itself - for instance if your account needs the hub's serial.
+  #auth_serial: "your_hub_serial"
 
 # Zappi settings
 zappi:
@@ -232,8 +237,22 @@ zappi:
   db: "zappi_db"
   # Interval in seconds between data collection
   interval: 300
-  # The serial number of the Zappi device
+  # The serial number of the Zappi device. This form - one serial at the top of the
+  # block - collects a single device and tags it device=zappi in InfluxDB, exactly as
+  # it always has. Add an optional `label:` here to tag it with a name of your own
+  # instead, remembering that changing a label starts a new series.
   serial: "your_zappi_serial"
+  # For more than one Zappi, list the extra ones here. Each entry needs its own
+  # `label`, which becomes the InfluxDB `device` tag and the name the MCP tools use, so
+  # it must be unique across the zappi, eddi and harvi blocks - they share one
+  # measurement. An entry may carry its own `fields` list; without one it uses the
+  # block-level `fields` below.
+  #devices:
+  #  - serial: "your_second_zappi_serial"
+  #    label: "Driveway"
+  #  - serial: "your_third_zappi_serial"
+  #    label: "Garage"
+  #    fields: ["frq", "vol"]
   # The fields to collect from the Zappi device
   fields:
     - "frq"
@@ -253,7 +272,10 @@ harvi:
   db: "myenergi_db"
   # Interval in seconds between data collection
   interval: 300
-  # The serial number of the Harvi device (used for API authentication)
+  # The serial number of the Harvi device. Also sent as the MyEnergi API's digest
+  # username, which the API accepts for any device on the account. Add an optional
+  # `label:` to choose the InfluxDB `device` tag, or a `devices:` list for more than
+  # one - see the zappi block above.
   serial: "your_harvi_serial"
   # The fields to collect from the Harvi device
   fields:
@@ -270,7 +292,10 @@ eddi:
   db: "myenergi_db"
   # Interval in seconds between data collection
   interval: 300
-  # The serial number of the Eddi device (used for API authentication)
+  # The serial number of the Eddi device. Also sent as the MyEnergi API's digest
+  # username, which the API accepts for any device on the account. Add an optional
+  # `label:` to choose the InfluxDB `device` tag, or a `devices:` list for more than
+  # one - see the zappi block above.
   serial: "your_eddi_serial"
   # The fields to collect from the Eddi device
   fields:
