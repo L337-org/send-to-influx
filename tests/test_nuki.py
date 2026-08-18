@@ -466,3 +466,56 @@ class TestLiveStatePerLock:
         assert result["instances"]["Front_Door"]["fields"]["batteryChargeState"]["unit"] == "%"
         assert result["instances"]["Back_Door"]["fields"]["stateValue"]["label"] == "unlocked"
         assert "fields" not in result, "the flat shape must not be returned alongside instances"
+
+    def test_a_failing_live_read_propagates(self, sample_settings):
+        """One read covers every lock, so a failure means every lock failed - there is no
+        partial answer to give, unlike Hue where one bridge can fail and the others report."""
+        from toinflux.exceptions import SourceConnectionError
+        from toinflux.mcp_read import current_state_result
+
+        settings = {**_nuki_settings(sample_settings), "sources": ["nuki"]}
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Nuki("nuki")
+        handler.session = MagicMock()
+        with (
+            patch.object(Nuki, "get_data", side_effect=SourceConnectionError("broker unreachable")),
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+        ):
+            with pytest.raises(SourceConnectionError, match="broker unreachable"):
+                current_state_result("nuki", settings, None)
+
+    def test_an_empty_snapshot_reports_no_locks_rather_than_failing(self, sample_settings):
+        """A broker that is reachable but has delivered no retained state is not an error, and
+        must not be reported as one. It reports an empty set of locks - the same shape a
+        single-target source's empty live read gives, so nothing reading the payload has to
+        special-case it."""
+        from toinflux.mcp_read import current_state_result
+
+        settings = {**_nuki_settings(sample_settings), "sources": ["nuki"]}
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Nuki("nuki")
+        handler.session = MagicMock()
+        with (
+            patch.object(Nuki, "get_data", return_value={}),
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+        ):
+            result = current_state_result("nuki", settings, None)
+        assert result["instances"] == {}
+        assert result["instance_tag"] == "device"
+
+    def test_the_handler_session_is_closed_even_on_the_per_lock_path(self, sample_settings):
+        """The per-lock branch returns early, before the shared per-instance loop. It sits
+        inside the same try/finally, but nothing asserted that - and a leaked session per
+        current-state call is the kind of thing that only shows up under load."""
+        from toinflux.mcp_read import current_state_result
+
+        settings = {**_nuki_settings(sample_settings), "sources": ["nuki"]}
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Nuki("nuki")
+        handler.session = MagicMock()
+        with (
+            patch.object(Nuki, "get_data", return_value={"Front_Door": {"stateValue": 1}}),
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+        ):
+            current_state_result("nuki", settings, None)
+        handler.session.close.assert_called_once()
