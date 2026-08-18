@@ -199,6 +199,9 @@ except requests.exceptions.RequestException as e:
 
 - **The supported Python floor is declared in four places, kept consistent by a test**: `requires-python`, `build-deb.sh`'s `PYTHON_MIN_SUPPORTED_MINOR`, the CI matrix, and `[tool.black] target-version`. Raising one alone fails remotely from the cause, so `test_the_supported_python_floor_is_declared_consistently` reads all four and names whichever disagrees. `target-version` is pinned rather than inferred - black otherwise picks one from the syntax and the running interpreter (seen inferring `py315` on 3.14), so "correctly formatted" could differ between a developer's machine and CI.
 
+- **Config faults are caught at validation, not at first collection**: a source section that is not a mapping (null/scalar/list) used to raise a raw `TypeError` from `"interval" not in source_cfg` - a traceback where `--check-config` exists to give a message, and the same in the journal at startup; null gets its own wording since commenting out every field leaves a bare key. And a source *name* nothing can collect used to validate cleanly and then fail forever via the worker's broad handler, so validation now refuses unknown names up front and lists what is accepted (which also catches a plain typo with a matching section). Both live in `_unusable_source_block()` and return immediately, since field errors about a section with no fields bury the cause.
+- **Only collectable sources are registered**: the `MyEnergi` parent sat in `_source_classes()` and was filtered out by `known_sources()`, letting the two disagree - the name validated, constructed, then died with `AttributeError: no attribute 'get_data'` every cycle. Absent now, like `DataHandler`; `known_sources()` needs no filter, and `measurement_for()`/`shares_measurement()` are unaffected since they iterate `known_sources()`.
+
 ## Dependencies
 
 ### Core Dependencies

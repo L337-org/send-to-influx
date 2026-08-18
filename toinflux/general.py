@@ -186,7 +186,7 @@ def _source_classes():
     :rtype: dict
     """
     from toinflux.carbonintensity import CarbonIntensity
-    from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
+    from toinflux.myenergi import Zappi, Eddi, Harvi
     from toinflux.nuki import Nuki
     from toinflux.octopus import Octopus
     from toinflux.openmeteo import OpenMeteo
@@ -198,7 +198,14 @@ def _source_classes():
         "Eddi": Eddi,
         "Harvi": Harvi,
         "Hue": Hue,
-        "MyEnergi": MyEnergi,
+        # The MyEnergi parent is deliberately absent. It holds the shared API auth for
+        # Zappi/Eddi/Harvi and defines no get_data(), so it is not collectable - but while
+        # it was registered, `--source myenergi` passed validation, reported
+        # "Configuration OK", and then failed at the first collection with
+        # `AttributeError: 'MyEnergi' object has no attribute 'get_data'` - which the worker
+        # loop's broad handler retried forever without ever naming the cause. Registering
+        # only collectable sources makes it an ordinary unknown-source ConfigError instead,
+        # caught by --check-config. Same reasoning as DataHandler, which is likewise absent.
         "Nuki": Nuki,
         "Octopus": Octopus,
         "OpenMeteo": OpenMeteo,
@@ -232,11 +239,11 @@ def known_sources():
     :return: sorted source names
     :rtype: list
     """
-    # Read from the one mapping, never a second list - see _source_classes(). MyEnergi is
-    # excluded because it is the abstract parent of the three device types, not a
-    # collectable source of its own; get_class() accepts the name but there is nothing to
-    # collect under it.
-    return sorted(name.lower() for name in _source_classes() if name != "MyEnergi")
+    # Read from the one mapping, never a second list - see _source_classes(). No filtering
+    # here any more: the mapping holds only collectable sources, so anything it accepts is
+    # something that can actually run. Filtering afterwards was what let get_class() and
+    # known_sources() disagree about whether the MyEnergi parent was a source.
+    return sorted(name.lower() for name in _source_classes())
 
 
 def shares_measurement(source):
@@ -486,6 +493,12 @@ def _validate_hue_bridges(settings, sources):
     # wrong type. One cause, one message.
     if "hue" not in sources or "hue" not in settings:
         return ([], [])
+    # Same rule for a section that is present but not a mapping: the shared per-source
+    # check reports the type, so enumerating would only say it again in the same words.
+    # enumerate_bridges keeps its own guard regardless - Hue.bridge() calls it at runtime,
+    # where no validation has run.
+    if not isinstance(settings.get("hue"), dict):
+        return ([], [])
     from toinflux.philipshue import enumerate_bridges
 
     _, errors, bridge_warnings = enumerate_bridges(settings.get("hue"))
@@ -732,6 +745,49 @@ def _validate_influx_block(influx):
     return errors
 
 
+def _unusable_source_block(source, settings):
+    """Return the one error that stops a source section being validated at all, or None.
+
+    Split from the field checks below both to keep them within the complexity limit and
+    because these four faults are terminal: none of the field checks can run, and reporting
+    them anyway would bury the real cause under "interval is required" for a section that
+    has no fields.
+
+    :param source: source name, already lowercased
+    :type source: str
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: the error message, or None when the section can be validated
+    :rtype: str or None
+    """
+    # The name first: a source nothing can collect is the primary fault, and reporting a
+    # missing section for it would send the reader off to write configuration for something
+    # that will never run. get_class() raises the same way at runtime, but only once a
+    # worker tries to collect - so without this, --check-config reported "Configuration OK"
+    # for a source that then failed on every cycle forever.
+    # Once, not twice: the membership test and the message must describe the same set, and
+    # each call rebuilds the registry.
+    collectable = known_sources()
+    if source not in collectable:
+        return f"'{source}' is not a known source (known: {', '.join(collectable)})"
+    if source not in settings:
+        return f"no configuration section found for source '{source}'"
+    source_cfg = settings[source]
+    # Guard the type before anything indexes or searches it. `"interval" not in source_cfg`
+    # is a containment test, and Python refuses that against a non-container, so a section
+    # set to null or a scalar raised a raw TypeError out of validation - a traceback where
+    # --check-config exists to give a clear message, and the same traceback in the journal
+    # on startup under systemd.
+    if source_cfg is None:
+        return (
+            f"{source} has no settings: the section is present but empty. A key with nothing "
+            f"under it parses as null, which is what commenting out every field leaves behind"
+        )
+    if not isinstance(source_cfg, dict):
+        return f"{source} must be a mapping of settings (got {type(source_cfg).__name__})"
+    return None
+
+
 def _validate_source_block(source, settings, is_v2):
     """Return a list of error strings for a single source configuration section.
 
@@ -743,8 +799,9 @@ def _validate_source_block(source, settings, is_v2):
     """
     if not source:
         return []
-    if source not in settings:
-        return [f"no configuration section found for source '{source}'"]
+    unusable = _unusable_source_block(source, settings)
+    if unusable:
+        return [unusable]
     errors = []
     source_cfg = settings[source]
     if "interval" not in source_cfg:
