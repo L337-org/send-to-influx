@@ -532,6 +532,35 @@ advertises a capability that isn't there. `home_status`/`usage_trends` are alway
 falls back to computing it when called standalone), so the per-source handler construction that
 computation costs isn't done twice at startup.
 
+### MyEnergi device selection (`toinflux/myenergi.py`)
+
+The status endpoints are per device **type** (`cgi-jstatus-Z`/`-E`/`-H`) and each returns *every*
+device of that type on the account, so the configured `serial` is what picks one out -
+`_select_device()`. It used to take index 0, which had two consequences on one line: a second device
+of the same type was silently never collected whichever serial was configured, and an account owning
+none of that type raised `IndexError`, which the worker loop's broad handler caught and retried
+forever logging only "list index out of range".
+
+- **`sno` is the serial field**, confirmed against the live API as the only key in a device object
+  whose value equals the configured serial. `deviceClass` and `productCode` are also present if type
+  identification is ever wanted.
+- **Both sides are compared as strings.** An all-digit serial in `settings.yaml` is an `int` unless
+  quoted, so a raw comparison would never match and would present as a wrong serial rather than a
+  type mismatch.
+- **The two failure modes are deliberately different exception types**, because one is worth retrying
+  and the other never is. No device of that type is a `SourceConnectionError` (a device can
+  legitimately be mid-provisioning, and an absent response key is not distinguishable here from a
+  temporary API oddity); devices present but none matching the serial is a `ConfigError`, since the
+  account is reachable and the type exists so the serial is simply wrong - which stops that worker
+  rather than backing off forever. Swapping either type is mutation-tested.
+- The `ConfigError` **names the serials the account does report**, which is the difference between a
+  message the operator can act on and one that only says no. A missing response key is treated as an
+  empty list rather than allowed to raise `KeyError`, which would escape the same exception contract
+  the `IndexError` escaped.
+- Note `sno` is written as a field on any install with no `fields` list configured, since the whole
+  device dict is returned then. Long-standing behaviour, not introduced here, but worth knowing
+  before adding a `fields` list changes what a dashboard sees.
+
 ### Entry point (`sendtoinflux.py`)
 
 - **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source. Connection failures (`SourceConnectionError`) are retried with exponential backoff (base 5 s, max 300 s); a `ConfigError` is not retried — it exits the process immediately with code 1.
