@@ -774,10 +774,37 @@ forever logging only "list index out of range".
 
 ### Factory / settings
 
-- `toinflux/general.py`: `load_settings(settings_file=None)` (raises `ConfigError` on missing/invalid YAML; `settings_file` defaults to `settings.yaml` in the project root when omitted), `get_class(source, settings_file=None)` (case-insensitive factory → correct DataHandler subclass; raises `ConfigError` for an unknown source, including `DataHandler` itself — it's the abstract base, not a selectable source; threads `settings_file` through to the handler's `load_settings()` call), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped **stderr** logging, plus an optional `RotatingFileHandler`; raises `ConfigError` instead of a raw `OSError` if `logfile` can't be opened, e.g. a permissions problem).
+- `toinflux/general.py`: `load_settings(settings_file=None)` (raises `ConfigError` on missing/invalid YAML; `settings_file` defaults to `settings.yaml` in the project root when omitted), `get_class(source, settings_file=None)` (case-insensitive factory → correct DataHandler subclass; raises `ConfigError` for an unknown source, including the abstract `DataHandler` and `MyEnergi` bases, which are not registered as selectable sources; threads `settings_file` through to the handler's `load_settings()` call), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped **stderr** logging, plus an optional `RotatingFileHandler`; raises `ConfigError` instead of a raw `OSError` if `logfile` can't be opened, e.g. a permissions problem).
 - `configure_logging()` is called via `_configure_logging_or_exit()` in `main()` after settings are loaded and `--check-config` has short-circuited - this catches that `ConfigError`, logs it (the stderr handler is already attached by the time it's raised, so this still reaches the journal under systemd as a normal formatted line, not a traceback), and exits 1. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`.
 - **Diagnostics go to stderr; stdout carries the program's data.** Every log level, `--check-config`'s `Configuration error:` and the credential CLI's errors are on stderr; `--dump`/`--print` JSON, `Configuration OK` and the credential CLI's success messages are on stdout. That split is what makes `--dump | jq` reliable: a partially-successful dump reports a failure *and* emits a payload, and while both shared stdout the payload was unparseable exactly when it mattered. Every level moves, not just errors - splitting diagnostics by severity across two streams would interleave them unpredictably for anyone capturing either. Under systemd nothing changes: the unit pins neither `StandardOutput` nor `StandardError`, so both already reach the journal, and the rsyslog rule matches on `programname` rather than a stream - asserted against a real install by `test-packaging.sh` rather than inferred from the unit file. Records emitted *before* `configure_logging()` runs already went to stderr via Python's `lastResort` handler, so the streams now agree; their format still differs (`CRITICAL:root:...`), which is cosmetic and left alone. Effective log level is `-v`/`--verbose` (forces `DEBUG`) > `loglevel` settings.yaml key > `INFO` default.
 - Config file: `settings.yaml` (copy from `example_settings.yaml`), or a custom path via `--settings`. Required at runtime; not committed. Optional `logfile` key adds a rotating file log destination (`log_max_bytes`/`log_backup_count` settings keys control rotation, defaulting to 10 MiB / 3 backups). Some fields can optionally be sourced from `systemd-creds` instead on the packaged install - see "Credential storage (`systemd-creds`)" below; an environment-variable secret-override mechanism was considered and deliberately rejected instead - see "Rejected: environment-variable secrets" below.
+
+**Configuration faults are caught at validation, not at the first collection.** Two shapes used
+to slip past `--check-config` and surface much later, both now terminal errors from
+`_unusable_source_block()`:
+
+- **A source section that is not a mapping.** `"interval" not in source_cfg` is a containment
+  test, so a section set to null or a scalar raised a raw `TypeError` out of validation - a
+  traceback where `--check-config` exists to give a message, and the same traceback in the
+  journal on startup. The null case is the one reached by accident: commenting out every field
+  under a section leaves the bare key, which YAML parses as `None`, so it gets its own message
+  saying so rather than "got NoneType". The check returns immediately rather than collecting
+  further errors, because "interval is required" about a section with no fields at all buries
+  the cause under its consequences. `enumerate_bridges()` keeps its own type guard - `Hue.bridge()`
+  calls it at runtime, where no validation has run - but `_validate_hue_block()` now defers to the
+  shared check so the same sentence is not printed twice.
+- **A source name nothing can collect.** `get_class()` always refused an unknown name, but only
+  once a worker tried to construct a handler, so `--check-config` reported "Configuration OK" and
+  the worker loop's broad handler then retried forever. Validation refuses the name up front and
+  lists what is accepted. This also catches an ordinary typo with a matching section, which
+  previously validated cleanly.
+
+**Only collectable sources are in the registry.** The `MyEnergi` parent was registered alongside
+Zappi/Eddi/Harvi and filtered back out by `known_sources()`, which let the two disagree: the name
+validated, constructed, and then died with `AttributeError: 'MyEnergi' object has no attribute
+'get_data'` on every cycle. It is simply absent now, like `DataHandler`, and `known_sources()`
+needs no filter. `measurement_for()`/`shares_measurement()` are unaffected - they iterate
+`known_sources()`, which never included it.
 
 ### Adding a new data source
 
