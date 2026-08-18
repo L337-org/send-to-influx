@@ -1262,6 +1262,21 @@ class TestDataRangeResult:
         return {"results": [{"series": [{"columns": ["time", "ping"], "values": [[ts, 12.0]]}]}]}
 
     @staticmethod
+    def _grouped_point(**per_host):
+        """Speedtest has an instance axis, so the range is also read per producer -
+        two extra grouped round trips (oldest, newest) before the overall pair."""
+        return {
+            "results": [
+                {
+                    "series": [
+                        {"tags": {"host": h}, "columns": ["time", "ping"], "values": [[ts, 12.0]]}
+                        for h, ts in per_host.items()
+                    ]
+                }
+            ]
+        }
+
+    @staticmethod
     def _tag_values(*values):
         """Speedtest declares an instance tag, so resolve_schema enumerates it - one
         extra round trip between field discovery and the edge-time queries."""
@@ -1287,7 +1302,16 @@ class TestDataRangeResult:
             ]
         }
         result, _ = self._run(
-            self.V1, [self._fields("ping"), self._tag_values("hostA"), self._point(1000), self._point(5000), retention]
+            self.V1,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1000),
+                self._point(5000),
+                retention,
+            ],
         )
         assert (result["earliest"], result["latest"], result["span_seconds"]) == (1000, 5000, 4000)
         assert result["points_present"] is True
@@ -1297,6 +1321,10 @@ class TestDataRangeResult:
         assert result["retention"]["duration_seconds"] == 2592000
         assert result["retention"]["shard_group_duration_seconds"] == 3600
         assert result["retention"]["read_from"] == "v1 SHOW RETENTION POLICIES"
+        # Per producer as well as overall: a host added last week and one collecting for a
+        # year share a merged span that is true of the measurement and false of both.
+        assert result["instance_tag"] == "host"
+        assert result["instances"]["hostA"] == {"earliest": 1000, "latest": 5000, "span_seconds": 4000}
 
     def test_v1_prefers_the_default_policy(self):
         """Writes with no explicit policy land in the default one, so that is the policy
@@ -1317,7 +1345,16 @@ class TestDataRangeResult:
             ]
         }
         result, _ = self._run(
-            self.V1, [self._fields("ping"), self._tag_values("hostA"), self._point(1), self._point(2), retention]
+            self.V1,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                retention,
+            ],
         )
         assert result["retention"]["policy"] == "keep"
 
@@ -1340,7 +1377,16 @@ class TestDataRangeResult:
             ]
         }
         result, calls = self._run(
-            self.V2, [self._fields("ping"), self._tag_values("hostA"), self._point(10), self._point(20), buckets]
+            self.V2,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(10),
+                self._point(20),
+                buckets,
+            ],
         )
         assert result["retention"]["known"] is True
         assert result["retention"]["duration_seconds"] == 2592000
@@ -1375,6 +1421,8 @@ class TestDataRangeResult:
             [
                 self._fields("ping"),
                 self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
                 self._point(100),
                 self._point(200),
                 requests.exceptions.HTTPError("403 Forbidden"),
@@ -1389,7 +1437,16 @@ class TestDataRangeResult:
         """v2 answers 200 with an empty list for a name matching nothing, so this is not
         caught by raise_for_status - and must not be read as 'no retention rules'."""
         result, _ = self._run(
-            self.V2, [self._fields("ping"), self._tag_values("hostA"), self._point(1), self._point(2), {"buckets": []}]
+            self.V2,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                {"buckets": []},
+            ],
         )
         assert result["retention"]["known"] is False
         assert "no bucket named" in result["retention"]["reason"]
@@ -1458,10 +1515,28 @@ class TestDataRangeResult:
             ]
         }
         v1, _ = self._run(
-            self.V1, [self._fields("ping"), self._tag_values("hostA"), self._point(1), self._point(2), v1_retention]
+            self.V1,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                v1_retention,
+            ],
         )
         v2, _ = self._run(
-            self.V2, [self._fields("ping"), self._tag_values("hostA"), self._point(1), self._point(2), v2_buckets]
+            self.V2,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                v2_buckets,
+            ],
         )
         for key in ("duration", "duration_seconds", "shard_group_duration", "shard_group_duration_seconds"):
             assert v1["retention"][key] == v2["retention"][key], key

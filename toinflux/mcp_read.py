@@ -1392,6 +1392,31 @@ def _edge_time(handler, schema, order_query):
     return _cell(values[0], index, "time")
 
 
+def _edge_times_per_instance(handler, schema, order):
+    """Return ``{tag value: unix seconds}`` for one edge, per producer.
+
+    An estate-wide range hides exactly what matters when producers differ: a host added
+    last week and one collecting for a year report the same span if they are merged, so
+    "how far back does this go" gets an answer that is true of the measurement and false
+    of every host in it.
+
+    :param order: ``"ASC"`` for each producer's oldest point, ``"DESC"`` for its newest
+    :return: dict of tag value to unix seconds, omitting a producer with no usable time
+    :raises SourceConnectionError: transport failure or an InfluxDB-reported query error
+    """
+    query = build_edge_time_query(schema.measurement, schema.tag_filters, order, group_by_tag=schema.instance_tag)
+    out = {}
+    for one in run_query(handler.session, handler.settings["influx"], schema.db, query):
+        key = one.tags.get(schema.instance_tag)
+        if key is None or not one.values:
+            continue
+        index = {col: i for i, col in enumerate(one.columns)}
+        stamp = _cell(one.values[0], index, "time")
+        if stamp is not None:
+            out[key] = stamp
+    return out
+
+
 def data_range_result(source, settings, settings_file):
     """Build the get_data_range payload (runs in a worker thread).
 
@@ -1410,6 +1435,12 @@ def data_range_result(source, settings, settings_file):
     For an instanced source (a Hue install with more than one bridge) the range covers
     every bridge, since they share one measurement - matching ``query_history``'s
     unqualified default rather than inventing a per-bridge answer here.
+
+    A source with an instance *axis* additionally reports per producer under
+    ``instances``. Merging them would answer a question nobody asked: a host added last
+    week and one collecting for a year share a span that is true of the measurement and
+    false of both. The overall figures stay alongside, because retention bounds the
+    database rather than any one producer and the two are read together.
 
     :param source: source name from a tool argument
     :param settings: parsed settings dict
@@ -1432,6 +1463,25 @@ def data_range_result(source, settings, settings_file):
             # which is configured independently of whether anything was collected.
             result.update({"earliest": None, "latest": None, "span_seconds": None, "points_present": False})
         else:
+            if schema.instance_tag:
+                # Per producer as well as overall. The overall figures stay, because
+                # retention is a property of the database rather than of any one producer
+                # and the two answers are read together.
+                first = _edge_times_per_instance(handler, schema, "ASC")
+                last = _edge_times_per_instance(handler, schema, "DESC")
+                result["instance_tag"] = schema.instance_tag
+                result["instances"] = {
+                    key: {
+                        "earliest": first.get(key),
+                        "latest": last.get(key),
+                        "span_seconds": (
+                            last[key] - first[key]
+                            if isinstance(first.get(key), int) and isinstance(last.get(key), int)
+                            else None
+                        ),
+                    }
+                    for key in sorted(set(first) | set(last))
+                }
             earliest = _edge_time(handler, schema, build_edge_time_query(schema.measurement, schema.tag_filters, "ASC"))
             latest = _edge_time(handler, schema, build_edge_time_query(schema.measurement, schema.tag_filters, "DESC"))
             span = latest - earliest if isinstance(earliest, int) and isinstance(latest, int) else None
