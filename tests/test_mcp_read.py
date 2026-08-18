@@ -2,6 +2,7 @@
 time parsing, field discovery, result annotation, and tool registration)."""
 
 import datetime
+import warnings
 from unittest.mock import MagicMock, patch
 
 import anyio
@@ -1066,6 +1067,34 @@ class TestMultiBridgeReads:
     def test_both_spellings_agreeing_is_accepted(self):
         with pytest.warns(DeprecationWarning):
             assert _resolve_deprecated_bridge("hue", "a.example.com", "a.example.com") == "a.example.com"
+
+    @pytest.mark.parametrize("bad_source", [5, None, ["hue"], "", "   "])
+    def test_a_bad_source_does_not_warn_about_the_deprecated_parameter(self, bad_source, caplog):
+        """A call that fails on `source` must not also complain about `bridge`. The other
+        ordering logged "MCP read for '' used the deprecated 'bridge' parameter" - a
+        deprecation notice for a call that never ran, naming the bad source while doing it.
+
+        The sibling parametrised test below did not catch this: it asserts which error is
+        raised, and a spurious log line does not change that."""
+        from toinflux.mcp_read import _query_history_result
+
+        with caplog.at_level("WARNING"), warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(ToolParamError):
+                _query_history_result(
+                    {"sources": ["hue"]},
+                    None,
+                    source=bad_source,
+                    field="Kitchen",
+                    start="-1h",
+                    end="now",
+                    aggregation="raw",
+                    group_by=None,
+                    limit=10,
+                    bridge="a.example.com",
+                )
+        assert "deprecated" not in caplog.text
+        assert [c for c in caught if c.category is DeprecationWarning] == []
 
     @pytest.mark.parametrize("bad_source", [5, None, ["hue"], "", "   "])
     def test_a_bad_source_is_reported_as_a_bad_source_not_a_bridge_problem(self, bad_source):

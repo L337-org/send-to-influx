@@ -1163,9 +1163,16 @@ def _query_history_result(
     implementations that could drift. The handler is now resolved unscoped and the filter
     applied at the query, which is also why the Hue-specific branch here is gone.
     """
-    instance = _resolve_deprecated_bridge(source, bridge, instance)
+    # Resolve the schema *before* judging `bridge`, so an unusable source fails on being an
+    # unusable source and nothing else. The other order warned about a deprecated parameter
+    # for a call that never ran - and named the bad source while doing it, producing
+    # "MCP read for '' used the deprecated 'bridge' parameter". The predecessor guard
+    # deferred the same judgement for the same reason; this rewrite had dropped that
+    # ordering, and the parametrised bad-source test did not catch it because it only
+    # asserted which error was raised, not that nothing was logged.
     handler, schema = resolve_schema(source, settings, settings_file)
     try:
+        instance = _resolve_deprecated_bridge(source, bridge, instance)
         # `instance` names a value of a tag in the *data*, which is not the same question as
         # resolve_schema's own `instance` (a collector work unit in INSTANCED_SOURCES - a
         # bridge with its own credentials and worker). A read from InfluxDB needs no
