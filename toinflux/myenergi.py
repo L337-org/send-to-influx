@@ -126,8 +126,12 @@ def _checked_legacy_label(source, source_settings):
     if "label" not in source_settings or source_settings["label"] is None:
         return source, []
     label = source_settings["label"]
-    if not isinstance(label, str) or not label.strip():
-        return None, [f"{source}.label is set but blank - remove it to fall back to {source!r}, " f"or give it a name"]
+    if not isinstance(label, str):
+        # Reporting a non-string as "blank" is untrue of `label: 5` and would send the reader
+        # looking for whitespace that is not there.
+        return None, [f"{source}.label must be a name (got {type(label).__name__})"]
+    if not label.strip():
+        return None, [f"{source}.label is set but blank - remove it to fall back to {source!r}, or give it a name"]
     return label.strip(), []
 
 
