@@ -880,6 +880,51 @@ class TestSendHeartbeat:
             sendtoinflux.send_heartbeat(handler, name, ok=True, consecutive_failures=0)
         return posted
 
+    def test_a_tag_value_that_cannot_be_escaped_is_swallowed_like_any_other_failure(self):
+        """The docstring promises a heartbeat failure is logged and swallowed. Building the
+        tags has to be inside that guard, not before it.
+
+        ``escape_key_or_tag_value()`` *raises* on a newline rather than escaping it, and
+        ``heartbeat_tags()`` returns values this code does not control - Speedtest's is the OS
+        hostname. Built outside the try, such a value escaped: on the success path it would
+        have been counted as a source failure, and on the two failure paths - where the
+        heartbeat call sits inside an ``except`` block, so nothing catches it - it killed the
+        worker thread outright, reporting the heartbeat error rather than whatever had
+        actually gone wrong.
+        """
+        handler = MagicMock(STREAMING=False, instance=None)
+        handler.influx_header = "speedtest,host=x "
+        handler.worker_label = "speedtest"
+        handler.heartbeat_tags.return_value = {"host": "evil\nspeedtest,host=forged ping=0.1"}
+
+        # Must not raise - that is the whole promise.
+        sendtoinflux.send_heartbeat(handler, "speedtest", ok=False, consecutive_failures=1)
+
+        handler.send_data.assert_not_called()
+        assert handler.influx_header == "speedtest,host=x ", "the header must still be restored"
+
+    def test_that_failure_is_logged_rather_than_silent(self, caplog):
+        """Swallowed is not the same as hidden: a heartbeat that never writes is exactly the
+        blind spot the heartbeat exists to remove, so it has to say so."""
+        handler = MagicMock(STREAMING=False, instance=None)
+        handler.influx_header = "speedtest,host=x "
+        handler.worker_label = "speedtest"
+        handler.heartbeat_tags.return_value = {"host": "evil\nhost"}
+        with caplog.at_level(logging.WARNING):
+            sendtoinflux.send_heartbeat(handler, "speedtest", ok=True, consecutive_failures=0)
+        assert any("Failed to write heartbeat" in r.getMessage() for r in caplog.records)
+
+    def test_a_normal_tag_value_still_writes_the_heartbeat(self):
+        """The guard must not swallow the ordinary case."""
+        handler = MagicMock(STREAMING=False, instance=None)
+        handler.influx_header = "speedtest,host=x "
+        handler.worker_label = "speedtest"
+        handler.heartbeat_tags.return_value = {"host": "merlin"}
+        captured = {}
+        handler.send_data.side_effect = lambda **kwargs: captured.update(header=handler.influx_header)
+        sendtoinflux.send_heartbeat(handler, "speedtest", ok=True, consecutive_failures=0)
+        assert captured["header"] == "collector_status,source=speedtest,host=merlin "
+
     def test_uses_current_time_not_a_stale_self_timestamp(self, sample_settings):
         """send_heartbeat writes with the current time, not a stale self.timestamp set by an earlier get_data() cycle.
 
