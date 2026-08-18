@@ -9,6 +9,7 @@ import pytest
 import requests
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
+from toinflux.philipshue import Hue
 from toinflux.mcp_read import (
     DEFAULT_RESULT_POINTS,
     MAX_RESULT_POINTS,
@@ -29,6 +30,7 @@ from toinflux.mcp_read import (
     QuerySeries,
     run_query,
     single_series,
+    configured_instances,
     _resolve_deprecated_bridge,
     _validate_instance,
     _annotate_state_field,
@@ -951,6 +953,72 @@ class TestMultiBridgeReads:
         message = str(excinfo.value)
         # Each bridge paired with its own error, not merely both hostnames present somewhere.
         assert "down.example.com: down" in message and "up.example.com: also down" in message
+
+    def test_hue_declares_the_host_axis_so_scoping_uses_the_shared_path(self):
+        """The core of SI-33: without the axis on the class, Hue falls back to the old
+        merged behaviour and `instance` is refused as not applying. Driven through
+        resolve_schema and the real Hue class rather than asserting the attribute, so it
+        fails if the plumbing stops reading it as well as if the value changes."""
+        settings = {
+            "sources": ["hue"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "hue": {"db": "h", "interval": 300, "host": "a.example.com", "user": "tok"},
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Hue("hue")
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"Kitchen"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"a.example.com"}),
+        ):
+            _, schema = resolve_schema("hue", settings, None)
+        assert schema.instance_tag == "host"
+        query = build_query(schema, field="Kitchen", start="-1h", end="now", instance="a.example.com")
+        assert "\"host\" = 'a.example.com'" in query
+
+    def test_allowlist_unions_configured_targets_with_recorded_ones(self):
+        """Acceptance question 1 turns on this. Discovered values alone would refuse a
+        bridge that is configured but has not collected yet - which `bridge` accepted - and
+        would leave query_history disagreeing with get_current_state, which reads live from
+        whatever is configured. A decommissioned bridge still has history worth querying."""
+        settings = {
+            "sources": ["hue"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "hue": {
+                "db": "h",
+                "interval": 300,
+                "host": "configured-and-recording.example.com",
+                "user": "tok",
+                "host2": "configured-no-data-yet.example.com",
+                "user2": "tok2",
+            },
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Hue("hue")
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"Kitchen"}),
+            patch(
+                "toinflux.mcp_read.discover_tag_values",
+                return_value={"configured-and-recording.example.com", "decommissioned.example.com"},
+            ),
+        ):
+            _, schema = resolve_schema("hue", settings, None)
+        assert schema.instance_values == {
+            "configured-and-recording.example.com",
+            "configured-no-data-yet.example.com",
+            "decommissioned.example.com",
+        }
+        # Both edge cases must be accepted, not merely present in the set.
+        assert _validate_instance(schema, "configured-no-data-yet.example.com") is None
+        assert _validate_instance(schema, "decommissioned.example.com") is None
+
+    def test_configured_instances_is_empty_for_a_single_target_source(self):
+        """A source with no separate targets expands to one None instance, which is not a
+        value - leaking it into the allowlist would make None an acceptable argument."""
+        assert configured_instances("speedtest", {"sources": ["speedtest"]}) == []
 
     def test_bridge_is_rejected_for_a_source_with_one_producer(self):
         """Silently ignoring it would be worse than refusing: the source would run an
