@@ -380,9 +380,47 @@ six read-only tools - `list_sources`, `list_fields`, `query_history`, `get_curre
 state, domain-aware
 rather than a raw passthrough. The read mechanics live in `mcp_read.py`; the per-source domain
 knowledge lives on the `DataHandler` subclasses as class attributes (`MCP_MEASUREMENT`,
-`MCP_TAG_FILTERS`, `MCP_FIELD_METADATA`, plus `MCP_DESCRIPTION` and `MCP_LIVE_STATE` - see below) so
+`MCP_TAG_FILTERS`, `MCP_INSTANCE_TAG`, `MCP_FIELD_METADATA`, plus `MCP_DESCRIPTION` and
+`MCP_LIVE_STATE` - see below) so
 there's no parallel schema to keep in step - `ReadSchema`/`build_schema()` combine those with a live
 field set. Design points:
+  - **A tag can be a constant to pin or an axis to enumerate, and the two are different
+    attributes.** `MCP_TAG_FILTERS` pins a tag to one value (`device=zappi`) to disambiguate a
+    source within a shared measurement. `MCP_INSTANCE_TAG` names the tag that separates
+    *producers* within one source's measurement - something to enumerate, scope by, and report
+    per value. Only having the first is what made a two-host Speedtest install give wrong
+    answers: both hosts' points came back interleaved in one unlabelled series, and
+    `aggregation="mean"` averaged across them. Grafana honoured the dimension all along; the MCP
+    layer flattened it. Set on `Speedtest` (`host`), and deliberately per source rather than one
+    global "collector" tag, because the axis means different things (a collecting host, a bridge,
+    a lock, a device) and most sources genuinely have one producer.
+    - `discover_tag_values()` is the exact analogue of `discover_fields()`: `SHOW TAG VALUES`
+      gives the live allowlist an `instance` argument is validated against, so a value never
+      written is refused rather than answering confidently with nothing. Discovered rather than
+      configured, so a host that started reporting yesterday is queryable today with no config
+      change. Verified identical on real InfluxDB 1.8 and 2.7's v1-compatibility endpoint -
+      worth checking, since that same endpoint reports bucket retention as `0s`.
+    - **Payload shape depends on the source, never on how many producers it happens to have.**
+      Scoped, or a source with no axis, returns flat `points` exactly as before; unscoped on a
+      source with an axis returns `instances` keyed by value - keyed even for a single producer,
+      the same reasoning as Hue's per-bridge map. Never merged: two hosts' ping in one unlabelled
+      list is a wrong answer, not a partial one.
+    - **`LIMIT` is applied per series once a query groups by a tag** (verified: `LIMIT 2` across
+      two hosts returned two rows each, not two in total). Left alone, N producers would multiply
+      `MAX_RESULT_POINTS` and the response cap would stop capping anything - so the limit is
+      divided across the known producers and reported as `limit_per_instance`, not `limit`, since
+      a caller comparing it with the figure they passed would otherwise be misled.
+    - **The axis is not the same thing as `INSTANCED_SOURCES`.** That names a collector *work
+      unit* (a Hue bridge with its own credentials and worker) and would reject Speedtest, whose
+      hosts are separate processes: the axis exists in the data without the collector having any
+      notion of instances. `query_history` therefore carries both `bridge` (Hue's work unit) and
+      `instance` (the data axis) until SI-33 unifies them for callers.
+    - **The `collector_status` heartbeat takes its extra tags from the source**, via
+      `DataHandler.heartbeat_tags()` - an instanced source tags its bridge, `Speedtest` tags the
+      collecting machine through `Speedtest.collector_host()`, which is also what its data uses so
+      the two cannot drift. Until this existed every Speedtest host wrote
+      `collector_status,source=speedtest` and overwrote the others at second precision, so a dead
+      collector was indistinguishable from a healthy estate.
   - **History vs current state**: `query_history` answers "when did X change / trends"; the new
     `get_current_state(source)` answers "what is X *now*" ("is the door locked", "which lights are
     on"). For a live source it calls the source's own `get_data()` (a cheap API/MQTT read) and
@@ -539,7 +577,12 @@ computation costs isn't done twice at startup.
    any numeric-coded field) from the UNITS.md entry, and a one-line `MCP_DESCRIPTION` of what the
    source reports (surfaced by `list_sources`, the documentation tool, and the per-source resources).
    Set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS` if the source's InfluxDB measurement isn't its own name or
-   it shares a measurement with others. Leave `MCP_LIVE_STATE` at its `True` default *unless*
+   it shares a measurement with others. Set `MCP_INSTANCE_TAG` only if several *producers* write to
+   the one measurement and a tag tells them apart (Speedtest's collecting `host`) - that makes the
+   read tools enumerate it, accept `instance`, and report per producer instead of merging; leave it
+   `None` otherwise, which keeps the flat payload shape. A source doing that should also override
+   `heartbeat_tags()` so its `collector_status` points are attributable to one writer rather than
+   several overwriting each other. Leave `MCP_LIVE_STATE` at its `True` default *unless*
    `get_data()` is expensive or pointless to call live (a full run like Speedtest, or delayed data
    like Octopus) - set it `False` and current-state will read the latest InfluxDB point instead.
    Nothing else is needed - the source is exposed by the read tools *and* resources automatically once

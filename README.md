@@ -666,6 +666,29 @@ Once connected, the client has these read tools:
 - **`get_documentation`** - a one-call reference of what every source reports and what its coded
   values mean.
 
+### Several collectors writing to one measurement
+
+Some measurements hold points from more than one producer. Speedtest is the clearest case: running
+a collector on several hosts into one database is exactly how their connections get compared, and
+every point carries the `host` tag that tells them apart.
+
+The read tools treat that tag as a dimension rather than flattening it:
+
+- `list_sources` names the tag (`instance_tag`); `list_fields` lists the values recorded for it.
+- `query_history` takes an `instance` to scope a query to one producer. Left out, it reports each
+  producer **separately** under `instances`, keyed by value - never merged, because two hosts' ping
+  interleaved in one unlabelled series is a wrong answer rather than an incomplete one. A value that
+  was never recorded is an error, not an empty result.
+- `get_current_state` and `get_data_range` likewise report per producer. The range is worth having
+  per host: a machine added last week and one collecting for a year share a merged span that is
+  true of the measurement and false of both.
+- `speedtest_run` names the host it ran on, and refuses a request naming a different one - it can
+  only measure the machine the server runs on, since each collecting host runs its own process.
+
+Because InfluxDB applies a query's `LIMIT` to each series separately once results are grouped, an
+unscoped query divides the limit across the known producers so the total stays bounded, and reports
+the figure actually applied as `limit_per_instance`.
+
 Results are domain-aware throughout: values carry their unit, and coded fields come back with a
 decoded label alongside the raw number. The same data is also exposed as MCP **resources** (a
 documentation reference, and a live-state and schema resource per source) for clients that use them.

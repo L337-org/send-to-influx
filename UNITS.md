@@ -152,3 +152,14 @@ underscores), e.g. `Front_Door_stateValue`; every lock provisioned to the broker
 Other fields available from `speedtest-cli`'s results (e.g. `bytes_sent`, `bytes_received`, `server.*`) can also
 be selected via `fields` in settings; see the [speedtest-cli](https://github.com/sivel/speedtest-cli) project for
 their meaning and units.
+
+Every **Speedtest** point carries a `host` tag holding the short hostname of the machine that ran
+the test. That is the point of it: running a collector on several hosts into one database is how
+their connections are compared, so the tag is what separates them. Filter or group by `host`, and
+note that renaming a machine starts a new series.
+
+The `collector_status` heartbeat for `speedtest` carries the same `host` tag, so each collector's
+`ok`/`consecutive_failures` are recorded separately. Before this existed every host wrote the same
+`collector_status,source=speedtest` series and overwrote the others at second precision, so one
+collector dying looked exactly like a healthy estate - if you have heartbeat history from before
+that change, it sits in an untagged series and cannot be attributed to a host.
