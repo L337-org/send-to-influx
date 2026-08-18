@@ -703,6 +703,28 @@ class TestMultiDevice:
         )
         assert errors[0].endswith("each device needs its own serial")
 
+    def test_a_blank_top_level_label_falls_back_to_the_source_name(self):
+        """`label: "   "` is truthy, so it became a whitespace-only tag value and instance
+        name - near-impossible to spot, and it would break scoping and series identity."""
+        devices, errors, _ = enumerate_devices("zappi", {"serial": "1", "label": "   "})
+        assert errors == []
+        assert [d.label for d in devices] == ["zappi"]
+
+    def test_a_padded_top_level_label_is_stripped(self):
+        devices, _, _ = enumerate_devices("zappi", {"serial": "1", "label": "  Garage  "})
+        assert [d.label for d in devices] == ["Garage"]
+
+    def test_padded_field_names_are_stripped(self):
+        """A padded name matches nothing in the API response, so the field would simply be
+        missing from the written point with nothing saying why."""
+        devices, errors, _ = enumerate_devices("zappi", {"serial": "1", "fields": [" frq ", "vol"]})
+        assert errors == []
+        assert devices[0].fields == ["frq", "vol"]
+
+    def test_a_blank_field_name_is_refused(self):
+        _, errors, _ = enumerate_devices("zappi", {"serial": "1", "fields": ["frq", ""]})
+        assert "must not contain a blank field name" in errors[0]
+
     # --- resolution and auth ---
 
     def test_an_unknown_label_is_a_config_error_not_a_connection_error(self):

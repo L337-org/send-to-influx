@@ -1336,6 +1336,31 @@ class TestSharedMeasurementInstances:
             result = _run_query_history(handler, schema, "frq", "-1h", "now", "raw", None, 100)
         assert set(result["instances"]) == {"zappi", "Driveway"}
 
+    def test_an_empty_allowlist_reports_nothing_not_everything(self):
+        """Review finding, reproduced first. The filter was guarded on the allowlist being
+        non-empty, so a source that owns nothing in the measurement skipped filtering
+        entirely and reported *every* producer - answering a zappi question with the eddi and
+        harvi devices. Empty means nothing is ours, so nothing is the honest answer."""
+        from toinflux.mcp_read import _run_query_history
+
+        schema = ReadSchema(
+            source="zappi",
+            measurement="myenergi",
+            db="m",
+            allowed_fields={"frq"},
+            instance_tag="device",
+            instance_values=set(),
+        )
+        handler = MagicMock()
+        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
+        series = [
+            QuerySeries({"device": "Hot Water"}, ["time", "frq"], [[1, 48.0]]),
+            QuerySeries({"device": "harvi"}, ["time", "frq"], [[1, 47.0]]),
+        ]
+        with patch("toinflux.mcp_read.run_query", return_value=series):
+            result = _run_query_history(handler, schema, "frq", "-1h", "now", "raw", None, 100)
+        assert result["instances"] == {}
+
     def test_a_source_owning_its_measurement_still_uses_discovery(self):
         """The rule must not have quietly changed Speedtest or Hue: they own their
         measurements, so a discovered value is unambiguous and the union still applies."""

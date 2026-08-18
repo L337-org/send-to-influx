@@ -1232,7 +1232,13 @@ def _run_query_history(handler, schema, field, start, end, aggregation, group_by
         # zappi query would answer with the eddi and harvi devices too. For a source that owns
         # its measurement the allowlist already holds the discovered values, so nothing is
         # filtered and behaviour is unchanged. One rule serves both.
-        if schema.instance_values and key not in schema.instance_values:
+        #
+        # Deliberately not guarded on the allowlist being non-empty. An empty allowlist means
+        # this source owns nothing in the measurement, so the honest answer is nothing -
+        # skipping the filter there reported *every* producer instead, which for a shared
+        # measurement means answering a zappi question with the eddi and harvi devices.
+        # Reproduced before fixing; maximally wrong rather than merely incomplete.
+        if key not in schema.instance_values:
             continue
         instances[key] = {
             "points": annotated["points"],

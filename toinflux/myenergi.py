@@ -31,7 +31,7 @@ class MyEnergiDevice:
 
     serial: str
     label: str
-    fields: "list | None"
+    fields: "list[str] | None"
 
 
 def enumerate_devices(source, source_settings):
@@ -80,7 +80,10 @@ def enumerate_devices(source, source_settings):
                     serial=serial,
                     # An explicit top-level label is honoured; without one the source name
                     # keeps the emitted tag identical to what this install already writes.
-                    label=str(source_settings.get("label") or source),
+                    # Stripped, and a blank one treated as absent, so `label: "   "` cannot
+                    # become a whitespace-only tag value and instance name - which would be
+                    # near-impossible to spot and would break scoping and series identity.
+                    label=str(source_settings.get("label") or "").strip() or source,
                     fields=block_fields,
                 )
             )
@@ -188,7 +191,11 @@ def _checked_fields(position, value):
     bad = [item for item in value if not isinstance(item, str)]
     if bad:
         return None, [f"{position}.fields must contain only field names (got {', '.join(repr(b) for b in bad)})"]
-    return list(value), []
+    if any(not item.strip() for item in value):
+        return None, [f"{position}.fields must not contain a blank field name"]
+    # Stripped, because a padded name silently matches nothing in the API response: the field
+    # would simply be missing from the written point with nothing saying why.
+    return [item.strip() for item in value], []
 
 
 def _duplicate_errors(source, devices):
