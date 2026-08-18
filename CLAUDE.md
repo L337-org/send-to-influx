@@ -262,6 +262,16 @@ source down to the HTTP boundary - written across every source rather than just 
 break was one subclass violating a shared contract and the next override would break it the same
 way.
 
+- **The backlog is flushed once per cycle, not once per lock.** The write buffer is keyed by
+  *worker*, so calling the base `send_data()` per lock flushed it per lock too, charging the head
+  buffered point one rejection each time. With `MAX_POINT_REJECTIONS` at 5, a five-lock install
+  burned the whole allowance in one cycle and discarded the backlog after a single cycle instead
+  of five - defeating the documented guarantee that a middlebox answering 4xx for a down InfluxDB
+  cannot mass-discard it. `DataHandler.send_data()` therefore takes `flush=`, and Nuki passes it
+  only for its first lock; every lock still buffers its own point on failure, only the flush is
+  shared. Measured before and after (1/3/3 charged, five dropped outright; now 1 at any lock
+  count), and the test asserts the count because the count *is* the property.
+
 - **Statements travel in a POST body, never the URL.** The rewrite phase names every old field
   key in one `SELECT` - one per lock per field - so a ten-lock estate is kilobytes of statement,
   and in a request line a reverse proxy can refuse it, failing the migration on a statement

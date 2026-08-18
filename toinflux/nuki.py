@@ -211,7 +211,7 @@ class Nuki(MqttDataHandler):
         original_header = self.influx_header
         failures = []
         try:
-            for label, fields in sorted(per_device.items()):
+            for index, (label, fields) in enumerate(sorted(per_device.items())):
                 try:
                     # Header construction is inside the try because it can fail: a lock name
                     # carrying a newline cannot be escaped (a newline is what separates points)
@@ -220,7 +220,14 @@ class Nuki(MqttDataHandler):
                     # promise two lines up. Lock names come from the retained MQTT `name` topic,
                     # so they are external input, not config.
                     self.influx_header = f"nuki,device={escape_key_or_tag_value(label)} "
-                    super().send_data(data=fields, timestamp=timestamp, use_buffer=use_buffer)
+                    # Flush the shared backlog on the first lock only. The buffer is per
+                    # *worker*, so flushing once per lock charged the head buffered point one
+                    # rejection per lock - a five-lock install burned all of
+                    # MAX_POINT_REJECTIONS in one cycle and dropped the backlog after a single
+                    # cycle instead of five, defeating the guarantee that a middlebox answering
+                    # 4xx for a down InfluxDB cannot mass-discard it. Every lock still buffers
+                    # its own point on failure; only the flush is done once.
+                    super().send_data(data=fields, timestamp=timestamp, use_buffer=use_buffer, flush=index == 0)
                 except InfluxWriteError as exc:
                     failures.append(f"{label}: {exc}")
         finally:

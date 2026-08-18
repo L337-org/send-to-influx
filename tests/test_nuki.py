@@ -467,6 +467,46 @@ class TestPerLockPoints:
         assert headers == ["nuki,device=Aaa_Good ", "nuki,device=Zzz_Good "], headers
         assert not any("Injected" in header for header in headers)
 
+    def test_the_backlog_is_flushed_once_per_cycle_not_once_per_lock(self, sample_settings):
+        """The write buffer is per *worker*, so flushing on every lock charged the head
+        buffered point one rejection per lock.
+
+        With MAX_POINT_REJECTIONS at 5, a five-lock install burned the whole allowance in a
+        single cycle and discarded the backlog after one cycle instead of five - defeating the
+        documented guarantee that a middlebox answering 4xx for a down InfluxDB cannot
+        mass-discard it. Measured before the fix: 1 lock charged 1, three charged 3, five
+        dropped the point outright.
+
+        Asserted as the count rather than as "it works", because the count *is* the property.
+        """
+        from collections import deque
+
+        from toinflux.influx import DataHandler, InfluxWriteError, MAX_BUFFERED_POINTS
+
+        def reject(line, url, kwargs):
+            exc = InfluxWriteError("400 Bad Request")
+            exc.status_code = 400
+            raise exc
+
+        for locks in (1, 3, 5, 10):
+            handler = self._handler(sample_settings)
+            DataHandler._write_buffers.clear()
+            buffer = DataHandler._write_buffers.setdefault(handler.worker_key, deque(maxlen=MAX_BUFFERED_POINTS))
+            buffer.append(["nuki,device=Old stateValue=9 1699999999", 0])
+            handler.data = {f"Lock{index}": {"stateValue": index} for index in range(locks)}
+
+            with patch.object(DataHandler, "_post_line", side_effect=reject):
+                with pytest.raises(InfluxWriteError):
+                    handler.send_data(timestamp=1700000000)
+
+            assert buffer, f"the backlog was discarded with {locks} lock(s) in one cycle"
+            assert buffer[0][1] == 1, (
+                f"{locks} lock(s) charged the head point {buffer[0][1]} rejections in one cycle, " f"expected 1"
+            )
+            # Every lock still buffers its own point - only the flush is done once.
+            assert len(buffer) == locks + 1
+        DataHandler._write_buffers.clear()
+
     def test_the_header_is_restored_after_writing(self, sample_settings):
         """send_data() swaps a per-lock header in for each write, and must put back what it
         found. Left dirty, the handler holds the *last* lock's header, and any later write that
