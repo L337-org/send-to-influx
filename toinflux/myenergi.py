@@ -10,7 +10,7 @@ import datetime
 import requests
 from requests.auth import HTTPDigestAuth
 from toinflux.influx import DataHandler
-from toinflux.exceptions import SourceConnectionError
+from toinflux.exceptions import ConfigError, SourceConnectionError
 
 
 class MyEnergi(DataHandler):
@@ -53,20 +53,82 @@ class MyEnergi(DataHandler):
         """
         Fetch data for a MyEnergi device and filter it to configured fields if set.
 
+        The endpoint is per device *type* and returns every device of that type on the
+        account, so the configured serial is what picks one out of the list. Taking index 0
+        instead meant a second device of the same type was silently never collected, and an
+        account owning none of that type raised ``IndexError`` - which the worker loop's
+        broad handler caught, logged as "list index out of range", and retried forever
+        without ever naming the cause.
+
         :param device_key: settings/response key for the device, e.g. "eddi", "harvi", "zappi"
         :type device_key: str
         :param url_key: settings key (under "myenergi") for the device's API URL, e.g. "eddi_url"
         :type url_key: str
         :return: device data, filtered to the configured "fields" list if present
         :rtype: dict
+        :raises SourceConnectionError: the account has no device of this type. Transient
+            rather than fatal because a device can legitimately be mid-provisioning, and
+            because an absent key is not distinguishable here from a temporary API oddity
+        :raises ConfigError: devices of this type came back but none has the configured
+            serial. The account is reachable and the type exists, so the serial is simply
+            wrong, and no amount of waiting fixes that - this stops the worker instead of
+            backing off forever
         """
         myenergi_data = self.get_data_from_myenergi(self.settings["myenergi"][url_key])
-        device_data = myenergi_data[device_key][0]
+        device_data = self._select_device(myenergi_data, device_key)
 
         device_settings = self.settings[device_key]
         if "fields" in device_settings:
             return {k: device_data[k] for k in device_settings["fields"] if k in device_data}
         return device_data
+
+    def _select_device(self, myenergi_data, device_key):
+        """
+        Pick the device matching this source's configured serial out of the API response.
+
+        ``sno`` is the serial field - confirmed against the live MyEnergi API, where it is
+        the only key in a device object whose value equals the configured serial. Compared
+        as strings on both sides: an all-digit serial in ``settings.yaml`` is an ``int``
+        unless quoted, so a raw comparison would never match and would look exactly like a
+        wrong serial rather than a type mismatch.
+
+        :param myenergi_data: the parsed API response
+        :type myenergi_data: dict
+        :param device_key: the response key for this device type, e.g. "zappi"
+        :type device_key: str
+        :return: the matching device's data
+        :rtype: dict
+        :raises SourceConnectionError: no device of this type in the response
+        :raises ConfigError: devices present, but none with the configured serial
+        """
+        # A missing key is treated as an empty list rather than allowed to raise KeyError:
+        # the response shape is the vendor's to change, and a KeyError would escape the
+        # SourceConnectionError/ConfigError split the worker loop relies on exactly as the
+        # IndexError did.
+        devices = myenergi_data.get(device_key) or []
+        serial = str(self.source_settings["serial"])
+        for device in devices:
+            if str(device.get("sno")) == serial:
+                return device
+        if not devices:
+            logging.error("MyEnergi returned no %s devices for this account", device_key)
+            raise SourceConnectionError(
+                f"MyEnergi returned no {device_key} devices for this account - check that a "
+                f"{device_key} is provisioned, or remove {device_key} from the configured sources"
+            )
+        # Name what the account does have: the difference between a message the operator
+        # can act on and one that only says no.
+        found = ", ".join(sorted(str(device.get("sno")) for device in devices)) or "(none reported a serial)"
+        logging.critical(
+            "No %s on this MyEnergi account has serial %s; the account reports: %s",
+            device_key,
+            serial,
+            found,
+        )
+        raise ConfigError(
+            f"no {device_key} on this MyEnergi account has serial {serial!r}; "
+            f"the account reports these {device_key} serials: {found}"
+        )
 
     def dayhour_results(self, year, month, day, hour=None):
         """
