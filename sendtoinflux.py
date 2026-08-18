@@ -272,7 +272,12 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
     # series per writer. Accepted for a liveness signal whose old data was already wrong.
     tags = f"source={source}"
     for key, value in sorted(data_handler.heartbeat_tags().items()):
-        tags += f",{key}={escape_key_or_tag_value(value)}"
+        # Both halves escaped, not just the value: this is an extension point any source
+        # can override, and the header is written verbatim, so a key carrying a comma,
+        # equals or space would end the tag set early and silently corrupt the point.
+        # Every key today is a bare word, which is exactly why an unescaped one would go
+        # unnoticed until some future source returned something else.
+        tags += f",{escape_key_or_tag_value(key)}={escape_key_or_tag_value(value)}"
     data_handler.influx_header = f"collector_status,{tags} "
     try:
         data_handler.send_data(

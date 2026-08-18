@@ -1670,6 +1670,19 @@ class TestMultiBridgeWorkers:
             handler.collector_host = Speedtest.collector_host
             assert MethodType(Speedtest.heartbeat_tags, handler)() == {"host": "nas"}
 
+    def test_heartbeat_escapes_the_tag_key_as_well_as_the_value(self):
+        """heartbeat_tags() is an extension point any source can override, and the header
+        is written verbatim - an unescaped key carrying a comma, equals or space would end
+        the tag set early and silently corrupt the point. Every key today is a bare word,
+        which is precisely why an unescaped one would go unnoticed."""
+        captured = {}
+        handler = MagicMock(STREAMING=False, instance=None)
+        handler.heartbeat_tags = lambda: {"odd key,x": "v=1"}
+        handler.influx_header = "speedtest "
+        handler.send_data.side_effect = lambda **kw: captured.update(header=handler.influx_header)
+        sendtoinflux.send_heartbeat(handler, "speedtest", ok=True, consecutive_failures=0)
+        assert captured["header"] == "collector_status,source=speedtest,odd\\ key\\,x=v\\=1 "
+
     def test_dump_emits_every_bridge_keyed_by_host(self):
         """--dump covers all bridges, keyed by host even for one bridge, so nothing
         reading the output depends on the operator's bridge count."""

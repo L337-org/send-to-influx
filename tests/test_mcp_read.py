@@ -1095,6 +1095,15 @@ class TestInstanceAxis:
     def test_no_instance_is_always_allowed(self):
         assert _validate_instance(self._schema(), None) is None
 
+    def test_build_query_refuses_an_instance_on_a_source_with_no_axis(self):
+        """build_query is public and reachable without _validate_instance. Unguarded it
+        reached _quote_identifier(None) and raised a bare AttributeError - neither
+        ToolParamError nor SourceConnectionError, so the MCP layer could not tell a caller
+        mistake from a transport failure."""
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o", allowed_fields={"cost"})
+        with pytest.raises(ToolParamError, match="single producer"):
+            build_query(plain, field="cost", start="-1h", end="now", instance="whatever")
+
 
 class TestPerInstanceHistoryShape:
     """Acceptance question 2: an unscoped result must say which producer each point
@@ -1194,6 +1203,18 @@ class TestDiscoverTagValues:
             _mock_session({"results": [{}]}), {"url": "http://x", "user": "u", "password": "p"}, "db", "m", "host"
         )
         assert values == set()
+
+    def test_series_without_a_value_column_is_skipped_not_misread(self, caplog):
+        """A -1 fallback read each row's last cell, which is right for today's
+        ["key", "value"] shape and would silently invent tag values if that changed. A
+        wrong allowlist refuses real producers and accepts ones that do not exist."""
+        payload = {"results": [{"series": [{"columns": ["key"], "values": [["host"]]}]}]}
+        with caplog.at_level("WARNING"):
+            values = discover_tag_values(
+                _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "m", "host"
+            )
+        assert values == set()
+        assert "no 'value' column" in caplog.text
 
     def test_result_error_surfaces_rather_than_looking_like_no_instances(self):
         payload = {"results": [{"error": "database not found: sdb"}]}

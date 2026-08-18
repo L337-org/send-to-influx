@@ -419,6 +419,18 @@ def build_query(
         _validate_identifier(tag_key, "tag")
         where.append(f"{_quote_identifier(tag_key)} = {_quote_string_literal(tag_value)}")
     if instance is not None:
+        # Guarded here as well as in _validate_instance, because build_query is public and
+        # reachable without it (the tests call it directly). Unguarded, a schema with no
+        # axis reached _quote_identifier(None) and raised a bare AttributeError - which is
+        # neither ToolParamError nor SourceConnectionError, so the MCP layer could not
+        # tell a caller mistake from a transport failure. Same layering as the field
+        # allowlist: validate at the boundary *and* where the value is interpolated.
+        if not schema.instance_tag:
+            raise ToolParamError(
+                f"cannot scope source {schema.source!r} to {instance!r}: its measurement has a "
+                f"single producer, so there is no tag to scope by"
+            )
+        _validate_identifier(schema.instance_tag, "tag")
         where.append(f"{_quote_identifier(schema.instance_tag)} = {_quote_string_literal(instance)}")
 
     return (
@@ -434,7 +446,9 @@ def _select_and_group(field, aggregation, group_by, instance_clause):
     Extracted from build_query to keep it within the project's complexity limit once
     instance grouping had to compose with time bucketing.
 
-    :param instance_clause: ``, "<tag>"`` when the query separates producers, else ""
+    :param instance_clause: the tag to group by, **already prefixed with a comma and a
+        space** so it can be spliced straight after ``time(...)`` - literally
+        ``, "host"`` - or an empty string when the query does not separate producers
     :return: (select expression, group-by clause including its leading space)
     :raises ToolParamError: for an unknown aggregation, or a missing/malformed group_by
     """
@@ -662,7 +676,18 @@ def discover_tag_values(session, influx_settings, db, measurement, tag):
             raise SourceConnectionError(f"InfluxDB rejected the tag-value discovery: {result['error']}")
         for series in result.get("series", []):
             columns = series.get("columns", [])
-            index = columns.index("value") if "value" in columns else -1
+            if "value" not in columns:
+                # A -1 fallback would read each row's *last* cell, which happens to be the
+                # right one for today's ["key", "value"] shape and would silently invent
+                # tag values if that ever changed. Skipping is the honest answer: a wrong
+                # allowlist would refuse real producers and accept ones that do not exist.
+                logging.warning(
+                    "Tag-value discovery for %s returned a series with no 'value' column (%s); ignoring it",
+                    measurement,
+                    columns,
+                )
+                continue
+            index = columns.index("value")
             for row in series.get("values", []):
                 if row and isinstance(row[index], str):
                     values.add(row[index])
