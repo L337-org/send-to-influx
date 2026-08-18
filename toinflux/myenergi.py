@@ -97,34 +97,48 @@ def enumerate_devices(source, source_settings):
         raw = []
 
     for index, entry in enumerate(raw):
-        position = f"{source}.devices[{index}]"
-        if not isinstance(entry, dict):
-            errors.append(f"{position} must be a mapping (got {type(entry).__name__})")
-            continue
-        if entry.get("serial") is None:
-            errors.append(f"{position} has no serial")
-            continue
-        serial, serial_errors = _checked_serial(position, entry["serial"])
-        if serial_errors:
-            errors.extend(serial_errors)
-            continue
-        entry_fields, field_errors = _checked_fields(position, entry.get("fields", block_fields))
-        if field_errors:
-            errors.extend(field_errors)
-            continue
-        label = entry.get("label")
-        if not (isinstance(label, str) and label.strip()):
-            errors.append(
-                f"{position} has no label - every entry in a devices list must name one, "
-                f"since the label is what identifies the device in InfluxDB and in answers"
-            )
-            continue
-        devices.append(MyEnergiDevice(serial=serial, label=label.strip(), fields=entry_fields))
+        device, entry_errors = _device_from_entry(f"{source}.devices[{index}]", entry, block_fields)
+        errors.extend(entry_errors)
+        if device is not None:
+            devices.append(device)
 
     errors.extend(_duplicate_errors(source, devices))
     if not devices:
         warnings.append(f"no {source} device is configured, so {source} will not be collected")
     return devices, errors, warnings
+
+
+def _device_from_entry(position, entry, block_fields):
+    """
+    Build one device from a ``devices:`` entry, or report why it cannot be built.
+
+    Extracted from ``enumerate_devices`` to keep it inside the project's complexity limit
+    once each field gained validation.
+
+    :param position: what to name in messages, e.g. "zappi.devices[0]"
+    :type position: str
+    :param entry: the list entry as parsed from YAML
+    :param block_fields: the block-level fields list, used when the entry names none
+    :return: (device, errors); device is None when there are errors
+    :rtype: tuple
+    """
+    if not isinstance(entry, dict):
+        return None, [f"{position} must be a mapping (got {type(entry).__name__})"]
+    if entry.get("serial") is None:
+        return None, [f"{position} has no serial"]
+    serial, errors = _checked_serial(position, entry["serial"])
+    if errors:
+        return None, errors
+    fields, errors = _checked_fields(position, entry.get("fields", block_fields))
+    if errors:
+        return None, errors
+    label = entry.get("label")
+    if not (isinstance(label, str) and label.strip()):
+        return None, [
+            f"{position} has no label - every entry in a devices list must name one, "
+            f"since the label is what identifies the device in InfluxDB and in answers"
+        ]
+    return MyEnergiDevice(serial=serial, label=label.strip(), fields=fields), []
 
 
 def _checked_serial(position, value):
