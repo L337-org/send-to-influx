@@ -20,6 +20,7 @@ from toinflux.mcp_read import (
     build_schema,
     current_state_result,
     discover_fields,
+    discover_tag_values,
     metadata_for,
     parse_time_bound,
     register_read_tools,
@@ -28,6 +29,7 @@ from toinflux.mcp_read import (
     QuerySeries,
     run_query,
     single_series,
+    _validate_instance,
     _annotate_state_field,
     _influx_read_request,
 )
@@ -1027,6 +1029,178 @@ class TestMultiBridgeReads:
         )
         query = build_query(schema, field="Kitchen", start="-1h", end="now")
         assert "host" not in query
+
+
+class TestInstanceAxis:
+    """The instance axis: scoping a query to one producer, and never merging producers.
+
+    Every query shape asserted here was executed against a real InfluxDB 1.8 while this
+    was written, so the SQL is known to parse and to return the series counts assumed -
+    including the composed `GROUP BY time(1h), "host"`, which is the one most likely to
+    be wrong by inspection.
+    """
+
+    @staticmethod
+    def _schema(values=("hostA", "hostB"), tag="host"):
+        return ReadSchema(
+            source="speedtest",
+            measurement="speedtest",
+            db="sdb",
+            allowed_fields={"ping"},
+            field_metadata={"ping": {"unit": "ms"}},
+            instance_tag=tag,
+            instance_values=set(values),
+        )
+
+    def test_scoped_query_filters_on_the_instance_tag(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now", instance="hostA")
+        assert "\"host\" = 'hostA'" in q
+        # Scoped means one series already, so grouping would be noise.
+        assert "GROUP BY" not in q
+
+    def test_unscoped_query_groups_by_the_instance_tag(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now")
+        assert 'GROUP BY "host"' in q
+        assert "'hostA'" not in q
+
+    def test_unscoped_aggregation_groups_by_time_and_tag(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now", aggregation="mean", group_by="1h")
+        assert 'GROUP BY time(1h), "host" fill(none)' in q
+
+    def test_limit_is_divided_across_instances_when_grouping(self):
+        # InfluxDB applies LIMIT per series once grouped, so an undivided limit would
+        # let N producers multiply the result cap - the bound would stop bounding.
+        q = build_query(self._schema(values=("a", "b", "c", "d")), field="ping", start="-1h", end="now", limit=100)
+        assert q.endswith("LIMIT 25")
+
+    def test_scoped_limit_is_not_divided(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now", limit=100, instance="hostA")
+        assert q.endswith("LIMIT 100")
+
+    def test_source_without_an_axis_is_unchanged(self):
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o", allowed_fields={"cost"})
+        q = build_query(plain, field="cost", start="-1h", end="now", limit=100)
+        assert "GROUP BY" not in q
+        assert q.endswith("LIMIT 100")
+
+    def test_unknown_instance_value_is_refused_with_the_known_ones(self):
+        with pytest.raises(ToolParamError, match="recorded values: hostA, hostB"):
+            _validate_instance(self._schema(), "typo")
+
+    def test_instance_refused_for_a_single_producer_source(self):
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o")
+        with pytest.raises(ToolParamError, match="single producer"):
+            _validate_instance(plain, "anything")
+
+    def test_no_instance_is_always_allowed(self):
+        assert _validate_instance(self._schema(), None) is None
+
+
+class TestPerInstanceHistoryShape:
+    """Acceptance question 2: an unscoped result must say which producer each point
+    came from, and must not merge them."""
+
+    @staticmethod
+    def _handler():
+        handler = MagicMock()
+        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
+        handler.session = MagicMock()
+        return handler
+
+    def _run(self, series, instance=None, limit=DEFAULT_RESULT_POINTS):
+        from toinflux.mcp_read import _run_query_history
+
+        schema = TestInstanceAxis._schema()
+        with patch("toinflux.mcp_read.run_query", return_value=series):
+            return _run_query_history(
+                self._handler(), schema, "ping", "-1h", "now", "raw", None, limit, instance=instance
+            )
+
+    def test_unscoped_reports_each_producer_separately(self):
+        result = self._run(
+            [
+                QuerySeries({"host": "hostA"}, ["time", "ping"], [[2, 13.1], [1, 12.3]]),
+                QuerySeries({"host": "hostB"}, ["time", "ping"], [[2, 46.0], [1, 45.6]]),
+            ]
+        )
+        assert set(result["instances"]) == {"hostA", "hostB"}
+        assert [p["value"] for p in result["instances"]["hostA"]["points"]] == [13.1, 12.3]
+        assert [p["value"] for p in result["instances"]["hostB"]["points"]] == [46.0, 45.6]
+        assert result["instance_tag"] == "host"
+        # Field-level metadata stays at the top rather than repeating per producer.
+        assert result["unit"] == "ms"
+        assert "points" not in result
+
+    def test_keyed_even_with_one_producer(self):
+        # So nothing reading the payload depends on how many producers exist - the same
+        # reasoning as Hue's per-bridge map.
+        result = self._run([QuerySeries({"host": "only"}, ["time", "ping"], [[1, 5.0]])])
+        assert set(result["instances"]) == {"only"}
+
+    def test_scoped_returns_the_flat_shape(self):
+        result = self._run([QuerySeries({}, ["time", "ping"], [[1, 12.3]])], instance="hostA")
+        assert [p["value"] for p in result["points"]] == [12.3]
+        assert "instances" not in result
+
+    def test_limit_reported_is_the_one_actually_applied_per_instance(self):
+        # Reporting the caller's figure would make `truncated` a comparison against a
+        # limit InfluxDB never used.
+        result = self._run(
+            [
+                QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 1.0]]),
+                QuerySeries({"host": "hostB"}, ["time", "ping"], [[1, 2.0]]),
+            ],
+            limit=10,
+        )
+        assert result["limit_per_instance"] == 5
+        assert "limit" not in result
+
+    def test_truncation_is_per_instance_and_summarised(self):
+        result = self._run(
+            [
+                QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 1.0], [2, 2.0]]),
+                QuerySeries({"host": "hostB"}, ["time", "ping"], [[1, 3.0]]),
+            ],
+            limit=4,
+        )
+        assert result["instances"]["hostA"]["truncated"] is True
+        assert result["instances"]["hostB"]["truncated"] is False
+        assert result["truncated"] is True
+
+    def test_untagged_series_is_reported_not_silently_dropped(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = self._run(
+                [
+                    QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 1.0]]),
+                    QuerySeries({}, ["time", "ping"], [[1, 9.0]]),
+                ]
+            )
+        assert set(result["instances"]) == {"hostA"}
+        assert "no host tag" in caplog.text
+
+
+class TestDiscoverTagValues:
+    def test_parses_values(self):
+        payload = {
+            "results": [{"series": [{"columns": ["key", "value"], "values": [["host", "hostA"], ["host", "hostB"]]}]}]
+        }
+        values = discover_tag_values(
+            _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "speedtest", "host"
+        )
+        assert values == {"hostA", "hostB"}
+
+    def test_empty_when_nothing_recorded(self):
+        values = discover_tag_values(
+            _mock_session({"results": [{}]}), {"url": "http://x", "user": "u", "password": "p"}, "db", "m", "host"
+        )
+        assert values == set()
+
+    def test_result_error_surfaces_rather_than_looking_like_no_instances(self):
+        payload = {"results": [{"error": "database not found: sdb"}]}
+        with pytest.raises(SourceConnectionError, match="rejected the tag-value discovery"):
+            discover_tag_values(
+                _mock_session(payload), {"url": "http://x", "token": "t", "org": "o"}, "db", "m", "host"
+            )
 
 
 class TestDataRangeResult:

@@ -346,7 +346,9 @@ def _clamp_limit(limit):
     return max(1, min(value, MAX_RESULT_POINTS))
 
 
-def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, limit=DEFAULT_RESULT_POINTS):
+def build_query(
+    schema, *, field, start, end, aggregation="raw", group_by=None, limit=DEFAULT_RESULT_POINTS, instance=None
+):
     """Build a parameterised InfluxQL SELECT for a source's measurement.
 
     Every dynamic part is validated: the field against the schema's live
@@ -361,7 +363,12 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     :param end: end time bound (see parse_time_bound)
     :param aggregation: one of AGGREGATIONS, or "raw" for un-aggregated points
     :param group_by: GROUP BY time interval (required when aggregating), e.g. "1h"
-    :param limit: maximum points to return (clamped to MAX_RESULT_POINTS)
+    :param limit: maximum points to return (clamped to MAX_RESULT_POINTS). When the
+        query groups by the instance tag this is divided across the known instances,
+        because InfluxDB applies LIMIT per series
+    :param instance: restrict to one value of the source's instance tag; None leaves
+        the query unscoped, which groups by that tag so producers stay distinguishable
+        rather than being merged into one series
     :return: the InfluxQL query string
     :raises ToolParamError: on any invalid parameter
     """
@@ -382,23 +389,27 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     if start_dt >= end_dt:
         raise ToolParamError(f"start ({_rfc3339(start_dt)}) must be before end ({_rfc3339(end_dt)})")
 
-    if aggregation == "raw":
-        select_expr = _quote_identifier(field)
-        group_clause = ""
-    else:
-        func = AGGREGATIONS.get(aggregation)
-        if func is None:
-            raise ToolParamError(
-                f"unknown aggregation {aggregation!r}; choose one of: raw, {', '.join(sorted(AGGREGATIONS))}"
-            )
-        select_expr = f"{func}({_quote_identifier(field)})"
-        if not group_by:
-            raise ToolParamError(f"aggregation {aggregation!r} requires a group_by interval (e.g. '1h')")
-        if not _DURATION_RE.match(str(group_by)):
-            raise ToolParamError(f"invalid group_by interval {group_by!r}; use a duration like '5m', '1h', '1d'")
-        group_clause = f" GROUP BY time({group_by}) fill(none)"
+    # Whether this query separates producers. Scoped to one instance it does not (the
+    # WHERE clause narrows to a single series); unscoped on a source with an instance
+    # axis it must, or InfluxQL merges every producer into one unlabelled series and
+    # the answer silently mixes them - the defect this whole change exists to fix.
+    group_by_instance = instance is None and bool(schema.instance_tag)
+    instance_clause = ""
+    if group_by_instance:
+        _validate_identifier(schema.instance_tag, "tag")
+        instance_clause = f", {_quote_identifier(schema.instance_tag)}"
 
+    select_expr, group_clause = _select_and_group(field, aggregation, group_by, instance_clause)
+
+    # LIMIT is applied *per series* once a query groups by a tag - verified against a
+    # real InfluxDB 1.8, where LIMIT 2 across two hosts returned two rows each, not
+    # two in total. Left alone, the result cap would quietly stop bounding anything:
+    # N producers would multiply it. Divide it instead, so the caller's limit still
+    # bounds the whole answer, and report the per-instance figure so the difference
+    # is visible rather than silent.
     limit_value = _clamp_limit(limit)
+    if group_by_instance:
+        limit_value = max(1, limit_value // max(1, len(schema.instance_values)))
 
     where = [
         f"time >= {_quote_string_literal(_rfc3339(start_dt))}",
@@ -407,12 +418,43 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     for tag_key, tag_value in sorted(schema.tag_filters.items()):
         _validate_identifier(tag_key, "tag")
         where.append(f"{_quote_identifier(tag_key)} = {_quote_string_literal(tag_value)}")
+    if instance is not None:
+        where.append(f"{_quote_identifier(schema.instance_tag)} = {_quote_string_literal(instance)}")
 
     return (
         f"SELECT {select_expr} FROM {_quote_identifier(schema.measurement)} "
         f"WHERE {' AND '.join(where)}{group_clause} "
         f"ORDER BY time DESC LIMIT {limit_value}"
     )
+
+
+def _select_and_group(field, aggregation, group_by, instance_clause):
+    """Return the SELECT expression and GROUP BY clause for a history query.
+
+    Extracted from build_query to keep it within the project's complexity limit once
+    instance grouping had to compose with time bucketing.
+
+    :param instance_clause: ``, "<tag>"`` when the query separates producers, else ""
+    :return: (select expression, group-by clause including its leading space)
+    :raises ToolParamError: for an unknown aggregation, or a missing/malformed group_by
+    """
+    if aggregation == "raw":
+        # A raw query still needs the tag in a GROUP BY to keep producers apart; there
+        # is just no time bucket to combine it with.
+        return _quote_identifier(field), f" GROUP BY{instance_clause[1:]}" if instance_clause else ""
+    func = AGGREGATIONS.get(aggregation)
+    if func is None:
+        raise ToolParamError(
+            f"unknown aggregation {aggregation!r}; choose one of: raw, {', '.join(sorted(AGGREGATIONS))}"
+        )
+    if not group_by:
+        raise ToolParamError(f"aggregation {aggregation!r} requires a group_by interval (e.g. '1h')")
+    if not _DURATION_RE.match(str(group_by)):
+        raise ToolParamError(f"invalid group_by interval {group_by!r}; use a duration like '5m', '1h', '1d'")
+    # Verified against a real InfluxDB 1.8: GROUP BY time(1h), "host" fill(none) is
+    # valid and yields one series per host, each with its own buckets. Worth checking
+    # rather than assuming, since the two grouping kinds compose here.
+    return f"{func}({_quote_identifier(field)})", f" GROUP BY time({group_by}){instance_clause} fill(none)"
 
 
 def _build_single_point_query(measurement, tag_filters, fields, order):
@@ -965,8 +1007,38 @@ def list_fields_result(source, settings, settings_file):
         close_session(handler.session)
 
 
+def _validate_instance(schema, instance):
+    """Check an ``instance`` argument against the source's live tag values.
+
+    Two separate refusals, and both matter. A source with no instance axis is told so
+    outright rather than having the value ignored - accepting it, running an unscoped
+    query and echoing it back would tell the caller the answer was narrowed when it was
+    not, the same dishonesty the ``bridge`` guard exists to prevent. A value the tag has
+    never held is refused with the known values listed, because the alternative is a
+    confidently empty result that reads as "no data" rather than "no such producer".
+
+    The allowlist is the live discovered set, which is also what keeps the value safe to
+    interpolate - the same layering as a queried field name.
+
+    :raises ToolParamError: if the source has no axis, or the value is not one of its
+        discovered values
+    """
+    if instance is None:
+        return
+    if not schema.instance_tag:
+        raise ToolParamError(
+            f"'instance' does not apply to source {schema.source!r} - its measurement has a single "
+            f"producer, so there is nothing to scope to"
+        )
+    if instance not in schema.instance_values:
+        known = ", ".join(sorted(schema.instance_values)) or "(none recorded yet)"
+        raise ToolParamError(
+            f"unknown {schema.instance_tag} {instance!r} for source {schema.source!r}; " f"recorded values: {known}"
+        )
+
+
 def _query_history_result(
-    settings, settings_file, *, source, field, start, end, aggregation, group_by, limit, bridge=None
+    settings, settings_file, *, source, field, start, end, aggregation, group_by, limit, bridge=None, instance=None
 ):
     """Build the query_history tool payload (runs in a worker thread).
 
@@ -995,37 +1067,111 @@ def _query_history_result(
         )
     handler, schema = resolve_schema(source, settings, settings_file, instance=bridge)
     try:
-        result = _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit)
+        # Deliberately not routed through resolve_schema's own `instance`: that one names a
+        # collector *work unit* (INSTANCED_SOURCES - a Hue bridge with its own credentials
+        # and worker) and would reject Speedtest outright. This one names a value of a tag
+        # in the *data*, which is a different question - Speedtest runs one worker per host
+        # and each host is its own process, so the axis exists in InfluxDB without the
+        # collector having any notion of instances. SI-33 folds the two parameters into one
+        # for callers; they stay distinct concepts underneath.
+        _validate_instance(schema, instance)
+        result = _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit, instance=instance)
         # Say what was actually queried: without this the model cannot tell a single-bridge
         # answer from an estate-wide one, and the two mean different things.
         if bridge is not None:
             result["bridge"] = bridge
+        if instance is not None:
+            result["instance"] = instance
+            result["instance_tag"] = schema.instance_tag
         return result
     finally:
         close_session(handler.session)
 
 
-def _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit):
+def _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit, instance=None):
     """Execute the query and shape the payload (session lifecycle owned by the
-    caller). Split out so _query_history_result's finally: stays a thin wrapper."""
+    caller). Split out so _query_history_result's finally: stays a thin wrapper.
+
+    Two payload shapes, and which one you get depends on the *source*, never on how
+    many producers it happens to have:
+
+    - A source with no instance axis, or a query scoped to one instance, returns flat
+      ``points`` - byte-identical to before this existed.
+    - An unscoped query on a source with an axis returns ``instances``, keyed by tag
+      value. Keyed even when only one value exists, so nothing reading the payload
+      depends on the producer count - the same reasoning as Hue's per-bridge map.
+
+    Never a merged series: two hosts' ping interleaved in one unlabelled list is not a
+    partial answer, it is a wrong one.
+    """
     # handler.settings["influx"], not the startup snapshot, so the query runs
     # against the same (possibly freshly-edited) InfluxDB the schema was
     # discovered from - see resolve_schema.
     query = build_query(
-        schema, field=field, start=start, end=end, aggregation=aggregation, group_by=group_by, limit=limit
+        schema,
+        field=field,
+        start=start,
+        end=end,
+        aggregation=aggregation,
+        group_by=group_by,
+        limit=limit,
+        instance=instance,
     )
-    # Ungrouped today, so exactly one series; the per-instance grouping that makes
-    # this return several is the next slice, and changes this consumer with it.
-    columns, values = single_series(run_query(handler.session, handler.settings["influx"], schema.db, query))
-    result = annotate_rows(schema, field, columns, values)
-    # Surface the effective limit and whether the query hit it. `truncated` means
-    # exactly that - the result reached the limit, so more data *may* exist beyond
-    # it (if precisely `limit` points exist, nothing more does) - it's a prompt to
-    # narrow the range or aggregate, not a guarantee of omitted data. build_query
-    # already validated limit, so this can't raise.
+    series = run_query(handler.session, handler.settings["influx"], schema.db, query)
+    grouped = instance is None and bool(schema.instance_tag)
+    # Mirrors build_query's division exactly: InfluxDB applies LIMIT per series once a
+    # query groups by a tag, so the figure reported has to be the one actually in force
+    # or `truncated` would be measured against a limit that was never applied.
     effective_limit = _clamp_limit(limit)
-    result["limit"] = effective_limit
-    result["truncated"] = len(result["points"]) >= effective_limit
+    if grouped:
+        effective_limit = max(1, effective_limit // max(1, len(schema.instance_values)))
+
+    if not grouped:
+        columns, values = single_series(series)
+        result = annotate_rows(schema, field, columns, values)
+        # `truncated` means the result reached the limit, so more data *may* exist
+        # beyond it - if exactly `limit` points exist, nothing more does. A prompt to
+        # narrow the range or aggregate, not a guarantee of omitted data.
+        result["limit"] = effective_limit
+        result["truncated"] = len(result["points"]) >= effective_limit
+        return result
+
+    instances = {}
+    unit, codes = None, None
+    for one in series:
+        annotated = annotate_rows(schema, field, one.columns, one.values)
+        unit = unit or annotated.get("unit")
+        codes = codes or annotated.get("codes")
+        key = one.tags.get(schema.instance_tag)
+        if key is None:
+            # A grouped query always tags its series, so this would mean InfluxDB
+            # answered a shape we did not ask for. Skipping it silently is how the
+            # original defect looked; name it instead.
+            logging.warning(
+                "Query for %r grouped by %r returned a series with no %s tag; ignoring it",
+                schema.source,
+                schema.instance_tag,
+                schema.instance_tag,
+            )
+            continue
+        instances[key] = {
+            "points": annotated["points"],
+            "truncated": len(annotated["points"]) >= effective_limit,
+        }
+    result = {
+        "source": schema.source,
+        "field": field,
+        "instance_tag": schema.instance_tag,
+        "instances": instances,
+        # Named rather than plain `limit`: it is per instance here, not a total, and a
+        # caller comparing it against the number it passed would otherwise be misled.
+        "limit_per_instance": effective_limit,
+        "truncated": any(entry["truncated"] for entry in instances.values()),
+    }
+    if unit:
+        result["unit"] = unit
+    if codes:
+        result["codes"] = codes
     return result
 
 
@@ -1315,6 +1461,7 @@ def register_read_tools(server, settings, settings_file=None):
         group_by: "str | None" = None,
         limit: int = DEFAULT_RESULT_POINTS,
         bridge: "str | None" = None,
+        instance: "str | None" = None,
     ) -> dict:
         """Query a field's history for a source from InfluxDB. Reads only; to
         change a device use that source's control tool, e.g. `hue_set_light`
@@ -1340,12 +1487,23 @@ def register_read_tools(server, settings, settings_file=None):
           when one was used, so a single-bridge answer is distinguishable from an
           estate-wide one.
 
+        - instance: for a source whose measurement holds several producers, restricts
+          the query to one of them - Speedtest tags each point with the collecting
+          host, so `instance='pi4'` asks only about that machine. Omit it to get
+          every producer reported *separately* under `instances`, keyed by tag value:
+          results are never merged, because two hosts' ping in one unlabelled list
+          would be a wrong answer rather than an incomplete one. `list_fields` reports
+          the tag name and its recorded values; an unrecorded value is an error, and
+          so is passing this for a single-producer source.
+
         Points come back newest-first, each with a unix-seconds `time` and
         `value`; coded fields (e.g. Nuki lock state) also carry a decoded `label`.
-        The result also reports the effective `limit` and a `truncated` flag -
-        `truncated` is true when the query returned as many points as the limit
-        allowed, so more data may exist beyond it; narrow the range or use an
-        aggregation to be sure of a complete view.
+        The result also reports a `truncated` flag - true when the query returned as
+        many points as the limit allowed, so more data may exist beyond it; narrow the
+        range or use an aggregation to be sure of a complete view. A scoped or
+        single-producer result reports the `limit` in force; a per-instance one reports
+        `limit_per_instance` instead, because InfluxDB applies the limit to each
+        producer separately and calling that a total would misstate it.
         """
         return await anyio.to_thread.run_sync(
             lambda: _query_history_result(
@@ -1359,6 +1517,7 @@ def register_read_tools(server, settings, settings_file=None):
                 group_by=group_by,
                 limit=limit,
                 bridge=bridge,
+                instance=instance,
             )
         )
 
