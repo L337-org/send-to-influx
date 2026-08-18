@@ -17,7 +17,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Only files git actually tracks. Deliberately not a filesystem walk: that would sweep in .venv
 # and build output, and - the reason it matters - a developer's own settings.yaml, which is
 # gitignored, holds real credentials and is none of this test's business.
-TRACKED_SUFFIXES = (".py", ".md", ".sh", ".yaml", ".yml", ".service", ".templates")
+#
+# Every tracked *text* file, decided by sniffing rather than by a suffix allowlist. An allowlist
+# has holes by construction and silently falls behind: the first version listed extensions and
+# missed 14 tracked files, including every debconf maintainer script (`postinst`, `preinst`,
+# `config`, ...) - shell files with no extension, and exactly the kind of place a comment cites
+# an issue key. Sniffing covers anything added later with no list to maintain.
+BINARY_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".gz", ".zip", ".deb", ".whl")
 
 # This file necessarily contains the patterns it searches for, so it cannot check itself.
 SELF = Path(__file__).name
@@ -26,7 +32,14 @@ SELF = Path(__file__).name
 # never the reverse - that is the only surviving connection, and it lives on the private side.
 # Matched by the tracker's key shape rather than one project's prefix, so a second project's
 # keys are caught too.
-TRACKER_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
+#
+# The prefix is letters only, and at least two. Allowing digits in it (as Jira technically does)
+# made this match `Z0-9` inside the regex character class `[a-zA-Z0-9]` in pylintrc - a false
+# positive, and the kind that gets a guard switched off wholesale, which costs more than it ever
+# caught. A project key with a digit in it would slip past; that is the right side to err on,
+# since the cost of a miss is a human noticing, while the cost of a false alarm is the check
+# being disabled.
+TRACKER_KEY = re.compile(r"\b[A-Z]{2,10}-\d+\b")
 
 # Strings with the same shape that are not tracker keys. An over-broad guard is one someone
 # eventually switches off wholesale, which costs more than it ever caught - so each of these is
@@ -78,12 +91,44 @@ def _tracked_files():
     for name in listing.stdout.split("\0"):
         if not name or Path(name).name == SELF:
             continue
-        if not name.endswith(TRACKED_SUFFIXES):
-            continue
         path = REPO_ROOT / name
-        if path.is_file():
-            paths.append(path)
+        if not path.is_file() or not _is_text(path):
+            continue
+        paths.append(path)
     return sorted(paths)
+
+
+def _is_text(path):
+    """Whether a file can be scanned as text.
+
+    Sniffed rather than inferred from the name, so a text file with no extension - every
+    maintainer script here - is covered, and a future binary asset cannot break the scan. A NUL
+    byte is the usual binary marker, and anything that is not valid UTF-8 is not text we can
+    meaningfully search either.
+
+    :param path: the file to check
+    :type path: pathlib.Path
+    :return: True if the file should be scanned
+    :rtype: bool
+    """
+    if path.suffix.lower() in BINARY_SUFFIXES:
+        return False
+    try:
+        chunk = path.read_bytes()[:8192]
+    except OSError:
+        return False
+    if b"\0" in chunk:
+        return False
+    try:
+        chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        # Could be a multi-byte character split by the 8 KiB boundary; only reject if the whole
+        # file fails, so a large UTF-8 file is not skipped on a boundary artefact.
+        try:
+            path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            return False
+    return True
 
 
 def test_at_least_one_file_is_searched():
@@ -98,6 +143,22 @@ def test_at_least_one_file_is_searched():
     # be read by this test, whatever the pattern list says.
     assert "settings.yaml" not in names
     assert "example_settings.yaml" in names
+    # Files the first, suffix-allowlist version silently skipped. Named individually so the hole
+    # cannot reopen: the maintainer scripts have no extension and are exactly where a comment
+    # would cite an issue key.
+    for expected in (
+        "postinst",
+        "preinst",
+        "prerm",
+        "postrm",
+        "config",
+        "pyproject.toml",
+        "requirements.txt",
+        "CODEOWNERS",
+        "send-to-influx.rsyslog",
+        "send-to-influx.logrotate",
+    ):
+        assert expected in names, f"{expected} is tracked but not being checked"
 
 
 def test_no_tracker_keys_in_a_public_repo():
