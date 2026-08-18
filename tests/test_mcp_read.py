@@ -540,7 +540,7 @@ class TestRegisterReadTools:
         return {
             "sources": ["zappi"],
             "influx": {"url": "http://x", "user": "u", "password": "p"},
-            # A serial, because zappi is instanced since SI-34: one worker per configured
+            # A serial, because zappi is instanced: one worker per configured
             # device, so a block with no device expands to nothing.
             "zappi": {"db": "zappi_db", "serial": "12345"},
         }
@@ -776,7 +776,7 @@ class TestCurrentStateResult:
         return handler
 
     def test_live_annotates_and_reports_state(self):
-        """MyEnergi is instanced since SI-34 - one worker per configured device - so the
+        """MyEnergi is instanced - one worker per configured device - so the
         payload is keyed by device label rather than flat, even for the single legacy device.
         Same rule as Hue's per-bridge map: the shape must not depend on how many devices
         happen to be configured."""
@@ -913,27 +913,36 @@ class TestMultiBridgeReads:
     def test_a_single_target_source_keeps_the_flat_shape(self):
         """Every non-instanced source is untouched - instance None means no grouping.
 
-        Exercised through a genuinely single-target source (Nuki: live state, one broker),
-        not through Hue with a None instance. That combination cannot occur in production -
-        for Hue, resolve_handlers always yields host instances or raises - so asserting the
-        flat shape that way would prove it using a scenario nothing produces, and would not
-        notice a regression in the real single-target path.
+        Exercised through a genuinely single-target source, not through Hue with a None
+        instance. That combination cannot occur in production - for Hue, resolve_handlers
+        always yields host instances or raises - so asserting the flat shape that way would
+        prove it using a scenario nothing produces, and would not notice a regression in the
+        real single-target path.
+
+        Uses openmeteo: Nuki was the example here precisely because it was
+        single-target, and it now has a device axis covering every lock.
         """
-        handler = MagicMock(MCP_LIVE_STATE=True, MCP_DESCRIPTION="Nuki smart lock", MCP_FIELD_METADATA={})
-        handler.source = "nuki"
+        handler = MagicMock(
+            MCP_LIVE_STATE=True,
+            MCP_INSTANCE_TAG=None,
+            MCP_LIVE_STATE_COVERS_ALL_INSTANCES=False,
+            MCP_DESCRIPTION="Weather",
+            MCP_FIELD_METADATA={},
+        )
+        handler.source = "openmeteo"
         handler.instance = None
-        handler.worker_label = "nuki"
-        handler.get_data.return_value = {"Front_Door_stateValue": 1}
+        handler.worker_label = "openmeteo"
+        handler.get_data.return_value = {"temperature_2m": 18.5}
         handler.session = MagicMock()
         settings = {
-            "sources": ["nuki"],
+            "sources": ["openmeteo"],
             "influx": {"url": "http://x", "user": "u", "password": "p"},
-            "nuki": {"db": "nuki_db"},
+            "openmeteo": {"db": "weather_db"},
         }
         with patch("toinflux.mcp_read.resolve_handlers", return_value=[(None, handler)]):
-            result = current_state_result("nuki", settings, None)
-        assert result["source"] == "nuki"
-        assert result["fields"]["Front_Door_stateValue"]["value"] == 1
+            result = current_state_result("openmeteo", settings, None)
+        assert result["source"] == "openmeteo"
+        assert result["fields"]["temperature_2m"]["value"] == 18.5
         assert "as_of" in result
         assert "instances" not in result
 
@@ -960,10 +969,10 @@ class TestMultiBridgeReads:
                 current_state_result("hue", self._settings(), None)
         message = str(excinfo.value)
         # Each bridge paired with its own error, not merely both hostnames present somewhere.
-        assert "down.example.com: down" in message and "up.example.com: also down" in message
+        assert "'down.example.com': down" in message and "'up.example.com': also down" in message
 
     def test_hue_declares_the_host_axis_so_scoping_uses_the_shared_path(self):
-        """The core of SI-33: without the axis on the class, Hue falls back to the old
+        """The core of per-bridge scoping: without the axis on the class, Hue falls back to the old
         merged behaviour and `instance` is refused as not applying. Driven through
         resolve_schema and the real Hue class rather than asserting the attribute, so it
         fails if the plumbing stops reading it as well as if the value changes."""
@@ -1265,7 +1274,7 @@ class TestPerInstanceHistoryShape:
 
 
 class TestSharedMeasurementInstances:
-    """SI-34, acceptance questions 3 and 6. The three MyEnergi types share the `myenergi`
+    """The three MyEnergi types share the `myenergi`
     measurement and are told apart by the same `device` tag that now carries the operator's
     label - so a discovered value cannot be attributed to a type, and the config is the
     authority. The config does distinguish them: separate blocks, separate sources."""

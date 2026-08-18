@@ -17,7 +17,7 @@ def _settings():
     return {
         "sources": ["zappi", "speedtest"],
         "influx": {"url": "http://x", "user": "u", "password": "p"},
-        # A serial, because zappi is instanced since SI-34: one worker per configured
+        # A serial, because zappi is instanced: one worker per configured
         # device, so a block with no device expands to nothing and the source drops out.
         "zappi": {"db": "zappi_db", "serial": "12345"},
         "speedtest": {"db": "speedtest_db"},

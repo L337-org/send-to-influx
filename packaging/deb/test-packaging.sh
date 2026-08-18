@@ -349,6 +349,28 @@ rm -f /tmp/ci-bad-settings.yaml /tmp/ci-good-settings.yaml
 pass "installed package: diagnostics on stderr, the --check-config verdict on stdout"
 [ -f "$SETTINGS" ] || fail "settings.yaml not created"
 [ -f /usr/share/send-to-influx/example_settings.yaml ] || fail "example not shipped under /usr/share"
+# The Nuki migration and its instructions ship beside the example, so an apt install can run
+# the 5.2->5.3 data migration without cloning the repo. Asserted because the alternative
+# failure is silent: the collector works fine, and the operator only discovers the script is
+# missing at the point they need to rescue their history.
+[ -f /usr/share/send-to-influx/migrate-nuki-device-tag.py ] \
+    || fail "the Nuki migration script is not shipped under /usr/share"
+[ -x /usr/share/send-to-influx/migrate-nuki-device-tag.py ] \
+    || fail "the Nuki migration script is not executable"
+[ -f /usr/share/send-to-influx/UPGRADING.md ] || fail "UPGRADING.md is not shipped under /usr/share"
+# It must never be on $PATH: a destructive, irreversible one-off that nothing should be able to
+# run by accident or by tab-completion.
+command -v migrate-nuki-device-tag.py >/dev/null 2>&1 \
+    && fail "the Nuki migration script is on \$PATH - it must be hand-run from /usr/share only"
+# It must run with the interpreter UPGRADING.md tells the operator to use. That is the venv's
+# python3, not a bare one: the script needs `requests`, and this package bundles its
+# dependencies rather than depending on python3-requests, so a bare python3 would fail with
+# ModuleNotFoundError on any machine that does not happen to have it. --help also proves the
+# script loads with no toinflux import and no settings.yaml present, which is what lets it run
+# against a database this host does not collect for.
+/opt/send-to-influx/venv/bin/python3 /usr/share/send-to-influx/migrate-nuki-device-tag.py --help \
+    >/dev/null 2>&1 || fail "the Nuki migration script does not run under the packaged venv python"
+pass "the Nuki migration script and UPGRADING.md ship under /usr/share, off \$PATH, runnable"
 # settings.yaml is deliberately NOT a conffile (see build-deb.sh) - but the
 # rsyslog/logrotate config deliberately IS, since no maintainer script
 # ever rewrites either. Assert exactly those two, no more, no fewer.

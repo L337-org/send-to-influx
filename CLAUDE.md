@@ -176,14 +176,140 @@ equivalent to an HTTP GET. Failure mapping is deliberately strict: bad credentia
 (never as an exception from `connect()`), and a broker that accepts TCP but never completes the MQTT
 handshake raises `SourceConnectionError` rather than returning an empty result - either would
 otherwise masquerade as "no data". `Nuki` (`toinflux/nuki.py`) holds only vendor logic: filtering to
-known state topics (command/event topics are ignored), grouping by device ID, prefixing field keys
-with each lock's own Nuki-app name, and renaming `state`/`doorsensorState` to `stateValue`/
+known state topics (command/event topics are ignored), grouping by device ID, labelling each lock
+with its own Nuki-app name, and renaming `state`/`doorsensorState` to `stateValue`/
 `doorsensorStateValue` - Grafana visualises numeric fields far better than text, so unlike the
 Bridge HTTP API's `stateName` strings, these are always written as their raw numeric code (a code
 with no documented meaning is written through unchanged); see UNITS.md for what each code means.
 `paho-mqtt` (a
 source-specific runtime dependency like `speedtest-cli`, pure Python so the `.deb`'s
 `Architecture: all` design holds) is imported only in `toinflux/mqtt.py`.
+
+**Per-lock points (5.3).** `parse_nuki_data()`/`decode_stream_message()` return
+`{device: {field: value}}`, and `Nuki.send_data()` writes **one point per lock** tagged
+`device=<lock>` with bare field keys, delegating each to the base implementation with the header
+swapped in - the same idiom `send_heartbeat()` uses, so buffering, retry and the `InfluxWriteError`
+contract are untouched rather than reimplemented. Every lock in one cycle shares a single
+timestamp: letting each call default independently would scatter one snapshot across a second or
+two, so "what was the state at time T" could see one lock and not another. A failure on one lock
+does not stop the rest - each is attempted and one error raised at the end, so the worker still
+backs off, and re-writing a lock that already succeeded is harmless because points are idempotent.
+`MCP_INSTANCE_TAG = "device"`, and `MCP_LIVE_STATE_COVERS_ALL_INSTANCES = True` because Nuki is the
+only source whose *one* live read covers every producer (a single retained-state subscription
+returns all locks), unlike Hue where each bridge needs its own handler.
+
+The broker `host` tag was **dropped** in the same change rather than as a separate series break:
+every lock arrives through one broker, so it identified nothing, and moving broker should not start
+a new series.
+
+**This was a breaking change to emitted data, and the field-key prefix was the original mistake.**
+Before 5.3 every lock's fields were flattened into one shared point with the lock's name built into
+each field key (`Front_Door_Lock_stateValue`), which is precisely why the lock could not be queried
+as a dimension. Existing history keeps working but sits in different series from the new points.
+
+**The migration** (`scripts/migrate-nuki-device-tag.py`, shipped to
+`/usr/share/send-to-influx/` and documented in `UPGRADING.md`) converts it. Notes that cost real
+debugging:
+
+- **It cannot be documented InfluxQL instead.** There is no UPDATE; `SELECT ... INTO` preserves
+  existing tags via `GROUP BY *` but has no syntax to set a tag to a *new literal*, which is the
+  entire job; and the lock name lives in the field *key*, which InfluxQL has no expression to
+  operate on.
+- **Two phases, separately invoked.** Phase 1 is non-destructive by construction - the new format
+  is a different series - so old and new coexist and backing out means not running phase 2. Phase 2
+  is driven by a manifest phase 1 writes and scoped by the old `host` tag, so it can only drop what
+  phase 1 confirmed it carried across. An earlier version did an unscoped `DROP SERIES FROM "nuki"`,
+  which would have destroyed the migration's own output.
+- **It reads no credentials on any install type**, deliberately and universally. A fallback to
+  `settings.yaml` where it happens to be readable would make the safeguard depend on how you
+  installed rather than being real. It also needs `requests`, which the package keeps in its venv
+  rather than as a system dependency, so the documented invocation is
+  `/opt/send-to-influx/venv/bin/python3` - a bare `python3` fails where `python3-requests` is absent.
+- **Its value formatter duplicates `_format_field_value()` and must stay identical.** It emitted the
+  `i` integer suffix at first; a field's type is fixed by its first write, so that established these
+  fields as integer and every subsequent *collector* write then failed with a 400 type conflict. The
+  migration would have broken the running collector. Only writing both outputs to one real InfluxDB
+  surfaces it, and a test now pins the equivalence for every value shape. It is deliberately
+  *stricter* in one respect: a numeric value on a text field is still quoted, closing the same
+  failure by the other route.
+- **Its field list is a superset of the collector's and was hand-copied wrongly.** Listing a real
+  database's field keys found `stateName`/`doorsensorStateName` - text state names an earlier
+  release wrote before the numeric rename - still holding years of points and absent from the copy,
+  so the migration halted on the very data it exists to rescue. Had the halt not been there, phase 2
+  would have deleted them. This is exactly why a migration is tested against real data from the
+  previous release rather than a fixture matched to its own assumptions.
+- **The split is longest-known-suffix, and the underscore in the comparison is load-bearing** (a key
+  merely *ending* in a field name is not one of ours and must halt). Longest-match itself is
+  currently unreachable - two known fields could only both match if one ended with `_<the other>`,
+  and none contains an underscore - so no test kills it; it is documented as the guard for a future
+  underscored field rather than left looking tested.
+- **Halting beats skipping.** An unrecognised field key stops the run with nothing written, because a
+  skipped key is data silently left behind that phase 2 would then delete, and it would look like
+  success.
+
+**`Nuki.send_data()` must not capture every caller, and the discriminator is the payload's
+shape.** `send_heartbeat()` sets its own `collector_status` header and passes a flat
+`{field: value}` dict through the *same* `send_data()`; the streaming path passes per-device data
+explicitly. So "was `data` given?" cannot tell them apart - `_is_per_device()` decides on every
+value being a mapping, since a lock always carries a dict of fields and a field never does.
+Getting this wrong treated `ok`/`consecutive_failures` as lock names whose scalar values were
+then skipped as non-dicts, so **Nuki wrote no heartbeat at all**, silently, with only warnings -
+exactly the silent gap the heartbeat exists to prevent. Found in review, not by the tests, because
+every existing heartbeat test used a `MagicMock` handler: a mock's `send_data` never runs the
+source's own override, so those tests assert what `send_heartbeat` *asked for* and never what the
+handler *did*. `test_every_source_actually_writes_a_heartbeat_point` now drives a real handler per
+source down to the HTTP boundary - written across every source rather than just Nuki, because the
+break was one subclass violating a shared contract and the next override would break it the same
+way.
+
+- **External values are named with `!r` in every message, never raw.** A lock name comes from the
+  retained MQTT `name` topic, and one containing a newline turned the per-lock failure message
+  into *two* journal lines - the worker logs `Source '%s' failed: %s`, so a forged entry with its
+  own timestamp and ERROR level appeared as though the daemon had written it, and the same text
+  reaches an MCP client as a tool error. `escape_key_or_tag_value`'s own message was already safe
+  for exactly this reason; the prefix wrapped around it was not. Swept rather than patched at the
+  one reported line: the same shape existed in `mcp_write`'s unreachable-bridge list and
+  `mcp_read`'s all-instances-failed message, both of which reach a client. The name is still
+  reported, just escaped - a failure has to stay diagnosable from its output alone.
+
+- **The backlog is flushed once per cycle, not once per lock.** The write buffer is keyed by
+  *worker*, so calling the base `send_data()` per lock flushed it per lock too, charging the head
+  buffered point one rejection each time. With `MAX_POINT_REJECTIONS` at 5, a five-lock install
+  burned the whole allowance in one cycle and discarded the backlog after a single cycle instead
+  of five - defeating the documented guarantee that a middlebox answering 4xx for a down InfluxDB
+  cannot mass-discard it. `DataHandler.send_data()` therefore takes `flush=`, and Nuki passes it
+  only for its first lock; every lock still buffers its own point on failure, only the flush is
+  shared. Measured before and after (1/3/3 charged, five dropped outright; now 1 at any lock
+  count), and the test asserts the count because the count *is* the property.
+
+- **Statements travel in a POST body, never the URL.** The rewrite phase names every old field
+  key in one `SELECT` - one per lock per field - so a ten-lock estate is kilobytes of statement,
+  and in a request line a reverse proxy can refuse it, failing the migration on a statement
+  InfluxDB would have accepted. The same shape the read layer already hit, which is why
+  `build_edge_time_query` selects `*`. POST verified equivalent to GET on real 1.8 and 2.7 for
+  every statement this script issues.
+- **v2 has no `DROP SERIES`, so phase 2 differs by version.** Its v1-compatibility endpoint
+  answers HTTP *200* carrying `{"error": "not implemented: DROP SERIES"}` (verified on 2.7) - so
+  the error check catches it rather than mistaking it for success, but it can never succeed.
+  Phase 1 works fully on v2, so the operator would be left with migrated data and no way to
+  finish; phase 2 therefore translates that one rejection into the `/api/v2/delete` request that
+  does work. Built with `json.dumps`, because the predicate's own value contains double quotes
+  and hand-assembly produced invalid JSON that would have failed if pasted - the emitted command
+  was run verbatim against a real 2.7 (204, old `host=` series gone, migrated `device=` kept).
+  Deliberately *not* run automatically: it needs the organisation, which the script cannot know
+  and must not guess for a delete that cannot be undone. Only "not implemented" is translated;
+  any other failure surfaces as itself.
+
+**Changing emitted data means sweeping `tests/integration/` too, and that is easy to miss.**
+Integration tests are deselected from the default `pytest` run (by design - they need a broker),
+so a local green run says nothing about them. Worse, running `pytest -m integration` *without* a
+broker skips cleanly rather than failing, so it also proves nothing. The Nuki device-tag change
+left `test_mqtt_streaming.py` asserting the old prefixed field key *and* `startswith("nuki,host=")`
+- the exact tag the change removed - and only CI caught it. When a change alters a measurement,
+tag set or field key: grep `tests/integration/` for the old names, and run that suite against a
+real broker (`MQTT_TEST_BROKER_HOST`/`MQTT_TEST_BROKER_PORT` point it anywhere, so a throwaway
+`eclipse-mosquitto:2` container is enough). Then mutate the product back and confirm the test
+fails, since an assertion that survives the old behaviour was never testing the new one.
 
 **Streaming (5.1):** MQTT sources are event-driven, not timer-polled. `MqttDataHandler` sets
 `STREAMING = True` and `stream_mqtt_messages()` holds the subscription open, so a state change is
@@ -310,7 +436,7 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     the historical flat `fields`/`as_of` shape untouched. One failing bridge gets an `error` entry while the
     others still report `fields`, a partial answer *with* its failure status; only when every bridge fails is
     `SourceConnectionError` raised, since then there is nothing useful to return. **Scoping a history read runs through the shared
-    instance mechanism, not a Hue-specific path** (SI-33). Hue sets `MCP_INSTANCE_TAG = "host"`, so
+    instance mechanism, not a Hue-specific path**. Hue sets `MCP_INSTANCE_TAG = "host"`, so
     `query_history`'s `instance` scopes to one bridge exactly as it scopes Speedtest to one collecting host -
     the handler is resolved *unscoped* and the filter applied at the query, rather than the older route of
     `resolve_schema(instance=...)` adding the tag through `Hue.mcp_tag_filters()`. That override still exists
@@ -433,7 +559,7 @@ field set. Design points:
       unit* (a Hue bridge with its own credentials and worker) and would reject Speedtest, whose
       hosts are separate processes: the axis exists in the data without the collector having any
       notion of instances. `query_history` therefore carries both `bridge` (Hue's work unit) and
-      `instance` (the data axis) until SI-33 unifies them for callers.
+      `instance` (the data axis) until the shared parameter unified them for callers.
     - **The `collector_status` heartbeat takes its extra tags from the source**, via
       `DataHandler.heartbeat_tags()` - an instanced source tags its bridge, `Speedtest` tags the
       collecting machine through `Speedtest.collector_host()`, which is also what its data uses so
@@ -532,7 +658,7 @@ advertises a capability that isn't there. `home_status`/`usage_trends` are alway
 falls back to computing it when called standalone), so the per-source handler construction that
 computation costs isn't done twice at startup.
 
-### MyEnergi multiple devices (SI-34)
+### MyEnergi multiple devices
 
 Each of `zappi`/`eddi`/`harvi` collects **one worker per configured device**, registered through
 `_INSTANCE_ENUMERATORS` like Hue's bridges. `enumerate_devices()` in `toinflux/myenergi.py` is the
@@ -746,7 +872,12 @@ forever logging only "list index out of range".
 
 - `pyproject.toml` is the single source of truth for the package version (`[project].version`) and runtime dependencies (dynamically read from `requirements.txt`). Bump the version there, not in `sendtoinflux.py`.
 - `sendtoinflux.py`'s `__version__` is read from installed package metadata (`importlib.metadata.version("send-to-influx")`), falling back to `"0.0.0-dev"` when run from a source checkout without the package installed. `requirements-dev.txt` includes `-e .` so dev/test environments have it installed and see the real version.
-- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/preinst`/`postinst`/`prerm`/`postrm`). `/etc/send-to-influx/settings.yaml` is deliberately *not* a dpkg conffile: `postinst` and `send-to-influx-set-credential` write debconf answers/sentinels into it, and dpkg's conffile machinery treats any maintainer-script write as a local modification (Debian Policy 10.7.3 forbids the combination) - guaranteeing a "modified (by you or by a script)" prompt on every upgrade that ships a changed example, with a one-keypress path to replacing a configured file with the pristine example. Instead the example ships at `/usr/share/send-to-influx/example_settings.yaml` and `postinst` copies it into place only if `/etc/send-to-influx/settings.yaml` doesn't exist (the Policy 10.7.3 "configuration files handled by maintainer scripts" pattern; `postrm` removes it on purge, as that pattern requires) - so upgrades never touch the live file at all. On upgrade (and after a `dpkg-reconfigure` that rewrote configuration), `postinst` restarts the service if - and only if - it's currently running, so unattended upgrades don't leave the replaced code running until the next reboot; a stopped service is never started. Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. The exceptions since the MCP server landed are `pydantic_core` and `rpds-py`, plus `cffi` and `cryptography` since the mcp 2.x port (all required by the `mcp` SDK, compiled, no pure-Python fallback - `cryptography` arrives via `pyjwt[crypto]`, which `mcp/server/request_state.py` imports unconditionally, so it is load-bearing rather than optional): the blanket strip removes them too, and a dedicated compiled-wheel-matrix step re-adds them. **These come in two shapes and the difference is load-bearing.** `pydantic_core`, `rpds-py` and `cffi` publish a wheel per CPython minor whose `.so` filename carries both the minor and the architecture (`_cffi_backend.cpython-310-aarch64-linux-gnu.so`), so every variant across the supported minors (3.10-3.14, `COMPILED_WHEEL_MINORS`) x both architectures can be merged into the one shared site-packages and coexist - CPython only imports a `.so` tagged with its own exact ABI. `cryptography` publishes a *stable-ABI* (`cp39-abi3`) wheel instead: one per architecture, serving every minor, whose `.so` name carries **neither** tag - `cryptography/hazmat/bindings/_rust.abi3.so` is identically named in the x86_64 and the aarch64 wheel, so merging both would silently have one overwrite the other. Those (`COMPILED_WHEEL_ABI3_PACKAGES`) are therefore staged side-by-side as `<name>.so.<arch>` with the un-suffixed name deliberately never written, and `postinst` symlinks the variant matching `dpkg --print-architecture` at install time (discovered by pattern, so a future abi3 dependency needs no postinst change; on an architecture with no staged variant nothing is linked, leaving the pure-Python collectors unaffected and the optional MCP server reporting its usual "could not be imported" `ConfigError`). The build fails loudly if any minor/arch combination is missing, or if an abi3 extension ever appears un-suffixed - which (together with the `rpds-py~=0.30.0` hold in requirements.txt) is the guard against a wheel version dropping a supported minor or platform. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead renames it to the version-independent `lib/python3` and `postinst` symlinks every supported minor to it (see the `preinst`/layout bullet below for why the symlinks are created there rather than shipped; both bounds come from `PYTHON_MIN_SUPPORTED_MINOR`/`PYTHON_MAX_SUPPORTED_MINOR`, which also drive `Depends:` and are substituted into `postinst`, so the range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds the same script's output on an `ubuntu-24.04-arm` runner on every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - catching both a future dependency change that makes a compiled extension load-bearing rather than optional, and any regression in the maintainer-script behaviour below, before it can merge; `bookworm-verify` re-runs the same suite in a `debian:12` container for systemd-252 coverage (the restart scenario self-skips there - no running systemd - but the systemd-creds *tooling* is the real 252 binaries, which is what caught out 4.1). See the README's "After installing" section (under "Using the .deb package").
+- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/preinst`/`postinst`/`prerm`/`postrm`). `/etc/send-to-influx/settings.yaml` is deliberately *not* a dpkg conffile: `postinst` and `send-to-influx-set-credential` write debconf answers/sentinels into it, and dpkg's conffile machinery treats any maintainer-script write as a local modification (Debian Policy 10.7.3 forbids the combination) - guaranteeing a "modified (by you or by a script)" prompt on every upgrade that ships a changed example, with a one-keypress path to replacing a configured file with the pristine example. Instead the example ships at `/usr/share/send-to-influx/example_settings.yaml` and `postinst` copies it into place only if `/etc/send-to-influx/settings.yaml` doesn't exist (the Policy 10.7.3 "configuration files handled by maintainer scripts" pattern; `postrm` removes it on purge, as that pattern requires) - so upgrades never touch the live file at all. The Nuki device-tag migration and `UPGRADING.md`
+ship into that same directory, so an apt install can run the 5.2->5.3 data migration without
+cloning the repo - deliberately not a `pyproject.toml` entry point and asserted *off* `$PATH` by
+the scenario suite, since a destructive irreversible one-off must be a deliberate act. It is run
+with `/opt/send-to-influx/venv/bin/python3`, not a bare `python3`: it needs `requests`, which the
+package bundles rather than declaring as a system dependency. On upgrade (and after a `dpkg-reconfigure` that rewrote configuration), `postinst` restarts the service if - and only if - it's currently running, so unattended upgrades don't leave the replaced code running until the next reboot; a stopped service is never started. Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. The exceptions since the MCP server landed are `pydantic_core` and `rpds-py`, plus `cffi` and `cryptography` since the mcp 2.x port (all required by the `mcp` SDK, compiled, no pure-Python fallback - `cryptography` arrives via `pyjwt[crypto]`, which `mcp/server/request_state.py` imports unconditionally, so it is load-bearing rather than optional): the blanket strip removes them too, and a dedicated compiled-wheel-matrix step re-adds them. **These come in two shapes and the difference is load-bearing.** `pydantic_core`, `rpds-py` and `cffi` publish a wheel per CPython minor whose `.so` filename carries both the minor and the architecture (`_cffi_backend.cpython-310-aarch64-linux-gnu.so`), so every variant across the supported minors (3.10-3.14, `COMPILED_WHEEL_MINORS`) x both architectures can be merged into the one shared site-packages and coexist - CPython only imports a `.so` tagged with its own exact ABI. `cryptography` publishes a *stable-ABI* (`cp39-abi3`) wheel instead: one per architecture, serving every minor, whose `.so` name carries **neither** tag - `cryptography/hazmat/bindings/_rust.abi3.so` is identically named in the x86_64 and the aarch64 wheel, so merging both would silently have one overwrite the other. Those (`COMPILED_WHEEL_ABI3_PACKAGES`) are therefore staged side-by-side as `<name>.so.<arch>` with the un-suffixed name deliberately never written, and `postinst` symlinks the variant matching `dpkg --print-architecture` at install time (discovered by pattern, so a future abi3 dependency needs no postinst change; on an architecture with no staged variant nothing is linked, leaving the pure-Python collectors unaffected and the optional MCP server reporting its usual "could not be imported" `ConfigError`). The build fails loudly if any minor/arch combination is missing, or if an abi3 extension ever appears un-suffixed - which (together with the `rpds-py~=0.30.0` hold in requirements.txt) is the guard against a wheel version dropping a supported minor or platform. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead renames it to the version-independent `lib/python3` and `postinst` symlinks every supported minor to it (see the `preinst`/layout bullet below for why the symlinks are created there rather than shipped; both bounds come from `PYTHON_MIN_SUPPORTED_MINOR`/`PYTHON_MAX_SUPPORTED_MINOR`, which also drive `Depends:` and are substituted into `postinst`, so the range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds the same script's output on an `ubuntu-24.04-arm` runner on every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - catching both a future dependency change that makes a compiled extension load-bearing rather than optional, and any regression in the maintainer-script behaviour below, before it can merge; `bookworm-verify` re-runs the same suite in a `debian:12` container for systemd-252 coverage (the restart scenario self-skips there - no running systemd - but the systemd-creds *tooling* is the real 252 binaries, which is what caught out 4.1). See the README's "After installing" section (under "Using the .deb package").
 
 The package also ships rsyslog and logrotate config (`packaging/deb/send-to-influx.rsyslog`/
 `send-to-influx.logrotate`, installed to `/etc/rsyslog.d/49-send-to-influx.conf` and

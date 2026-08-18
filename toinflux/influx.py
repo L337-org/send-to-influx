@@ -217,6 +217,13 @@ class DataHandler:
     # means different things (Speedtest's collecting host, a Hue bridge, a Nuki
     # lock, a MyEnergi device), and most sources genuinely have only one producer.
     MCP_INSTANCE_TAG: "str | None" = None
+    # Whether one live get_data() covers *every* producer of this source, or only the one
+    # this handler serves. Three shapes exist and they are genuinely different: Speedtest
+    # reads live but can only speak for the local host; Hue reads live per bridge, each
+    # bridge having its own handler; Nuki reads every lock over one MQTT subscription, so a
+    # single handler's live read covers them all. Only the third can report per instance
+    # from a live read, which is what this distinguishes.
+    MCP_LIVE_STATE_COVERS_ALL_INSTANCES = False
 
     def mcp_tag_filters(self):
         """Return the tag filters that scope this handler's reads.
@@ -344,7 +351,7 @@ class DataHandler:
         """
         return worker_label(self.source, self.instance)
 
-    def send_data(self, data=None, timestamp=None, use_buffer=True):
+    def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True):
         """
         Sends data to influxDB.
 
@@ -370,6 +377,16 @@ class DataHandler:
             heartbeat), which would otherwise consume buffer capacity that belongs
             to real measurements.
         :type use_buffer: bool
+        :param flush: when False, post this point without first flushing the
+            backlog. Exists for a source that writes several points per collection
+            cycle through this method - Nuki writes one per lock - because the write
+            buffer is per *worker*, not per point: flushing on every point charged
+            the head buffered point one rejection per point, so a five-lock install
+            burned all of ``MAX_POINT_REJECTIONS`` in a single cycle and discarded
+            the backlog after one, instead of surviving five. Such a caller flushes
+            on its first point and passes False for the rest. Ignored when
+            ``use_buffer`` is False, which skips the buffer entirely.
+        :type flush: bool
         :return: None
         :raises InfluxWriteError: if the write to InfluxDB fails
         """
@@ -398,9 +415,29 @@ class DataHandler:
             self._post_line(data_to_send, url, post_kwargs)
             return
 
+        self._send_buffered(data_to_send, url, post_kwargs, flush)
+
+    def _send_buffered(self, data_to_send, url, post_kwargs, flush):
+        """Flush the backlog then post this point, buffering it if either fails.
+
+        Split out of ``send_data`` only to keep that method within the project's cyclomatic
+        complexity limit; the behaviour is unchanged.
+
+        :param data_to_send: the line protocol point, or None for a flush-only call
+        :type data_to_send: str or None
+        :param url: the write URL from _build_write_request
+        :type url: str
+        :param post_kwargs: the request kwargs from _build_write_request
+        :type post_kwargs: dict
+        :param flush: whether to flush the backlog first - see send_data
+        :type flush: bool
+        :return: None
+        :raises InfluxWriteError: the flush or the post failed
+        """
         buffer = self._write_buffers.setdefault(self.worker_key, deque(maxlen=MAX_BUFFERED_POINTS))
         try:
-            self._flush_buffer(buffer, url, post_kwargs)
+            if flush:
+                self._flush_buffer(buffer, url, post_kwargs)
             if data_to_send is not None:
                 self._post_line(data_to_send, url, post_kwargs)
         except InfluxWriteError:

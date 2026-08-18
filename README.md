@@ -41,6 +41,7 @@ Contents
 - [Using the .deb package](#using-the-deb-package)
 - [Remote MCP server (query and control your devices via an MCP client like Claude)](#remote-mcp-server)
 - [Usage / CLI reference](#usage)
+- [Upgrading](#upgrading)
 - [Contributing](#contributing)
 - [Privacy and Security](#privacy-and-security)
 
@@ -213,8 +214,20 @@ the **instant** a lock or door-sensor state changes, so a door opening and closi
 no longer missed. It also takes a full-state snapshot every `interval` seconds as a safety net (and
 to keep an idle lock's status heartbeat ticking); because Nuki publishes every state topic with the
 MQTT retain flag set, that snapshot's brief resubscribe receives the last-known state of every lock
-provisioned to the broker. Locks need no per-device configuration in `settings.yaml`, and each
-lock's fields are prefixed with its own name from the Nuki app (give each lock a distinct name).
+provisioned to the broker. Locks need no per-device configuration in `settings.yaml`: each lock
+is written as its own point, tagged `device=<the lock's name from the Nuki app>` (give each lock
+a distinct name), with the same bare field names for every lock. Group or filter by `device` to
+separate them. The broker is not recorded - every lock arrives through one, so it identifies
+nothing, and changing broker should not start a new series.
+
+> **Breaking change in 5.3:** the lock moved out of the field key and into a `device` tag.
+> Before 5.3 every lock's state went into one shared point per cycle with each field key
+> prefixed by the lock's name (`Front_Door_Lock_stateValue`), which made the lock impossible to
+> query as a dimension; the point also carried a `host` tag naming the broker, which has been
+> dropped. Your existing history is untouched and nothing breaks, but old and new data are in
+> different series, so a dashboard built on prefixed field keys stops gaining new points.
+> [UPGRADING.md](UPGRADING.md) explains the supplied migration that joins them back together -
+> two phases, with the irreversible delete separately invoked so you can verify first.
 
 > **Behaviour change in 5.1:** MQTT sources (Nuki) now stream state changes as they happen instead
 > of only sampling once per `interval`, so you'll see denser data - more points, at the moments
@@ -765,6 +778,18 @@ Usage
 | 0 | Normal exit |
 | 1 | A condition that requires manual intervention and never resolves itself by waiting: a fatal configuration error (missing/invalid settings, unknown source name), or nothing to collect (`sources:` empty/absent with no `-s`/`--source`, or every configured instance of a requested source is unusable - e.g. a Hue install whose bridges have no tokens). Under the packaged systemd service, this exit code is marked `RestartPreventExitStatus`, so the service is not respawned for either cause - see "After installing" below. |
 | 2 | Connection error (a transient failure talking to a source's API or InfluxDB) in `--dump` mode only - there's no worker loop to retry a one-shot dump with backoff. In continuous mode (single- or multi-source), connection errors are always retried with backoff instead of exiting. |
+
+Upgrading
+---------
+
+Most releases need nothing done: `settings.yaml` is never rewritten by an upgrade, and new
+configuration is optional with a safe default.
+
+Where a release does need a step - a data migration, or a change to what a series looks like -
+it is described in [UPGRADING.md](UPGRADING.md), per version. **5.3 has one**, for Nuki users
+only: the lock moved from the field key into a `device` tag, and a supplied migration converts
+existing history. On a packaged install both the migration and a copy of those instructions are
+at `/usr/share/send-to-influx/`.
 
 Contributing
 ------------

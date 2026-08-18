@@ -790,6 +790,96 @@ class TestSendHeartbeat:
 
         assert captured["header"] == "collector_status,source=hue "
 
+    # Settings that let every source construct, so the contract test below can use a real
+    # handler per source rather than a mock. A mock is exactly what let a real regression
+    # through: MagicMock.send_data never runs the source's own override.
+    #
+    # Asserted to pass the project's own validate_settings() by the test below, not merely
+    # hand-checked - which is what caught that every source needs an `interval`. A handler
+    # constructed from settings no real install could have is only pretending to be real, since
+    # __init__ reads almost none of them.
+    #
+    # Note the validator does NOT cover everything: octopus was written here with "serial"
+    # where the collector reads "meter_serial", and validate_settings accepts that happily -
+    # it checks the fields it knows are required, not every field a source later reads. So the
+    # key names below are additionally checked against each source by hand. Corrected rather
+    # than left, because the whole point of this fixture is settings a real install could have.
+    _EVERY_SOURCE_SETTINGS = {
+        "influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"},
+        "mqtt": {"broker_host": "broker.example.com"},
+        "hue": {"db": "d", "interval": 300, "host": "bridge.example.com", "user": "token"},
+        "nuki": {"db": "d", "interval": 300},
+        "speedtest": {"db": "d", "interval": 3600},
+        "openmeteo": {"db": "d", "interval": 300, "latitude": 51.5, "longitude": -0.1},
+        "octopus": {"db": "d", "interval": 1800, "api_key": "k", "mpan": "1", "meter_serial": "s"},
+        "carbonintensity": {"db": "d", "interval": 1800},
+        "zappi": {"db": "d", "interval": 300, "serial": "10000001"},
+        "eddi": {"db": "d", "interval": 300, "serial": "10000002"},
+        "harvi": {"db": "d", "interval": 300, "serial": "10000003"},
+        "myenergi": {"apikey": "k"},
+    }
+
+    def test_the_fixture_settings_are_ones_a_real_install_could_have(self):
+        """Guards the fixture the contract test depends on.
+
+        The point of that test is a *real* handler per source, which is undermined if the
+        settings are not ones the project would accept - and nothing would say so, because
+        __init__ reads almost none of them. Running the real validator is what keeps the
+        fixture honest as sources gain required fields.
+
+        It is not a complete check: the validator enforces the fields it knows are required,
+        not every field a source goes on to read, so it accepts octopus's "serial" where the
+        collector wants "meter_serial". Worth having anyway - it caught the missing intervals -
+        but do not read a pass here as proof every key is right.
+        """
+        from toinflux.general import known_sources, validate_settings
+
+        for name in known_sources():
+            # Raises ConfigError with the offending key named, which is the useful failure.
+            validate_settings({**self._EVERY_SOURCE_SETTINGS, "sources": [name]}, source=name)
+
+    def test_every_source_actually_writes_a_heartbeat_point(self):
+        """The heartbeat must survive any source's own send_data() override.
+
+        Every other test in this class uses a MagicMock handler, so it asserts what
+        send_heartbeat *asked for* and never what the handler *did*. That is precisely how a
+        real regression shipped: Nuki's per-lock override treated the heartbeat's flat
+        ``{ok, consecutive_failures}`` payload as lock names, whose scalar values were then
+        skipped as non-dicts, so Nuki wrote no heartbeat at all - silently, and only warnings
+        in the log. A collector with no heartbeat is the exact silent gap the heartbeat exists
+        to prevent.
+
+        So this drives a *real* handler per source down to the HTTP boundary and asserts a
+        collector_status line arrives. It covers every source rather than just Nuki, because
+        the failure was a shared contract being broken by one subclass, and the next override
+        would break it the same way.
+        """
+        from toinflux.general import known_sources
+
+        for name in known_sources():
+            posted = self._heartbeat_lines(name)
+            assert len(posted) == 1, f"{name} wrote {len(posted)} heartbeat lines, expected 1: {posted}"
+            line = posted[0]
+            assert line.startswith("collector_status,"), f"{name} wrote {line!r}"
+            assert f"source={name}" in line, f"{name} wrote {line!r}"
+            assert "ok=1" in line and "consecutive_failures=0" in line, f"{name} wrote {line!r}"
+
+    @classmethod
+    def _heartbeat_lines(cls, name):
+        """Drive one source's real handler through send_heartbeat and return the lines it
+        posted. A method rather than an inline loop body so nothing closes over a loop
+        variable."""
+        from toinflux.general import source_class
+
+        with patch("toinflux.influx.load_settings", return_value=cls._EVERY_SOURCE_SETTINGS):
+            handler = source_class(name)(name)
+        handler.session = MagicMock()
+        posted = []
+        base = type(handler).__mro__[-2]  # DataHandler, wherever it sits in each source's chain
+        with patch.object(base, "_post_line", side_effect=lambda line, *a, **k: posted.append(line)):
+            sendtoinflux.send_heartbeat(handler, name, ok=True, consecutive_failures=0)
+        return posted
+
     def test_uses_current_time_not_a_stale_self_timestamp(self, sample_settings):
         """send_heartbeat writes with the current time, not a stale self.timestamp set by an earlier get_data() cycle.
 

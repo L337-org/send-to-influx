@@ -183,6 +183,15 @@ def metadata_for(field_metadata, field):
     Longest-wins is deterministic regardless of dict order and stays correct as
     metadata grows.
 
+    **The suffix match now serves history, not current writes.** It existed because Nuki
+    prefixed every field key with its lock's name; since 5.3 each lock is a tag and the
+    keys are bare, so an exact match covers everything being written today. It is kept
+    deliberately rather than deleted: pre-migration Nuki points still carry prefixed keys
+    until the migration's delete phase runs, so those fields remain queryable in the
+    meantime - and this is what keeps them annotated with their units and decoded labels,
+    which is exactly when an operator is deciding whether to migrate at all. Removable once
+    no install can still hold pre-5.3 Nuki data, which is a condition rather than a date.
+
     Kept module-level (not only a ReadSchema method) so the live current-state
     path can annotate a source's raw ``get_data()`` fields straight from the
     handler's ``MCP_FIELD_METADATA``, without building an InfluxDB-backed schema.
@@ -1368,6 +1377,18 @@ def current_state_result(source, settings, settings_file):
             # rather than in this install's config. Only answerable per producer when
             # the state comes *from* InfluxDB: a live read reflects this machine alone
             # and could not speak for the others, so a live source keeps the flat shape.
+            if first.MCP_INSTANCE_TAG and first.MCP_LIVE_STATE_COVERS_ALL_INSTANCES:
+                # One live read covers every producer - Nuki, whose locks all arrive over a
+                # single MQTT subscription. get_data() already returns {instance: {field:
+                # value}}, so no InfluxDB read is needed and the answer is genuinely live for
+                # every lock rather than only the handler's own.
+                as_of = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+                result["instance_tag"] = first.MCP_INSTANCE_TAG
+                result["instances"] = {
+                    key: {"fields": _annotate_state(first, fields), "as_of": as_of}
+                    for key, fields in sorted((first.get_data() or {}).items())
+                }
+                return result
             if first.MCP_INSTANCE_TAG and not first.MCP_LIVE_STATE:
                 per_instance = _latest_recorded_per_instance(first)
                 result["instance_tag"] = first.MCP_INSTANCE_TAG
@@ -1394,7 +1415,8 @@ def current_state_result(source, settings, settings_file):
         if failures == len(handlers):
             raise SourceConnectionError(
                 f"could not read current state for any configured target of {source!r}: "
-                + "; ".join(f"{instance}: {entry['error']}" for instance, entry in instances.items())
+                # instance!r for the same reason as mcp_write's unreachable list.
+                + "; ".join(f"{instance!r}: {entry['error']}" for instance, entry in instances.items())
             )
         result["instances"] = instances
         return result

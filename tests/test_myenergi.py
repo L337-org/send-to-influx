@@ -326,7 +326,7 @@ class TestHarvi:
 
 
 class TestDeviceSelection:
-    """SI-36. The device was picked out of the API response by a hardcoded index, so a
+    """The device was picked out of the API response by a hardcoded index, so a
     second device of the same type was silently ignored and an account with none of that
     type raised IndexError - caught by the worker's broad handler and retried forever
     logging only "list index out of range"."""
@@ -426,7 +426,7 @@ class TestDeviceSelection:
 
 
 class TestMultiDevice:
-    """SI-34: several devices of one type, each named by the operator."""
+    """Several devices of one type, each named by the operator."""
 
     BASE = {
         "influx": {"url": "http://x", "token": "t", "org": "o"},

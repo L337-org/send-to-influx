@@ -207,7 +207,10 @@ def _resolve_hue_target(handlers, device, bridge):
         # missing and that 'bridge' proceeds without consulting it. Raised as a
         # ToolParamError, not the underlying SourceConnectionError: the caller has something
         # different to do, whereas a transient-transport error invites an identical retry.
-        missing = ", ".join(f"{instance} ({exc})" for instance, exc in unreachable)
+        # instance!r, so a target whose configured name contains a newline cannot split this
+        # message into two lines in the log or the client's error text - same reasoning as
+        # Nuki.send_data()'s per-lock failures.
+        missing = ", ".join(f"{instance!r} ({exc})" for instance, exc in unreachable)
         found = (
             ", ".join(f"{name!r} (id {light_id}) on bridge {instance}" for instance, _, light_id, name in matches)
             or "none"
