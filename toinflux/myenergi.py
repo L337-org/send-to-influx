@@ -70,23 +70,14 @@ def enumerate_devices(source, source_settings):
     if source_settings.get("serial") is not None:
         serial, serial_errors = _checked_serial(source, source_settings["serial"])
         errors.extend(serial_errors)
+        label, label_errors = _checked_legacy_label(source, source_settings)
+        errors.extend(label_errors)
         # Not created when its fields failed validation either, matching the entry path
         # below. Unreachable while validate_settings() raises on any error, but the
         # alternative default would be to treat a broken `fields` as "collect everything",
         # which is the wrong way to fail if this ever became reachable.
-        if serial is not None and not block_field_errors:
-            devices.append(
-                MyEnergiDevice(
-                    serial=serial,
-                    # An explicit top-level label is honoured; without one the source name
-                    # keeps the emitted tag identical to what this install already writes.
-                    # Stripped, and a blank one treated as absent, so `label: "   "` cannot
-                    # become a whitespace-only tag value and instance name - which would be
-                    # near-impossible to spot and would break scoping and series identity.
-                    label=str(source_settings.get("label") or "").strip() or source,
-                    fields=block_fields,
-                )
-            )
+        if serial is not None and label is not None and not block_field_errors:
+            devices.append(MyEnergiDevice(serial=serial, label=label, fields=block_fields))
 
     raw = source_settings.get("devices")
     if raw is None:
@@ -109,6 +100,35 @@ def enumerate_devices(source, source_settings):
     if not devices:
         warnings.append(f"no {source} device is configured, so {source} will not be collected")
     return devices, errors, warnings
+
+
+def _checked_legacy_label(source, source_settings):
+    """
+    Return the label for the legacy top-of-block device, or an error saying why not.
+
+    An **absent** label defaults to the source name, which is what keeps an existing install
+    writing ``device=zappi`` and is why this feature needed no data migration.
+
+    A **present but blank or non-string** label is an error rather than falling back to that
+    default. The two cases are different intentions: no label means none was wanted, while
+    ``label: "   "`` means one was wanted and got typed wrongly. Falling back there would
+    hand the operator ``device=zappi`` when they asked for a name, so their dashboard would
+    show the wrong thing with nothing saying why - and it would treat the same mistake more
+    leniently than a ``devices:`` entry does, where a blank label is refused.
+
+    :param source: the source name, used as the default and in messages
+    :type source: str
+    :param source_settings: that source's settings block
+    :type source_settings: dict
+    :return: (label, errors); label is None when there are errors
+    :rtype: tuple
+    """
+    if "label" not in source_settings or source_settings["label"] is None:
+        return source, []
+    label = source_settings["label"]
+    if not isinstance(label, str) or not label.strip():
+        return None, [f"{source}.label is set but blank - remove it to fall back to {source!r}, " f"or give it a name"]
+    return label.strip(), []
 
 
 def _device_from_entry(position, entry, block_fields):

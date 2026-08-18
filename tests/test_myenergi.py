@@ -703,12 +703,28 @@ class TestMultiDevice:
         )
         assert errors[0].endswith("each device needs its own serial")
 
-    def test_a_blank_top_level_label_falls_back_to_the_source_name(self):
-        """`label: "   "` is truthy, so it became a whitespace-only tag value and instance
-        name - near-impossible to spot, and it would break scoping and series identity."""
-        devices, errors, _ = enumerate_devices("zappi", {"serial": "1", "label": "   "})
-        assert errors == []
-        assert [d.label for d in devices] == ["zappi"]
+    def test_an_absent_label_defaults_to_the_source_name(self):
+        """The reason no migration was needed: an existing install keeps writing device=zappi."""
+        for block in ({"serial": "1"}, {"serial": "1", "label": None}):
+            devices, errors, _ = enumerate_devices("zappi", block)
+            assert errors == []
+            assert [d.label for d in devices] == ["zappi"]
+
+    def test_a_present_but_blank_label_is_refused_rather_than_defaulted(self):
+        """Two different intentions: no label means none was wanted, while `label: "   "`
+        means one was wanted and typed wrongly. Falling back there would hand the operator
+        device=zappi when they asked for a name, so their dashboard would show the wrong
+        thing with nothing saying why - and it would treat the same mistake more leniently
+        than a devices entry, where a blank label is refused."""
+        _, errors, _ = enumerate_devices("zappi", {"serial": "1", "label": "   "})
+        assert "set but blank" in errors[0]
+        assert "remove it to fall back" in errors[0]
+
+    def test_a_non_string_label_says_so_rather_than_calling_it_blank(self):
+        """`label: 5` is not blank, and saying so would send the reader looking for
+        whitespace that is not there."""
+        _, errors, _ = enumerate_devices("zappi", {"serial": "1", "label": 5})
+        assert "must be a name (got int)" in errors[0]
 
     def test_a_padded_top_level_label_is_stripped(self):
         devices, _, _ = enumerate_devices("zappi", {"serial": "1", "label": "  Garage  "})
