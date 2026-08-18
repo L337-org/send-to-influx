@@ -217,8 +217,6 @@ myenergi:
   zappi_url: "https://s18.myenergi.net/cgi-jstatus-Z"
   # The URL to get the status of the Harvi device
   harvi_url: "https://s18.myenergi.net/cgi-jstatus-H"
-  # The URL to get the status of all devices
-  status_url: "https://s18.myenergi.net/cgi-jstatus-*"
   # The URL to get the dayhour data for the Zappi device
   dayhour_url: "https://s18.myenergi.net/cgi-jdayhour-Z"
   # The API key for the Myenergi API

@@ -29,6 +29,13 @@ dependencies = { file = ["requirements.txt"] }
 
 [tool.black]
 line-length = 120
+# Pinned to the minimum supported interpreter, never left to inference. Black otherwise picks a
+# target from the syntax it finds and the interpreter running it - on this machine it inferred
+# py315 while running on 3.14, warning on every invocation - so "formatted correctly" could
+# differ between a developer's machine and CI, which is the one thing a formatter must not do.
+# py310 also guarantees the output stays parseable on every version the project supports, which
+# requires-python and the .deb's PYTHON_MIN_SUPPORTED_MINOR both put at 3.10.
+target-version = ["py310"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

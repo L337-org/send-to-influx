@@ -855,6 +855,18 @@ forever logging only "list index out of range".
      question-visibility scenario (questions appear when the source is selected, and for
      conditional shared blocks, do **not** appear when it isn't).
 
+**The supported Python floor is declared in four places and a test keeps them consistent.**
+`requires-python` gates installation, `PYTHON_MIN_SUPPORTED_MINOR` in `build-deb.sh` drives the
+`.deb`'s `Depends:` and its venv symlinks, the CI matrix decides what is actually tested, and
+`[tool.black] target-version` decides what syntax the formatter may emit. Raising one and
+forgetting another fails remotely from the cause - a package installing on a version nothing
+tested, or formatting a supported interpreter cannot parse -
+so `test_the_supported_python_floor_is_declared_consistently` reads all four and fails naming
+whichever disagrees. **`target-version` is pinned rather than inferred**: black otherwise picks a
+target from the syntax it sees and the interpreter running it (observed inferring `py315` while
+running on 3.14, warning on every invocation), which would let "correctly formatted" differ
+between a developer's machine and CI - the one thing a formatter must not do.
+
 ### Testing conventions
 
 - Mock `load_settings`, HTTP calls, and file I/O so tests run without real config or network.
