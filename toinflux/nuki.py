@@ -176,6 +176,8 @@ class Nuki(MqttDataHandler):
 
         A failure on one lock does not stop the rest: each is attempted, and one
         InfluxWriteError is raised at the end if any failed, so the worker still backs off.
+        That covers a lock whose *name* cannot be used as well as one whose write fails - see
+        the loop below, where building the header is deliberately inside the guarded block.
         Points are idempotent - same measurement, tag set and timestamp overwrite - so the
         retry re-writing a lock that already succeeded is harmless.
 
@@ -210,8 +212,14 @@ class Nuki(MqttDataHandler):
         failures = []
         try:
             for label, fields in sorted(per_device.items()):
-                self.influx_header = f"nuki,device={escape_key_or_tag_value(label)} "
                 try:
+                    # Header construction is inside the try because it can fail: a lock name
+                    # carrying a newline cannot be escaped (a newline is what separates points)
+                    # and escape_key_or_tag_value raises. Built outside, that one lock aborted
+                    # the loop and every lock sorting after it went unwritten - breaking the
+                    # promise two lines up. Lock names come from the retained MQTT `name` topic,
+                    # so they are external input, not config.
+                    self.influx_header = f"nuki,device={escape_key_or_tag_value(label)} "
                     super().send_data(data=fields, timestamp=timestamp, use_buffer=use_buffer)
                 except InfluxWriteError as exc:
                     failures.append(f"{label}: {exc}")

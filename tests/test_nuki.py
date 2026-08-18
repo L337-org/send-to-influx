@@ -438,6 +438,35 @@ class TestPerLockPoints:
 
         assert _is_per_device(payload) is per_device
 
+    def test_an_unusable_lock_name_does_not_stop_the_other_locks(self, sample_settings):
+        """The docstring promises one lock failing does not stop the rest, and that has to
+        cover a lock whose *name* is unusable as well as one whose write fails.
+
+        A lock name comes from the retained MQTT ``name`` topic, so it is external input. One
+        containing a newline cannot be escaped - a newline is what separates points - so
+        escape_key_or_tag_value raises. Built outside the guarded block, that aborted the loop
+        and every lock sorting after the bad one went unwritten, which is a promise the
+        docstring made and the code did not keep.
+        """
+        from toinflux.influx import InfluxWriteError
+
+        handler = self._handler(sample_settings)
+        handler.data = {
+            "Aaa_Good": {"stateValue": 1},
+            "Bad\nnuki,device=Injected fake": {"stateValue": 2},
+            "Zzz_Good": {"stateValue": 3},
+        }
+        written, patcher = self._captured(handler)
+        with patcher:
+            # Still raises, so the worker keeps backing off rather than treating the cycle as
+            # healthy - the bad name will not fix itself, but the good locks keep reporting.
+            with pytest.raises(InfluxWriteError, match="cannot contain a newline"):
+                handler.send_data(timestamp=1700000000)
+
+        headers = [header for header, _, _ in written]
+        assert headers == ["nuki,device=Aaa_Good ", "nuki,device=Zzz_Good "], headers
+        assert not any("Injected" in header for header in headers)
+
     def test_the_header_is_restored_after_writing(self, sample_settings):
         """send_data() swaps a per-lock header in for each write, and must put back what it
         found. Left dirty, the handler holds the *last* lock's header, and any later write that
