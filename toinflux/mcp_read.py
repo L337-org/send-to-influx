@@ -983,13 +983,18 @@ def _list_sources_result(settings, settings_file):
             continue
         # Constructed only to read class metadata; close its session immediately.
         try:
-            out.append(
-                {
-                    "source": source,
-                    "measurement": handler.MCP_MEASUREMENT or handler.source,
-                    "description": handler.MCP_DESCRIPTION,
-                }
-            )
+            entry = {
+                "source": source,
+                "measurement": handler.MCP_MEASUREMENT or handler.source,
+                "description": handler.MCP_DESCRIPTION,
+            }
+            # The tag name only - static class metadata, so this stays a no-InfluxDB
+            # call. Deliberately not the values: enumerating them means a query per
+            # source, and the entry point for reads should not become the most expensive
+            # tool on the server. list_fields carries them, and its description says so.
+            if handler.MCP_INSTANCE_TAG:
+                entry["instance_tag"] = handler.MCP_INSTANCE_TAG
+            out.append(entry)
         finally:
             close_session(handler.session)
     return {"sources": out}
@@ -1008,7 +1013,15 @@ def list_fields_result(source, settings, settings_file):
             if meta.get("codes"):
                 entry["codes"] = {str(code): label for code, label in meta["codes"].items()}
             fields.append(entry)
-        return {"source": source, "measurement": schema.measurement, "fields": fields}
+        result = {"source": source, "measurement": schema.measurement, "fields": fields}
+        if schema.instance_tag:
+            # Reported here rather than in list_sources because this call already makes
+            # an InfluxDB round trip: the values are live, so listing them costs nothing
+            # extra here and would cost a query per source there. list_sources names the
+            # tag so a caller knows to come and get them.
+            result["instance_tag"] = schema.instance_tag
+            result["instances"] = sorted(schema.instance_values)
+        return result
     finally:
         close_session(handler.session)
 
@@ -1509,7 +1522,12 @@ def register_read_tools(server, settings, settings_file=None):
         The entry point for reads and the only one needing no arguments: start
         here, then `list_fields` for a source's fields, then `query_history` to
         read them. Takes no parameters and returns every configured source; use
-        `list_fields` when you already know the source and want its fields."""
+        `list_fields` when you already know the source and want its fields.
+
+        A source whose measurement holds several producers (e.g. Speedtest, one per
+        collecting host) reports the tag that tells them apart as `instance_tag`. The
+        values it holds come from `list_fields`, not here, because listing them means
+        querying InfluxDB per source."""
         return await anyio.to_thread.run_sync(_list_sources_result, settings, settings_file)
 
     @server.tool(title="List Source Fields", annotations=_READ_ONLY)
@@ -1521,7 +1539,12 @@ def register_read_tools(server, settings, settings_file=None):
         rejected as an error, so use it to discover exact field names (they can
         contain spaces-as-underscores and punctuation). Use `list_sources`
         instead when you don't yet know which source you want. `source` is a
-        source name from `list_sources`; an unknown one returns an error."""
+        source name from `list_sources`; an unknown one returns an error.
+
+        Where the source's measurement holds several producers, also returns
+        `instance_tag` (what tells them apart, e.g. 'host') and `instances` (the values
+        recorded). Those are the accepted values for `query_history`'s `instance`, so
+        this is where to look before scoping a query or comparing producers."""
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file)
 
     @server.tool(title="Query Historical Data", annotations=_READ_ONLY)

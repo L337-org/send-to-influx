@@ -11,7 +11,7 @@ from socket import gethostname
 import speedtest
 from toinflux.influx import DataHandler, InfluxWriteError
 from toinflux.general import flatten_dict
-from toinflux.exceptions import SourceConnectionError
+from toinflux.exceptions import SourceConnectionError, ToolParamError
 
 # speedtest-cli's get_best_server() times each of the 3 latency probes it makes per candidate
 # server using SpeedtestHTTPConnection/SpeedtestHTTPSConnection, whose __init__ defaults to a
@@ -150,7 +150,7 @@ class Speedtest(DataHandler):
         """
         return {"host": self.collector_host()}
 
-    def mcp_trigger_run(self):
+    def mcp_trigger_run(self, host=None):
         """Run a speed test now (the MCP write action for this source) and return
         the result, recording it to InfluxDB like a scheduled run.
 
@@ -159,11 +159,31 @@ class Speedtest(DataHandler):
         Recording is best-effort: a failed write is reported in the result's
         ``recorded`` flag, not raised, since the measurement itself succeeded.
 
-        :return: ``{"source", "recorded", "result": {field: {"value"[, "unit"]}}}``
+        The result names the machine that ran it. With several hosts collecting into one
+        database, "the speed test result" is meaningless without knowing whose connection
+        was measured - and this can only ever measure *this* machine's, because each host
+        runs its own process with no listener for the others to be asked through.
+
+        ``host`` is therefore a guard, not a target selector: naming a different host is
+        refused rather than quietly measured here and returned as if it were that host's.
+        Silently answering the wrong question is worse than refusing, especially when the
+        number looks entirely plausible.
+
+        :param host: optionally assert which machine should run it; must be this one
+        :return: ``{"source", "host", "recorded", "result": {field: {"value"[, "unit"]}}}``
         :rtype: dict
+        :raises ToolParamError: ``host`` names a machine other than this one
         :raises SourceConnectionError: a run is already in progress, or the test
             failed
         """
+        this_host = self.collector_host()
+        if host is not None and host != this_host:
+            raise ToolParamError(
+                f"cannot run a speed test on {host!r}: this server can only measure its own "
+                f"connection, and it is running on {this_host!r}. Each collecting host runs its "
+                f"own process, so there is no way to trigger a run elsewhere - query that host's "
+                f"recorded history instead."
+            )
         data = self.get_data()
         recorded = True
         try:
@@ -178,5 +198,5 @@ class Speedtest(DataHandler):
             if unit:
                 entry["unit"] = unit
             result[name] = entry
-        logging.info("MCP-triggered Speedtest run complete (recorded=%s)", recorded)
-        return {"source": self.source, "recorded": recorded, "result": result}
+        logging.info("MCP-triggered Speedtest run complete on %s (recorded=%s)", this_host, recorded)
+        return {"source": self.source, "host": this_host, "recorded": recorded, "result": result}
