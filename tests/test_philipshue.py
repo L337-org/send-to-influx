@@ -296,7 +296,7 @@ class TestUrlHost:
 
 
 class TestHueIpv6Host:
-    """A bridge configured with a bare IPv6 address must be reachable (SI-17)."""
+    """A bridge configured with a bare IPv6 address must be reachable."""
 
     @staticmethod
     def _hue_with_host(sample_settings, host):

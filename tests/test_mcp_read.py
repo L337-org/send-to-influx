@@ -540,7 +540,7 @@ class TestRegisterReadTools:
         return {
             "sources": ["zappi"],
             "influx": {"url": "http://x", "user": "u", "password": "p"},
-            # A serial, because zappi is instanced since SI-34: one worker per configured
+            # A serial, because zappi is instanced: one worker per configured
             # device, so a block with no device expands to nothing.
             "zappi": {"db": "zappi_db", "serial": "12345"},
         }
@@ -776,7 +776,7 @@ class TestCurrentStateResult:
         return handler
 
     def test_live_annotates_and_reports_state(self):
-        """MyEnergi is instanced since SI-34 - one worker per configured device - so the
+        """MyEnergi is instanced - one worker per configured device - so the
         payload is keyed by device label rather than flat, even for the single legacy device.
         Same rule as Hue's per-bridge map: the shape must not depend on how many devices
         happen to be configured."""
@@ -919,7 +919,7 @@ class TestMultiBridgeReads:
         prove it using a scenario nothing produces, and would not notice a regression in the
         real single-target path.
 
-        Uses openmeteo since SI-35: Nuki was the example here precisely because it was
+        Uses openmeteo: Nuki was the example here precisely because it was
         single-target, and it now has a device axis covering every lock.
         """
         handler = MagicMock(
@@ -972,7 +972,7 @@ class TestMultiBridgeReads:
         assert "down.example.com: down" in message and "up.example.com: also down" in message
 
     def test_hue_declares_the_host_axis_so_scoping_uses_the_shared_path(self):
-        """The core of SI-33: without the axis on the class, Hue falls back to the old
+        """The core of per-bridge scoping: without the axis on the class, Hue falls back to the old
         merged behaviour and `instance` is refused as not applying. Driven through
         resolve_schema and the real Hue class rather than asserting the attribute, so it
         fails if the plumbing stops reading it as well as if the value changes."""
@@ -1274,7 +1274,7 @@ class TestPerInstanceHistoryShape:
 
 
 class TestSharedMeasurementInstances:
-    """SI-34, acceptance questions 3 and 6. The three MyEnergi types share the `myenergi`
+    """The three MyEnergi types share the `myenergi`
     measurement and are told apart by the same `device` tag that now carries the operator's
     label - so a discovered value cannot be attributed to a type, and the config is the
     authority. The config does distinguish them: separate blocks, separate sources."""

@@ -212,7 +212,7 @@ class TestHueSetLight:
         )
 
     def test_write_path_brackets_a_bare_ipv6_host(self):
-        """The write PUT brackets an IPv6 host exactly as the read GET does (SI-17).
+        """The write PUT brackets an IPv6 host exactly as the read GET does.
 
         Both paths build their URL from the one shared _api_base(), so this is the
         guard against a future second copy of the construction reintroducing the

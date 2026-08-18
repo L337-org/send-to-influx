@@ -301,7 +301,7 @@ class TestNukiStreaming:
 
 
 class TestPerLockPoints:
-    """SI-35, acceptance question 1. Each lock is its own point, tagged with the lock, on
+    """Each lock is its own point, tagged with the lock, on
     both the snapshot and the streaming path."""
 
     @staticmethod
@@ -399,7 +399,7 @@ class TestPerLockPoints:
 
 
 class TestLiveStatePerLock:
-    """SI-35. Nuki is the only source whose single live read covers every producer: the locks
+    """Nuki is the only source whose single live read covers every producer: the locks
     all arrive over one MQTT subscription. Hue reads live per bridge with a handler each, and
     Speedtest's live read can only speak for the local host - so this third shape needed
     distinguishing rather than assuming."""

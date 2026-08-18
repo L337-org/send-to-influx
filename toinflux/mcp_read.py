@@ -184,13 +184,13 @@ def metadata_for(field_metadata, field):
     metadata grows.
 
     **The suffix match now serves history, not current writes.** It existed because Nuki
-    prefixed every field key with its lock's name; since SI-35 each lock is a tag and the
+    prefixed every field key with its lock's name; since 5.3 each lock is a tag and the
     keys are bare, so an exact match covers everything being written today. It is kept
     deliberately rather than deleted: pre-migration Nuki points still carry prefixed keys
     until the migration's delete phase runs, so those fields remain queryable in the
     meantime - and this is what keeps them annotated with their units and decoded labels,
     which is exactly when an operator is deciding whether to migrate at all. Removable once
-    no install can still hold pre-SI-35 Nuki data, which is a condition rather than a date.
+    no install can still hold pre-5.3 Nuki data, which is a condition rather than a date.
 
     Kept module-level (not only a ReadSchema method) so the live current-state
     path can annotate a source's raw ``get_data()`` fields straight from the

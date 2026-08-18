@@ -372,7 +372,7 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     the historical flat `fields`/`as_of` shape untouched. One failing bridge gets an `error` entry while the
     others still report `fields`, a partial answer *with* its failure status; only when every bridge fails is
     `SourceConnectionError` raised, since then there is nothing useful to return. **Scoping a history read runs through the shared
-    instance mechanism, not a Hue-specific path** (SI-33). Hue sets `MCP_INSTANCE_TAG = "host"`, so
+    instance mechanism, not a Hue-specific path**. Hue sets `MCP_INSTANCE_TAG = "host"`, so
     `query_history`'s `instance` scopes to one bridge exactly as it scopes Speedtest to one collecting host -
     the handler is resolved *unscoped* and the filter applied at the query, rather than the older route of
     `resolve_schema(instance=...)` adding the tag through `Hue.mcp_tag_filters()`. That override still exists
@@ -495,7 +495,7 @@ field set. Design points:
       unit* (a Hue bridge with its own credentials and worker) and would reject Speedtest, whose
       hosts are separate processes: the axis exists in the data without the collector having any
       notion of instances. `query_history` therefore carries both `bridge` (Hue's work unit) and
-      `instance` (the data axis) until SI-33 unifies them for callers.
+      `instance` (the data axis) until the shared parameter unified them for callers.
     - **The `collector_status` heartbeat takes its extra tags from the source**, via
       `DataHandler.heartbeat_tags()` - an instanced source tags its bridge, `Speedtest` tags the
       collecting machine through `Speedtest.collector_host()`, which is also what its data uses so
@@ -594,7 +594,7 @@ advertises a capability that isn't there. `home_status`/`usage_trends` are alway
 falls back to computing it when called standalone), so the per-source handler construction that
 computation costs isn't done twice at startup.
 
-### MyEnergi multiple devices (SI-34)
+### MyEnergi multiple devices
 
 Each of `zappi`/`eddi`/`harvi` collects **one worker per configured device**, registered through
 `_INSTANCE_ENUMERATORS` like Hue's bridges. `enumerate_devices()` in `toinflux/myenergi.py` is the
