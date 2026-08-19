@@ -41,6 +41,7 @@ Contents
 - [Using the .deb package](#using-the-deb-package)
 - [Remote MCP server (query and control your devices via an MCP client like Claude)](#remote-mcp-server)
 - [Usage / CLI reference](#usage)
+- [Upgrading](#upgrading)
 - [Contributing](#contributing)
 - [Privacy and Security](#privacy-and-security)
 
@@ -58,7 +59,7 @@ verification is skipped by default (`insecure: true`). If your bridge has a vali
 set `insecure: false` in the `hue` settings block to enable verification.
 
 The `host` setting accepts a hostname, an IPv4 address, or an IPv6 address. Write an IPv6
-address plainly (`host: "2001:db8::1"`) — the square brackets a URL needs are added
+address plainly (`host: "2001:db8::1"`) - the square brackets a URL needs are added
 internally, so you do not have to. Brackets are accepted too if you prefer them, and the
 value you configure is what appears as the `host` tag in InfluxDB either way.
 
@@ -66,7 +67,7 @@ value you configure is what appears as the `host` tag in InfluxDB either way.
 
 A bridge holds a limited number of devices, so larger installations run more than one. All of
 them can be collected. The first is the `host`/`user` pair every install already has; each
-further bridge adds a numbered pair — `host2`/`user2`, `host3`/`user3`, and so on — with that
+further bridge adds a numbered pair - `host2`/`user2`, `host3`/`user3`, and so on - with that
 bridge's **own** username, since a username belongs to one bridge and is not valid on another.
 
 ```yaml
@@ -78,28 +79,28 @@ hue:
 ```
 
 Each bridge is collected by its own worker, started `stagger_seconds` apart, with its own
-retry backoff — so a bridge that is switched off or unreachable delays only itself and the
-others keep recording. `send-to-influx --check-config` lists any problems — from a source
-checkout that is `sendtoinflux.py --check-config` — and a bridge whose username is missing is
+retry backoff - so a bridge that is switched off or unreachable delays only itself and the
+others keep recording. `send-to-influx --check-config` lists any problems - from a source
+checkout that is `sendtoinflux.py --check-config` - and a bridge whose username is missing is
 reported and skipped rather than stopping the rest.
 
 The numbers are **labels, not an order**. They need not be consecutive, and nothing renumbers
 them. That matters when removing a bridge: leave the gap. The number is what ties a host to
 its username, so shifting the ones above it down would pair a bridge with another bridge's
-username — which shows up as an authentication failure rather than as an obvious mistake.
+username - which shows up as an authentication failure rather than as an obvious mistake.
 
 Settings other than `host`/`user` apply to the whole Hue estate: there is no per-bridge
 `timeout`, `insecure`, `temperature_units` or `sensors` mapping.
 
 In InfluxDB, every point carries a `host` tag naming its bridge. **Field names are unchanged
 and unprefixed**, so nothing about your existing dashboards breaks when you add a second
-bridge — but two bridges with a light of the same name write the same field key under
+bridge - but two bridges with a light of the same name write the same field key under
 different `host` tags, so filter or group by `host` to tell them apart.
 
 The `collector_status` heartbeat carries the same tag, so each bridge's health is recorded
 separately. **Check any existing alert that groups `collector_status` by `source` alone.**
 With one bridge that was the whole story; with two it aggregates them, so a healthy bridge
-can mask a failing one — `SELECT last(ok) ... GROUP BY source` returns `ok=1` while another
+can mask a failing one - `SELECT last(ok) ... GROUP BY source` returns `ok=1` while another
 bridge sits at `0`. Group by `source, host` (or `*`) to get a series per bridge:
 
 ```sql
@@ -111,18 +112,18 @@ SELECT last("ok") FROM "collector_status" WHERE "source" = 'hue' GROUP BY "sourc
 1. Pick any unused number `N`. Set the address:
    `sudo send-to-influx-set-credential --set-field hue.hostN <address>`
 2. Generate a username on **that** bridge, following
-   [the Hue instructions](https://developers.meethue.com/develop/get-started-2/) — press the
+   [the Hue instructions](https://developers.meethue.com/develop/get-started-2/) - press the
    link button on the bridge you are adding, not on one you already use.
 3. Store it: `sudo send-to-influx-set-credential hue-userN`
    (on a plain source checkout, put the username in `hue.userN` in `settings.yaml` instead).
 4. `send-to-influx --check-config`, then restart the service.
 
-Existing bridges are untouched throughout — no username needs re-entering.
+Existing bridges are untouched throughout - no username needs re-entering.
 
 `--check-config` run by hand cannot see credentials stored with
 `send-to-influx-set-credential`: systemd only mounts them for the service itself, so a stored
 username reads as "not set" there. The check says so when that applies, and the collector will
-still find it — `systemctl status send-to-influx` shows what the service itself sees.
+still find it - `systemctl status send-to-influx` shows what the service itself sees.
 
 #### Removing a Hue bridge
 
@@ -133,7 +134,7 @@ still find it — `systemctl status send-to-influx` shows what the service itsel
 Do both steps before restarting: between them the bridge has an address but no username,
 which `--check-config` reports and the collector skips. Leave the number unused rather than
 renumbering the others, and it is free for a future bridge. The removed bridge's history stays
-in InfluxDB under its own `host` tag — it is not deleted.
+in InfluxDB under its own `host` tag - it is not deleted.
 
 #### Replacing a Hue bridge
 
@@ -148,7 +149,7 @@ Three things worth knowing, none of them obvious:
 - **The `host` tag is the address, so a replacement at a *different* address starts new
   series.** The old bridge's data stays under the old tag and nothing new is written to it, so
   a Grafana panel filtered on the old address goes quiet without erroring. Where the new
-  bridge can reuse the old address — a DHCP reservation, or the same DNS name repointed — the
+  bridge can reuse the old address - a DHCP reservation, or the same DNS name repointed - the
   series continues unbroken, which is usually what you want.
 - **Field names follow *device* names, not the bridge.** Re-paired devices named identically
   in the Hue app keep their existing field keys; devices named differently produce new keys
@@ -213,8 +214,20 @@ the **instant** a lock or door-sensor state changes, so a door opening and closi
 no longer missed. It also takes a full-state snapshot every `interval` seconds as a safety net (and
 to keep an idle lock's status heartbeat ticking); because Nuki publishes every state topic with the
 MQTT retain flag set, that snapshot's brief resubscribe receives the last-known state of every lock
-provisioned to the broker. Locks need no per-device configuration in `settings.yaml`, and each
-lock's fields are prefixed with its own name from the Nuki app (give each lock a distinct name).
+provisioned to the broker. Locks need no per-device configuration in `settings.yaml`: each lock
+is written as its own point, tagged `device=<the lock's name from the Nuki app>` (give each lock
+a distinct name), with the same bare field names for every lock. Group or filter by `device` to
+separate them. The broker is not recorded - every lock arrives through one, so it identifies
+nothing, and changing broker should not start a new series.
+
+> **Breaking change in 5.3:** the lock moved out of the field key and into a `device` tag.
+> Before 5.3 every lock's state went into one shared point per cycle with each field key
+> prefixed by the lock's name (`Front_Door_Lock_stateValue`), which made the lock impossible to
+> query as a dimension; the point also carried a `host` tag naming the broker, which has been
+> dropped. Your existing history is untouched and nothing breaks, but old and new data are in
+> different series, so a dashboard built on prefixed field keys stops gaining new points.
+> [UPGRADING.md](UPGRADING.md) explains the supplied migration that joins them back together -
+> two phases, with the irreversible delete separately invoked so you can verify first.
 
 > **Behaviour change in 5.1:** MQTT sources (Nuki) now stream state changes as they happen instead
 > of only sampling once per `interval`, so you'll see denser data - more points, at the moments
@@ -338,12 +351,12 @@ Log output goes to **stderr** with timestamps and log level, e.g.:
 
     2026-06-29 14:23:01 WARNING  Source 'hue' failed: connection timeout. Restarting in 5 seconds (attempt 1).
 
-Diagnostics are on stderr so that stdout carries only the program's own output — `--dump` and
+Diagnostics are on stderr so that stdout carries only the program's own output - `--dump` and
 `--print` JSON, and `--check-config`'s verdict. That is what lets you pipe them: `sendtoinflux.py
 --dump --source hue | jq` works even when a source fails, because the failure is reported on the
 other stream. **If you redirect logs to a file, redirect stderr**: `sendtoinflux.py 2> mylog`, or
 `> mylog 2>&1` to capture both. Watching a terminal or a screen session needs no change, and
-neither does the packaged service — the journal captures both streams.
+neither does the packaged service - the journal captures both streams.
 
 On startup, an INFO line logs the version and which source(s) will run, so restarts are visible in the logs:
 
@@ -361,8 +374,9 @@ package ships its own separate mechanism for a dedicated logfile, described belo
 service's messages out of the shared `daemon.log`/`syslog` entirely rather than adding a second copy
 alongside it. Setting `logfile` yourself on a packaged install is possible (the packaged service's
 `ProtectSystem=strict` sandboxing means `/var/log/...` isn't writable by it directly, so point it at
-a path under `/etc/send-to-influx/`, the one directory the service can write to, or add your own path
-to `ReadWritePaths=` in `packaging/send-to-influx.service` and rebuild) - but don't point it at
+a path under `/var/lib/send-to-influx/` - the directory systemd creates for the service and the one
+it can write - or add your own path to `ReadWritePaths=` (or a `LogsDirectory=`) in
+`packaging/send-to-influx.service` and rebuild) - but don't point it at
 `/var/log/send-to-influx.log` itself, since that's the same file the packaging-level mechanism below
 already writes to, and you'd end up with two independent writers to one file.
 
@@ -381,11 +395,11 @@ By default, `sendtoinflux.py` starts one worker per source listed in the `source
 
 Worker start times are slightly staggered to avoid all collectors firing at exactly the same moment when intervals are equal.
 
-If a source hits a transient failure (e.g. a network error talking to its API or to InfluxDB) — whether running in single-source or multi-source mode — it is automatically restarted with exponential backoff (base 5 s, max 300 s) to avoid tight failure loops. In multi-source mode, only the failed source is retried; other sources keep running. A configuration problem (e.g. a source missing its settings section) is not retried: in single-source mode the process exits with code 1; in multi-source mode that source's worker stops permanently and a critical line is logged, while other sources keep running.
+If a source hits a transient failure (e.g. a network error talking to its API or to InfluxDB) - whether running in single-source or multi-source mode - it is automatically restarted with exponential backoff (base 5 s, max 300 s) to avoid tight failure loops. In multi-source mode, only the failed source is retried; other sources keep running. A configuration problem (e.g. a source missing its settings section) is not retried: in single-source mode the process exits with code 1; in multi-source mode that source's worker stops permanently and a critical line is logged, while other sources keep running.
 
-If `sources:` is empty or absent (and no `-s`/`--source` was given), or every configured instance of a requested source turns out unusable (e.g. a Hue install whose bridges have no tokens), the process logs that plainly and exits with code 1 rather than starting nothing while looking healthy. Both causes require manual intervention (an edit to `settings.yaml` and a restart) and never resolve themselves by waiting, so under the packaged systemd service they are not retried either — see "Exit codes" and "After installing" below.
+If `sources:` is empty or absent (and no `-s`/`--source` was given), or every configured instance of a requested source turns out unusable (e.g. a Hue install whose bridges have no tokens), the process logs that plainly and exits with code 1 rather than starting nothing while looking healthy. Both causes require manual intervention (an edit to `settings.yaml` and a restart) and never resolve themselves by waiting, so under the packaged systemd service they are not retried either - see "Exit codes" and "After installing" below.
 
-If InfluxDB itself is briefly unreachable, a point that fails to write is buffered in memory (per source, up to a few hundred points) rather than dropped, and sent automatically — oldest first, batched into a handful of requests — once InfluxDB is reachable again, so a short outage delays data rather than losing it. A point the server itself repeatedly rejects (for example, one that has aged past the bucket's retention window) is given up on after a few attempts rather than blocking the points queued behind it. The buffer is in-memory only: it does not survive a process restart, and if the settings file's InfluxDB destination is changed while a backlog exists, the backlog is delivered to the new destination. Heartbeat status points are never buffered — they are a live signal, so a failed one is simply dropped.
+If InfluxDB itself is briefly unreachable, a point that fails to write is buffered in memory (per source, up to a few hundred points) rather than dropped, and sent automatically - oldest first, batched into a handful of requests - once InfluxDB is reachable again, so a short outage delays data rather than losing it. A point the server itself repeatedly rejects (for example, one that has aged past the bucket's retention window) is given up on after a few attempts rather than blocking the points queued behind it. The buffer is in-memory only: it does not survive a process restart, and if the settings file's InfluxDB destination is changed while a backlog exists, the backlog is delivered to the new destination. Heartbeat status points are never buffered - they are a live signal, so a failed one is simply dropped.
 
 After every collection cycle (success or failure), a `collector_status,source=<name>` heartbeat point is written to InfluxDB alongside the source's own data, with fields `ok` (`1`/`0`) and `consecutive_failures`. A dead collector would otherwise only show up as a silent gap in Grafana; this gives you a positive signal to alert on (e.g. `ok == 0` or a stale `collector_status` point). Heartbeats are not written in `--print` mode, since that mode never sends anything to InfluxDB.
 
@@ -554,7 +568,7 @@ Remote MCP server
 -----------------
 
 send-to-influx can optionally run a remote [MCP](https://modelcontextprotocol.io/) server inside the
-same process, so an MCP client — Claude Desktop or Claude Mobile, or another — can ask
+same process, so an MCP client - Claude Desktop or Claude Mobile, or another - can ask
 natural-language questions about your devices via a custom connector. It is disabled unless **both**
 `user` and `password` are set in the `mcp:` settings block - credentials-present is the primary
 enablement mechanism. Set `mcp.disabled: true` to force it off regardless of user/password state -
@@ -575,7 +589,7 @@ Key points:
 - **You provide the TLS side.** The server itself speaks plain HTTP on a private/loopback address;
   put your own TLS-terminating reverse proxy (nginx, Caddy, ...) in front of it and set
   `public_url` to the address the proxy serves. Binding a public interface is refused outright: the
-  server speaks plain HTTP — OAuth login and tokens included — so it must sit behind your
+  server speaks plain HTTP - OAuth login and tokens included - so it must sit behind your
   TLS-terminating proxy, never face the internet directly.
 - **Authentication is OAuth 2.1** (what Claude's connector UI uses, and the remote-MCP standard):
   add the connector in your MCP client (Claude, say) with URL `https://mcp.example.org/mcp`, and it
@@ -585,7 +599,7 @@ Key points:
   logged. On the packaged install the password can be stored in systemd-creds:
   `sudo send-to-influx-set-credential mcp-password`.
 - **Connections survive restarts.** OAuth client registrations and refresh tokens are persisted
-  (hashed) in `mcp-oauth-state.json` next to the settings file (override with `mcp.state_file`),
+  (hashed) in `mcp-oauth-state.json` - under `/var/lib/send-to-influx` on the packaged systemd install, or next to the settings file when run by hand (override with `mcp.state_file`),
   so package upgrades and reboots don't make the client re-authenticate.
 - **Read-only by default.** Device-control tools are opt-in per collector and aren't registered at
   all unless enabled in that collector's own settings block - when none is enabled, the write tools
@@ -656,7 +670,7 @@ Once connected, the client has these read tools:
   on?"). Most sources are read live from the device; Speedtest and Octopus report their latest
   recorded reading instead.
 - **`query_history`** - a field's history over a time range, either as individual points or
-  aggregated (mean/max/min/sum/count/…) into buckets ("how much electricity this month vs last?",
+  aggregated (mean/max/min/sum/count/...) into buckets ("how much electricity this month vs last?",
   "when did the light go off?").
 - **`get_data_range`** - how far back a source's data goes, and how long InfluxDB is configured to
   keep it ("how far back do my records go?", "when did collection start?"). Reports the oldest and
@@ -665,6 +679,68 @@ Once connected, the client has these read tools:
   data, not three years.
 - **`get_documentation`** - a one-call reference of what every source reports and what its coded
   values mean.
+
+### Several MyEnergi devices of one type
+
+Each of `zappi`, `eddi` and `harvi` collects one device by default, using the `serial` at the top
+of its block, and tags it `device=<type>` as it always has. To collect more than one, add a
+`devices:` list:
+
+```yaml
+zappi:
+  db: "zappi_db"
+  interval: 300
+  fields: ["frq", "vol", "gen"]
+  devices:
+    - serial: "first_serial"
+      label: "Garage"
+    - serial: "second_serial"
+      label: "Driveway"
+      fields: ["frq"]
+```
+
+Each device gets its own collector, so one unreachable device delays only itself. Every entry
+needs a `label`, which becomes the `device` tag and the name the MCP tools use; a device declared
+at the top of the block may take an optional `label` too, defaulting to the type name so existing
+installs keep writing the same tag. `fields` resolves per device first, then the block-level list,
+then everything the API returns.
+
+Labels must be unique across all three blocks, because the three types share the one `myenergi`
+measurement - two devices with the same label would merge into a single series. Renaming a label
+starts a new series.
+
+Existing single-device configurations need no change and write exactly the same data as before.
+
+### Several collectors writing to one measurement
+
+Some measurements hold points from more than one producer. Speedtest is the clearest case: running
+a collector on several hosts into one database is exactly how their connections get compared, and
+every point carries the `host` tag that tells them apart. Hue is the other: every point carries the
+bridge it came from, and with more than one bridge that tag is what separates two lights sharing a
+name. MyEnergi is the third: configure more than one Zappi and each carries the `label` you gave it
+in its `device` tag.
+
+The read tools treat that tag as a dimension rather than flattening it:
+
+- `list_sources` names the tag (`instance_tag`); `list_fields` lists the values it accepts -
+  those present in the data plus any target configured but not yet collecting.
+- `query_history` takes an `instance` to scope a query to one producer. Left out, it reports each
+  producer **separately** under `instances`, keyed by value - never merged, because two hosts' ping
+  interleaved in one unlabelled series is a wrong answer rather than an incomplete one, as is one
+  "Kitchen" reading that could be either of two bridges. An unknown value is an error, not an empty
+  result; the accepted values are the producers found in the data plus any target that is configured
+  but has not collected yet, so a newly added bridge and a decommissioned one are both queryable.
+  Hue's older `bridge` parameter is gone, replaced by `instance`, which behaves the same way
+  for every source rather than for Hue alone.
+- `get_current_state` and `get_data_range` likewise report per producer. The range is worth having
+  per host: a machine added last week and one collecting for a year share a merged span that is
+  true of the measurement and false of both.
+- `speedtest_run` names the host it ran on, and refuses a request naming a different one - it can
+  only measure the machine the server runs on, since each collecting host runs its own process.
+
+Because InfluxDB applies a query's `LIMIT` to each series separately once results are grouped, an
+unscoped query divides the limit across the known producers so the total stays bounded, and reports
+the figure actually applied as `limit_per_instance`.
 
 Results are domain-aware throughout: values carry their unit, and coded fields come back with a
 decoded label alongside the raw number. The same data is also exposed as MCP **resources** (a
@@ -703,6 +779,18 @@ Usage
 | 0 | Normal exit |
 | 1 | A condition that requires manual intervention and never resolves itself by waiting: a fatal configuration error (missing/invalid settings, unknown source name), or nothing to collect (`sources:` empty/absent with no `-s`/`--source`, or every configured instance of a requested source is unusable - e.g. a Hue install whose bridges have no tokens). Under the packaged systemd service, this exit code is marked `RestartPreventExitStatus`, so the service is not respawned for either cause - see "After installing" below. |
 | 2 | Connection error (a transient failure talking to a source's API or InfluxDB) in `--dump` mode only - there's no worker loop to retry a one-shot dump with backoff. In continuous mode (single- or multi-source), connection errors are always retried with backoff instead of exiting. |
+
+Upgrading
+---------
+
+Most releases need nothing done: `settings.yaml` is never rewritten by an upgrade, and new
+configuration is optional with a safe default.
+
+Where a release does need a step - a data migration, or a change to what a series looks like -
+it is described in [UPGRADING.md](UPGRADING.md), per version. **5.3 has one**, for Nuki users
+only: the lock moved from the field key into a `device` tag, and a supplied migration converts
+existing history. On a packaged install both the migration and a copy of those instructions are
+at `/usr/share/send-to-influx/`.
 
 Contributing
 ------------

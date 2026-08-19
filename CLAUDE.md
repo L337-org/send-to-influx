@@ -176,14 +176,140 @@ equivalent to an HTTP GET. Failure mapping is deliberately strict: bad credentia
 (never as an exception from `connect()`), and a broker that accepts TCP but never completes the MQTT
 handshake raises `SourceConnectionError` rather than returning an empty result - either would
 otherwise masquerade as "no data". `Nuki` (`toinflux/nuki.py`) holds only vendor logic: filtering to
-known state topics (command/event topics are ignored), grouping by device ID, prefixing field keys
-with each lock's own Nuki-app name, and renaming `state`/`doorsensorState` to `stateValue`/
+known state topics (command/event topics are ignored), grouping by device ID, labelling each lock
+with its own Nuki-app name, and renaming `state`/`doorsensorState` to `stateValue`/
 `doorsensorStateValue` - Grafana visualises numeric fields far better than text, so unlike the
 Bridge HTTP API's `stateName` strings, these are always written as their raw numeric code (a code
 with no documented meaning is written through unchanged); see UNITS.md for what each code means.
 `paho-mqtt` (a
 source-specific runtime dependency like `speedtest-cli`, pure Python so the `.deb`'s
 `Architecture: all` design holds) is imported only in `toinflux/mqtt.py`.
+
+**Per-lock points (5.3).** `parse_nuki_data()`/`decode_stream_message()` return
+`{device: {field: value}}`, and `Nuki.send_data()` writes **one point per lock** tagged
+`device=<lock>` with bare field keys, delegating each to the base implementation with the header
+swapped in - the same idiom `send_heartbeat()` uses, so buffering, retry and the `InfluxWriteError`
+contract are untouched rather than reimplemented. Every lock in one cycle shares a single
+timestamp: letting each call default independently would scatter one snapshot across a second or
+two, so "what was the state at time T" could see one lock and not another. A failure on one lock
+does not stop the rest - each is attempted and one error raised at the end, so the worker still
+backs off, and re-writing a lock that already succeeded is harmless because points are idempotent.
+`MCP_INSTANCE_TAG = "device"`, and `MCP_LIVE_STATE_COVERS_ALL_INSTANCES = True` because Nuki is the
+only source whose *one* live read covers every producer (a single retained-state subscription
+returns all locks), unlike Hue where each bridge needs its own handler.
+
+The broker `host` tag was **dropped** in the same change rather than as a separate series break:
+every lock arrives through one broker, so it identified nothing, and moving broker should not start
+a new series.
+
+**This was a breaking change to emitted data, and the field-key prefix was the original mistake.**
+Before 5.3 every lock's fields were flattened into one shared point with the lock's name built into
+each field key (`Front_Door_Lock_stateValue`), which is precisely why the lock could not be queried
+as a dimension. Existing history keeps working but sits in different series from the new points.
+
+**The migration** (`scripts/migrate-nuki-device-tag.py`, shipped to
+`/usr/share/send-to-influx/` and documented in `UPGRADING.md`) converts it. Notes that cost real
+debugging:
+
+- **It cannot be documented InfluxQL instead.** There is no UPDATE; `SELECT ... INTO` preserves
+  existing tags via `GROUP BY *` but has no syntax to set a tag to a *new literal*, which is the
+  entire job; and the lock name lives in the field *key*, which InfluxQL has no expression to
+  operate on.
+- **Two phases, separately invoked.** Phase 1 is non-destructive by construction - the new format
+  is a different series - so old and new coexist and backing out means not running phase 2. Phase 2
+  is driven by a manifest phase 1 writes and scoped by the old `host` tag, so it can only drop what
+  phase 1 confirmed it carried across. An earlier version did an unscoped `DROP SERIES FROM "nuki"`,
+  which would have destroyed the migration's own output.
+- **It reads no credentials on any install type**, deliberately and universally. A fallback to
+  `settings.yaml` where it happens to be readable would make the safeguard depend on how you
+  installed rather than being real. It also needs `requests`, which the package keeps in its venv
+  rather than as a system dependency, so the documented invocation is
+  `/opt/send-to-influx/venv/bin/python3` - a bare `python3` fails where `python3-requests` is absent.
+- **Its value formatter duplicates `_format_field_value()` and must stay identical.** It emitted the
+  `i` integer suffix at first; a field's type is fixed by its first write, so that established these
+  fields as integer and every subsequent *collector* write then failed with a 400 type conflict. The
+  migration would have broken the running collector. Only writing both outputs to one real InfluxDB
+  surfaces it, and a test now pins the equivalence for every value shape. It is deliberately
+  *stricter* in one respect: a numeric value on a text field is still quoted, closing the same
+  failure by the other route.
+- **Its field list is a superset of the collector's and was hand-copied wrongly.** Listing a real
+  database's field keys found `stateName`/`doorsensorStateName` - text state names an earlier
+  release wrote before the numeric rename - still holding years of points and absent from the copy,
+  so the migration halted on the very data it exists to rescue. Had the halt not been there, phase 2
+  would have deleted them. This is exactly why a migration is tested against real data from the
+  previous release rather than a fixture matched to its own assumptions.
+- **The split is longest-known-suffix, and the underscore in the comparison is load-bearing** (a key
+  merely *ending* in a field name is not one of ours and must halt). Longest-match itself is
+  currently unreachable - two known fields could only both match if one ended with `_<the other>`,
+  and none contains an underscore - so no test kills it; it is documented as the guard for a future
+  underscored field rather than left looking tested.
+- **Halting beats skipping.** An unrecognised field key stops the run with nothing written, because a
+  skipped key is data silently left behind that phase 2 would then delete, and it would look like
+  success.
+
+**`Nuki.send_data()` must not capture every caller, and the discriminator is the payload's
+shape.** `send_heartbeat()` sets its own `collector_status` header and passes a flat
+`{field: value}` dict through the *same* `send_data()`; the streaming path passes per-device data
+explicitly. So "was `data` given?" cannot tell them apart - `_is_per_device()` decides on every
+value being a mapping, since a lock always carries a dict of fields and a field never does.
+Getting this wrong treated `ok`/`consecutive_failures` as lock names whose scalar values were
+then skipped as non-dicts, so **Nuki wrote no heartbeat at all**, silently, with only warnings -
+exactly the silent gap the heartbeat exists to prevent. Found in review, not by the tests, because
+every existing heartbeat test used a `MagicMock` handler: a mock's `send_data` never runs the
+source's own override, so those tests assert what `send_heartbeat` *asked for* and never what the
+handler *did*. `test_every_source_actually_writes_a_heartbeat_point` now drives a real handler per
+source down to the HTTP boundary - written across every source rather than just Nuki, because the
+break was one subclass violating a shared contract and the next override would break it the same
+way.
+
+- **External values are named with `!r` in every message, never raw.** A lock name comes from the
+  retained MQTT `name` topic, and one containing a newline turned the per-lock failure message
+  into *two* journal lines - the worker logs `Source '%s' failed: %s`, so a forged entry with its
+  own timestamp and ERROR level appeared as though the daemon had written it, and the same text
+  reaches an MCP client as a tool error. `escape_key_or_tag_value`'s own message was already safe
+  for exactly this reason; the prefix wrapped around it was not. Swept rather than patched at the
+  one reported line: the same shape existed in `mcp_write`'s unreachable-bridge list and
+  `mcp_read`'s all-instances-failed message, both of which reach a client. The name is still
+  reported, just escaped - a failure has to stay diagnosable from its output alone.
+
+- **The backlog is flushed once per cycle, not once per lock.** The write buffer is keyed by
+  *worker*, so calling the base `send_data()` per lock flushed it per lock too, charging the head
+  buffered point one rejection each time. With `MAX_POINT_REJECTIONS` at 5, a five-lock install
+  burned the whole allowance in one cycle and discarded the backlog after a single cycle instead
+  of five - defeating the documented guarantee that a middlebox answering 4xx for a down InfluxDB
+  cannot mass-discard it. `DataHandler.send_data()` therefore takes `flush=`, and Nuki passes it
+  only for its first lock; every lock still buffers its own point on failure, only the flush is
+  shared. Measured before and after (1/3/3 charged, five dropped outright; now 1 at any lock
+  count), and the test asserts the count because the count *is* the property.
+
+- **Statements travel in a POST body, never the URL.** The rewrite phase names every old field
+  key in one `SELECT` - one per lock per field - so a ten-lock estate is kilobytes of statement,
+  and in a request line a reverse proxy can refuse it, failing the migration on a statement
+  InfluxDB would have accepted. The same shape the read layer already hit, which is why
+  `build_edge_time_query` selects `*`. POST verified equivalent to GET on real 1.8 and 2.7 for
+  every statement this script issues.
+- **v2 has no `DROP SERIES`, so phase 2 differs by version.** Its v1-compatibility endpoint
+  answers HTTP *200* carrying `{"error": "not implemented: DROP SERIES"}` (verified on 2.7) - so
+  the error check catches it rather than mistaking it for success, but it can never succeed.
+  Phase 1 works fully on v2, so the operator would be left with migrated data and no way to
+  finish; phase 2 therefore translates that one rejection into the `/api/v2/delete` request that
+  does work. Built with `json.dumps`, because the predicate's own value contains double quotes
+  and hand-assembly produced invalid JSON that would have failed if pasted - the emitted command
+  was run verbatim against a real 2.7 (204, old `host=` series gone, migrated `device=` kept).
+  Deliberately *not* run automatically: it needs the organisation, which the script cannot know
+  and must not guess for a delete that cannot be undone. Only "not implemented" is translated;
+  any other failure surfaces as itself.
+
+**Changing emitted data means sweeping `tests/integration/` too, and that is easy to miss.**
+Integration tests are deselected from the default `pytest` run (by design - they need a broker),
+so a local green run says nothing about them. Worse, running `pytest -m integration` *without* a
+broker skips cleanly rather than failing, so it also proves nothing. The Nuki device-tag change
+left `test_mqtt_streaming.py` asserting the old prefixed field key *and* `startswith("nuki,host=")`
+- the exact tag the change removed - and only CI caught it. When a change alters a measurement,
+tag set or field key: grep `tests/integration/` for the old names, and run that suite against a
+real broker (`MQTT_TEST_BROKER_HOST`/`MQTT_TEST_BROKER_PORT` point it anywhere, so a throwaway
+`eclipse-mosquitto:2` container is enough). Then mutate the product back and confirm the test
+fails, since an assertion that survives the old behaviour was never testing the new one.
 
 **Streaming (5.1):** MQTT sources are event-driven, not timer-polled. `MqttDataHandler` sets
 `STREAMING = True` and `stream_mqtt_messages()` holds the subscription open, so a state change is
@@ -309,15 +435,34 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
     a single bridge - so nothing reading the payload depends on the bridge count; a single-*target* source keeps
     the historical flat `fields`/`as_of` shape untouched. One failing bridge gets an `error` entry while the
     others still report `fields`, a partial answer *with* its failure status; only when every bridge fails is
-    `SourceConnectionError` raised, since then there is nothing useful to return. `query_history` gains an
-    optional `bridge`, which scopes the query by adding that bridge's `host` tag - the same tag Hue's own writes
-    carry - via `DataHandler.mcp_tag_filters()`, a *method* rather than the `MCP_TAG_FILTERS` class attribute
-    precisely because the answer depends on which instance the handler serves. Omitted, the query spans every
-    bridge: deliberate and documented in the tool description, since Hue writes all of them to one measurement
-    and an unqualified question about the estate should get an answer about the estate. The result echoes
-    `bridge` when one was used, so a single-bridge answer is distinguishable from an estate-wide one. The bridge
-    value never reaches a query as given - it is resolved through `Hue.bridge()` first, so an unconfigured
-    bridge is refused as a `ToolParamError`, and the existing tag-filter path then quotes and escapes it.
+    `SourceConnectionError` raised, since then there is nothing useful to return. **Scoping a history read runs through the shared
+    instance mechanism, not a Hue-specific path**. Hue sets `MCP_INSTANCE_TAG = "host"`, so
+    `query_history`'s `instance` scopes to one bridge exactly as it scopes Speedtest to one collecting host -
+    the handler is resolved *unscoped* and the filter applied at the query, rather than the older route of
+    `resolve_schema(instance=...)` adding the tag through `Hue.mcp_tag_filters()`. That override still exists
+    and is still load-bearing (it is what forces `Hue.bridge()` to resolve, so `resolve_handler` refuses an
+    unconfigured bridge), but the read tools no longer depend on it for scoping - one concept, one
+    implementation.
+    - **`bridge` was removed outright rather than deprecated**, and the reasoning generalises to any
+      model-facing parameter. The compatibility rule about accepting a renamed key for a release exists for
+      interfaces whose *caller* persists across an upgrade - a settings key, a library signature, an emitted
+      metric name. An MCP tool schema is the opposite: the client fetches it with `tools/list` at session
+      start, so after an upgrade the next session already uses the new name and there is no stored caller to
+      break. An alias would therefore have cost context on every session - which a tool description is
+      explicitly a budget for - to cover a window shorter than one conversation. It was never a documented
+      parameter in the README either, so no user was following it. **Do not add a deprecation window to a
+      tool parameter by reflex; ask first whether the caller persists.**
+    - **An unscoped Hue query now reports per bridge rather than merging.** A deliberate reversal of the
+      earlier span-everything default: two bridges can each hold a "Kitchen", so a merged series is a wrong
+      answer, not an estate-wide one.
+    - **The instance allowlist is the union of the values present in the data and the targets currently
+      configured.** Discovered values alone would refuse a bridge configured but not yet collecting - which
+      `bridge` accepted - and would leave `query_history` disagreeing with `get_current_state`, which reads
+      live from whatever is configured. Neither half suffices: a decommissioned bridge still has history worth
+      querying, a new one has config but no data. `configured_instances()` supplies the configured half via
+      `expand_sources()`, the same function the collectors use. The refusal message therefore says *accepted*
+      values, never *recorded* - the union includes targets that have recorded nothing, and calling them
+      recorded would state something untrue about the very value offered as the alternative.
   - **Multi-bridge Hue**: both write tools cover *every* configured bridge, via
     `resolve_handlers()` in `toinflux/mcp_common.py` - one handler per bridge, built from the same
     `expand_sources()` the collectors use so the MCP surface and the collectors cannot disagree about which
@@ -347,6 +492,29 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
   - This is the project's first device-control capability and gets a dedicated `/security-review`
     before the feature branch merges to `main`.
 
+**The OAuth state file lives in the systemd `StateDirectory`, not `/etc`.** This was broken from
+5.0 until 5.3: the service runs as `send-to-influx` while `postinst` leaves `/etc/send-to-influx`
+root-owned 755, so `save()` could create neither the state file nor the `.tmp` its atomic write
+needs beside it. `PermissionError` was logged and persistence degraded to nothing, exactly as the
+error says - and because access tokens are in-memory anyway, the only symptom was a connected MCP
+client re-authorising after **every** restart, which an operator meets at upgrades. Neither the
+unit test suite nor the packaging suite caught it: the former asserted the resolved *path*, the
+latter that the server *bound*, and `save()` is deliberately non-fatal so nothing raised.
+
+`resolve_state_path()` now prefers `$STATE_DIRECTORY`, which is the same shape as
+`apply_credential_substitution()`'s `$CREDENTIALS_DIRECTORY` - set by systemd only for a unit that
+declares the directory, so a source checkout or screen session (equally first-class here) finds it
+unset and keeps the historical location beside `settings.yaml`. Colon-separated when several are
+declared, so only the first is taken. An explicit `mcp.state_file` still wins.
+
+**The state moved rather than `/etc` being opened up**, deliberately: giving the service user write
+access to the directory holding `settings.yaml` and the credential store is the wrong trade, and
+the packaging suite now asserts `/etc/send-to-influx` stayed root-owned as well as that the service
+user *can* write the state directory - probed as that user, since root could write either way.
+`postinst` migrates an existing file across (an install predating the removal of the old
+`chown -R` may have a working one); `postrm` removes the directory on purge, because systemd only
+does so on `systemctl clean`.
+
 **Packaging** (debconf + systemd): the `mcp:` block is the third shared-infrastructure block after
 `influx:` and `mqtt:`, but gated on its own `mcp-enable` boolean (asked at priority `high`, default
 no) rather than a source selection - the MCP server is an interface over all sources, not a source.
@@ -367,8 +535,10 @@ the working install is left enabled - never disabled out from under a running se
 this the first inbound-network-facing service, so the systemd unit gained a conservative hardening
 set (`ProtectKernel*`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, empty
 `CapabilityBoundingSet`, `SystemCallFilter=@system-service`, etc. - `MemoryDenyWriteExecute` and a
-hand-rolled narrower syscall filter deliberately omitted as Python-fragile); `ReadWritePaths` already
-covers the OAuth state file (it lives in `/etc/send-to-influx`). `test-packaging.sh` seeds the MCP
+hand-rolled narrower syscall filter deliberately omitted as Python-fragile); the OAuth state file lives in `StateDirectory=send-to-influx`
+(`/var/lib/send-to-influx`, 0700, service-owned) and there is deliberately **no**
+`ReadWritePaths` at all - the daemon writes nothing under `/etc`, so `ProtectSystem=strict`
+leaves the whole of it read-only to the service. `test-packaging.sh` seeds the MCP
 answers in the fresh-install scenario (asserting public_url/user land in settings.yaml, the password
 in the credstore and not in plaintext) and, where real systemd is present, asserts the server
 actually binds `127.0.0.1:8420` under the full hardened sandbox (the real test that the hardening +
@@ -380,9 +550,47 @@ six read-only tools - `list_sources`, `list_fields`, `query_history`, `get_curre
 state, domain-aware
 rather than a raw passthrough. The read mechanics live in `mcp_read.py`; the per-source domain
 knowledge lives on the `DataHandler` subclasses as class attributes (`MCP_MEASUREMENT`,
-`MCP_TAG_FILTERS`, `MCP_FIELD_METADATA`, plus `MCP_DESCRIPTION` and `MCP_LIVE_STATE` - see below) so
+`MCP_TAG_FILTERS`, `MCP_INSTANCE_TAG`, `MCP_FIELD_METADATA`, plus `MCP_DESCRIPTION` and
+`MCP_LIVE_STATE` - see below) so
 there's no parallel schema to keep in step - `ReadSchema`/`build_schema()` combine those with a live
 field set. Design points:
+  - **A tag can be a constant to pin or an axis to enumerate, and the two are different
+    attributes.** `MCP_TAG_FILTERS` pins a tag to one value (`device=zappi`) to disambiguate a
+    source within a shared measurement. `MCP_INSTANCE_TAG` names the tag that separates
+    *producers* within one source's measurement - something to enumerate, scope by, and report
+    per value. Only having the first is what made a two-host Speedtest install give wrong
+    answers: both hosts' points came back interleaved in one unlabelled series, and
+    `aggregation="mean"` averaged across them. Grafana honoured the dimension all along; the MCP
+    layer flattened it. Set on `Speedtest` (`host`), and deliberately per source rather than one
+    global "collector" tag, because the axis means different things (a collecting host, a bridge,
+    a lock, a device) and most sources genuinely have one producer.
+    - `discover_tag_values()` is the exact analogue of `discover_fields()`: `SHOW TAG VALUES`
+      gives the live allowlist an `instance` argument is validated against, so a value never
+      written is refused rather than answering confidently with nothing. Discovered rather than
+      configured, so a host that started reporting yesterday is queryable today with no config
+      change. Verified identical on real InfluxDB 1.8 and 2.7's v1-compatibility endpoint -
+      worth checking, since that same endpoint reports bucket retention as `0s`.
+    - **Payload shape depends on the source, never on how many producers it happens to have.**
+      Scoped, or a source with no axis, returns flat `points` exactly as before; unscoped on a
+      source with an axis returns `instances` keyed by value - keyed even for a single producer,
+      the same reasoning as Hue's per-bridge map. Never merged: two hosts' ping in one unlabelled
+      list is a wrong answer, not a partial one.
+    - **`LIMIT` is applied per series once a query groups by a tag** (verified: `LIMIT 2` across
+      two hosts returned two rows each, not two in total). Left alone, N producers would multiply
+      `MAX_RESULT_POINTS` and the response cap would stop capping anything - so the limit is
+      divided across the known producers and reported as `limit_per_instance`, not `limit`, since
+      a caller comparing it with the figure they passed would otherwise be misled.
+    - **The axis is not the same thing as `INSTANCED_SOURCES`.** That names a collector *work
+      unit* (a Hue bridge with its own credentials and worker) and would reject Speedtest, whose
+      hosts are separate processes: the axis exists in the data without the collector having any
+      notion of instances. `query_history` therefore carries both `bridge` (Hue's work unit) and
+      `instance` (the data axis) until the shared parameter unified them for callers.
+    - **The `collector_status` heartbeat takes its extra tags from the source**, via
+      `DataHandler.heartbeat_tags()` - an instanced source tags its bridge, `Speedtest` tags the
+      collecting machine through `Speedtest.collector_host()`, which is also what its data uses so
+      the two cannot drift. Until this existed every Speedtest host wrote
+      `collector_status,source=speedtest` and overwrote the others at second precision, so a dead
+      collector was indistinguishable from a healthy estate.
   - **History vs current state**: `query_history` answers "when did X change / trends"; the new
     `get_current_state(source)` answers "what is X *now*" ("is the door locked", "which lights are
     on"). For a live source it calls the source's own `get_data()` (a cheap API/MQTT read) and
@@ -475,6 +683,78 @@ advertises a capability that isn't there. `home_status`/`usage_trends` are alway
 falls back to computing it when called standalone), so the per-source handler construction that
 computation costs isn't done twice at startup.
 
+### MyEnergi multiple devices
+
+Each of `zappi`/`eddi`/`harvi` collects **one worker per configured device**, registered through
+`_INSTANCE_ENUMERATORS` like Hue's bridges. `enumerate_devices()` in `toinflux/myenergi.py` is the
+single source of "which devices are configured", shared by validation, the worker spawner and the
+handler's own `device()` resolution - the same shape as `enumerate_bridges()`, returning
+`(devices, errors, warnings)` so the two instanced sources report problems alike.
+
+- **Two config shapes, and both may appear together.** A `serial` at the top of the block is the
+  legacy single-device form; its `label` is optional and **defaults to the source name**, which is
+  what keeps such an install writing `device=zappi` exactly as before and is why this needed no
+  data migration. A `devices:` list adds more, each naming its `label` explicitly - there is no
+  sensible default for a second device, and deriving one from the serial would give exactly the
+  unreadable tag values that tagging by label exists to avoid. `fields` resolves device-first,
+  then block-level, then everything the API returns.
+- **Labels are the emitted `device` tag and must be unique across all three blocks.** The types
+  share the `myenergi` measurement, so a zappi and an eddi agreeing on a label would merge into
+  one series carrying both devices' fields. Checked whenever any of the three is selected, never
+  per block, because per-block checking misses precisely the collision that matters.
+- **`MCP_TAG_FILTERS` on the three subclasses is gone**; `mcp_tag_filters()` supplies
+  `{"device": <this device's label>}` per instance. That method also carries the type
+  discrimination the old static filter provided: without a device filter, a read of the
+  `myenergi` measurement returns all three types.
+- **`shares_measurement()` decides whether discovered tag values can be trusted.** Once `device`
+  carries an arbitrary label, a value found in the data cannot be attributed to a type - so for a
+  shared measurement the *configured* devices are the allowlist and `discover_tag_values()` is not
+  even called. The config is the authority precisely because it does distinguish the types. A
+  source owning its measurement still unions discovered with configured. Reported series are then
+  filtered to the allowlist, one rule that reads correctly for both. Consequence: a decommissioned
+  MyEnergi device's history stops being reachable by label where a Hue bridge's does not.
+- **`heartbeat_tags()` is overridden** to tag `device`, not the base's `host`: a MyEnergi instance
+  is a device label, and a health series tagged differently from the measurement it reports on
+  cannot be joined to it. This adds a tag to a legacy install's heartbeat where there was none -
+  a deliberate emitted-data change on a liveness signal, noted in UNITS.md.
+- **`worker_label()` collapses an instance equal to the source name.** A legacy install's label
+  defaults to the source name, so without this every log line would read `zappi@zappi`.
+  `worker_key` keeps the instance, being an identity rather than a label.
+- **`myenergi.auth_serial` optionally overrides the digest username**, defaulting to the device's
+  own serial as every install already sends. The credential is account-scoped - the real zappi
+  serial authenticates against all three endpoints, verified live - but that is *evidenced, not
+  proven* for a second device of one type, since the test account has one zappi. The override
+  exists so discovering otherwise needs no config change.
+
+### MyEnergi device selection (`toinflux/myenergi.py`)
+
+The status endpoints are per device **type** (`cgi-jstatus-Z`/`-E`/`-H`) and each returns *every*
+device of that type on the account, so the configured `serial` is what picks one out -
+`_select_device()`. It used to take index 0, which had two consequences on one line: a second device
+of the same type was silently never collected whichever serial was configured, and an account owning
+none of that type raised `IndexError`, which the worker loop's broad handler caught and retried
+forever logging only "list index out of range".
+
+- **`sno` is the serial field**, confirmed against the live API as the only key in a device object
+  whose value equals the configured serial. `deviceClass` and `productCode` are also present if type
+  identification is ever wanted.
+- **Both sides are compared as strings.** An all-digit serial in `settings.yaml` is an `int` unless
+  quoted, so a raw comparison would never match and would present as a wrong serial rather than a
+  type mismatch.
+- **The two failure modes are deliberately different exception types**, because one is worth retrying
+  and the other never is. No device of that type is a `SourceConnectionError` (a device can
+  legitimately be mid-provisioning, and an absent response key is not distinguishable here from a
+  temporary API oddity); devices present but none matching the serial is a `ConfigError`, since the
+  account is reachable and the type exists so the serial is simply wrong - which stops that worker
+  rather than backing off forever. Swapping either type is mutation-tested.
+- The `ConfigError` **names the serials the account does report**, which is the difference between a
+  message the operator can act on and one that only says no. A missing response key is treated as an
+  empty list rather than allowed to raise `KeyError`, which would escape the same exception contract
+  the `IndexError` escaped.
+- Note `sno` is written as a field on any install with no `fields` list configured, since the whole
+  device dict is returned then. Long-standing behaviour, not introduced here, but worth knowing
+  before adding a `fields` list changes what a dashboard sees.
+
 ### Entry point (`sendtoinflux.py`)
 
 - **Single-source mode** (`--source <name>`): continuous loop, fixed interval per source. Connection failures (`SourceConnectionError`) are retried with exponential backoff (base 5 s, max 300 s); a `ConfigError` is not retried — it exits the process immediately with code 1.
@@ -519,10 +799,37 @@ computation costs isn't done twice at startup.
 
 ### Factory / settings
 
-- `toinflux/general.py`: `load_settings(settings_file=None)` (raises `ConfigError` on missing/invalid YAML; `settings_file` defaults to `settings.yaml` in the project root when omitted), `get_class(source, settings_file=None)` (case-insensitive factory → correct DataHandler subclass; raises `ConfigError` for an unknown source, including `DataHandler` itself — it's the abstract base, not a selectable source; threads `settings_file` through to the handler's `load_settings()` call), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped **stderr** logging, plus an optional `RotatingFileHandler`; raises `ConfigError` instead of a raw `OSError` if `logfile` can't be opened, e.g. a permissions problem).
+- `toinflux/general.py`: `load_settings(settings_file=None)` (raises `ConfigError` on missing/invalid YAML; `settings_file` defaults to `settings.yaml` in the project root when omitted), `get_class(source, settings_file=None, instance=None)` (case-insensitive factory returning a constructed handler - `source_class()` is the one returning the class itself, uninstantiated; raises `ConfigError` for an unknown source, including the abstract `DataHandler` and `MyEnergi` bases, which are not registered as selectable sources; threads `settings_file` through to the handler's `load_settings()` call), `flatten_dict()` (used by Speedtest to flatten nested JSON), `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` (sets up timestamped **stderr** logging, plus an optional `RotatingFileHandler`; raises `ConfigError` instead of a raw `OSError` if `logfile` can't be opened, e.g. a permissions problem).
 - `configure_logging()` is called via `_configure_logging_or_exit()` in `main()` after settings are loaded and `--check-config` has short-circuited - this catches that `ConfigError`, logs it (the stderr handler is already attached by the time it's raised, so this still reaches the journal under systemd as a normal formatted line, not a traceback), and exits 1. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`.
 - **Diagnostics go to stderr; stdout carries the program's data.** Every log level, `--check-config`'s `Configuration error:` and the credential CLI's errors are on stderr; `--dump`/`--print` JSON, `Configuration OK` and the credential CLI's success messages are on stdout. That split is what makes `--dump | jq` reliable: a partially-successful dump reports a failure *and* emits a payload, and while both shared stdout the payload was unparseable exactly when it mattered. Every level moves, not just errors - splitting diagnostics by severity across two streams would interleave them unpredictably for anyone capturing either. Under systemd nothing changes: the unit pins neither `StandardOutput` nor `StandardError`, so both already reach the journal, and the rsyslog rule matches on `programname` rather than a stream - asserted against a real install by `test-packaging.sh` rather than inferred from the unit file. Records emitted *before* `configure_logging()` runs already went to stderr via Python's `lastResort` handler, so the streams now agree; their format still differs (`CRITICAL:root:...`), which is cosmetic and left alone. Effective log level is `-v`/`--verbose` (forces `DEBUG`) > `loglevel` settings.yaml key > `INFO` default.
 - Config file: `settings.yaml` (copy from `example_settings.yaml`), or a custom path via `--settings`. Required at runtime; not committed. Optional `logfile` key adds a rotating file log destination (`log_max_bytes`/`log_backup_count` settings keys control rotation, defaulting to 10 MiB / 3 backups). Some fields can optionally be sourced from `systemd-creds` instead on the packaged install - see "Credential storage (`systemd-creds`)" below; an environment-variable secret-override mechanism was considered and deliberately rejected instead - see "Rejected: environment-variable secrets" below.
+
+**Configuration faults are caught at validation, not at the first collection.** Two shapes used
+to slip past `--check-config` and surface much later, both now terminal errors from
+`_unusable_source_block()`:
+
+- **A source section that is not a mapping.** `"interval" not in source_cfg` is a containment
+  test, so a section set to null or a scalar raised a raw `TypeError` out of validation - a
+  traceback where `--check-config` exists to give a message, and the same traceback in the
+  journal on startup. The null case is the one reached by accident: commenting out every field
+  under a section leaves the bare key, which YAML parses as `None`, so it gets its own message
+  saying so rather than "got NoneType". The check returns immediately rather than collecting
+  further errors, because "interval is required" about a section with no fields at all buries
+  the cause under its consequences. `enumerate_bridges()` keeps its own type guard - `Hue.bridge()`
+  calls it at runtime, where no validation has run - but `_validate_hue_block()` now defers to the
+  shared check so the same sentence is not printed twice.
+- **A source name nothing can collect.** `get_class()` always refused an unknown name, but only
+  once a worker tried to construct a handler, so `--check-config` reported "Configuration OK" and
+  the worker loop's broad handler then retried forever. Validation refuses the name up front and
+  lists what is accepted. This also catches an ordinary typo with a matching section, which
+  previously validated cleanly.
+
+**Only collectable sources are in the registry.** The `MyEnergi` parent was registered alongside
+Zappi/Eddi/Harvi and filtered back out by `known_sources()`, which let the two disagree: the name
+validated, constructed, and then died with `AttributeError: 'MyEnergi' object has no attribute
+'get_data'` on every cycle. It is simply absent now, like `DataHandler`, and `known_sources()`
+needs no filter. `measurement_for()`/`shares_measurement()` are unaffected - they iterate
+`known_sources()`, which never included it.
 
 ### Adding a new data source
 
@@ -539,7 +846,12 @@ computation costs isn't done twice at startup.
    any numeric-coded field) from the UNITS.md entry, and a one-line `MCP_DESCRIPTION` of what the
    source reports (surfaced by `list_sources`, the documentation tool, and the per-source resources).
    Set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS` if the source's InfluxDB measurement isn't its own name or
-   it shares a measurement with others. Leave `MCP_LIVE_STATE` at its `True` default *unless*
+   it shares a measurement with others. Set `MCP_INSTANCE_TAG` only if several *producers* write to
+   the one measurement and a tag tells them apart (Speedtest's collecting `host`) - that makes the
+   read tools enumerate it, accept `instance`, and report per producer instead of merging; leave it
+   `None` otherwise, which keeps the flat payload shape. A source doing that should also override
+   `heartbeat_tags()` so its `collector_status` points are attributable to one writer rather than
+   several overwriting each other. Leave `MCP_LIVE_STATE` at its `True` default *unless*
    `get_data()` is expensive or pointless to call live (a full run like Speedtest, or delayed data
    like Octopus) - set it `False` and current-state will read the latest InfluxDB point instead.
    Nothing else is needed - the source is exposed by the read tools *and* resources automatically once
@@ -595,6 +907,18 @@ computation costs isn't done twice at startup.
      question-visibility scenario (questions appear when the source is selected, and for
      conditional shared blocks, do **not** appear when it isn't).
 
+**The supported Python floor is declared in four places and a test keeps them consistent.**
+`requires-python` gates installation, `PYTHON_MIN_SUPPORTED_MINOR` in `build-deb.sh` drives the
+`.deb`'s `Depends:` and its venv symlinks, the CI matrix decides what is actually tested, and
+`[tool.black] target-version` decides what syntax the formatter may emit. Raising one and
+forgetting another fails remotely from the cause - a package installing on a version nothing
+tested, or formatting a supported interpreter cannot parse -
+so `test_the_supported_python_floor_is_declared_consistently` reads all four and fails naming
+whichever disagrees. **`target-version` is pinned rather than inferred**: black otherwise picks a
+target from the syntax it sees and the interpreter running it (observed inferring `py315` while
+running on 3.14, warning on every invocation), which would let "correctly formatted" differ
+between a developer's machine and CI - the one thing a formatter must not do.
+
 ### Testing conventions
 
 - Mock `load_settings`, HTTP calls, and file I/O so tests run without real config or network.
@@ -612,7 +936,12 @@ computation costs isn't done twice at startup.
 
 - `pyproject.toml` is the single source of truth for the package version (`[project].version`) and runtime dependencies (dynamically read from `requirements.txt`). Bump the version there, not in `sendtoinflux.py`.
 - `sendtoinflux.py`'s `__version__` is read from installed package metadata (`importlib.metadata.version("send-to-influx")`), falling back to `"0.0.0-dev"` when run from a source checkout without the package installed. `requirements-dev.txt` includes `-e .` so dev/test environments have it installed and see the real version.
-- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/preinst`/`postinst`/`prerm`/`postrm`). `/etc/send-to-influx/settings.yaml` is deliberately *not* a dpkg conffile: `postinst` and `send-to-influx-set-credential` write debconf answers/sentinels into it, and dpkg's conffile machinery treats any maintainer-script write as a local modification (Debian Policy 10.7.3 forbids the combination) - guaranteeing a "modified (by you or by a script)" prompt on every upgrade that ships a changed example, with a one-keypress path to replacing a configured file with the pristine example. Instead the example ships at `/usr/share/send-to-influx/example_settings.yaml` and `postinst` copies it into place only if `/etc/send-to-influx/settings.yaml` doesn't exist (the Policy 10.7.3 "configuration files handled by maintainer scripts" pattern; `postrm` removes it on purge, as that pattern requires) - so upgrades never touch the live file at all. On upgrade (and after a `dpkg-reconfigure` that rewrote configuration), `postinst` restarts the service if - and only if - it's currently running, so unattended upgrades don't leave the replaced code running until the next reboot; a stopped service is never started. Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. The exceptions since the MCP server landed are `pydantic_core` and `rpds-py`, plus `cffi` and `cryptography` since the mcp 2.x port (all required by the `mcp` SDK, compiled, no pure-Python fallback - `cryptography` arrives via `pyjwt[crypto]`, which `mcp/server/request_state.py` imports unconditionally, so it is load-bearing rather than optional): the blanket strip removes them too, and a dedicated compiled-wheel-matrix step re-adds them. **These come in two shapes and the difference is load-bearing.** `pydantic_core`, `rpds-py` and `cffi` publish a wheel per CPython minor whose `.so` filename carries both the minor and the architecture (`_cffi_backend.cpython-310-aarch64-linux-gnu.so`), so every variant across the supported minors (3.10-3.14, `COMPILED_WHEEL_MINORS`) x both architectures can be merged into the one shared site-packages and coexist - CPython only imports a `.so` tagged with its own exact ABI. `cryptography` publishes a *stable-ABI* (`cp39-abi3`) wheel instead: one per architecture, serving every minor, whose `.so` name carries **neither** tag - `cryptography/hazmat/bindings/_rust.abi3.so` is identically named in the x86_64 and the aarch64 wheel, so merging both would silently have one overwrite the other. Those (`COMPILED_WHEEL_ABI3_PACKAGES`) are therefore staged side-by-side as `<name>.so.<arch>` with the un-suffixed name deliberately never written, and `postinst` symlinks the variant matching `dpkg --print-architecture` at install time (discovered by pattern, so a future abi3 dependency needs no postinst change; on an architecture with no staged variant nothing is linked, leaving the pure-Python collectors unaffected and the optional MCP server reporting its usual "could not be imported" `ConfigError`). The build fails loudly if any minor/arch combination is missing, or if an abi3 extension ever appears un-suffixed - which (together with the `rpds-py~=0.30.0` hold in requirements.txt) is the guard against a wheel version dropping a supported minor or platform. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead renames it to the version-independent `lib/python3` and `postinst` symlinks every supported minor to it (see the `preinst`/layout bullet below for why the symlinks are created there rather than shipped; both bounds come from `PYTHON_MIN_SUPPORTED_MINOR`/`PYTHON_MAX_SUPPORTED_MINOR`, which also drive `Depends:` and are substituted into `postinst`, so the range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds the same script's output on an `ubuntu-24.04-arm` runner on every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - catching both a future dependency change that makes a compiled extension load-bearing rather than optional, and any regression in the maintainer-script behaviour below, before it can merge; `bookworm-verify` re-runs the same suite in a `debian:12` container for systemd-252 coverage (the restart scenario self-skips there - no running systemd - but the systemd-creds *tooling* is the real 252 binaries, which is what caught out 4.1). See the README's "After installing" section (under "Using the .deb package").
+- `packaging/deb/build-deb.sh` builds a `.deb` that bundles the app + dependencies into a venv under `/opt/send-to-influx`, with a systemd unit (`packaging/send-to-influx.service` - kept at the top level of `packaging/` since it's format-agnostic; a future `.rpm` would ship the identical unit file) and maintainer scripts (`packaging/deb/preinst`/`postinst`/`prerm`/`postrm`). `/etc/send-to-influx/settings.yaml` is deliberately *not* a dpkg conffile: `postinst` and `send-to-influx-set-credential` write debconf answers/sentinels into it, and dpkg's conffile machinery treats any maintainer-script write as a local modification (Debian Policy 10.7.3 forbids the combination) - guaranteeing a "modified (by you or by a script)" prompt on every upgrade that ships a changed example, with a one-keypress path to replacing a configured file with the pristine example. Instead the example ships at `/usr/share/send-to-influx/example_settings.yaml` and `postinst` copies it into place only if `/etc/send-to-influx/settings.yaml` doesn't exist (the Policy 10.7.3 "configuration files handled by maintainer scripts" pattern; `postrm` removes it on purge, as that pattern requires) - so upgrades never touch the live file at all. The Nuki device-tag migration and `UPGRADING.md`
+ship into that same directory, so an apt install can run the 5.2->5.3 data migration without
+cloning the repo - deliberately not a `pyproject.toml` entry point and asserted *off* `$PATH` by
+the scenario suite, since a destructive irreversible one-off must be a deliberate act. It is run
+with `/opt/send-to-influx/venv/bin/python3`, not a bare `python3`: it needs `requests`, which the
+package bundles rather than declaring as a system dependency. On upgrade (and after a `dpkg-reconfigure` that rewrote configuration), `postinst` restarts the service if - and only if - it's currently running, so unattended upgrades don't leave the replaced code running until the next reboot; a stopped service is never started. Package is `Architecture: all`: the venv's own interpreter is a symlink to the system-provided `/usr/bin/python3` (declared as a `Depends: python3 (>= 3.10), python3 (<< 3.31)`, not bundled), and any optional compiled accelerators pulled in by pip (e.g. PyYAML's `_yaml`, charset-normalizer's `md`/`cd`) are stripped post-install in favour of their pure-Python fallbacks - see the comments at the top of `build-deb.sh`. The exceptions since the MCP server landed are `pydantic_core` and `rpds-py`, plus `cffi` and `cryptography` since the mcp 2.x port (all required by the `mcp` SDK, compiled, no pure-Python fallback - `cryptography` arrives via `pyjwt[crypto]`, which `mcp/server/request_state.py` imports unconditionally, so it is load-bearing rather than optional): the blanket strip removes them too, and a dedicated compiled-wheel-matrix step re-adds them. **These come in two shapes and the difference is load-bearing.** `pydantic_core`, `rpds-py` and `cffi` publish a wheel per CPython minor whose `.so` filename carries both the minor and the architecture (`_cffi_backend.cpython-310-aarch64-linux-gnu.so`), so every variant across the supported minors (3.10-3.14, `COMPILED_WHEEL_MINORS`) x both architectures can be merged into the one shared site-packages and coexist - CPython only imports a `.so` tagged with its own exact ABI. `cryptography` publishes a *stable-ABI* (`cp39-abi3`) wheel instead: one per architecture, serving every minor, whose `.so` name carries **neither** tag - `cryptography/hazmat/bindings/_rust.abi3.so` is identically named in the x86_64 and the aarch64 wheel, so merging both would silently have one overwrite the other. Those (`COMPILED_WHEEL_ABI3_PACKAGES`) are therefore staged side-by-side as `<name>.so.<arch>` with the un-suffixed name deliberately never written, and `postinst` symlinks the variant matching `dpkg --print-architecture` at install time (discovered by pattern, so a future abi3 dependency needs no postinst change; on an architecture with no staged variant nothing is linked, leaving the pure-Python collectors unaffected and the optional MCP server reporting its usual "could not be imported" `ConfigError`). The build fails loudly if any minor/arch combination is missing, or if an abi3 extension ever appears un-suffixed - which (together with the `rpds-py~=0.30.0` hold in requirements.txt) is the guard against a wheel version dropping a supported minor or platform. A venv's `site-packages` normally lives under `lib/pythonX.Y/` (named after the exact interpreter that created it), which would otherwise tie the package to whichever Python the *build host* happened to have; since everything left after the accelerator-stripping is pure Python, the script instead renames it to the version-independent `lib/python3` and `postinst` symlinks every supported minor to it (see the `preinst`/layout bullet below for why the symlinks are created there rather than shipped; both bounds come from `PYTHON_MIN_SUPPORTED_MINOR`/`PYTHON_MAX_SUPPORTED_MINOR`, which also drive `Depends:` and are substituted into `postinst`, so the range can't drift apart), so the package installs correctly on any target with a matching `python3`, regardless of which minor in that range. (An earlier version pinned `Depends:` to the exact build-time minor instead - that broke in practice the first time the target's Python drifted out of sync with whatever GitHub's CI runner image shipped.) `.github/workflows/premerge.yaml`'s `arm64-verify` job builds the same script's output on an `ubuntu-24.04-arm` runner on every push/PR (a required status check) and runs `packaging/deb/test-packaging.sh` against it - catching both a future dependency change that makes a compiled extension load-bearing rather than optional, and any regression in the maintainer-script behaviour below, before it can merge; `bookworm-verify` re-runs the same suite in a `debian:12` container for systemd-252 coverage (the restart scenario self-skips there - no running systemd - but the systemd-creds *tooling* is the real 252 binaries, which is what caught out 4.1). See the README's "After installing" section (under "Using the .deb package").
 
 The package also ships rsyslog and logrotate config (`packaging/deb/send-to-influx.rsyslog`/
 `send-to-influx.logrotate`, installed to `/etc/rsyslog.d/49-send-to-influx.conf` and

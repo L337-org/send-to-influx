@@ -96,11 +96,27 @@ def escape_key_or_tag_value(value):
     backslash-escaped in measurement/tag/field keys and tag values (field
     *values* follow different quoting rules, handled by _format_field_value).
 
+    **A newline cannot be escaped** - the line protocol has no escape for one, because a
+    newline is what separates points. A tag value containing one therefore terminates the
+    point early and turns the remainder into a *second* point, which reached InfluxDB as
+    data the operator never configured. Demonstrated with a Hue host or MyEnergi label of
+    ``"Garage\nmyenergi,device=Injected fake=1"``.
+
+    So this refuses rather than escapes. Callers should reject such a value at the
+    configuration boundary, where the error can name the settings key at fault - this is the
+    backstop that makes it impossible to reach a write by any route, present and future.
+
     :param value: key or tag value to escape
     :return: escaped line protocol representation
     :rtype: str
+    :raises InfluxWriteError: the value contains a character that cannot appear in a tag
     """
     value = str(value)
+    if any(char in value for char in "\n\r"):
+        raise InfluxWriteError(
+            f"a line protocol key or tag value cannot contain a newline (got {value!r}); "
+            f"it would split the point in two"
+        )
     return value.replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
 
 
@@ -119,13 +135,21 @@ def worker_label(source, instance=None):
     disagree with ``worker_key``, which keeps the value verbatim - so the label shows it
     (as ``source@``) instead of silently swallowing it.
 
+    An instance equal to the source name collapses to the bare source, because that is what
+    a MyEnergi device's label defaults to on a legacy single-device install: without this
+    every log line for such an install would read ``zappi@zappi``, changing the output an
+    operator greps for no reason. ``worker_key`` is unaffected and keeps the instance, since
+    it is an identity rather than a label.
+
     :param source: source name
     :type source: str
     :param instance: the worker's instance, or None for a single-target source
     :return: label for log output
     :rtype: str
     """
-    return f"{source}" if instance is None else f"{source}@{instance}"
+    if instance is None or instance == source:
+        return f"{source}"
+    return f"{source}@{instance}"
 
 
 class DataHandler:
@@ -179,6 +203,27 @@ class DataHandler:
     # disabled capability isn't registered at all (least privilege), never
     # registered-and-refusing.
     MCP_WRITABLE = False
+    # The tag key that distinguishes *producers* within this source's measurement,
+    # or None when the measurement has only one. This is the tag as an **axis** -
+    # something to enumerate and scope by - as opposed to MCP_TAG_FILTERS above,
+    # which pins a tag to one constant value. The distinction is the whole point:
+    # Speedtest deliberately tags every point with the collecting host, and Grafana
+    # separates them, but the MCP read tools used to flatten every host into one
+    # unlabelled series - so a two-host install got answers that silently mixed
+    # them. Naming the axis is what lets a read enumerate it, scope to one value,
+    # and report per value.
+    #
+    # It is deliberately per source rather than one global "collector" tag: the axis
+    # means different things (Speedtest's collecting host, a Hue bridge, a Nuki
+    # lock, a MyEnergi device), and most sources genuinely have only one producer.
+    MCP_INSTANCE_TAG: "str | None" = None
+    # Whether one live get_data() covers *every* producer of this source, or only the one
+    # this handler serves. Three shapes exist and they are genuinely different: Speedtest
+    # reads live but can only speak for the local host; Hue reads live per bridge, each
+    # bridge having its own handler; Nuki reads every lock over one MQTT subscription, so a
+    # single handler's live read covers them all. Only the third can report per instance
+    # from a live read, which is what this distinguishes.
+    MCP_LIVE_STATE_COVERS_ALL_INSTANCES = False
 
     def mcp_tag_filters(self):
         """Return the tag filters that scope this handler's reads.
@@ -195,6 +240,28 @@ class DataHandler:
         :rtype: dict
         """
         return dict(self.MCP_TAG_FILTERS)
+
+    def heartbeat_tags(self):
+        """Return extra tags for this handler's ``collector_status`` heartbeat.
+
+        The heartbeat must be distinguishable per *writer*, or several writers overwrite
+        one another's ok/consecutive_failures at second precision and a dead one is
+        invisible - which is exactly what happened with two Speedtest hosts sharing
+        ``collector_status,source=speedtest``.
+
+        The base answer covers an instanced source, tagging its own instance (a Hue
+        bridge). A source whose producers are separate *processes* rather than separate
+        targets has ``instance`` None and overrides this instead - see Speedtest, which
+        tags the collecting machine. Either way the tag has to match what the source's own
+        data carries, or the health series and the measurement disagree about who wrote
+        what.
+
+        :return: extra tag key/value pairs, empty for a single-writer source
+        :rtype: dict
+        """
+        if self.instance is not None:
+            return {"host": self.instance}
+        return {}
 
     def mcp_write_enabled(self):
         """Return True only when this source is writable *and* the operator has
@@ -284,7 +351,7 @@ class DataHandler:
         """
         return worker_label(self.source, self.instance)
 
-    def send_data(self, data=None, timestamp=None, use_buffer=True):
+    def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True):
         """
         Sends data to influxDB.
 
@@ -310,6 +377,16 @@ class DataHandler:
             heartbeat), which would otherwise consume buffer capacity that belongs
             to real measurements.
         :type use_buffer: bool
+        :param flush: when False, post this point without first flushing the
+            backlog. Exists for a source that writes several points per collection
+            cycle through this method - Nuki writes one per lock - because the write
+            buffer is per *worker*, not per point: flushing on every point charged
+            the head buffered point one rejection per point, so a five-lock install
+            burned all of ``MAX_POINT_REJECTIONS`` in a single cycle and discarded
+            the backlog after one, instead of surviving five. Such a caller flushes
+            on its first point and passes False for the rest. Ignored when
+            ``use_buffer`` is False, which skips the buffer entirely.
+        :type flush: bool
         :return: None
         :raises InfluxWriteError: if the write to InfluxDB fails
         """
@@ -338,9 +415,29 @@ class DataHandler:
             self._post_line(data_to_send, url, post_kwargs)
             return
 
+        self._send_buffered(data_to_send, url, post_kwargs, flush)
+
+    def _send_buffered(self, data_to_send, url, post_kwargs, flush):
+        """Flush the backlog then post this point, buffering it if either fails.
+
+        Split out of ``send_data`` only to keep that method within the project's cyclomatic
+        complexity limit; the behaviour is unchanged.
+
+        :param data_to_send: the line protocol point, or None for a flush-only call
+        :type data_to_send: str or None
+        :param url: the write URL from _build_write_request
+        :type url: str
+        :param post_kwargs: the request kwargs from _build_write_request
+        :type post_kwargs: dict
+        :param flush: whether to flush the backlog first - see send_data
+        :type flush: bool
+        :return: None
+        :raises InfluxWriteError: the flush or the post failed
+        """
         buffer = self._write_buffers.setdefault(self.worker_key, deque(maxlen=MAX_BUFFERED_POINTS))
         try:
-            self._flush_buffer(buffer, url, post_kwargs)
+            if flush:
+                self._flush_buffer(buffer, url, post_kwargs)
             if data_to_send is not None:
                 self._post_line(data_to_send, url, post_kwargs)
         except InfluxWriteError:

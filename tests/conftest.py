@@ -87,6 +87,10 @@ def mock_main_deps():
         mock_load_settings.return_value = {
             "sources": ["hue"],
             "hue": {"db": "hue_db", "interval": 60, "host": "hue.example.com", "user": "test_hue_user"},
+            # zappi is instanced too now (one worker per configured device), so a test
+            # dispatching --source zappi needs a real device here or it correctly expands
+            # to nothing - the same trap the hue block above was added for.
+            "zappi": {"db": "zappi_db", "interval": 60, "serial": "12345"},
         }
         yield mock_handler, mock_get_class
 

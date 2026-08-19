@@ -7,11 +7,12 @@ import signal
 import sys
 import threading
 import time
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 import pytest
 import sendtoinflux
 from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.speedtest import Speedtest
 from toinflux.influx import DataHandler, InfluxWriteError
 
 
@@ -131,7 +132,7 @@ class TestMain:
         ):
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
-            mock_get_class.assert_called_once_with("zappi", None, instance=None)
+            mock_get_class.assert_called_once_with("zappi", None, instance="zappi")
 
     def test_main_uses_settings_arg(self, mock_main_deps):
         """main with --settings passes the path through to load_settings and get_class."""
@@ -145,7 +146,7 @@ class TestMain:
         ):
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
-            mock_get_class.assert_called_once_with("zappi", "/etc/send-to-influx/settings.yaml", instance=None)
+            mock_get_class.assert_called_once_with("zappi", "/etc/send-to-influx/settings.yaml", instance="zappi")
 
     def test_main_registers_sigterm_handler(self, mock_main_deps):
         """main registers signal_handler for both SIGINT and SIGTERM."""
@@ -173,13 +174,18 @@ class TestMain:
                 "stagger_seconds": 3,
                 # A real bridge: hue expands to one worker per *configured* bridge, so a
                 # hue with no block at all would correctly expand to no worker and drop
-                # out of the list these tests are checking.
+                # out of the list these tests are checking. zappi is instanced the same way
+                # now - one worker per configured device - so it needs a real device here for
+                # the same reason.
                 "hue": {"db": "hue_db", "interval": 60, "host": "hue.example.com", "user": "tok"},
+                "zappi": {"db": "zappi_db", "interval": 60, "serial": "12345"},
             }
             sendtoinflux.main()
             mock_run_workers.assert_called_once()
             call_args = mock_run_workers.call_args[0]
-            assert call_args[0] == [("hue", "hue.example.com"), ("zappi", None), ("speedtest", None)]
+            # zappi carries its device label, which for a legacy single-device block defaults
+            # to the source name; speedtest has no instances at all and stays None.
+            assert call_args[0] == [("hue", "hue.example.com"), ("zappi", "zappi"), ("speedtest", None)]
             assert call_args[2] == 3
 
     def test_main_logs_sources_on_multi_source_startup(self, caplog):
@@ -196,8 +202,11 @@ class TestMain:
                 "stagger_seconds": 3,
                 # A real bridge: hue expands to one worker per *configured* bridge, so a
                 # hue with no block at all would correctly expand to no worker and drop
-                # out of the list these tests are checking.
+                # out of the list these tests are checking. zappi is instanced the same way
+                # now - one worker per configured device - so it needs a real device here for
+                # the same reason.
                 "hue": {"db": "hue_db", "interval": 60, "host": "hue.example.com", "user": "tok"},
+                "zappi": {"db": "zappi_db", "interval": 60, "serial": "12345"},
             }
             sendtoinflux.main()
             assert any("workers=hue@hue.example.com, zappi, speedtest" in record.message for record in caplog.records)
@@ -780,6 +789,141 @@ class TestSendHeartbeat:
         sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
 
         assert captured["header"] == "collector_status,source=hue "
+
+    # Settings that let every source construct, so the contract test below can use a real
+    # handler per source rather than a mock. A mock is exactly what let a real regression
+    # through: MagicMock.send_data never runs the source's own override.
+    #
+    # Asserted to pass the project's own validate_settings() by the test below, not merely
+    # hand-checked - which is what caught that every source needs an `interval`. A handler
+    # constructed from settings no real install could have is only pretending to be real, since
+    # __init__ reads almost none of them.
+    #
+    # Note the validator does NOT cover everything: octopus was written here with "serial"
+    # where the collector reads "meter_serial", and validate_settings accepts that happily -
+    # it checks the fields it knows are required, not every field a source later reads. So the
+    # key names below are additionally checked against each source by hand. Corrected rather
+    # than left, because the whole point of this fixture is settings a real install could have.
+    _EVERY_SOURCE_SETTINGS = {
+        "influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"},
+        "mqtt": {"broker_host": "broker.example.com"},
+        "hue": {"db": "d", "interval": 300, "host": "bridge.example.com", "user": "token"},
+        "nuki": {"db": "d", "interval": 300},
+        "speedtest": {"db": "d", "interval": 3600},
+        "openmeteo": {"db": "d", "interval": 300, "latitude": 51.5, "longitude": -0.1},
+        "octopus": {"db": "d", "interval": 1800, "api_key": "k", "mpan": "1", "meter_serial": "s"},
+        "carbonintensity": {"db": "d", "interval": 1800},
+        "zappi": {"db": "d", "interval": 300, "serial": "10000001"},
+        "eddi": {"db": "d", "interval": 300, "serial": "10000002"},
+        "harvi": {"db": "d", "interval": 300, "serial": "10000003"},
+        "myenergi": {"apikey": "k"},
+    }
+
+    def test_the_fixture_settings_are_ones_a_real_install_could_have(self):
+        """Guards the fixture the contract test depends on.
+
+        The point of that test is a *real* handler per source, which is undermined if the
+        settings are not ones the project would accept - and nothing would say so, because
+        __init__ reads almost none of them. Running the real validator is what keeps the
+        fixture honest as sources gain required fields.
+
+        It is not a complete check: the validator enforces the fields it knows are required,
+        not every field a source goes on to read, so it accepts octopus's "serial" where the
+        collector wants "meter_serial". Worth having anyway - it caught the missing intervals -
+        but do not read a pass here as proof every key is right.
+        """
+        from toinflux.general import known_sources, validate_settings
+
+        for name in known_sources():
+            # Raises ConfigError with the offending key named, which is the useful failure.
+            validate_settings({**self._EVERY_SOURCE_SETTINGS, "sources": [name]}, source=name)
+
+    def test_every_source_actually_writes_a_heartbeat_point(self):
+        """The heartbeat must survive any source's own send_data() override.
+
+        Every other test in this class uses a MagicMock handler, so it asserts what
+        send_heartbeat *asked for* and never what the handler *did*. That is precisely how a
+        real regression shipped: Nuki's per-lock override treated the heartbeat's flat
+        ``{ok, consecutive_failures}`` payload as lock names, whose scalar values were then
+        skipped as non-dicts, so Nuki wrote no heartbeat at all - silently, and only warnings
+        in the log. A collector with no heartbeat is the exact silent gap the heartbeat exists
+        to prevent.
+
+        So this drives a *real* handler per source down to the HTTP boundary and asserts a
+        collector_status line arrives. It covers every source rather than just Nuki, because
+        the failure was a shared contract being broken by one subclass, and the next override
+        would break it the same way.
+        """
+        from toinflux.general import known_sources
+
+        for name in known_sources():
+            posted = self._heartbeat_lines(name)
+            assert len(posted) == 1, f"{name} wrote {len(posted)} heartbeat lines, expected 1: {posted}"
+            line = posted[0]
+            assert line.startswith("collector_status,"), f"{name} wrote {line!r}"
+            assert f"source={name}" in line, f"{name} wrote {line!r}"
+            assert "ok=1" in line and "consecutive_failures=0" in line, f"{name} wrote {line!r}"
+
+    @classmethod
+    def _heartbeat_lines(cls, name):
+        """Drive one source's real handler through send_heartbeat and return the lines it
+        posted. A method rather than an inline loop body so nothing closes over a loop
+        variable."""
+        from toinflux.general import source_class
+
+        with patch("toinflux.influx.load_settings", return_value=cls._EVERY_SOURCE_SETTINGS):
+            handler = source_class(name)(name)
+        handler.session = MagicMock()
+        posted = []
+        base = type(handler).__mro__[-2]  # DataHandler, wherever it sits in each source's chain
+        with patch.object(base, "_post_line", side_effect=lambda line, *a, **k: posted.append(line)):
+            sendtoinflux.send_heartbeat(handler, name, ok=True, consecutive_failures=0)
+        return posted
+
+    def test_a_tag_value_that_cannot_be_escaped_is_swallowed_like_any_other_failure(self):
+        """The docstring promises a heartbeat failure is logged and swallowed. Building the
+        tags has to be inside that guard, not before it.
+
+        ``escape_key_or_tag_value()`` *raises* on a newline rather than escaping it, and
+        ``heartbeat_tags()`` returns values this code does not control - Speedtest's is the OS
+        hostname. Built outside the try, such a value escaped: on the success path it would
+        have been counted as a source failure, and on the two failure paths - where the
+        heartbeat call sits inside an ``except`` block, so nothing catches it - it killed the
+        worker thread outright, reporting the heartbeat error rather than whatever had
+        actually gone wrong.
+        """
+        handler = MagicMock(STREAMING=False, instance=None)
+        handler.influx_header = "speedtest,host=x "
+        handler.worker_label = "speedtest"
+        handler.heartbeat_tags.return_value = {"host": "evil\nspeedtest,host=forged ping=0.1"}
+
+        # Must not raise - that is the whole promise.
+        sendtoinflux.send_heartbeat(handler, "speedtest", ok=False, consecutive_failures=1)
+
+        handler.send_data.assert_not_called()
+        assert handler.influx_header == "speedtest,host=x ", "the header must still be restored"
+
+    def test_that_failure_is_logged_rather_than_silent(self, caplog):
+        """Swallowed is not the same as hidden: a heartbeat that never writes is exactly the
+        blind spot the heartbeat exists to remove, so it has to say so."""
+        handler = MagicMock(STREAMING=False, instance=None)
+        handler.influx_header = "speedtest,host=x "
+        handler.worker_label = "speedtest"
+        handler.heartbeat_tags.return_value = {"host": "evil\nhost"}
+        with caplog.at_level(logging.WARNING):
+            sendtoinflux.send_heartbeat(handler, "speedtest", ok=True, consecutive_failures=0)
+        assert any("Failed to write heartbeat" in r.getMessage() for r in caplog.records)
+
+    def test_a_normal_tag_value_still_writes_the_heartbeat(self):
+        """The guard must not swallow the ordinary case."""
+        handler = MagicMock(STREAMING=False, instance=None)
+        handler.influx_header = "speedtest,host=x "
+        handler.worker_label = "speedtest"
+        handler.heartbeat_tags.return_value = {"host": "merlin"}
+        captured = {}
+        handler.send_data.side_effect = lambda **kwargs: captured.update(header=handler.influx_header)
+        sendtoinflux.send_heartbeat(handler, "speedtest", ok=True, consecutive_failures=0)
+        assert captured["header"] == "collector_status,source=speedtest,host=merlin "
 
     def test_uses_current_time_not_a_stale_self_timestamp(self, sample_settings):
         """send_heartbeat writes with the current time, not a stale self.timestamp set by an earlier get_data() cycle.
@@ -1620,6 +1764,10 @@ class TestMultiBridgeWorkers:
         ok/consecutive_failures on the same series at second precision."""
         captured = {}
         handler = MagicMock(STREAMING=False, instance="b.example.com")
+        # Bind the real base implementation rather than letting the mock invent a
+        # return value: the point of the test is that DataHandler decides the tag, and
+        # a canned mock answer would pass even if that logic were removed.
+        handler.heartbeat_tags = MethodType(DataHandler.heartbeat_tags, handler)
         handler.influx_header = "hue,host=b.example.com "
         handler.send_data.side_effect = lambda **kw: captured.update(header=handler.influx_header)
         sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
@@ -1630,10 +1778,53 @@ class TestMultiBridgeWorkers:
         line-protocol special must be escaped or the point is silently corrupt."""
         captured = {}
         handler = MagicMock(STREAMING=False, instance="odd host,x")
+        handler.heartbeat_tags = MethodType(DataHandler.heartbeat_tags, handler)
         handler.influx_header = "hue "
         handler.send_data.side_effect = lambda **kw: captured.update(header=handler.influx_header)
         sendtoinflux.send_heartbeat(handler, "hue", ok=True, consecutive_failures=0)
         assert captured["header"] == "collector_status,source=hue,host=odd\\ host\\,x "
+
+    def test_heartbeat_distinguishes_speedtest_collectors_by_host(self):
+        """Acceptance question 4. Two hosts running Speedtest into one database shared
+        `collector_status,source=speedtest` and overwrote one another at second
+        precision, so a dead collector was indistinguishable from a healthy estate.
+
+        Speedtest's writers are separate processes rather than separate targets, so
+        `instance` is None and the base implementation contributes nothing - the source
+        has to name the machine itself. The real override is exercised here, not a mock
+        value, and the tag must match what its own data carries."""
+        captured = {}
+        handler = MagicMock(STREAMING=False, instance=None)
+        handler.collector_host = Speedtest.collector_host
+        handler.heartbeat_tags = MethodType(Speedtest.heartbeat_tags, handler)
+        handler.influx_header = "speedtest "
+        handler.send_data.side_effect = lambda **kw: captured.update(header=handler.influx_header)
+        with patch("toinflux.speedtest.gethostname", return_value="pi4.lan"):
+            sendtoinflux.send_heartbeat(handler, "speedtest", ok=True, consecutive_failures=0)
+        assert captured["header"] == "collector_status,source=speedtest,host=pi4 "
+
+    def test_speedtest_data_and_heartbeat_agree_on_the_host_tag(self):
+        """The two must not drift: a health series tagged differently from the
+        measurement it reports on would make per-host health unjoinable to per-host
+        data. One implementation serves both, and this is what fails if that changes."""
+        with patch("toinflux.speedtest.gethostname", return_value="nas.local"):
+            assert Speedtest.collector_host() == "nas"
+            handler = MagicMock(instance=None)
+            handler.collector_host = Speedtest.collector_host
+            assert MethodType(Speedtest.heartbeat_tags, handler)() == {"host": "nas"}
+
+    def test_heartbeat_escapes_the_tag_key_as_well_as_the_value(self):
+        """heartbeat_tags() is an extension point any source can override, and the header
+        is written verbatim - an unescaped key carrying a comma, equals or space would end
+        the tag set early and silently corrupt the point. Every key today is a bare word,
+        which is precisely why an unescaped one would go unnoticed."""
+        captured = {}
+        handler = MagicMock(STREAMING=False, instance=None)
+        handler.heartbeat_tags = lambda: {"odd key,x": "v=1"}
+        handler.influx_header = "speedtest "
+        handler.send_data.side_effect = lambda **kw: captured.update(header=handler.influx_header)
+        sendtoinflux.send_heartbeat(handler, "speedtest", ok=True, consecutive_failures=0)
+        assert captured["header"] == "collector_status,source=speedtest,odd\\ key\\,x=v\\=1 "
 
     def test_dump_emits_every_bridge_keyed_by_host(self):
         """--dump covers all bridges, keyed by host even for one bridge, so nothing

@@ -129,7 +129,7 @@ def test_door_state_change_is_written_immediately(streaming_nuki):
     """A doorsensorState message published to the broker is decoded and written to InfluxDB
     within seconds - via the persistent subscription, not the (1h-away) periodic snapshot."""
     handler, posts = streaming_nuki
-    # Seed the retained name so the field key is prefixed with it (delivered on subscribe).
+    # Seed the retained name so the point is tagged with it (delivered on subscribe).
     _publish(f"nuki/{DEVICE_ID}/name", "Integration Lock", retain=True)
 
     stop = threading.Event()
@@ -139,8 +139,8 @@ def test_door_state_change_is_written_immediately(streaming_nuki):
     try:
         # Actively wait until the retained name has been received and remembered, rather
         # than sleeping a fixed guess (flaky on a slow/loaded runner): its arrival proves
-        # both that the subscription is established and that the field-key prefix the
-        # assertion below depends on ("Integration_Lock_...") is in place.
+        # both that the subscription is established and that the lock label the assertion
+        # below depends on (device=Integration_Lock) is in place.
         deadline = time.monotonic() + WRITE_TIMEOUT
         while time.monotonic() < deadline and handler._device_names.get(DEVICE_ID) != "Integration Lock":
             time.sleep(0.05)
@@ -151,8 +151,14 @@ def test_door_state_change_is_written_immediately(streaming_nuki):
         # Retained, as real Nuki publishes its state topics - so this exercises the
         # retained delivery path, not just a transient live message.
         _publish(f"nuki/{DEVICE_ID}/doorsensorState", "3", retain=True)
-        body = _wait_for_write(posts, "Integration_Lock_doorsensorStateValue=3")
-        assert body.startswith("nuki,host=")
+        body = _wait_for_write(posts, "doorsensorStateValue=3")
+        # Since 5.3 the lock is a tag and the field key is bare - it used to be
+        # "Integration_Lock_doorsensorStateValue" on a point tagged with the broker host.
+        # Asserted as the whole header rather than a substring, so neither half can regress
+        # silently: a returning field-key prefix and a returning broker tag both fail here.
+        assert body.startswith("nuki,device=Integration_Lock "), body
+        assert "Integration_Lock_doorsensorStateValue" not in body, body
+        assert ",host=" not in body, f"the broker host tag was dropped in 5.3: {body}"
     finally:
         stop.set()
         stream.join(timeout=WRITE_TIMEOUT)

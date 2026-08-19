@@ -251,9 +251,9 @@ def _overlay_credential(settings, name, path, value):
     """Write one credential value into its settings section, creating the section if absent.
 
     A malformed section (``influx: []``, ``hue: "oops"``) is logged and skipped rather than
-    crashing - this function's caller must survive a bad settings file. That does not
-    guarantee a clean ConfigError downstream: validate_settings() assumes every section is a
-    mapping too, which is tracked separately as a pre-existing gap.
+    crashing - this function's caller must survive a bad settings file. ``validate_settings()``
+    then reports it as a ``ConfigError`` naming the section and its type, so a bad section is
+    skipped here and explained there rather than reaching a collector half-applied.
 
     :param settings: parsed settings dict, mutated in place
     :param name: credential name, for the log message

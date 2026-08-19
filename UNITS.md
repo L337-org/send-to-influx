@@ -29,8 +29,21 @@ the README's "Multiple Hue bridges" section.
 
 The `collector_status` heartbeat for `hue` also carries a `host` tag, so each bridge's
 `ok`/`consecutive_failures` are recorded separately. Grouping by `source` alone aggregates
-across bridges, which can hide a failing one behind a healthy one — group by `source, host`
+across bridges, which can hide a failing one behind a healthy one - group by `source, host`
 (or `*`) for a series per bridge.
+
+Every **MyEnergi** point carries a `device` tag. With a single device configured per type it
+holds the type name (`zappi`, `eddi`, `harvi`), exactly as it always has. Configure more than
+one device of a type and the tag holds the `label` you gave each one, so the tag identifies
+the device rather than the type - filter or group by `device` to separate them. Labels must be
+unique across the three blocks, since all three types write to the one `myenergi` measurement.
+Note that renaming a label starts a new series, and that a decommissioned device's history
+stays under its old label.
+
+The `collector_status` heartbeat for a MyEnergi source also carries the `device` tag, so each
+device's `ok`/`consecutive_failures` are recorded separately rather than several devices
+overwriting one another at second precision. Heartbeat points written before this existed sit
+in an untagged series.
 
 ## MyEnergi Zappi (`zappi`)
 
@@ -99,8 +112,21 @@ page for the default unit of each one.
 
 ## Nuki Smart Lock (`nuki`)
 
-Field keys are prefixed with the lock's own name from the Nuki app (spaces replaced with
-underscores), e.g. `Front_Door_stateValue`; every lock provisioned to the broker is reported.
+Every **Nuki** point carries a `device` tag holding the lock's own name from the Nuki app (give
+each lock a distinct name), and every lock provisioned to the broker is reported as its own
+point. Field keys are the bare names below, the same for every lock, so filter or group by
+`device` to separate them. A lock that has not published its name to the broker is reported
+under its Nuki device ID instead.
+
+The broker is deliberately not recorded: every lock arrives through one broker, so it
+identifies nothing, and moving to a different broker should not start a new series.
+
+> **Breaking change in 5.3:** before 5.3 each lock's fields were prefixed with its name into a
+> single shared point - `Front_Door_stateValue` rather than `stateValue` tagged
+> `device=Front_Door` - and the point carried a `host` tag naming the broker. The lock could
+> not be queried as a dimension that way. Existing history stays in the old shape and keeps
+> working; `UPGRADING.md` describes the supplied migration that converts it, in two phases with
+> the irreversible one separately invoked.
 
 | Field | Unit | Notes |
 |---|---|---|
@@ -152,3 +178,14 @@ underscores), e.g. `Front_Door_stateValue`; every lock provisioned to the broker
 Other fields available from `speedtest-cli`'s results (e.g. `bytes_sent`, `bytes_received`, `server.*`) can also
 be selected via `fields` in settings; see the [speedtest-cli](https://github.com/sivel/speedtest-cli) project for
 their meaning and units.
+
+Every **Speedtest** point carries a `host` tag holding the short hostname of the machine that ran
+the test. That is the point of it: running a collector on several hosts into one database is how
+their connections are compared, so the tag is what separates them. Filter or group by `host`, and
+note that renaming a machine starts a new series.
+
+The `collector_status` heartbeat for `speedtest` carries the same `host` tag, so each collector's
+`ok`/`consecutive_failures` are recorded separately. Before this existed every host wrote the same
+`collector_status,source=speedtest` series and overwrote the others at second precision, so one
+collector dying looked exactly like a healthy estate - if you have heartbeat history from before
+that change, it sits in an untagged series and cannot be attributed to a host.

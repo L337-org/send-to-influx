@@ -10,9 +10,12 @@ supplies the storage/provider logic, the resource-owner login page (gated on
 ``mcp.user``/``mcp.password``), and its brute-force throttling.
 
 OAuth client registrations and refresh tokens persist across service restarts in
-a JSON state file (``mcp.state_file``, defaulting to alongside the settings
-file) - the packaged install restarts the service on every upgrade, and losing
-them would break the Claude connector until a human re-authenticated. Refresh
+a JSON state file (``mcp.state_file``; otherwise systemd's ``$STATE_DIRECTORY``,
+which is ``/var/lib/send-to-influx`` on the packaged install, and beside the
+settings file when the process is run by hand) - the packaged install restarts
+the service on every upgrade, and losing them breaks the Claude connector until
+a human re-authenticates, which is precisely what happened while the file was
+defaulting into root-owned ``/etc`` that the service user could not write. Refresh
 tokens are stored as SHA-256 hashes, so the file yields no replayable token;
 access tokens are short-lived and kept in memory only (a restart invalidates
 them, and the client recovers silently via its refresh token).
@@ -263,9 +266,16 @@ class LoginThrottle:
 
 
 def resolve_state_path(settings, settings_file=None):
-    """Return the OAuth state file path: ``mcp.state_file`` if set, otherwise
-    ``mcp-oauth-state.json`` next to the settings file (the one location the
-    packaged service's sandbox guarantees writable).
+    """Return the OAuth state file path.
+
+    ``mcp.state_file`` if set; otherwise systemd's ``$STATE_DIRECTORY`` when the process is
+    running under a unit that declares one, and only then beside the settings file.
+
+    The previous wording claimed the settings directory was "the one location the packaged
+    service's sandbox guarantees writable", which was the mistaken assumption behind a real
+    bug: ``ReadWritePaths=`` lifts systemd's own restriction but ordinary POSIX permissions
+    still apply, and ``/etc/send-to-influx`` is root-owned while the service runs as
+    ``send-to-influx``. Nothing there was ever writable by it, so the state never persisted.
 
     :param settings: parsed settings dictionary
     :type settings: dict
@@ -277,6 +287,27 @@ def resolve_state_path(settings, settings_file=None):
     configured = (settings.get("mcp") or {}).get("state_file")
     if isinstance(configured, str) and configured.strip():
         return configured
+    # Under systemd, the unit's StateDirectory=. This is where the file belongs: OAuth client
+    # registrations and refresh tokens are runtime state, not configuration, and /etc is not
+    # writable by the service user - which is exactly how this broke. The packaged service ran
+    # as send-to-influx while postinst left /etc/send-to-influx root-owned 755, so creating the
+    # file (and the .tmp the atomic write needs alongside it) failed with PermissionError on
+    # every save. The error was logged, persistence silently degraded to nothing, and a
+    # connected MCP client had to re-authorize after every restart - noticed only at upgrades,
+    # because that is when the service restarts.
+    #
+    # Read from the environment rather than hardcoded, the same shape as
+    # apply_credential_substitution()'s CREDENTIALS_DIRECTORY: systemd sets it only for a unit
+    # that declares the directory, so a source checkout or a screen session - which this
+    # project treats as equally first-class - finds it unset and keeps the historical location
+    # beside settings.yaml, writable by whoever is running the process. No new configuration,
+    # and no behaviour change off systemd.
+    #
+    # Colon-separated when a unit declares several; take the first, so adding a second
+    # StateDirectory= later cannot silently move this file.
+    state_dir = os.environ.get("STATE_DIRECTORY", "").split(os.pathsep)[0].strip()
+    if state_dir:
+        return os.path.join(state_dir, "mcp-oauth-state.json")
     base_dir = os.path.abspath(os.path.dirname(__file__) + "/..")
     settings_dir = os.path.dirname(os.path.join(base_dir, settings_file or "settings.yaml"))
     return os.path.join(settings_dir, "mcp-oauth-state.json")
