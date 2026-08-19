@@ -26,9 +26,13 @@ RestartPreventExitStatus=1
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-# /etc/send-to-influx holds settings.yaml, which send-to-influx-set-credential and
-# postinst write; the service itself needs it writable only because settings.yaml is
-# chowned to the service user.
+# The daemon does not write here. settings.yaml is written by postinst and by
+# send-to-influx-set-credential, both run by an admin outside this unit, and the settings
+# permission check only reports what to fix rather than chmod-ing anything. Since the OAuth
+# state file moved to StateDirectory below, nothing the service itself does needs /etc
+# writable - so this directive is a candidate for removal, left in place deliberately rather
+# than dropped as a side effect of that move, because tightening the sandbox deserves its own
+# change and its own verification.
 ReadWritePaths=/etc/send-to-influx
 
 # The MCP server's OAuth state (client registrations and hashed refresh tokens) lives

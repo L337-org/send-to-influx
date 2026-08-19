@@ -10,9 +10,12 @@ supplies the storage/provider logic, the resource-owner login page (gated on
 ``mcp.user``/``mcp.password``), and its brute-force throttling.
 
 OAuth client registrations and refresh tokens persist across service restarts in
-a JSON state file (``mcp.state_file``, defaulting to alongside the settings
-file) - the packaged install restarts the service on every upgrade, and losing
-them would break the Claude connector until a human re-authenticated. Refresh
+a JSON state file (``mcp.state_file``; otherwise systemd's ``$STATE_DIRECTORY``,
+which is ``/var/lib/send-to-influx`` on the packaged install, and beside the
+settings file when the process is run by hand) - the packaged install restarts
+the service on every upgrade, and losing them breaks the Claude connector until
+a human re-authenticates, which is precisely what happened while the file was
+defaulting into root-owned ``/etc`` that the service user could not write. Refresh
 tokens are stored as SHA-256 hashes, so the file yields no replayable token;
 access tokens are short-lived and kept in memory only (a restart invalidates
 them, and the client recovers silently via its refresh token).
