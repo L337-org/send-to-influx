@@ -549,6 +549,51 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
         done
         [ "$mcp_up" = 1 ] || fail "MCP server did not bind 127.0.0.1:8420 under the hardened systemd unit"
         pass "MCP server bound and served OAuth metadata under the hardened systemd sandbox"
+
+        # Binding is not the same as being able to keep state, and that gap hid a real bug:
+        # the service runs as send-to-influx while /etc/send-to-influx is root-owned 755, so
+        # the OAuth state file - and the .tmp its atomic write needs beside it - could never
+        # be created. save() logs the failure and carries on by design, so nothing crashed
+        # and nothing failed a test; the only symptom was a connected MCP client having to
+        # re-authorize after every restart, which an operator meets at upgrades.
+        #
+        # So assert the directory the service can actually write, with the ownership and mode
+        # systemd's StateDirectory= is supposed to give it. The file itself only appears once
+        # a client registers, which this suite has no client to do - the writability of the
+        # directory is the property that was missing, and it is what the unit now provides.
+        STATE_DIR=/var/lib/send-to-influx
+        [ -d "$STATE_DIR" ] || fail "systemd did not create $STATE_DIR from StateDirectory="
+        [ "$(stat -c %U "$STATE_DIR")" = "send-to-influx" ] \
+            || fail "$STATE_DIR is owned by $(stat -c %U "$STATE_DIR"), not the service user"
+        [ "$(stat -c %a "$STATE_DIR")" = "700" ] \
+            || fail "$STATE_DIR is mode $(stat -c %a "$STATE_DIR"), expected 700 - it holds tokens"
+        # The check that would have caught the bug: can the service user actually create a
+        # file there? Tested as the service user, not as root, since root could write either
+        # way. Skipped rather than failed where neither runuser nor su is available - the
+        # ownership and mode assertions above already cover it, and a guard that fails for a
+        # missing tool is one someone switches off.
+        if command -v runuser >/dev/null 2>&1; then
+            as_service_user() { runuser -u send-to-influx -- "$@"; }
+        elif command -v su >/dev/null 2>&1; then
+            as_service_user() { su -s /bin/sh send-to-influx -c "$*"; }
+        else
+            as_service_user() { return 127; }
+        fi
+        if as_service_user touch "$STATE_DIR/.write-probe" 2>/dev/null; then
+            rm -f "$STATE_DIR/.write-probe"
+            pass "the service user can persist OAuth state in $STATE_DIR (0700, correctly owned)"
+        elif [ "$?" = 127 ]; then
+            echo "  SKIP: no runuser/su available to probe the write as the service user" >&2
+        else
+            fail "the service user cannot create a file in $STATE_DIR - OAuth state will not persist"
+        fi
+
+        # And /etc must NOT have been loosened to achieve it: the state moved out precisely so
+        # the service user does not get write access to the directory holding settings.yaml
+        # and the credential store.
+        [ "$(stat -c %U /etc/send-to-influx)" = "root" ] \
+            || fail "/etc/send-to-influx is no longer root-owned - the state file should have moved, not /etc opened up"
+        pass "/etc/send-to-influx stayed root-owned"
     fi
     # Nothing was *lost* by moving diagnostics to stderr: the journal must still capture them.
     # This deliberately does not claim to prove *which* stream they came from - systemd captures
@@ -767,6 +812,10 @@ pass "incoherent MQTT auth warns instead of auto-enabling"
 echo "=== scenario: purge ==="
 dpkg -P send-to-influx >/dev/null 2>&1 || dpkg -P send-to-influx
 [ ! -e /etc/send-to-influx ] || fail "/etc/send-to-influx survived purge"
+# systemd removes a StateDirectory only on `systemctl clean`, never on package removal, so
+# postrm has to take it - it holds OAuth client registrations and hashed refresh tokens, which
+# must not outlive the package.
+[ ! -e /var/lib/send-to-influx ] || fail "/var/lib/send-to-influx survived purge (OAuth state)"
 [ ! -e /etc/systemd/system/send-to-influx.service.d ] || fail "systemd drop-in directory survived purge"
 getent passwd send-to-influx >/dev/null 2>&1 && fail "service user survived purge"
 if [ "$HAVE_SYSTEMD" = 1 ]; then

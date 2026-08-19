@@ -20,6 +20,10 @@ if [ "$1" = "purge" ]; then
         db_stop || true
     fi
     rm -rf /etc/send-to-influx
+    # systemd removes a StateDirectory only on `systemctl clean`, never on package
+    # removal, so purge has to take it - it holds OAuth client registrations and hashed
+    # refresh tokens, which must not outlive the package.
+    rm -rf /var/lib/send-to-influx
     rm -rf /etc/systemd/system/send-to-influx.service.d
     # The dedicated logfile and its rotated/compressed backups are
     # created at runtime by rsyslog, not shipped by the package - dpkg only

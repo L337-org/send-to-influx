@@ -492,6 +492,29 @@ mistyped `"true"` fails loud instead of silently staying off). Design points:
   - This is the project's first device-control capability and gets a dedicated `/security-review`
     before the feature branch merges to `main`.
 
+**The OAuth state file lives in the systemd `StateDirectory`, not `/etc`.** This was broken from
+5.0 until 5.3: the service runs as `send-to-influx` while `postinst` leaves `/etc/send-to-influx`
+root-owned 755, so `save()` could create neither the state file nor the `.tmp` its atomic write
+needs beside it. `PermissionError` was logged and persistence degraded to nothing, exactly as the
+error says - and because access tokens are in-memory anyway, the only symptom was a connected MCP
+client re-authorising after **every** restart, which an operator meets at upgrades. Neither the
+unit test suite nor the packaging suite caught it: the former asserted the resolved *path*, the
+latter that the server *bound*, and `save()` is deliberately non-fatal so nothing raised.
+
+`resolve_state_path()` now prefers `$STATE_DIRECTORY`, which is the same shape as
+`apply_credential_substitution()`'s `$CREDENTIALS_DIRECTORY` - set by systemd only for a unit that
+declares the directory, so a source checkout or screen session (equally first-class here) finds it
+unset and keeps the historical location beside `settings.yaml`. Colon-separated when several are
+declared, so only the first is taken. An explicit `mcp.state_file` still wins.
+
+**The state moved rather than `/etc` being opened up**, deliberately: giving the service user write
+access to the directory holding `settings.yaml` and the credential store is the wrong trade, and
+the packaging suite now asserts `/etc/send-to-influx` stayed root-owned as well as that the service
+user *can* write the state directory - probed as that user, since root could write either way.
+`postinst` migrates an existing file across (an install predating the removal of the old
+`chown -R` may have a working one); `postrm` removes the directory on purge, because systemd only
+does so on `systemctl clean`.
+
 **Packaging** (debconf + systemd): the `mcp:` block is the third shared-infrastructure block after
 `influx:` and `mqtt:`, but gated on its own `mcp-enable` boolean (asked at priority `high`, default
 no) rather than a source selection - the MCP server is an interface over all sources, not a source.

@@ -277,6 +277,27 @@ def resolve_state_path(settings, settings_file=None):
     configured = (settings.get("mcp") or {}).get("state_file")
     if isinstance(configured, str) and configured.strip():
         return configured
+    # Under systemd, the unit's StateDirectory=. This is where the file belongs: OAuth client
+    # registrations and refresh tokens are runtime state, not configuration, and /etc is not
+    # writable by the service user - which is exactly how this broke. The packaged service ran
+    # as send-to-influx while postinst left /etc/send-to-influx root-owned 755, so creating the
+    # file (and the .tmp the atomic write needs alongside it) failed with PermissionError on
+    # every save. The error was logged, persistence silently degraded to nothing, and a
+    # connected MCP client had to re-authorize after every restart - noticed only at upgrades,
+    # because that is when the service restarts.
+    #
+    # Read from the environment rather than hardcoded, the same shape as
+    # apply_credential_substitution()'s CREDENTIALS_DIRECTORY: systemd sets it only for a unit
+    # that declares the directory, so a source checkout or a screen session - which this
+    # project treats as equally first-class - finds it unset and keeps the historical location
+    # beside settings.yaml, writable by whoever is running the process. No new configuration,
+    # and no behaviour change off systemd.
+    #
+    # Colon-separated when a unit declares several; take the first, so adding a second
+    # StateDirectory= later cannot silently move this file.
+    state_dir = os.environ.get("STATE_DIRECTORY", "").split(os.pathsep)[0].strip()
+    if state_dir:
+        return os.path.join(state_dir, "mcp-oauth-state.json")
     base_dir = os.path.abspath(os.path.dirname(__file__) + "/..")
     settings_dir = os.path.dirname(os.path.join(base_dir, settings_file or "settings.yaml"))
     return os.path.join(settings_dir, "mcp-oauth-state.json")

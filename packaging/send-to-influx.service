@@ -26,9 +26,19 @@ RestartPreventExitStatus=1
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-# /etc/send-to-influx holds settings.yaml and, when the MCP server is enabled,
-# its OAuth state file (mcp-oauth-state.json) - the only path the service writes.
+# /etc/send-to-influx holds settings.yaml, which send-to-influx-set-credential and
+# postinst write; the service itself needs it writable only because settings.yaml is
+# chowned to the service user.
 ReadWritePaths=/etc/send-to-influx
+
+# The MCP server's OAuth state (client registrations and hashed refresh tokens) lives
+# here, not in /etc: it is runtime state rather than configuration, and /etc is
+# root-owned. systemd creates /var/lib/send-to-influx owned by the service user and adds
+# it to ReadWritePaths implicitly, which is what makes the state actually persist -
+# previously the write failed with PermissionError on every save, so a connected MCP
+# client had to re-authorize after every restart. 0700 because the file holds tokens.
+StateDirectory=send-to-influx
+StateDirectoryMode=0700
 
 # Sandbox hardening. Especially relevant since the MCP server made this the
 # project's first inbound-network-facing service (it binds a loopback TCP port).

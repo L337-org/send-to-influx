@@ -92,6 +92,25 @@ if [ ! -e /etc/send-to-influx/settings.yaml ]; then
     chmod 644 /etc/send-to-influx/settings.yaml
 fi
 
+# Move an existing OAuth state file into the state directory. Only some installs have
+# one: /etc/send-to-influx has been root-owned since the chown -R was removed, so the
+# service user could not create it there - but an install predating that change may have
+# a working file, and losing it would cost a needless re-authorization. systemd creates
+# /var/lib/send-to-influx itself at unit start, so this only has to exist early enough
+# for the move; ownership and mode are set to match what StateDirectoryMode gives it.
+if [ -f /etc/send-to-influx/mcp-oauth-state.json ] \
+        && [ ! -e /var/lib/send-to-influx/mcp-oauth-state.json ]; then
+    mkdir -p /var/lib/send-to-influx
+    chown send-to-influx:send-to-influx /var/lib/send-to-influx
+    chmod 700 /var/lib/send-to-influx
+    mv /etc/send-to-influx/mcp-oauth-state.json /var/lib/send-to-influx/mcp-oauth-state.json
+    chown send-to-influx:send-to-influx /var/lib/send-to-influx/mcp-oauth-state.json
+    chmod 600 /var/lib/send-to-influx/mcp-oauth-state.json
+    echo "send-to-influx: moved the MCP OAuth state file to /var/lib/send-to-influx." >&2
+fi
+# A leftover .tmp from a crashed save is not worth carrying across.
+rm -f /etc/send-to-influx/mcp-oauth-state.json.tmp
+
 mkdir -p /etc/send-to-influx/credstore.encrypted
 chmod 700 /etc/send-to-influx/credstore.encrypted
 chown root:root /etc/send-to-influx/credstore.encrypted

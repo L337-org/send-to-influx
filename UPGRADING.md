@@ -212,6 +212,39 @@ rewriting data; several collector hosts can share one database, so an upgrade-tr
 would fire once per host and race on the same measurement; and the service may not own the
 database at all.
 
+### The MCP server's OAuth state moves to /var/lib
+
+**Who this affects:** anyone running the MCP server on the packaged install. No action is
+needed, and if you have been re-authorising the connector after upgrades, this is why.
+
+The OAuth state file holds the client registration and a hashed refresh token, so a restart
+should be invisible to a connected client: the access token expires after an hour, but the
+refresh token lasts 90 days and the client renews silently.
+
+That never worked on the packaged install. The service runs as `send-to-influx`, while
+`/etc/send-to-influx` is owned by root - so creating the state file there, and the temporary
+file its atomic write needs beside it, failed with a permission error on every save. The
+failure was logged and the server carried on without persistence, so the only visible symptom
+was having to re-authorise the client after every restart. In practice that means after every
+upgrade, since that is when the service restarts.
+
+The file now lives in `/var/lib/send-to-influx`, created by systemd from the unit's
+`StateDirectory=`, owned by the service user and mode 0700 because it holds tokens. `/etc`
+stays root-owned: the fix moves the state out rather than opening the configuration directory
+up to the service.
+
+If you already had a working state file - possible on an install old enough to predate a
+change that stopped `postinst` taking ownership of the whole directory - `postinst` moves it
+across for you, so you will not be asked to re-authorise.
+
+Running the script by hand is unchanged. `STATE_DIRECTORY` is set only by systemd for a unit
+that declares it, so a source checkout or a screen session still keeps the file next to
+`settings.yaml`, where whoever started the process can write it. An explicit `mcp.state_file`
+still overrides both.
+
+**You will need to re-authorise the connector once**, on the upgrade that first gives the
+server somewhere writable - there is no earlier state to carry across.
+
 ### Speedtest heartbeats gain a host tag
 
 **Who this affects:** anyone running `speedtest` collectors on more than one machine into the

@@ -598,7 +598,7 @@ Key points:
   logged. On the packaged install the password can be stored in systemd-creds:
   `sudo send-to-influx-set-credential mcp-password`.
 - **Connections survive restarts.** OAuth client registrations and refresh tokens are persisted
-  (hashed) in `mcp-oauth-state.json` next to the settings file (override with `mcp.state_file`),
+  (hashed) in `mcp-oauth-state.json` - under `/var/lib/send-to-influx` on the packaged systemd install, or next to the settings file when run by hand (override with `mcp.state_file`),
   so package upgrades and reboots don't make the client re-authenticate.
 - **Read-only by default.** Device-control tools are opt-in per collector and aren't registered at
   all unless enabled in that collector's own settings block - when none is enabled, the write tools
