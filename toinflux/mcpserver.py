@@ -263,9 +263,16 @@ class LoginThrottle:
 
 
 def resolve_state_path(settings, settings_file=None):
-    """Return the OAuth state file path: ``mcp.state_file`` if set, otherwise
-    ``mcp-oauth-state.json`` next to the settings file (the one location the
-    packaged service's sandbox guarantees writable).
+    """Return the OAuth state file path.
+
+    ``mcp.state_file`` if set; otherwise systemd's ``$STATE_DIRECTORY`` when the process is
+    running under a unit that declares one, and only then beside the settings file.
+
+    The previous wording claimed the settings directory was "the one location the packaged
+    service's sandbox guarantees writable", which was the mistaken assumption behind a real
+    bug: ``ReadWritePaths=`` lifts systemd's own restriction but ordinary POSIX permissions
+    still apply, and ``/etc/send-to-influx`` is root-owned while the service runs as
+    ``send-to-influx``. Nothing there was ever writable by it, so the state never persisted.
 
     :param settings: parsed settings dictionary
     :type settings: dict

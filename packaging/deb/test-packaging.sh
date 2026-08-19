@@ -299,6 +299,29 @@ EOF
         [ "$check_status" -eq 0 ] || fail "settings.yaml no longer valid after post-upgrade reconfigure"
         pass "post-upgrade reconfigure: sections back-filled, venv intact, config still valid"
 
+        # The OAuth state migration must refuse a symlink rather than follow it. postinst runs
+        # as root, and the installs the migration exists for are precisely those where
+        # /etc/send-to-influx was writable by the service user - so a planted symlink is
+        # reachable. `[ -f ]` is true for a symlink to a regular file, `mv` moves the link
+        # rather than its target, and `chown` dereferences by default: the sequence would have
+        # handed ownership of any root-owned file to the service user during an upgrade.
+        printf 'do not chown me\n' > /root/state-symlink-canary
+        chown root:root /root/state-symlink-canary
+        chmod 600 /root/state-symlink-canary
+        rm -f /etc/send-to-influx/mcp-oauth-state.json
+        ln -s /root/state-symlink-canary /etc/send-to-influx/mcp-oauth-state.json
+        DEBCONF_FRONTEND=noninteractive dpkg-reconfigure -f noninteractive send-to-influx >/dev/null 2>&1 || true
+        canary_owner="$(stat -c %U /root/state-symlink-canary)"
+        canary_mode="$(stat -c %a /root/state-symlink-canary)"
+        [ "$canary_owner" = "root" ] \
+            || fail "the state migration followed a symlink and chowned /root/state-symlink-canary to $canary_owner"
+        [ "$canary_mode" = "600" ] \
+            || fail "the state migration followed a symlink and chmodded /root/state-symlink-canary to $canary_mode"
+        [ ! -e /var/lib/send-to-influx/mcp-oauth-state.json ] \
+            || fail "the state migration moved a symlink into the state directory"
+        rm -f /etc/send-to-influx/mcp-oauth-state.json /root/state-symlink-canary
+        pass "the OAuth state migration refuses a symlink instead of dereferencing it"
+
         dpkg -P send-to-influx >/dev/null 2>&1
         pass "released-then-upgraded install purged cleanly"
     fi
