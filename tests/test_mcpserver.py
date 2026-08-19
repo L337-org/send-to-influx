@@ -321,13 +321,33 @@ class TestResolveStatePath:
         assert "client-1" in written.read_text(encoding="utf8")
         assert oct(written.stat().st_mode)[-3:] == "600"
 
-    def test_a_save_into_an_unwritable_directory_is_logged_not_raised(self, tmp_path, caplog):
-        """The behaviour that hid the bug, pinned so the log line stays the only warning
-        anyone gets. It must not raise - the server has to keep serving - but it must say so."""
-        unwritable = tmp_path / "nope"
-        store = OAuthStateStore(str(unwritable / "mcp-oauth-state.json"))
+    def test_a_permission_denied_save_is_logged_not_raised(self, tmp_path, caplog):
+        """The behaviour that hid the bug, pinned on the failure that actually occurred.
+
+        PermissionError specifically, not "some OSError": that is what a root-owned directory
+        gives a service user, and it is the case where the server must keep serving while
+        saying clearly that persistence is gone - the log line was the only signal anyone got
+        for three releases.
+
+        Raised from a patched os.open rather than by chmod-ing a real directory, so the test
+        does not quietly pass when run as root - which it would, since root ignores the mode.
+        """
+        store = OAuthStateStore(str(tmp_path / "mcp-oauth-state.json"))
+        with patch("toinflux.mcpserver.os.open", side_effect=PermissionError(13, "Permission denied")):
+            with caplog.at_level(logging.ERROR):
+                store.save()  # must not raise
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("Could not persist MCP OAuth state" in m for m in messages), messages
+        assert any("Permission denied" in m for m in messages), "the underlying cause must survive"
+        assert not (tmp_path / "mcp-oauth-state.json").exists()
+
+    def test_a_missing_directory_is_also_logged_not_raised(self, tmp_path, caplog):
+        """The other way a save can fail - a state_file pointing somewhere that does not
+        exist. Separate from the permission case rather than standing in for it, because the
+        two are different faults and only one of them was the bug."""
+        store = OAuthStateStore(str(tmp_path / "nope" / "mcp-oauth-state.json"))
         with caplog.at_level(logging.ERROR):
-            store.save()
+            store.save()  # must not raise
         assert any("Could not persist MCP OAuth state" in r.getMessage() for r in caplog.records)
 
 

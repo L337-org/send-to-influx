@@ -310,7 +310,23 @@ EOF
         chmod 600 /root/state-symlink-canary
         rm -f /etc/send-to-influx/mcp-oauth-state.json
         ln -s /root/state-symlink-canary /etc/send-to-influx/mcp-oauth-state.json
-        DEBCONF_FRONTEND=noninteractive dpkg-reconfigure -f noninteractive send-to-influx >/dev/null 2>&1 || true
+        # The exit status is checked, not discarded. An untouched canary proves nothing if
+        # dpkg-reconfigure never ran - the assertions below would pass for the wrong reason,
+        # which is exactly the shape of guard this suite exists to avoid. The refusal is a
+        # message on stderr, not a failure, so postinst must still succeed here; if refusing a
+        # symlink ever becomes fatal, that is itself worth failing on.
+        reconf_out="$(DEBCONF_FRONTEND=noninteractive dpkg-reconfigure -f noninteractive send-to-influx 2>&1)" \
+            || fail "dpkg-reconfigure failed with a symlinked state file, so the migration guard was never exercised: $reconf_out"
+        # Reported, not asserted. Whether debconf's noninteractive frontend passes maintainer-
+        # script stderr through is not something this suite can rely on, and failing the run on
+        # a missing message would be failing on the harness rather than on the property. The
+        # canary assertions below are the substantive check; the exit status above proves the
+        # code ran at all.
+        if echo "$reconf_out" | grep -q "refusing to migrate it"; then
+            echo "  (postinst reported refusing the symlink, as intended)" >&2
+        else
+            echo "  (note: postinst's refusal message was not visible in dpkg-reconfigure output)" >&2
+        fi
         canary_owner="$(stat -c %U /root/state-symlink-canary)"
         canary_mode="$(stat -c %a /root/state-symlink-canary)"
         [ "$canary_owner" = "root" ] \
