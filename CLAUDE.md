@@ -535,8 +535,10 @@ the working install is left enabled - never disabled out from under a running se
 this the first inbound-network-facing service, so the systemd unit gained a conservative hardening
 set (`ProtectKernel*`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, empty
 `CapabilityBoundingSet`, `SystemCallFilter=@system-service`, etc. - `MemoryDenyWriteExecute` and a
-hand-rolled narrower syscall filter deliberately omitted as Python-fragile); `ReadWritePaths` already
-covers the OAuth state file (it lives in `/etc/send-to-influx`). `test-packaging.sh` seeds the MCP
+hand-rolled narrower syscall filter deliberately omitted as Python-fragile); the OAuth state file lives in `StateDirectory=send-to-influx`
+(`/var/lib/send-to-influx`, 0700, service-owned) and there is deliberately **no**
+`ReadWritePaths` at all - the daemon writes nothing under `/etc`, so `ProtectSystem=strict`
+leaves the whole of it read-only to the service. `test-packaging.sh` seeds the MCP
 answers in the fresh-install scenario (asserting public_url/user land in settings.yaml, the password
 in the credstore and not in plaintext) and, where real systemd is present, asserts the server
 actually binds `127.0.0.1:8420` under the full hardened sandbox (the real test that the hardening +

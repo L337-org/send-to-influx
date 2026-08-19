@@ -26,14 +26,13 @@ RestartPreventExitStatus=1
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-# The daemon does not write here. settings.yaml is written by postinst and by
-# send-to-influx-set-credential, both run by an admin outside this unit, and the settings
-# permission check only reports what to fix rather than chmod-ing anything. Since the OAuth
-# state file moved to StateDirectory below, nothing the service itself does needs /etc
-# writable - so this directive is a candidate for removal, left in place deliberately rather
-# than dropped as a side effect of that move, because tightening the sandbox deserves its own
-# change and its own verification.
-ReadWritePaths=/etc/send-to-influx
+# No ReadWritePaths for /etc/send-to-influx, deliberately. The daemon writes nothing there:
+# settings.yaml is written by postinst and by send-to-influx-set-credential, both run by an
+# admin outside this unit; the settings permission check only reports what to fix rather than
+# chmod-ing anything; and the OAuth state file lives in StateDirectory below. ProtectSystem
+# =strict therefore leaves the whole of /etc read-only to this service, which is what should
+# always have been the case - the directive existed only because the state file used to
+# default into /etc, where the service user could not write it anyway.
 
 # The MCP server's OAuth state (client registrations and hashed refresh tokens) lives
 # here, not in /etc: it is runtime state rather than configuration, and /etc is

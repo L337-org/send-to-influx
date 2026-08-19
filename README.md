@@ -374,8 +374,9 @@ package ships its own separate mechanism for a dedicated logfile, described belo
 service's messages out of the shared `daemon.log`/`syslog` entirely rather than adding a second copy
 alongside it. Setting `logfile` yourself on a packaged install is possible (the packaged service's
 `ProtectSystem=strict` sandboxing means `/var/log/...` isn't writable by it directly, so point it at
-a path under `/etc/send-to-influx/`, the one directory the service can write to, or add your own path
-to `ReadWritePaths=` in `packaging/send-to-influx.service` and rebuild) - but don't point it at
+a path under `/var/lib/send-to-influx/` - the directory systemd creates for the service and the one
+it can write - or add your own path to `ReadWritePaths=` (or a `LogsDirectory=`) in
+`packaging/send-to-influx.service` and rebuild) - but don't point it at
 `/var/log/send-to-influx.log` itself, since that's the same file the packaging-level mechanism below
 already writes to, and you'd end up with two independent writers to one file.
 
