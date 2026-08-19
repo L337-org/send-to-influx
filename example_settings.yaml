@@ -102,8 +102,11 @@ mcp:
   user: ""
   password: ""
   # Where OAuth client registrations/refresh tokens persist across restarts.
-  # Defaults to mcp-oauth-state.json next to this settings file.
-  # state_file: "/etc/send-to-influx/mcp-oauth-state.json"
+  # Defaults to /var/lib/send-to-influx/mcp-oauth-state.json on the packaged systemd
+  # install (the unit's StateDirectory=, owned by the service user), and to
+  # mcp-oauth-state.json next to this settings file when run by hand, where whoever
+  # started the process can write there. Set this only to override both.
+  # state_file: "/var/lib/send-to-influx/mcp-oauth-state.json"
 
 # Hue bridge settings
 hue:
