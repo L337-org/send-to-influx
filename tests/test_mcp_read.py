@@ -9,6 +9,8 @@ import pytest
 import requests
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
+from toinflux.general import get_class
+from toinflux.philipshue import Hue
 from toinflux.mcp_read import (
     DEFAULT_RESULT_POINTS,
     MAX_RESULT_POINTS,
@@ -20,12 +22,18 @@ from toinflux.mcp_read import (
     build_schema,
     current_state_result,
     discover_fields,
+    discover_tag_values,
+    list_fields_result,
     metadata_for,
     parse_time_bound,
     register_read_tools,
     resolve_db,
     resolve_schema,
+    QuerySeries,
     run_query,
+    single_series,
+    configured_instances,
+    _validate_instance,
     _annotate_state_field,
     _influx_read_request,
 )
@@ -194,6 +202,7 @@ class TestBuildSchema:
         handler = MagicMock()
         handler.source = "openmeteo"
         handler.MCP_MEASUREMENT = "weather"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {"temperature_2m": {"unit": "°C"}}
         schema = build_schema(handler, {"temperature_2m", "precipitation"}, "weather_db")
@@ -205,6 +214,7 @@ class TestBuildSchema:
         handler = MagicMock()
         handler.source = "hue"
         handler.MCP_MEASUREMENT = None
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
         schema = build_schema(handler, set(), "hue_db")
@@ -372,11 +382,10 @@ class TestDiscoverFields:
 class TestRunQuery:
     def test_returns_columns_and_values(self):
         payload = {"results": [{"series": [{"columns": ["time", "gen"], "values": [[1, 100]]}]}]}
-        cols, vals = run_query(
-            _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1"
-        )
-        assert cols == ["time", "gen"]
-        assert vals == [[1, 100]]
+        series = run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1")
+        assert len(series) == 1
+        assert series[0].columns == ["time", "gen"]
+        assert series[0].values == [[1, 100]]
 
     def test_query_error_raises(self):
         payload = {"results": [{"error": "boom"}]}
@@ -384,10 +393,70 @@ class TestRunQuery:
             run_query(_mock_session(payload), {"url": "http://x", "token": "t", "org": "o"}, "db", "SELECT 1")
 
     def test_no_series_returns_empty(self):
-        cols, vals = run_query(
-            _mock_session({"results": [{}]}), {"url": "http://x", "user": "u", "password": "p"}, "db", "q"
+        assert (
+            run_query(_mock_session({"results": [{}]}), {"url": "http://x", "user": "u", "password": "p"}, "db", "q")
+            == []
         )
-        assert (cols, vals) == ([], [])
+
+    def test_every_series_is_returned_with_its_tags(self):
+        # A GROUP BY on a tag returns one series per tag value. Returning only the
+        # first silently discards every producer but one - the exact failure that
+        # makes a two-host speedtest install unanswerable. Payload captured from a
+        # real InfluxDB 1.8 and confirmed byte-identical on 2.7's v1-compat endpoint.
+        payload = {
+            "results": [
+                {
+                    "statement_id": 0,
+                    "series": [
+                        {
+                            "name": "speedtest",
+                            "tags": {"host": "hostA"},
+                            "columns": ["time", "ping"],
+                            "values": [[1700000000, 12.3], [1700000600, 13.1]],
+                        },
+                        {
+                            "name": "speedtest",
+                            "tags": {"host": "hostB"},
+                            "columns": ["time", "ping"],
+                            "values": [[1700000000, 45.6], [1700000600, 46]],
+                        },
+                    ],
+                }
+            ]
+        }
+        series = run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1")
+        assert [s.tags for s in series] == [{"host": "hostA"}, {"host": "hostB"}]
+        assert [s.values[0][1] for s in series] == [12.3, 45.6]
+
+    def test_untagged_series_has_empty_tags(self):
+        payload = {"results": [{"series": [{"columns": ["time", "gen"], "values": [[1, 100]]}]}]}
+        series = run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "SELECT 1")
+        assert series[0].tags == {}
+
+    def test_single_series_helper_returns_columns_and_values(self):
+        payload = {"results": [{"series": [{"columns": ["time", "gen"], "values": [[1, 100]]}]}]}
+        cols, vals = single_series(
+            run_query(_mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "q")
+        )
+        assert (cols, vals) == (["time", "gen"], [[1, 100]])
+
+    def test_single_series_helper_on_empty_result(self):
+        assert single_series([]) == ([], [])
+
+    def test_single_series_refuses_to_truncate(self):
+        # Truncating here would re-introduce, behind a helper, exactly the silent
+        # series loss this module was fixed for: a later edit adding a tag GROUP BY
+        # without updating its consumer would go back to losing data invisibly.
+        # Unreachable from any current caller (verified against a real InfluxDB 1.8:
+        # every one of their queries returns a single series, including the
+        # aggregation path's GROUP BY time(), which splits rows not series), so this
+        # only ever fires on a programming error.
+        grouped = [
+            QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 12.3]]),
+            QuerySeries({"host": "hostB"}, ["time", "ping"], [[1, 45.6]]),
+        ]
+        with pytest.raises(ValueError, match="expected at most one"):
+            single_series(grouped)
 
 
 class TestResolveSchema:
@@ -405,6 +474,7 @@ class TestResolveSchema:
         handler = MagicMock()
         handler.source = "zappi"
         handler.MCP_MEASUREMENT = "myenergi"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {"device": "zappi"}
         # Tag filters now come from a method, so the mock must return the real value -
         # a MagicMock method call otherwise yields another mock, and any assertion on the
@@ -430,6 +500,7 @@ class TestResolveSchema:
         handler = MagicMock()
         handler.source = "zappi"
         handler.MCP_MEASUREMENT = "myenergi"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
         handler.source_settings = {"db": "zappi_db"}
@@ -470,13 +541,16 @@ class TestRegisterReadTools:
         return {
             "sources": ["zappi"],
             "influx": {"url": "http://x", "user": "u", "password": "p"},
-            "zappi": {"db": "zappi_db"},
+            # A serial, because zappi is instanced: one worker per configured
+            # device, so a block with no device expands to nothing.
+            "zappi": {"db": "zappi_db", "serial": "12345"},
         }
 
     def _handler(self):
         handler = MagicMock()
         handler.source = "zappi"
         handler.MCP_MEASUREMENT = "myenergi"
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {"device": "zappi"}
         # Tag filters now come from a method, so the mock must return the real value -
         # a MagicMock method call otherwise yields another mock, and any assertion on the
@@ -531,7 +605,7 @@ class TestRegisterReadTools:
         with (
             patch("toinflux.mcp_common.get_class", return_value=self._handler()),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
-            patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], [[100, 42]])),
+            patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], [[100, 42]])]),
         ):
             result = anyio.run(
                 server.call_tool,
@@ -553,7 +627,7 @@ class TestRegisterReadTools:
         with (
             patch("toinflux.mcp_common.get_class", return_value=self._handler()),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
-            patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], rows)),
+            patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], rows)]),
         ):
             result = anyio.run(
                 server.call_tool,
@@ -572,7 +646,7 @@ class TestRegisterReadTools:
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
             patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
-            patch("toinflux.mcp_read.run_query", return_value=(["time", "gen"], [[1, 2]])),
+            patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], [[1, 2]])]),
         ):
             anyio.run(
                 server.call_tool,
@@ -703,14 +777,20 @@ class TestCurrentStateResult:
         return handler
 
     def test_live_annotates_and_reports_state(self):
+        """MyEnergi is instanced - one worker per configured device - so the
+        payload is keyed by device label rather than flat, even for the single legacy device.
+        Same rule as Hue's per-bridge map: the shape must not depend on how many devices
+        happen to be configured."""
         handler = self._live_handler()
+        settings = {"sources": ["zappi"], "zappi": {"db": "z", "interval": 300, "serial": "12345"}}
         with patch("toinflux.mcp_common.get_class", return_value=handler):
-            result = current_state_result("zappi", {"sources": ["zappi"]}, None)
+            result = current_state_result("zappi", settings, None)
         assert result["source"] == "zappi"
         assert result["state"] == "live"
         assert result["description"] == "Zappi desc"
-        assert result["fields"]["gen"] == {"value": 1234, "unit": "W"}
-        assert result["fields"]["sta"] == {"value": 3, "label": "charging"}
+        fields = result["instances"]["zappi"]["fields"]
+        assert fields["gen"] == {"value": 1234, "unit": "W"}
+        assert fields["sta"] == {"value": 3, "label": "charging"}
         handler.session.close.assert_called_once()
 
     def test_non_live_reads_latest_from_influx_without_get_data(self):
@@ -718,6 +798,7 @@ class TestCurrentStateResult:
         handler.source = "speedtest"
         handler.MCP_LIVE_STATE = False
         handler.MCP_MEASUREMENT = None
+        handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_DESCRIPTION = "speed"
         handler.MCP_FIELD_METADATA = {"ping": {"unit": "ms"}}
@@ -729,7 +810,7 @@ class TestCurrentStateResult:
             patch("toinflux.mcp_read.discover_fields", return_value={"ping", "download"}),
             patch(
                 "toinflux.mcp_read.run_query",
-                return_value=(["time", "download", "ping"], [[1700, None, 12.5]]),
+                return_value=[QuerySeries({}, ["time", "download", "ping"], [[1700, None, 12.5]])],
             ),
         ):
             result = current_state_result("speedtest", {"sources": ["speedtest"]}, None)
@@ -741,6 +822,141 @@ class TestCurrentStateResult:
         # A field that came back NULL in the latest point is omitted, not reported None.
         assert "download" not in result["fields"]
         handler.session.close.assert_called_once()
+
+
+class TestInstancedReadsWithARealHandler:
+    """The per-producer read paths, driven by the real Speedtest class.
+
+    These exist because the rest of this file builds handlers with MagicMock, and a mock is
+    exactly what hid these two paths: the non-live current-state test sets
+    ``MCP_INSTANCE_TAG = None``, so it exercises Speedtest as it behaved *before* this axis
+    existed, and nothing reached ``list_fields_result`` at all. Both paths were correct when
+    probed by hand - the gap was in the tests, not the code - but an untested path is one a
+    later change can break silently, and between them they answer "does get_current_state
+    report both hosts separately" and "does list_fields report the values an instance may
+    take".
+
+    Using the real class also means ``MCP_INSTANCE_TAG``, ``MCP_LIVE_STATE`` and the field
+    metadata come from the source rather than from whatever the test asserts they are.
+    """
+
+    SETTINGS = {
+        "influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"},
+        "speedtest": {"db": "sdb", "interval": 3600},
+        "sources": ["speedtest"],
+    }
+
+    def _handler(self):
+        from toinflux.speedtest import Speedtest
+
+        with patch("toinflux.influx.load_settings", return_value=self.SETTINGS):
+            handler = Speedtest("speedtest")
+        handler.session = MagicMock()
+        return handler
+
+    def test_current_state_reports_each_host_separately(self):
+        """Speedtest is not live (its get_data runs a full test), so current state comes from
+        the latest recorded point per host - which is the whole point of the story: one
+        merged answer was wrong rather than incomplete."""
+        handler = self._handler()
+        series = [
+            QuerySeries({"host": "alpha"}, ["time", "download", "ping"], [[1700, 5.0, 12.5]]),
+            QuerySeries({"host": "beta"}, ["time", "download", "ping"], [[1701, 6.0, 40.0]]),
+        ]
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"ping", "download"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"alpha", "beta"}),
+            patch("toinflux.mcp_read.run_query", return_value=series),
+        ):
+            result = current_state_result("speedtest", self.SETTINGS, None)
+
+        assert result["state"] == "last_recorded"
+        assert result["instance_tag"] == "host"
+        assert set(result["instances"]) == {"alpha", "beta"}
+        assert result["instances"]["alpha"]["fields"]["ping"] == {"value": 12.5, "unit": "ms"}
+        assert result["instances"]["beta"]["fields"]["ping"] == {"value": 40.0, "unit": "ms"}
+        # Each host's reading carries its own timestamp, not one shared "now".
+        assert result["instances"]["alpha"]["as_of"] == 1700
+        assert result["instances"]["beta"]["as_of"] == 1701
+        # Never both shapes: a caller must not have to guess which to read.
+        assert "fields" not in result
+        handler.session.close.assert_called_once()
+
+    def test_current_state_never_runs_a_speed_test(self):
+        """The guard that matters most on this path: get_data() would saturate the link."""
+        handler = self._handler()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch.object(type(handler), "get_data", side_effect=AssertionError("get_data was called")),
+            patch("toinflux.mcp_read.discover_fields", return_value={"ping"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"alpha"}),
+            patch(
+                "toinflux.mcp_read.run_query",
+                return_value=[QuerySeries({"host": "alpha"}, ["time", "ping"], [[1700, 12.5]])],
+            ),
+        ):
+            result = current_state_result("speedtest", self.SETTINGS, None)
+        assert set(result["instances"]) == {"alpha"}
+
+    def test_an_untagged_series_is_skipped_rather_than_keyed_as_none(self):
+        """A grouped query should not return an untagged series, but if one arrives it must
+        not become a producer called ``None`` in the payload."""
+        handler = self._handler()
+        series = [
+            QuerySeries({}, ["time", "ping"], [[1699, 1.0]]),
+            QuerySeries({"host": "alpha"}, ["time", "ping"], [[1700, 12.5]]),
+        ]
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"ping"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"alpha"}),
+            patch("toinflux.mcp_read.run_query", return_value=series),
+        ):
+            result = current_state_result("speedtest", self.SETTINGS, None)
+        assert set(result["instances"]) == {"alpha"}
+
+    def test_list_fields_reports_the_axis_and_the_values_it_accepts(self):
+        """list_fields is where a caller learns which values `instance` may take - the tool
+        description points them here, and nothing asserted it did so."""
+        handler = self._handler()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"ping", "download"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"beta", "alpha"}),
+        ):
+            result = list_fields_result("speedtest", self.SETTINGS, None)
+
+        assert result["source"] == "speedtest"
+        assert result["measurement"] == "speedtest"
+        assert result["instance_tag"] == "host"
+        assert result["instances"] == ["alpha", "beta"], "instances must be sorted for a stable payload"
+        # Field metadata still comes through, from the source class rather than the test.
+        by_name = {entry["field"]: entry for entry in result["fields"]}
+        assert by_name["ping"]["unit"] == "ms"
+        assert [entry["field"] for entry in result["fields"]] == ["download", "ping"]
+        handler.session.close.assert_called_once()
+
+    def test_list_fields_omits_the_axis_for_a_source_without_one(self):
+        """A single-producer source keeps the historical shape, so nothing reading the payload
+        has to special-case its absence."""
+        from toinflux.carbonintensity import CarbonIntensity
+
+        settings = {
+            "influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"},
+            "carbonintensity": {"db": "cdb", "interval": 1800},
+            "sources": ["carbonintensity"],
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = CarbonIntensity("carbonintensity")
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"intensity"}),
+        ):
+            result = list_fields_result("carbonintensity", settings, None)
+        assert "instance_tag" not in result
+        assert "instances" not in result
 
 
 class TestBuildDocumentation:
@@ -833,27 +1049,36 @@ class TestMultiBridgeReads:
     def test_a_single_target_source_keeps_the_flat_shape(self):
         """Every non-instanced source is untouched - instance None means no grouping.
 
-        Exercised through a genuinely single-target source (Nuki: live state, one broker),
-        not through Hue with a None instance. That combination cannot occur in production -
-        for Hue, resolve_handlers always yields host instances or raises - so asserting the
-        flat shape that way would prove it using a scenario nothing produces, and would not
-        notice a regression in the real single-target path.
+        Exercised through a genuinely single-target source, not through Hue with a None
+        instance. That combination cannot occur in production - for Hue, resolve_handlers
+        always yields host instances or raises - so asserting the flat shape that way would
+        prove it using a scenario nothing produces, and would not notice a regression in the
+        real single-target path.
+
+        Uses openmeteo: Nuki was the example here precisely because it was
+        single-target, and it now has a device axis covering every lock.
         """
-        handler = MagicMock(MCP_LIVE_STATE=True, MCP_DESCRIPTION="Nuki smart lock", MCP_FIELD_METADATA={})
-        handler.source = "nuki"
+        handler = MagicMock(
+            MCP_LIVE_STATE=True,
+            MCP_INSTANCE_TAG=None,
+            MCP_LIVE_STATE_COVERS_ALL_INSTANCES=False,
+            MCP_DESCRIPTION="Weather",
+            MCP_FIELD_METADATA={},
+        )
+        handler.source = "openmeteo"
         handler.instance = None
-        handler.worker_label = "nuki"
-        handler.get_data.return_value = {"Front_Door_stateValue": 1}
+        handler.worker_label = "openmeteo"
+        handler.get_data.return_value = {"temperature_2m": 18.5}
         handler.session = MagicMock()
         settings = {
-            "sources": ["nuki"],
+            "sources": ["openmeteo"],
             "influx": {"url": "http://x", "user": "u", "password": "p"},
-            "nuki": {"db": "nuki_db"},
+            "openmeteo": {"db": "weather_db"},
         }
         with patch("toinflux.mcp_read.resolve_handlers", return_value=[(None, handler)]):
-            result = current_state_result("nuki", settings, None)
-        assert result["source"] == "nuki"
-        assert result["fields"]["Front_Door_stateValue"]["value"] == 1
+            result = current_state_result("openmeteo", settings, None)
+        assert result["source"] == "openmeteo"
+        assert result["fields"]["temperature_2m"]["value"] == 18.5
         assert "as_of" in result
         assert "instances" not in result
 
@@ -880,46 +1105,101 @@ class TestMultiBridgeReads:
                 current_state_result("hue", self._settings(), None)
         message = str(excinfo.value)
         # Each bridge paired with its own error, not merely both hostnames present somewhere.
-        assert "down.example.com: down" in message and "up.example.com: also down" in message
+        assert "'down.example.com': down" in message and "'up.example.com': also down" in message
 
-    def test_bridge_is_rejected_for_a_source_with_one_target(self):
-        """Silently ignoring it would be worse than refusing.
+    def test_hue_declares_the_host_axis_so_scoping_uses_the_shared_path(self):
+        """The core of per-bridge scoping: without the axis on the class, Hue falls back to the old
+        merged behaviour and `instance` is refused as not applying. Driven through
+        resolve_schema and the real Hue class rather than asserting the attribute, so it
+        fails if the plumbing stops reading it as well as if the value changes."""
+        settings = {
+            "sources": ["hue"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "hue": {"db": "h", "interval": 300, "host": "a.example.com", "user": "tok"},
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Hue("hue")
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"Kitchen"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"a.example.com"}),
+        ):
+            _, schema = resolve_schema("hue", settings, None)
+        assert schema.instance_tag == "host"
+        query = build_query(schema, field="Kitchen", start="-1h", end="now", instance="a.example.com")
+        assert "\"host\" = 'a.example.com'" in query
 
-        A non-instanced source accepts any instance, ignores it (its tag filters do not
-        vary), runs an unscoped query - and the result would then echo `bridge` back,
-        telling the caller the query was scoped when it was not.
+    def test_allowlist_unions_configured_targets_with_recorded_ones(self):
+        """Acceptance question 1 turns on this. Discovered values alone would refuse a
+        bridge that is configured but has not collected yet - which `bridge` accepted - and
+        would leave query_history disagreeing with get_current_state, which reads live from
+        whatever is configured. A decommissioned bridge still has history worth querying."""
+        settings = {
+            "sources": ["hue"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "hue": {
+                "db": "h",
+                "interval": 300,
+                "host": "configured-and-recording.example.com",
+                "user": "tok",
+                "host2": "configured-no-data-yet.example.com",
+                "user2": "tok2",
+            },
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = Hue("hue")
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"Kitchen"}),
+            patch(
+                "toinflux.mcp_read.discover_tag_values",
+                return_value={"configured-and-recording.example.com", "decommissioned.example.com"},
+            ),
+        ):
+            _, schema = resolve_schema("hue", settings, None)
+        assert schema.instance_values == {
+            "configured-and-recording.example.com",
+            "configured-no-data-yet.example.com",
+            "decommissioned.example.com",
+        }
+        # Both edge cases must be accepted, not merely present in the set.
+        assert _validate_instance(schema, "configured-no-data-yet.example.com") is None
+        assert _validate_instance(schema, "decommissioned.example.com") is None
+
+    def test_configured_instances_is_empty_for_a_single_target_source(self):
+        """A source with no separate targets expands to one None instance, which is not a
+        value - leaking it into the allowlist would make None an acceptable argument."""
+        assert configured_instances("speedtest", {"sources": ["speedtest"]}) == []
+
+    def test_bridge_is_rejected_for_a_source_with_one_producer(self):
+        """Silently ignoring it would be worse than refusing: the source would run an
+        unscoped query and the result would echo the value back, telling the caller the
+        answer was narrowed when it was not.
+
+        Still refused after `bridge` became an alias for `instance` - just through the one
+        shared guard rather than a Hue-specific branch, which is the point of the change.
+        Uses octopus because speedtest now *has* an axis and is no longer an example of a
+        single-producer source.
         """
-        from toinflux.mcp_read import _query_history_result
-
-        with pytest.raises(ToolParamError) as excinfo:
-            _query_history_result(
-                {"sources": ["speedtest"]},
-                None,
-                source="speedtest",
-                field="ping",
-                start="-1h",
-                end="now",
-                aggregation="raw",
-                group_by=None,
-                limit=10,
-                bridge="made-up",
-            )
-        assert "does not apply" in str(excinfo.value)
-        assert "hue" in str(excinfo.value)  # names the sources it does apply to
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o")
+        with pytest.raises(ToolParamError, match="single producer"):
+            _validate_instance(plain, "made-up")
 
     @pytest.mark.parametrize("bad_source", [5, None, ["hue"], "", "   "])
-    def test_a_bad_source_is_reported_as_a_bad_source_not_a_bridge_problem(self, bad_source):
-        """The bridge guard must not be the thing that judges an unusable source name.
+    def test_a_bad_source_is_reported_as_a_bad_source_not_an_instance_problem(self, bad_source):
+        """Scoping must not be the thing that judges an unusable source name.
 
-        Review finding: the guard called ``source.lower()`` before anything had checked the
-        type, so a non-string raised AttributeError - escaping the
-        ToolParamError/SourceConnectionError split the MCP layer relies on to tell a caller
-        mistake from a transport failure. A blank string was worse in a quieter way: it *is* a
-        string, so it reached the guard and came back blaming ``bridge`` for what was wrong
-        with ``source``.
+        Originally a review finding against the `bridge` guard: it called ``source.lower()``
+        before anything had checked the type, so a non-string raised AttributeError -
+        escaping the ToolParamError/SourceConnectionError split the MCP layer relies on to
+        tell a caller mistake from a transport failure. A blank string was worse in a
+        quieter way: it *is* a string, so it reached the guard and came back blaming the
+        scoping parameter for what was wrong with ``source``.
 
-        Both now fall through to the source validation, so the message names the parameter
-        actually at fault.
+        Kept after `bridge` was removed, because the concern outlives the parameter name -
+        ``instance`` is now the argument that must not be blamed for a bad source.
         """
         from toinflux.mcp_read import _query_history_result
 
@@ -934,7 +1214,7 @@ class TestMultiBridgeReads:
                 aggregation=None,
                 group_by=None,
                 limit=None,
-                bridge="anything",
+                instance="anything",
             )
         assert "source must be a non-empty string" in str(excinfo.value)
         assert "does not apply" not in str(excinfo.value)
@@ -960,6 +1240,327 @@ class TestMultiBridgeReads:
         )
         query = build_query(schema, field="Kitchen", start="-1h", end="now")
         assert "host" not in query
+
+
+class TestInstanceAxis:
+    """The instance axis: scoping a query to one producer, and never merging producers.
+
+    Every query shape asserted here was executed against a real InfluxDB 1.8 while this
+    was written, so the SQL is known to parse and to return the series counts assumed -
+    including the composed `GROUP BY time(1h), "host"`, which is the one most likely to
+    be wrong by inspection.
+    """
+
+    @staticmethod
+    def _schema(values=("hostA", "hostB"), tag="host"):
+        return ReadSchema(
+            source="speedtest",
+            measurement="speedtest",
+            db="sdb",
+            allowed_fields={"ping"},
+            field_metadata={"ping": {"unit": "ms"}},
+            instance_tag=tag,
+            instance_values=set(values),
+        )
+
+    def test_scoped_query_filters_on_the_instance_tag(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now", instance="hostA")
+        assert "\"host\" = 'hostA'" in q
+        # Scoped means one series already, so grouping would be noise.
+        assert "GROUP BY" not in q
+
+    def test_unscoped_query_groups_by_the_instance_tag(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now")
+        assert 'GROUP BY "host"' in q
+        assert "'hostA'" not in q
+
+    def test_unscoped_aggregation_groups_by_time_and_tag(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now", aggregation="mean", group_by="1h")
+        assert 'GROUP BY time(1h), "host" fill(none)' in q
+
+    def test_limit_is_divided_across_instances_when_grouping(self):
+        # InfluxDB applies LIMIT per series once grouped, so an undivided limit would
+        # let N producers multiply the result cap - the bound would stop bounding.
+        q = build_query(self._schema(values=("a", "b", "c", "d")), field="ping", start="-1h", end="now", limit=100)
+        assert q.endswith("LIMIT 25")
+
+    def test_scoped_limit_is_not_divided(self):
+        q = build_query(self._schema(), field="ping", start="-1h", end="now", limit=100, instance="hostA")
+        assert q.endswith("LIMIT 100")
+
+    def test_source_without_an_axis_is_unchanged(self):
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o", allowed_fields={"cost"})
+        q = build_query(plain, field="cost", start="-1h", end="now", limit=100)
+        assert "GROUP BY" not in q
+        assert q.endswith("LIMIT 100")
+
+    def test_unknown_instance_value_is_refused_with_the_accepted_ones(self):
+        with pytest.raises(ToolParamError, match="accepted values: hostA, hostB"):
+            _validate_instance(self._schema(), "typo")
+
+    def test_refusal_does_not_call_the_allowlist_recorded(self):
+        """The allowlist is the union of present-in-data and configured, so a configured
+        target that has not collected yet appears in it. Calling the list "recorded" would
+        state something untrue about the very value being offered as an alternative."""
+        with pytest.raises(ToolParamError) as excinfo:
+            _validate_instance(self._schema(), "typo")
+        assert "recorded values" not in str(excinfo.value)
+
+    def test_instance_refused_for_a_single_producer_source(self):
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o")
+        with pytest.raises(ToolParamError, match="single producer"):
+            _validate_instance(plain, "anything")
+
+    def test_no_instance_is_always_allowed(self):
+        assert _validate_instance(self._schema(), None) is None
+
+    def test_build_query_refuses_an_instance_on_a_source_with_no_axis(self):
+        """build_query is public and reachable without _validate_instance. Unguarded it
+        reached _quote_identifier(None) and raised a bare AttributeError - neither
+        ToolParamError nor SourceConnectionError, so the MCP layer could not tell a caller
+        mistake from a transport failure."""
+        plain = ReadSchema(source="octopus", measurement="octopus", db="o", allowed_fields={"cost"})
+        with pytest.raises(ToolParamError, match="single producer"):
+            build_query(plain, field="cost", start="-1h", end="now", instance="whatever")
+
+
+class TestPerInstanceHistoryShape:
+    """Acceptance question 2: an unscoped result must say which producer each point
+    came from, and must not merge them."""
+
+    @staticmethod
+    def _handler():
+        handler = MagicMock()
+        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
+        handler.session = MagicMock()
+        return handler
+
+    def _run(self, series, instance=None, limit=DEFAULT_RESULT_POINTS):
+        from toinflux.mcp_read import _run_query_history
+
+        schema = TestInstanceAxis._schema()
+        with patch("toinflux.mcp_read.run_query", return_value=series):
+            return _run_query_history(
+                self._handler(), schema, "ping", "-1h", "now", "raw", None, limit, instance=instance
+            )
+
+    def test_unscoped_reports_each_producer_separately(self):
+        result = self._run(
+            [
+                QuerySeries({"host": "hostA"}, ["time", "ping"], [[2, 13.1], [1, 12.3]]),
+                QuerySeries({"host": "hostB"}, ["time", "ping"], [[2, 46.0], [1, 45.6]]),
+            ]
+        )
+        assert set(result["instances"]) == {"hostA", "hostB"}
+        assert [p["value"] for p in result["instances"]["hostA"]["points"]] == [13.1, 12.3]
+        assert [p["value"] for p in result["instances"]["hostB"]["points"]] == [46.0, 45.6]
+        assert result["instance_tag"] == "host"
+        # Field-level metadata stays at the top rather than repeating per producer.
+        assert result["unit"] == "ms"
+        assert "points" not in result
+
+    def test_keyed_even_with_one_producer(self):
+        # So nothing reading the payload depends on how many producers exist - the same
+        # reasoning as Hue's per-bridge map.
+        # The tag value has to be one the schema knows about, since a producer outside the
+        # allowlist is deliberately not reported - see the shared-measurement filter.
+        result = self._run([QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 5.0]])])
+        assert set(result["instances"]) == {"hostA"}
+
+    def test_scoped_returns_the_flat_shape(self):
+        result = self._run([QuerySeries({}, ["time", "ping"], [[1, 12.3]])], instance="hostA")
+        assert [p["value"] for p in result["points"]] == [12.3]
+        assert "instances" not in result
+
+    def test_limit_reported_is_the_one_actually_applied_per_instance(self):
+        # Reporting the caller's figure would make `truncated` a comparison against a
+        # limit InfluxDB never used.
+        result = self._run(
+            [
+                QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 1.0]]),
+                QuerySeries({"host": "hostB"}, ["time", "ping"], [[1, 2.0]]),
+            ],
+            limit=10,
+        )
+        assert result["limit_per_instance"] == 5
+        assert "limit" not in result
+
+    def test_truncation_is_per_instance_and_summarised(self):
+        result = self._run(
+            [
+                QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 1.0], [2, 2.0]]),
+                QuerySeries({"host": "hostB"}, ["time", "ping"], [[1, 3.0]]),
+            ],
+            limit=4,
+        )
+        assert result["instances"]["hostA"]["truncated"] is True
+        assert result["instances"]["hostB"]["truncated"] is False
+        assert result["truncated"] is True
+
+    def test_untagged_series_is_reported_not_silently_dropped(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = self._run(
+                [
+                    QuerySeries({"host": "hostA"}, ["time", "ping"], [[1, 1.0]]),
+                    QuerySeries({}, ["time", "ping"], [[1, 9.0]]),
+                ]
+            )
+        assert set(result["instances"]) == {"hostA"}
+        assert "no host tag" in caplog.text
+
+
+class TestSharedMeasurementInstances:
+    """The three MyEnergi types share the `myenergi`
+    measurement and are told apart by the same `device` tag that now carries the operator's
+    label - so a discovered value cannot be attributed to a type, and the config is the
+    authority. The config does distinguish them: separate blocks, separate sources."""
+
+    SETTINGS = {
+        "sources": ["zappi", "eddi"],
+        "influx": {"url": "http://x", "user": "u", "password": "p"},
+        "zappi": {
+            "db": "m",
+            "interval": 300,
+            "serial": "1",
+            "devices": [{"serial": "2", "label": "Driveway"}],
+        },
+        "eddi": {"db": "m", "interval": 300, "serial": "3", "label": "Hot Water"},
+        "myenergi": {"apikey": "k", "zappi_url": "u", "eddi_url": "u", "dayhour_url": "u"},
+    }
+
+    def _schema(self, source="zappi"):
+        with patch("toinflux.influx.load_settings", return_value=self.SETTINGS):
+            handler = get_class(source, None)
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"frq"}),
+            # Every device in the measurement, whichever type wrote it - which is exactly
+            # what SHOW TAG VALUES returns and why it cannot be trusted here.
+            patch(
+                "toinflux.mcp_read.discover_tag_values",
+                return_value={"zappi", "Driveway", "Hot Water", "gone-device"},
+            ) as discover,
+        ):
+            _, schema = resolve_schema(source, self.SETTINGS, None)
+        return schema, discover
+
+    def test_the_allowlist_is_the_configured_devices_of_that_source_only(self):
+        """Acceptance question 6: a query for zappi covers the named device and the
+        legacy-labelled one, and nothing belonging to another type."""
+        schema, _ = self._schema("zappi")
+        assert schema.instance_values == {"zappi", "Driveway"}
+        assert "Hot Water" not in schema.instance_values
+
+    def test_discovery_is_not_consulted_for_a_shared_measurement(self):
+        """Not merely filtered afterwards - the round trip is skipped, since its answer
+        could not be attributed to a type anyway."""
+        _, discover = self._schema("zappi")
+        discover.assert_not_called()
+
+    def test_an_eddi_label_is_refused_for_a_zappi_query(self):
+        schema, _ = self._schema("zappi")
+        with pytest.raises(ToolParamError, match="accepted values: Driveway, zappi"):
+            _validate_instance(schema, "Hot Water")
+
+    def test_a_grouped_query_reports_only_this_sources_devices(self):
+        """The measurement holds every type's devices, so an unfiltered grouped query would
+        answer a zappi question with the eddi's readings."""
+        from toinflux.mcp_read import _run_query_history
+
+        schema, _ = self._schema("zappi")
+        handler = MagicMock()
+        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
+        series = [
+            QuerySeries({"device": "zappi"}, ["time", "frq"], [[1, 50.0]]),
+            QuerySeries({"device": "Driveway"}, ["time", "frq"], [[1, 49.0]]),
+            QuerySeries({"device": "Hot Water"}, ["time", "frq"], [[1, 48.0]]),
+            QuerySeries({"device": "gone-device"}, ["time", "frq"], [[1, 47.0]]),
+        ]
+        with patch("toinflux.mcp_read.run_query", return_value=series):
+            result = _run_query_history(handler, schema, "frq", "-1h", "now", "raw", None, 100)
+        assert set(result["instances"]) == {"zappi", "Driveway"}
+
+    def test_an_empty_allowlist_reports_nothing_not_everything(self):
+        """Review finding, reproduced first. The filter was guarded on the allowlist being
+        non-empty, so a source that owns nothing in the measurement skipped filtering
+        entirely and reported *every* producer - answering a zappi question with the eddi and
+        harvi devices. Empty means nothing is ours, so nothing is the honest answer."""
+        from toinflux.mcp_read import _run_query_history
+
+        schema = ReadSchema(
+            source="zappi",
+            measurement="myenergi",
+            db="m",
+            allowed_fields={"frq"},
+            instance_tag="device",
+            instance_values=set(),
+        )
+        handler = MagicMock()
+        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
+        series = [
+            QuerySeries({"device": "Hot Water"}, ["time", "frq"], [[1, 48.0]]),
+            QuerySeries({"device": "harvi"}, ["time", "frq"], [[1, 47.0]]),
+        ]
+        with patch("toinflux.mcp_read.run_query", return_value=series):
+            result = _run_query_history(handler, schema, "frq", "-1h", "now", "raw", None, 100)
+        assert result["instances"] == {}
+
+    def test_a_source_owning_its_measurement_still_uses_discovery(self):
+        """The rule must not have quietly changed Speedtest or Hue: they own their
+        measurements, so a discovered value is unambiguous and the union still applies."""
+        settings = {
+            "sources": ["speedtest"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "speedtest": {"db": "s", "interval": 600},
+        }
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = get_class("speedtest", None)
+        handler.session = MagicMock()
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_fields", return_value={"ping"}),
+            patch("toinflux.mcp_read.discover_tag_values", return_value={"pi4", "nas"}) as discover,
+        ):
+            _, schema = resolve_schema("speedtest", settings, None)
+        discover.assert_called_once()
+        assert schema.instance_values == {"pi4", "nas"}
+
+
+class TestDiscoverTagValues:
+    def test_parses_values(self):
+        payload = {
+            "results": [{"series": [{"columns": ["key", "value"], "values": [["host", "hostA"], ["host", "hostB"]]}]}]
+        }
+        values = discover_tag_values(
+            _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "speedtest", "host"
+        )
+        assert values == {"hostA", "hostB"}
+
+    def test_empty_when_nothing_recorded(self):
+        values = discover_tag_values(
+            _mock_session({"results": [{}]}), {"url": "http://x", "user": "u", "password": "p"}, "db", "m", "host"
+        )
+        assert values == set()
+
+    def test_series_without_a_value_column_is_skipped_not_misread(self, caplog):
+        """A -1 fallback read each row's last cell, which is right for today's
+        ["key", "value"] shape and would silently invent tag values if that changed. A
+        wrong allowlist refuses real producers and accepts ones that do not exist."""
+        payload = {"results": [{"series": [{"columns": ["key"], "values": [["host"]]}]}]}
+        with caplog.at_level("WARNING"):
+            values = discover_tag_values(
+                _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "m", "host"
+            )
+        assert values == set()
+        assert "no 'value' column" in caplog.text
+
+    def test_result_error_surfaces_rather_than_looking_like_no_instances(self):
+        payload = {"results": [{"error": "database not found: sdb"}]}
+        with pytest.raises(SourceConnectionError, match="rejected the tag-value discovery"):
+            discover_tag_values(
+                _mock_session(payload), {"url": "http://x", "token": "t", "org": "o"}, "db", "m", "host"
+            )
 
 
 class TestDataRangeResult:
@@ -1020,6 +1621,27 @@ class TestDataRangeResult:
     def _point(ts):
         return {"results": [{"series": [{"columns": ["time", "ping"], "values": [[ts, 12.0]]}]}]}
 
+    @staticmethod
+    def _grouped_point(**per_host):
+        """Speedtest has an instance axis, so the range is also read per producer -
+        two extra grouped round trips (oldest, newest) before the overall pair."""
+        return {
+            "results": [
+                {
+                    "series": [
+                        {"tags": {"host": h}, "columns": ["time", "ping"], "values": [[ts, 12.0]]}
+                        for h, ts in per_host.items()
+                    ]
+                }
+            ]
+        }
+
+    @staticmethod
+    def _tag_values(*values):
+        """Speedtest declares an instance tag, so resolve_schema enumerates it - one
+        extra round trip between field discovery and the edge-time queries."""
+        return {"results": [{"series": [{"columns": ["key", "value"], "values": [["host", v] for v in values]}]}]}
+
     def test_v1_reports_range_and_retention(self):
         """Acceptance question 2: v1 reports the configured duration and shard duration.
 
@@ -1039,7 +1661,18 @@ class TestDataRangeResult:
                 }
             ]
         }
-        result, _ = self._run(self.V1, [self._fields("ping"), self._point(1000), self._point(5000), retention])
+        result, _ = self._run(
+            self.V1,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1000),
+                self._point(5000),
+                retention,
+            ],
+        )
         assert (result["earliest"], result["latest"], result["span_seconds"]) == (1000, 5000, 4000)
         assert result["points_present"] is True
         assert result["retention"]["known"] is True
@@ -1048,6 +1681,10 @@ class TestDataRangeResult:
         assert result["retention"]["duration_seconds"] == 2592000
         assert result["retention"]["shard_group_duration_seconds"] == 3600
         assert result["retention"]["read_from"] == "v1 SHOW RETENTION POLICIES"
+        # Per producer as well as overall: a host added last week and one collecting for a
+        # year share a merged span that is true of the measurement and false of both.
+        assert result["instance_tag"] == "host"
+        assert result["instances"]["hostA"] == {"earliest": 1000, "latest": 5000, "span_seconds": 4000}
 
     def test_v1_prefers_the_default_policy(self):
         """Writes with no explicit policy land in the default one, so that is the policy
@@ -1067,7 +1704,18 @@ class TestDataRangeResult:
                 }
             ]
         }
-        result, _ = self._run(self.V1, [self._fields("ping"), self._point(1), self._point(2), retention])
+        result, _ = self._run(
+            self.V1,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                retention,
+            ],
+        )
         assert result["retention"]["policy"] == "keep"
 
     def test_v2_reads_retention_from_the_management_api_not_the_query_path(self):
@@ -1088,7 +1736,18 @@ class TestDataRangeResult:
                 }
             ]
         }
-        result, calls = self._run(self.V2, [self._fields("ping"), self._point(10), self._point(20), buckets])
+        result, calls = self._run(
+            self.V2,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(10),
+                self._point(20),
+                buckets,
+            ],
+        )
         assert result["retention"]["known"] is True
         assert result["retention"]["duration_seconds"] == 2592000
         # Rendered in v1's own style, so an answer is comparable across versions.
@@ -1121,6 +1780,9 @@ class TestDataRangeResult:
             self.V2,
             [
                 self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
                 self._point(100),
                 self._point(200),
                 requests.exceptions.HTTPError("403 Forbidden"),
@@ -1134,7 +1796,18 @@ class TestDataRangeResult:
     def test_v2_missing_bucket_degrades_rather_than_reporting_infinite(self):
         """v2 answers 200 with an empty list for a name matching nothing, so this is not
         caught by raise_for_status - and must not be read as 'no retention rules'."""
-        result, _ = self._run(self.V2, [self._fields("ping"), self._point(1), self._point(2), {"buckets": []}])
+        result, _ = self._run(
+            self.V2,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                {"buckets": []},
+            ],
+        )
         assert result["retention"]["known"] is False
         assert "no bucket named" in result["retention"]["reason"]
 
@@ -1201,8 +1874,30 @@ class TestDataRangeResult:
                 }
             ]
         }
-        v1, _ = self._run(self.V1, [self._fields("ping"), self._point(1), self._point(2), v1_retention])
-        v2, _ = self._run(self.V2, [self._fields("ping"), self._point(1), self._point(2), v2_buckets])
+        v1, _ = self._run(
+            self.V1,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                v1_retention,
+            ],
+        )
+        v2, _ = self._run(
+            self.V2,
+            [
+                self._fields("ping"),
+                self._tag_values("hostA"),
+                self._grouped_point(hostA=1000),
+                self._grouped_point(hostA=5000),
+                self._point(1),
+                self._point(2),
+                v2_buckets,
+            ],
+        )
         for key in ("duration", "duration_seconds", "shard_group_duration", "shard_group_duration_seconds"):
             assert v1["retention"][key] == v2["retention"][key], key
 

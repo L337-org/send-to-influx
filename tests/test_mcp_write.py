@@ -212,7 +212,7 @@ class TestHueSetLight:
         )
 
     def test_write_path_brackets_a_bare_ipv6_host(self):
-        """The write PUT brackets an IPv6 host exactly as the read GET does (SI-17).
+        """The write PUT brackets an IPv6 host exactly as the read GET does.
 
         Both paths build their URL from the one shared _api_base(), so this is the
         guard against a future second copy of the construction reintroducing the
@@ -600,7 +600,7 @@ class TestHueMultiBridgeWrites:
                     color=None,
                 )
         message = str(excinfo.value)
-        assert "bridge upstairs.example.com" in message and "could not be reached" in message
+        assert "bridge 'upstairs.example.com'" in message and "could not be reached" in message
         assert "Pass 'bridge'" in message
         # The match that *was* found is reported, so the caller knows what naming a bridge
         # would get them rather than having to guess.

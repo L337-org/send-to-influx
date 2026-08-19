@@ -296,7 +296,7 @@ class TestUrlHost:
 
 
 class TestHueIpv6Host:
-    """A bridge configured with a bare IPv6 address must be reachable (SI-17)."""
+    """A bridge configured with a bare IPv6 address must be reachable."""
 
     @staticmethod
     def _hue_with_host(sample_settings, host):
@@ -773,3 +773,33 @@ class TestBridgeResolution:
         with pytest.raises(ConfigError) as excinfo:
             hue.bridge()
         assert "same bridge" in str(excinfo.value)
+
+
+class TestHostNewlineRejected:
+    """Swept for the pattern after review raised it against MyEnergi labels rather than
+    waiting to be told: the Hue host is written verbatim as the `host` tag, so it had the
+    same exposure. A newline cannot appear in a line protocol tag value - it is what
+    separates points - so one here would end the point early and turn the remainder into a
+    second point nobody configured."""
+
+    def test_a_newline_in_a_bridge_host_is_refused(self):
+        from toinflux.philipshue import enumerate_bridges
+
+        evil = "a.example.com" + chr(10) + "hue,host=Injected f=1"
+        bridges, errors, _ = enumerate_bridges({"host": evil, "user": "tok"})
+        assert bridges == []
+        assert "must not contain a newline" in errors[0]
+
+    def test_a_carriage_return_is_refused_too(self):
+        from toinflux.philipshue import enumerate_bridges
+
+        bridges, errors, _ = enumerate_bridges({"host": "a" + chr(13) + "b", "user": "tok"})
+        assert bridges == []
+        assert "must not contain a newline" in errors[0]
+
+    def test_a_normal_host_is_unaffected(self):
+        from toinflux.philipshue import enumerate_bridges
+
+        bridges, errors, _ = enumerate_bridges({"host": "a.example.com", "user": "tok"})
+        assert errors == []
+        assert [bridge.host for bridge in bridges] == ["a.example.com"]

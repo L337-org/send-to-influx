@@ -261,16 +261,32 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
     if data_handler is None:
         return
     original_header = data_handler.influx_header
-    # An instanced source tags its own instance too, so per-bridge health is visible
-    # instead of several workers overwriting one another's ok/consecutive_failures at
-    # second precision. This adds a tag to an existing series for Hue - a deliberate
-    # emitted-data change, noted in the release notes: `GROUP BY source` now returns one
-    # series per bridge. Every single-target source has instance None and is untouched.
-    tags = f"source={source}"
-    if data_handler.instance is not None:
-        tags += f",host={escape_key_or_tag_value(data_handler.instance)}"
-    data_handler.influx_header = f"collector_status,{tags} "
+    # Extra tags come from the source itself (DataHandler.heartbeat_tags), because what
+    # distinguishes one writer from another differs by source: an instanced source tags
+    # its bridge, while Speedtest tags the collecting machine, since its writers are
+    # separate processes on separate hosts rather than separate targets. Without this the
+    # writers share one series and overwrite each other's ok/consecutive_failures at
+    # second precision, so a dead collector is indistinguishable from a healthy one.
+    # Adding a tag to an existing series is a deliberate emitted-data change: pre-change
+    # heartbeat points sit in an untagged series, and `GROUP BY source` now returns one
+    # series per writer. Accepted for a liveness signal whose old data was already wrong.
+    # Everything from here is inside the try, including building the tags. escape_key_or_tag_value()
+    # *raises* on a newline rather than escaping it, and heartbeat_tags() returns values this code
+    # does not control - Speedtest's is the OS hostname. Built outside the try, one such value
+    # escaped the guard that exists to swallow heartbeat failures: on the success path it would
+    # have been counted as a source failure, and on the failure paths - where the call sits inside
+    # an `except` block, so nothing catches it - it killed the worker thread outright, reporting
+    # the heartbeat error rather than whatever had actually gone wrong.
     try:
+        tags = f"source={source}"
+        for key, value in sorted(data_handler.heartbeat_tags().items()):
+            # Both halves escaped, not just the value: this is an extension point any
+            # source can override, and the header is written verbatim, so a key carrying a
+            # comma, equals or space would end the tag set early and silently corrupt the
+            # point. Every key today is a bare word, which is exactly why an unescaped one
+            # would go unnoticed until some future source returned something else.
+            tags += f",{escape_key_or_tag_value(key)}={escape_key_or_tag_value(value)}"
+        data_handler.influx_header = f"collector_status,{tags} "
         data_handler.send_data(
             data={"ok": 1 if ok else 0, "consecutive_failures": consecutive_failures},
             timestamp=int(time.time()),

@@ -41,7 +41,7 @@ import urllib3
 from mcp.types import ToolAnnotations
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
-from toinflux.general import INSTANCED_SOURCES
+from toinflux.general import INSTANCED_SOURCES, expand_sources, shares_measurement
 from toinflux.mcp_common import close_session, configured_sources, resolve_handler, resolve_handlers
 
 # Every read tool is read-only and scoped to this server's own configured
@@ -113,6 +113,12 @@ class ReadSchema:
     tag_filters: dict = dataclass_field(default_factory=dict)
     allowed_fields: set = dataclass_field(default_factory=set)
     field_metadata: dict = dataclass_field(default_factory=dict)
+    # The tag distinguishing producers within this measurement (from
+    # MCP_INSTANCE_TAG), and the values it currently holds - the live allowlist for
+    # an `instance` argument. None/empty for a source with a single producer, which
+    # keeps every such source's behaviour and payload shape exactly as before.
+    instance_tag: "str | None" = None
+    instance_values: set = dataclass_field(default_factory=set)
 
     def metadata_for(self, field):
         """Return the metadata dict for a field in this schema - see the
@@ -138,7 +144,7 @@ def resolve_db(source_settings, influx_settings):
     return source_settings.get("db")
 
 
-def build_schema(handler, discovered_fields, db):
+def build_schema(handler, discovered_fields, db, instance_values=None):
     """Assemble a ReadSchema from a DataHandler instance's static class metadata,
     the live discovered field set, and the resolved db (see resolve_db).
 
@@ -152,6 +158,8 @@ def build_schema(handler, discovered_fields, db):
     :param handler: a constructed DataHandler subclass instance
     :param discovered_fields: field keys found via discover_fields()
     :param db: the resolved database/bucket name (from resolve_db)
+    :param instance_values: values of the source's instance tag found via
+        discover_tag_values(), or None when it has no instance tag
     :return: ReadSchema
     """
     measurement = handler.MCP_MEASUREMENT or handler.source
@@ -162,6 +170,8 @@ def build_schema(handler, discovered_fields, db):
         tag_filters=handler.mcp_tag_filters(),
         allowed_fields=set(discovered_fields),
         field_metadata=dict(handler.MCP_FIELD_METADATA),
+        instance_tag=handler.MCP_INSTANCE_TAG,
+        instance_values=set(instance_values or ()),
     )
 
 
@@ -172,6 +182,15 @@ def metadata_for(field_metadata, field):
     e.g. ``stateValue`` over ``value``). Empty dict when nothing matches.
     Longest-wins is deterministic regardless of dict order and stays correct as
     metadata grows.
+
+    **The suffix match now serves history, not current writes.** It existed because Nuki
+    prefixed every field key with its lock's name; since 5.3 each lock is a tag and the
+    keys are bare, so an exact match covers everything being written today. It is kept
+    deliberately rather than deleted: pre-migration Nuki points still carry prefixed keys
+    until the migration's delete phase runs, so those fields remain queryable in the
+    meantime - and this is what keeps them annotated with their units and decoded labels,
+    which is exactly when an operator is deciding whether to migrate at all. Removable once
+    no install can still hold pre-5.3 Nuki data, which is a condition rather than a date.
 
     Kept module-level (not only a ReadSchema method) so the live current-state
     path can annotate a source's raw ``get_data()`` fields straight from the
@@ -336,7 +355,9 @@ def _clamp_limit(limit):
     return max(1, min(value, MAX_RESULT_POINTS))
 
 
-def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, limit=DEFAULT_RESULT_POINTS):
+def build_query(
+    schema, *, field, start, end, aggregation="raw", group_by=None, limit=DEFAULT_RESULT_POINTS, instance=None
+):
     """Build a parameterised InfluxQL SELECT for a source's measurement.
 
     Every dynamic part is validated: the field against the schema's live
@@ -351,7 +372,12 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     :param end: end time bound (see parse_time_bound)
     :param aggregation: one of AGGREGATIONS, or "raw" for un-aggregated points
     :param group_by: GROUP BY time interval (required when aggregating), e.g. "1h"
-    :param limit: maximum points to return (clamped to MAX_RESULT_POINTS)
+    :param limit: maximum points to return (clamped to MAX_RESULT_POINTS). When the
+        query groups by the instance tag this is divided across the known instances,
+        because InfluxDB applies LIMIT per series
+    :param instance: restrict to one value of the source's instance tag; None leaves
+        the query unscoped, which groups by that tag so producers stay distinguishable
+        rather than being merged into one series
     :return: the InfluxQL query string
     :raises ToolParamError: on any invalid parameter
     """
@@ -372,23 +398,27 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     if start_dt >= end_dt:
         raise ToolParamError(f"start ({_rfc3339(start_dt)}) must be before end ({_rfc3339(end_dt)})")
 
-    if aggregation == "raw":
-        select_expr = _quote_identifier(field)
-        group_clause = ""
-    else:
-        func = AGGREGATIONS.get(aggregation)
-        if func is None:
-            raise ToolParamError(
-                f"unknown aggregation {aggregation!r}; choose one of: raw, {', '.join(sorted(AGGREGATIONS))}"
-            )
-        select_expr = f"{func}({_quote_identifier(field)})"
-        if not group_by:
-            raise ToolParamError(f"aggregation {aggregation!r} requires a group_by interval (e.g. '1h')")
-        if not _DURATION_RE.match(str(group_by)):
-            raise ToolParamError(f"invalid group_by interval {group_by!r}; use a duration like '5m', '1h', '1d'")
-        group_clause = f" GROUP BY time({group_by}) fill(none)"
+    # Whether this query separates producers. Scoped to one instance it does not (the
+    # WHERE clause narrows to a single series); unscoped on a source with an instance
+    # axis it must, or InfluxQL merges every producer into one unlabelled series and
+    # the answer silently mixes them - the defect this whole change exists to fix.
+    group_by_instance = instance is None and bool(schema.instance_tag)
+    instance_clause = ""
+    if group_by_instance:
+        _validate_identifier(schema.instance_tag, "tag")
+        instance_clause = f", {_quote_identifier(schema.instance_tag)}"
 
+    select_expr, group_clause = _select_and_group(field, aggregation, group_by, instance_clause)
+
+    # LIMIT is applied *per series* once a query groups by a tag - verified against a
+    # real InfluxDB 1.8, where LIMIT 2 across two hosts returned two rows each, not
+    # two in total. Left alone, the result cap would quietly stop bounding anything:
+    # N producers would multiply it. Divide it instead, so the caller's limit still
+    # bounds the whole answer, and report the per-instance figure so the difference
+    # is visible rather than silent.
     limit_value = _clamp_limit(limit)
+    if group_by_instance:
+        limit_value = max(1, limit_value // max(1, len(schema.instance_values)))
 
     where = [
         f"time >= {_quote_string_literal(_rfc3339(start_dt))}",
@@ -397,6 +427,20 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     for tag_key, tag_value in sorted(schema.tag_filters.items()):
         _validate_identifier(tag_key, "tag")
         where.append(f"{_quote_identifier(tag_key)} = {_quote_string_literal(tag_value)}")
+    if instance is not None:
+        # Guarded here as well as in _validate_instance, because build_query is public and
+        # reachable without it (the tests call it directly). Unguarded, a schema with no
+        # axis reached _quote_identifier(None) and raised a bare AttributeError - which is
+        # neither ToolParamError nor SourceConnectionError, so the MCP layer could not
+        # tell a caller mistake from a transport failure. Same layering as the field
+        # allowlist: validate at the boundary *and* where the value is interpolated.
+        if not schema.instance_tag:
+            raise ToolParamError(
+                f"cannot scope source {schema.source!r} to {instance!r}: its measurement has a "
+                f"single producer, so there is no tag to scope by"
+            )
+        _validate_identifier(schema.instance_tag, "tag")
+        where.append(f"{_quote_identifier(schema.instance_tag)} = {_quote_string_literal(instance)}")
 
     return (
         f"SELECT {select_expr} FROM {_quote_identifier(schema.measurement)} "
@@ -405,7 +449,38 @@ def build_query(schema, *, field, start, end, aggregation="raw", group_by=None, 
     )
 
 
-def _build_single_point_query(measurement, tag_filters, fields, order):
+def _select_and_group(field, aggregation, group_by, instance_clause):
+    """Return the SELECT expression and GROUP BY clause for a history query.
+
+    Extracted from build_query to keep it within the project's complexity limit once
+    instance grouping had to compose with time bucketing.
+
+    :param instance_clause: the tag to group by, **already prefixed with a comma and a
+        space** so it can be spliced straight after ``time(...)`` - literally
+        ``, "host"`` - or an empty string when the query does not separate producers
+    :return: (select expression, group-by clause including its leading space)
+    :raises ToolParamError: for an unknown aggregation, or a missing/malformed group_by
+    """
+    if aggregation == "raw":
+        # A raw query still needs the tag in a GROUP BY to keep producers apart; there
+        # is just no time bucket to combine it with.
+        return _quote_identifier(field), f" GROUP BY{instance_clause[1:]}" if instance_clause else ""
+    func = AGGREGATIONS.get(aggregation)
+    if func is None:
+        raise ToolParamError(
+            f"unknown aggregation {aggregation!r}; choose one of: raw, {', '.join(sorted(AGGREGATIONS))}"
+        )
+    if not group_by:
+        raise ToolParamError(f"aggregation {aggregation!r} requires a group_by interval (e.g. '1h')")
+    if not _DURATION_RE.match(str(group_by)):
+        raise ToolParamError(f"invalid group_by interval {group_by!r}; use a duration like '5m', '1h', '1d'")
+    # Verified against a real InfluxDB 1.8: GROUP BY time(1h), "host" fill(none) is
+    # valid and yields one series per host, each with its own buckets. Worth checking
+    # rather than assuming, since the two grouping kinds compose here.
+    return f"{func}({_quote_identifier(field)})", f" GROUP BY time({group_by}){instance_clause} fill(none)"
+
+
+def _build_single_point_query(measurement, tag_filters, fields, order, group_by_tag=None):
     """Build an InfluxQL SELECT for one point at either end of a measurement.
 
     Shared by :func:`build_latest_query` and :func:`build_edge_time_query` - kept as one
@@ -440,10 +515,16 @@ def _build_single_point_query(measurement, tag_filters, fields, order):
         conditions.append(f"{_quote_identifier(tag_key)} = {_quote_string_literal(tag_value)}")
     if conditions:
         query += f" WHERE {' AND '.join(conditions)}"
+    if group_by_tag:
+        # LIMIT 1 becomes one row *per series* once grouped, which is exactly what a
+        # per-producer "latest" or "oldest" needs - verified against a real InfluxDB
+        # 1.8, where this returned the newest point for each host in one round trip.
+        _validate_identifier(group_by_tag, "tag")
+        query += f" GROUP BY {_quote_identifier(group_by_tag)}"
     return query + f" ORDER BY time {order} LIMIT 1"
 
 
-def build_latest_query(measurement, tag_filters, fields):
+def build_latest_query(measurement, tag_filters, fields, group_by_tag=None):
     """Build an InfluxQL SELECT for the single most recent point of a measurement -
     the current-state read for a non-live source (see MCP_LIVE_STATE).
 
@@ -452,10 +533,10 @@ def build_latest_query(measurement, tag_filters, fields):
     :param fields: the field keys to select (non-empty)
     :return: the InfluxQL query string
     """
-    return _build_single_point_query(measurement, tag_filters, fields, "DESC")
+    return _build_single_point_query(measurement, tag_filters, fields, "DESC", group_by_tag)
 
 
-def build_edge_time_query(measurement, tag_filters, order):
+def build_edge_time_query(measurement, tag_filters, order, group_by_tag=None):
     """Build an InfluxQL SELECT for the timestamp at one end of a measurement's data.
 
     ``ORDER BY time ASC`` answers "when did collection start, or where has older data aged
@@ -476,7 +557,7 @@ def build_edge_time_query(measurement, tag_filters, order):
     :param order: ``"ASC"`` for the oldest point, ``"DESC"`` for the newest
     :return: the InfluxQL query string
     """
-    return _build_single_point_query(measurement, tag_filters, None, order)
+    return _build_single_point_query(measurement, tag_filters, None, order, group_by_tag)
 
 
 def _influx_read_request(influx_settings, db, query):
@@ -559,22 +640,134 @@ def discover_fields(session, influx_settings, db, measurement):
     return fields
 
 
-def run_query(session, influx_settings, db, query):
-    """Execute an InfluxQL query and return its first series' (columns, values),
-    or ([], []) when the query matched nothing.
+@dataclass(frozen=True)
+class QuerySeries:
+    """One series from an InfluxQL result: its tag set, columns and rows.
 
-    :return: (columns, values) where columns is a list of names and values is a
-        list of rows
+    ``tags`` is empty for an ungrouped query. A ``GROUP BY`` on a tag returns one
+    of these per tag value, which is what makes a per-instance answer possible.
+    """
+
+    tags: dict
+    columns: list
+    values: list
+
+
+def discover_tag_values(session, influx_settings, db, measurement, tag):
+    """Return the set of values a tag actually holds in a measurement.
+
+    The exact analogue of :func:`discover_fields`, and it carries the same role: the
+    live allowlist an ``instance`` argument is validated against, so a value that was
+    never written is refused rather than producing a confidently empty answer. Being
+    discovered rather than configured also means a collector host that started
+    reporting yesterday is queryable today with no config change.
+
+    Verified against real InfluxDB 1.8 and 2.7 (the latter through its
+    v1-compatibility ``/query`` endpoint, whose response is identical): one series
+    with ``columns: ["key", "value"]`` and one row per value. Worth having checked
+    rather than assumed - that same endpoint reports a bucket's retention as ``0s``,
+    so its answers are not interchangeable with v1's by default.
+
+    :param tag: the tag key to enumerate (from the source class, never model input)
+    :return: set of tag-value strings (possibly empty)
+    :raises SourceConnectionError: on a transport/parse failure
+    """
+    _validate_identifier(measurement, "measurement")
+    _validate_identifier(tag, "tag")
+    query = f"SHOW TAG VALUES FROM {_quote_identifier(measurement)} WITH KEY = {_quote_identifier(tag)}"
+    url, kwargs = _influx_read_request(influx_settings, db, query)
+    payload = _get(session, url, kwargs, f"discover {tag} values for {measurement}")
+    values = set()
+    for result in payload.get("results", []):
+        # Same reasoning as discover_fields: a per-result error arrives in a 200 body,
+        # and swallowing it would make a broken query look like "no instances".
+        if result.get("error"):
+            raise SourceConnectionError(f"InfluxDB rejected the tag-value discovery: {result['error']}")
+        for series in result.get("series", []):
+            columns = series.get("columns", [])
+            if "value" not in columns:
+                # A -1 fallback would read each row's *last* cell, which happens to be the
+                # right one for today's ["key", "value"] shape and would silently invent
+                # tag values if that ever changed. Skipping is the honest answer: a wrong
+                # allowlist would refuse real producers and accept ones that do not exist.
+                logging.warning(
+                    "Tag-value discovery for %s returned a series with no 'value' column (%s); ignoring it",
+                    measurement,
+                    columns,
+                )
+                continue
+            index = columns.index("value")
+            for row in series.get("values", []):
+                if row and isinstance(row[index], str):
+                    values.add(row[index])
+    return values
+
+
+def run_query(session, influx_settings, db, query):
+    """Execute an InfluxQL query and return **every** series it produced.
+
+    A ``GROUP BY`` on a tag yields one series per tag value, each carrying its own
+    ``tags`` map (verified against InfluxDB 1.8 and 2.7's v1-compatibility
+    endpoint, whose responses are identical here). An earlier version returned only
+    the first series, which silently discarded every producer but one - invisible
+    while every query happened to be ungrouped, and wrong the moment one is not.
+    Callers that genuinely cannot produce more than one series use
+    :func:`single_series` to say so explicitly.
+
+    :return: list of QuerySeries, empty when the query matched nothing
     :raises SourceConnectionError: on a transport/parse failure
     """
     url, kwargs = _influx_read_request(influx_settings, db, query)
     payload = _get(session, url, kwargs, "query")
+    found = []
     for result in payload.get("results", []):
         if result.get("error"):
             raise SourceConnectionError(f"InfluxDB rejected the query: {result['error']}")
         for series in result.get("series", []):
-            return series.get("columns", []), series.get("values", [])
-    return [], []
+            found.append(
+                QuerySeries(
+                    tags=dict(series.get("tags") or {}),
+                    columns=series.get("columns", []),
+                    values=series.get("values", []),
+                )
+            )
+    return found
+
+
+def single_series(series):
+    """Flatten a :func:`run_query` result that must hold at most one series.
+
+    For queries that cannot produce more than one - no ``GROUP BY`` on a tag, so
+    InfluxQL merges every tag value into a single series - this restores the plain
+    ``(columns, values)`` shape.
+
+    **Raises rather than truncating if the assumption is violated.** Silently
+    keeping the first series is the exact defect this module was just fixed for, so
+    re-introducing it behind a helper would defeat the change: a later edit adding a
+    tag ``GROUP BY`` without updating its consumer would go back to losing data
+    invisibly. Failing loudly turns that into an immediate, obvious error instead.
+
+    The condition is unreachable today - verified against a real InfluxDB 1.8 that
+    every current caller's query returns exactly one series, including the
+    aggregation path's ``GROUP BY time(...)``, which splits rows rather than series.
+    So the guard costs nothing now and only fires on a genuine programming error.
+    ``ValueError`` matches ``_build_single_point_query``'s existing internal-guard
+    idiom; it is not a caller- or transport-level failure and must not be mapped to
+    ToolParamError or SourceConnectionError.
+
+    :param series: list of QuerySeries from run_query
+    :return: (columns, values), or ([], []) when there is no series
+    :raises ValueError: if given more than one series
+    """
+    if not series:
+        return [], []
+    if len(series) > 1:
+        raise ValueError(
+            f"single_series() got {len(series)} series, expected at most one - the query "
+            f"grouped by a tag, so its consumer must handle every series (tag sets: "
+            f"{[s.tags for s in series]})"
+        )
+    return series[0].columns, series[0].values
 
 
 _DURATION_UNIT_SECONDS = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
@@ -682,7 +875,9 @@ def _v1_retention(session, influx_settings, db):
     :raises SourceConnectionError: transport, parse, or an InfluxDB-reported error
     """
     _validate_identifier(db, "database")
-    columns, values = run_query(session, influx_settings, db, f"SHOW RETENTION POLICIES ON {_quote_identifier(db)}")
+    columns, values = single_series(
+        run_query(session, influx_settings, db, f"SHOW RETENTION POLICIES ON {_quote_identifier(db)}")
+    )
     if not values:
         raise SourceConnectionError(f"InfluxDB reported no retention policy for database {db!r}")
     index = {col: i for i, col in enumerate(columns)}
@@ -766,6 +961,23 @@ def _retention_for(session, influx_settings, db):
         return {"known": False, "reason": str(exc)}
 
 
+def configured_instances(source, settings):
+    """Return the instance values configured for a source, or an empty list.
+
+    The configured half of an instance allowlist. Uses ``expand_sources()`` - the same
+    function the collectors use to decide what runs - so the read tools and the collectors
+    cannot disagree about which targets exist. A source with no separate targets expands to
+    a single ``None`` instance, which is not a value and is filtered out.
+
+    :param source: source name (already validated as configured)
+    :param settings: parsed settings dict
+    :return: list of configured instance values, empty for a single-target source
+    """
+    if source.lower() not in INSTANCED_SOURCES:
+        return []
+    return [instance for _, instance in expand_sources([source.lower()], settings) if instance is not None]
+
+
 def resolve_schema(source, settings, settings_file, instance=None):
     """Build a fully-populated ReadSchema for a source: its static class metadata
     plus the live field allowlist discovered from InfluxDB. Constructs a handler
@@ -793,6 +1005,36 @@ def resolve_schema(source, settings, settings_file, instance=None):
     db = resolve_db(handler.source_settings, influx_settings)
     try:
         fields = discover_fields(handler.session, influx_settings, db, measurement)
+        # Only for a source that declares an instance axis, so nothing else pays for
+        # an extra round trip. Discovered rather than configured: the values are
+        # whatever has actually been written, so a new collector host is queryable
+        # without touching this install's settings.
+        instance_values = None
+        if handler.MCP_INSTANCE_TAG:
+            configured = set(configured_instances(source, settings))
+            if shares_measurement(source):
+                # Configured only. Where several sources write to one measurement - the three
+                # MyEnergi types, told apart by the same `device` tag that now carries the
+                # operator's label - a value discovered in the data cannot be attributed to
+                # one of them, so a zappi query would otherwise accept an eddi's label. The
+                # config does distinguish them, being separate blocks and separate sources,
+                # so it is the authority here. Discovery is skipped rather than filtered
+                # afterwards, since its answer could not be attributed anyway.
+                #
+                # Consequence worth knowing: a decommissioned MyEnergi device's history stops
+                # being reachable by label, where a decommissioned Hue bridge's does not. The
+                # asymmetry is real and follows from Hue owning its measurement outright.
+                instance_values = configured
+            else:
+                # The union matters in both directions. Discovered alone would refuse a
+                # bridge that is configured but has not collected yet - which Hue's
+                # predecessor `bridge` parameter accepted - and would leave query_history
+                # disagreeing with get_current_state, which reads live from whatever is
+                # configured. Configured alone would lose a decommissioned bridge's history.
+                instance_values = (
+                    discover_tag_values(handler.session, influx_settings, db, measurement, handler.MCP_INSTANCE_TAG)
+                    | configured
+                )
     except Exception:
         # A fresh requests.Session is created per handler (per tool call); close
         # it if discovery fails, or a long-running server accumulates open
@@ -800,7 +1042,7 @@ def resolve_schema(source, settings, settings_file, instance=None):
         # the returned handler and closes its session when done.
         close_session(handler.session)
         raise
-    return handler, build_schema(handler, fields, db)
+    return handler, build_schema(handler, fields, db, instance_values)
 
 
 def _list_sources_result(settings, settings_file):
@@ -813,13 +1055,18 @@ def _list_sources_result(settings, settings_file):
             continue
         # Constructed only to read class metadata; close its session immediately.
         try:
-            out.append(
-                {
-                    "source": source,
-                    "measurement": handler.MCP_MEASUREMENT or handler.source,
-                    "description": handler.MCP_DESCRIPTION,
-                }
-            )
+            entry = {
+                "source": source,
+                "measurement": handler.MCP_MEASUREMENT or handler.source,
+                "description": handler.MCP_DESCRIPTION,
+            }
+            # The tag name only - static class metadata, so this stays a no-InfluxDB
+            # call. Deliberately not the values: enumerating them means a query per
+            # source, and the entry point for reads should not become the most expensive
+            # tool on the server. list_fields carries them, and its description says so.
+            if handler.MCP_INSTANCE_TAG:
+                entry["instance_tag"] = handler.MCP_INSTANCE_TAG
+            out.append(entry)
         finally:
             close_session(handler.session)
     return {"sources": out}
@@ -838,70 +1085,188 @@ def list_fields_result(source, settings, settings_file):
             if meta.get("codes"):
                 entry["codes"] = {str(code): label for code, label in meta["codes"].items()}
             fields.append(entry)
-        return {"source": source, "measurement": schema.measurement, "fields": fields}
-    finally:
-        close_session(handler.session)
-
-
-def _query_history_result(
-    settings, settings_file, *, source, field, start, end, aggregation, group_by, limit, bridge=None
-):
-    """Build the query_history tool payload (runs in a worker thread).
-
-    ``bridge`` scopes the query to one Hue bridge by adding its ``host`` tag to the filter.
-    Left out, the query spans every bridge - deliberately, since Hue writes all of them to
-    one measurement and an unqualified question about the estate should get an answer about
-    the estate. The value never reaches the query as given: it is resolved against the
-    configured bridges first, so an unknown one is refused.
-
-    It is rejected outright for a source that has no instances. Such a source would accept
-    the instance, ignore it (its tag filters do not vary), run an unscoped query - and then
-    the result would echo ``bridge`` back, telling the caller the query was scoped when it
-    was not. Refusing is the only honest answer.
-    """
-    # Only judge 'bridge' once the source is a usable name. A non-string would raise
-    # AttributeError from .lower() here, escaping the ToolParamError/SourceConnectionError
-    # contract the MCP layer uses to tell a caller mistake from a transport failure; a blank
-    # one would be reported as a 'bridge' problem when the source is what is wrong. Either way
-    # the condition matches resolve_handler()'s, so skipping the guard hands the value to that
-    # validation and the message names the parameter actually at fault.
-    usable_source = isinstance(source, str) and source.strip()
-    if bridge is not None and usable_source and source.lower() not in INSTANCED_SOURCES:
-        raise ToolParamError(
-            f"'bridge' does not apply to source {source!r} - it has a single target. "
-            f"Only these sources have separate targets to scope to: {', '.join(sorted(INSTANCED_SOURCES))}"
-        )
-    handler, schema = resolve_schema(source, settings, settings_file, instance=bridge)
-    try:
-        result = _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit)
-        # Say what was actually queried: without this the model cannot tell a single-bridge
-        # answer from an estate-wide one, and the two mean different things.
-        if bridge is not None:
-            result["bridge"] = bridge
+        result = {"source": source, "measurement": schema.measurement, "fields": fields}
+        if schema.instance_tag:
+            # Reported here rather than in list_sources because this call already makes
+            # an InfluxDB round trip: the values are live, so listing them costs nothing
+            # extra here and would cost a query per source there. list_sources names the
+            # tag so a caller knows to come and get them.
+            result["instance_tag"] = schema.instance_tag
+            result["instances"] = sorted(schema.instance_values)
         return result
     finally:
         close_session(handler.session)
 
 
-def _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit):
+def _validate_instance(schema, instance):
+    """Check an ``instance`` argument against the source's live tag values.
+
+    Two separate refusals, and both matter. A source with no instance axis is told so
+    outright rather than having the value ignored - accepting it, running an unscoped
+    query and echoing it back would tell the caller the answer was narrowed when it was
+    not, the same dishonesty Hue's predecessor ``bridge`` guard existed to prevent. A value the tag has
+    never held is refused with the known values listed, because the alternative is a
+    confidently empty result that reads as "no data" rather than "no such producer".
+
+    The allowlist is the live discovered set, which is also what keeps the value safe to
+    interpolate - the same layering as a queried field name.
+
+    :raises ToolParamError: if the source has no axis, or the value is not one of its
+        discovered values
+    """
+    if instance is None:
+        return
+    if not schema.instance_tag:
+        raise ToolParamError(
+            f"'instance' does not apply to source {schema.source!r} - its measurement has a single "
+            f"producer, so there is nothing to scope to"
+        )
+    if instance not in schema.instance_values:
+        # "accepted", not "recorded": the allowlist is the union of what is present in the
+        # data and what is configured, so a configured target that has not collected yet is
+        # in this list without ever having been recorded. Calling it recorded would state
+        # something untrue about the very value being offered as an alternative.
+        known = ", ".join(sorted(schema.instance_values)) or "(none configured or recorded yet)"
+        raise ToolParamError(
+            f"unknown {schema.instance_tag} {instance!r} for source {schema.source!r}; " f"accepted values: {known}"
+        )
+
+
+def _query_history_result(
+    settings, settings_file, *, source, field, start, end, aggregation, group_by, limit, instance=None
+):
+    """Build the query_history tool payload (runs in a worker thread).
+
+    ``instance`` names a value of the source's instance tag, which for Hue is the bridge's
+    ``host``. Hue's older ``bridge`` parameter is gone rather than deprecated: an MCP client
+    fetches the tool schema at session start, so there is no persisted caller to keep
+    compatible, and a second name for one concept would cost context on every session to
+    serve a window shorter than one conversation.
+
+    Scoping happens in one place, ``build_query``, via the shared instance mechanism.
+    Previously ``bridge`` took a different route - ``resolve_schema(instance=...)``, which
+    added the tag through ``Hue.mcp_tag_filters()`` - so the same idea had two
+    implementations that could drift. The handler is now resolved unscoped and the filter
+    applied at the query, which is also why the Hue-specific branch here is gone.
+    """
+    handler, schema = resolve_schema(source, settings, settings_file)
+    try:
+        # `instance` names a value of a tag in the *data*, which is not the same question as
+        # resolve_schema's own `instance` (a collector work unit in INSTANCED_SOURCES - a
+        # bridge with its own credentials and worker). A read from InfluxDB needs no
+        # credentials, so the handler is resolved unscoped and the scoping is a query
+        # predicate. The two concepts stay distinct underneath; callers see one parameter.
+        _validate_instance(schema, instance)
+        result = _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit, instance=instance)
+        # Say what was actually queried: without this the model cannot tell a single-producer
+        # answer from an estate-wide one, and the two mean different things.
+        if instance is not None:
+            result["instance"] = instance
+            result["instance_tag"] = schema.instance_tag
+        return result
+    finally:
+        close_session(handler.session)
+
+
+def _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit, instance=None):
     """Execute the query and shape the payload (session lifecycle owned by the
-    caller). Split out so _query_history_result's finally: stays a thin wrapper."""
+    caller). Split out so _query_history_result's finally: stays a thin wrapper.
+
+    Two payload shapes, and which one you get depends on the *source*, never on how
+    many producers it happens to have:
+
+    - A source with no instance axis, or a query scoped to one instance, returns flat
+      ``points`` - byte-identical to before this existed.
+    - An unscoped query on a source with an axis returns ``instances``, keyed by tag
+      value. Keyed even when only one value exists, so nothing reading the payload
+      depends on the producer count - the same reasoning as Hue's per-bridge map.
+
+    Never a merged series: two hosts' ping interleaved in one unlabelled list is not a
+    partial answer, it is a wrong one.
+    """
     # handler.settings["influx"], not the startup snapshot, so the query runs
     # against the same (possibly freshly-edited) InfluxDB the schema was
     # discovered from - see resolve_schema.
     query = build_query(
-        schema, field=field, start=start, end=end, aggregation=aggregation, group_by=group_by, limit=limit
+        schema,
+        field=field,
+        start=start,
+        end=end,
+        aggregation=aggregation,
+        group_by=group_by,
+        limit=limit,
+        instance=instance,
     )
-    columns, values = run_query(handler.session, handler.settings["influx"], schema.db, query)
-    result = annotate_rows(schema, field, columns, values)
-    # Surface the effective limit and whether the query hit it. `truncated` means
-    # exactly that - the result reached the limit, so more data *may* exist beyond
-    # it (if precisely `limit` points exist, nothing more does) - it's a prompt to
-    # narrow the range or aggregate, not a guarantee of omitted data. build_query
-    # already validated limit, so this can't raise.
+    series = run_query(handler.session, handler.settings["influx"], schema.db, query)
+    grouped = instance is None and bool(schema.instance_tag)
+    # Mirrors build_query's division exactly: InfluxDB applies LIMIT per series once a
+    # query groups by a tag, so the figure reported has to be the one actually in force
+    # or `truncated` would be measured against a limit that was never applied.
     effective_limit = _clamp_limit(limit)
-    result["limit"] = effective_limit
-    result["truncated"] = len(result["points"]) >= effective_limit
+    if grouped:
+        effective_limit = max(1, effective_limit // max(1, len(schema.instance_values)))
+
+    if not grouped:
+        columns, values = single_series(series)
+        result = annotate_rows(schema, field, columns, values)
+        # `truncated` means the result reached the limit, so more data *may* exist
+        # beyond it - if exactly `limit` points exist, nothing more does. A prompt to
+        # narrow the range or aggregate, not a guarantee of omitted data.
+        result["limit"] = effective_limit
+        result["truncated"] = len(result["points"]) >= effective_limit
+        return result
+
+    instances = {}
+    unit, codes = None, None
+    for one in series:
+        annotated = annotate_rows(schema, field, one.columns, one.values)
+        unit = unit or annotated.get("unit")
+        codes = codes or annotated.get("codes")
+        key = one.tags.get(schema.instance_tag)
+        if key is None:
+            # A grouped query always tags its series, so this would mean InfluxDB
+            # answered a shape we did not ask for. Skipping it silently is how the
+            # original defect looked; name it instead.
+            logging.warning(
+                "Query for %r grouped by %r returned a series with no %s tag; ignoring it",
+                schema.source,
+                schema.instance_tag,
+                schema.instance_tag,
+            )
+            continue
+        # Only report producers this source owns, and only *after* the untagged case above -
+        # filtering first would silently drop an untagged series, which is the very thing that
+        # warning exists to prevent. A grouped query on a shared measurement returns every
+        # source's producers, the three MyEnergi types sharing `myenergi`, so without this a
+        # zappi query would answer with the eddi and harvi devices too. For a source that owns
+        # its measurement the allowlist already holds the discovered values, so nothing is
+        # filtered and behaviour is unchanged. One rule serves both.
+        #
+        # Deliberately not guarded on the allowlist being non-empty. An empty allowlist means
+        # this source owns nothing in the measurement, so the honest answer is nothing -
+        # skipping the filter there reported *every* producer instead, which for a shared
+        # measurement means answering a zappi question with the eddi and harvi devices.
+        # Reproduced before fixing; maximally wrong rather than merely incomplete.
+        if key not in schema.instance_values:
+            continue
+        instances[key] = {
+            "points": annotated["points"],
+            "truncated": len(annotated["points"]) >= effective_limit,
+        }
+    result = {
+        "source": schema.source,
+        "field": field,
+        "instance_tag": schema.instance_tag,
+        "instances": instances,
+        # Named rather than plain `limit`: it is per instance here, not a total, and a
+        # caller comparing it against the number it passed would otherwise be misled.
+        "limit_per_instance": effective_limit,
+        "truncated": any(entry["truncated"] for entry in instances.values()),
+    }
+    if unit:
+        result["unit"] = unit
+    if codes:
+        result["codes"] = codes
     return result
 
 
@@ -919,7 +1284,15 @@ def _latest_recorded(handler):
     if not fields:
         return {}, None
     query = build_latest_query(measurement, handler.mcp_tag_filters(), fields)
-    columns, values = run_query(handler.session, influx_settings, db, query)
+    columns, values = single_series(run_query(handler.session, influx_settings, db, query))
+    return _row_to_state(fields, columns, values)
+
+
+def _row_to_state(fields, columns, values):
+    """Turn a single-point result row into ``({field: value}, as_of)``.
+
+    :return: empty dict and None when there is no row
+    """
     if not values:
         return {}, None
     row = values[0]
@@ -927,8 +1300,43 @@ def _latest_recorded(handler):
     # Skip a field that came back NULL (a field written in some points but not the
     # latest one) rather than reporting a meaningless None as its current value.
     data = {name: _cell(row, index, name) for name in sorted(fields) if _cell(row, index, name) is not None}
-    as_of = _cell(row, index, "time")
-    return data, as_of
+    return data, _cell(row, index, "time")
+
+
+def _latest_recorded_per_instance(handler):
+    """Read the latest recorded point *per producer* for a non-live source with an
+    instance axis.
+
+    Speedtest is the case: several hosts write to one measurement, so a single
+    ungrouped "latest point" answers with whichever host happened to write most
+    recently and says nothing about which - a plausible-looking answer that is simply
+    the wrong question. Grouping by the tag gets every host's own latest in one round
+    trip, because InfluxDB applies LIMIT 1 per series once grouped.
+
+    :param handler: a constructed DataHandler whose MCP_INSTANCE_TAG is set
+    :return: ``{tag value: (fields, as_of)}``, empty when nothing is recorded yet
+    :raises SourceConnectionError: on a transport/parse failure
+    """
+    influx_settings = handler.settings["influx"]
+    db = resolve_db(handler.source_settings, influx_settings)
+    measurement = handler.MCP_MEASUREMENT or handler.source
+    fields = discover_fields(handler.session, influx_settings, db, measurement)
+    if not fields:
+        return {}
+    tag = handler.MCP_INSTANCE_TAG
+    query = build_latest_query(measurement, handler.mcp_tag_filters(), fields, group_by_tag=tag)
+    out = {}
+    for one in run_query(handler.session, influx_settings, db, query):
+        key = one.tags.get(tag)
+        if key is None:
+            logging.warning(
+                "Latest-state query for %r grouped by %r returned an untagged series; ignoring it",
+                handler.source,
+                tag,
+            )
+            continue
+        out[key] = _row_to_state(fields, one.columns, one.values)
+    return out
 
 
 def current_state_result(source, settings, settings_file):
@@ -964,6 +1372,31 @@ def current_state_result(source, settings, settings_file):
             result["description"] = first.MCP_DESCRIPTION
 
         if len(handlers) == 1 and handlers[0][0] is None:
+            # A source with a data axis but a single collector work unit - Speedtest,
+            # where each host is its own process, so the producers exist in InfluxDB
+            # rather than in this install's config. Only answerable per producer when
+            # the state comes *from* InfluxDB: a live read reflects this machine alone
+            # and could not speak for the others, so a live source keeps the flat shape.
+            if first.MCP_INSTANCE_TAG and first.MCP_LIVE_STATE_COVERS_ALL_INSTANCES:
+                # One live read covers every producer - Nuki, whose locks all arrive over a
+                # single MQTT subscription. get_data() already returns {instance: {field:
+                # value}}, so no InfluxDB read is needed and the answer is genuinely live for
+                # every lock rather than only the handler's own.
+                as_of = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+                result["instance_tag"] = first.MCP_INSTANCE_TAG
+                result["instances"] = {
+                    key: {"fields": _annotate_state(first, fields), "as_of": as_of}
+                    for key, fields in sorted((first.get_data() or {}).items())
+                }
+                return result
+            if first.MCP_INSTANCE_TAG and not first.MCP_LIVE_STATE:
+                per_instance = _latest_recorded_per_instance(first)
+                result["instance_tag"] = first.MCP_INSTANCE_TAG
+                result["instances"] = {
+                    key: {"fields": _annotate_state(first, fields), "as_of": as_of}
+                    for key, (fields, as_of) in sorted(per_instance.items())
+                }
+                return result
             # Single-target source: the historical flat shape, unchanged.
             fields, as_of = _instance_state(first)
             result["fields"] = fields
@@ -982,7 +1415,8 @@ def current_state_result(source, settings, settings_file):
         if failures == len(handlers):
             raise SourceConnectionError(
                 f"could not read current state for any configured target of {source!r}: "
-                + "; ".join(f"{instance}: {entry['error']}" for instance, entry in instances.items())
+                # instance!r for the same reason as mcp_write's unreachable list.
+                + "; ".join(f"{instance!r}: {entry['error']}" for instance, entry in instances.items())
             )
         result["instances"] = instances
         return result
@@ -1007,11 +1441,22 @@ def _instance_state(handler):
         as_of = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
     else:
         data, as_of = _latest_recorded(handler)
+    return _annotate_state(handler, data), as_of
+
+
+def _annotate_state(handler, data):
+    """Annotate a ``{field: value}`` map with units and decoded labels.
+
+    Shared by the flat and the per-instance current-state paths so a coded value reads
+    back as its label in both - a second copy would eventually annotate one and not the
+    other.
+
+    :param handler: the source's DataHandler, for its MCP_FIELD_METADATA
+    :param data: raw field name -> value
+    :return: field name -> annotated value
+    """
     field_metadata = handler.MCP_FIELD_METADATA
-    return (
-        {name: _annotate_state_field(field_metadata, name, value) for name, value in sorted(data.items())},
-        as_of,
-    )
+    return {name: _annotate_state_field(field_metadata, name, value) for name, value in sorted(data.items())}
 
 
 def _edge_time(handler, schema, order_query):
@@ -1029,11 +1474,36 @@ def _edge_time(handler, schema, order_query):
     :raises SourceConnectionError: transport failure, unparseable response, or an
         InfluxDB-reported query error
     """
-    columns, values = run_query(handler.session, handler.settings["influx"], schema.db, order_query)
+    columns, values = single_series(run_query(handler.session, handler.settings["influx"], schema.db, order_query))
     if not values:
         return None
     index = {col: i for i, col in enumerate(columns)}
     return _cell(values[0], index, "time")
+
+
+def _edge_times_per_instance(handler, schema, order):
+    """Return ``{tag value: unix seconds}`` for one edge, per producer.
+
+    An estate-wide range hides exactly what matters when producers differ: a host added
+    last week and one collecting for a year report the same span if they are merged, so
+    "how far back does this go" gets an answer that is true of the measurement and false
+    of every host in it.
+
+    :param order: ``"ASC"`` for each producer's oldest point, ``"DESC"`` for its newest
+    :return: dict of tag value to unix seconds, omitting a producer with no usable time
+    :raises SourceConnectionError: transport failure or an InfluxDB-reported query error
+    """
+    query = build_edge_time_query(schema.measurement, schema.tag_filters, order, group_by_tag=schema.instance_tag)
+    out = {}
+    for one in run_query(handler.session, handler.settings["influx"], schema.db, query):
+        key = one.tags.get(schema.instance_tag)
+        if key is None or not one.values:
+            continue
+        index = {col: i for i, col in enumerate(one.columns)}
+        stamp = _cell(one.values[0], index, "time")
+        if stamp is not None:
+            out[key] = stamp
+    return out
 
 
 def data_range_result(source, settings, settings_file):
@@ -1054,6 +1524,12 @@ def data_range_result(source, settings, settings_file):
     For an instanced source (a Hue install with more than one bridge) the range covers
     every bridge, since they share one measurement - matching ``query_history``'s
     unqualified default rather than inventing a per-bridge answer here.
+
+    A source with an instance *axis* additionally reports per producer under
+    ``instances``. Merging them would answer a question nobody asked: a host added last
+    week and one collecting for a year share a span that is true of the measurement and
+    false of both. The overall figures stay alongside, because retention bounds the
+    database rather than any one producer and the two are read together.
 
     :param source: source name from a tool argument
     :param settings: parsed settings dict
@@ -1076,6 +1552,25 @@ def data_range_result(source, settings, settings_file):
             # which is configured independently of whether anything was collected.
             result.update({"earliest": None, "latest": None, "span_seconds": None, "points_present": False})
         else:
+            if schema.instance_tag:
+                # Per producer as well as overall. The overall figures stay, because
+                # retention is a property of the database rather than of any one producer
+                # and the two answers are read together.
+                first = _edge_times_per_instance(handler, schema, "ASC")
+                last = _edge_times_per_instance(handler, schema, "DESC")
+                result["instance_tag"] = schema.instance_tag
+                result["instances"] = {
+                    key: {
+                        "earliest": first.get(key),
+                        "latest": last.get(key),
+                        "span_seconds": (
+                            last[key] - first[key]
+                            if isinstance(first.get(key), int) and isinstance(last.get(key), int)
+                            else None
+                        ),
+                    }
+                    for key in sorted(set(first) | set(last))
+                }
             earliest = _edge_time(handler, schema, build_edge_time_query(schema.measurement, schema.tag_filters, "ASC"))
             latest = _edge_time(handler, schema, build_edge_time_query(schema.measurement, schema.tag_filters, "DESC"))
             span = latest - earliest if isinstance(earliest, int) and isinstance(latest, int) else None
@@ -1166,7 +1661,12 @@ def register_read_tools(server, settings, settings_file=None):
         The entry point for reads and the only one needing no arguments: start
         here, then `list_fields` for a source's fields, then `query_history` to
         read them. Takes no parameters and returns every configured source; use
-        `list_fields` when you already know the source and want its fields."""
+        `list_fields` when you already know the source and want its fields.
+
+        A source whose measurement holds several producers (e.g. Speedtest, one per
+        collecting host) reports the tag that tells them apart as `instance_tag`. The
+        values it holds come from `list_fields`, not here, because listing them means
+        querying InfluxDB per source."""
         return await anyio.to_thread.run_sync(_list_sources_result, settings, settings_file)
 
     @server.tool(title="List Source Fields", annotations=_READ_ONLY)
@@ -1178,7 +1678,15 @@ def register_read_tools(server, settings, settings_file=None):
         rejected as an error, so use it to discover exact field names (they can
         contain spaces-as-underscores and punctuation). Use `list_sources`
         instead when you don't yet know which source you want. `source` is a
-        source name from `list_sources`; an unknown one returns an error."""
+        source name from `list_sources`; an unknown one returns an error.
+
+        Where the source's measurement holds several producers, also returns
+        `instance_tag` (what tells them apart, e.g. 'host') and `instances` - the values
+        `query_history`'s `instance` accepts, which are the producers present in the data
+        plus any target that is configured but has not collected yet. So a newly added Hue
+        bridge appears here before it has written anything, and a decommissioned one still
+        appears while its history remains. This is where to look before scoping a query or
+        comparing producers."""
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file)
 
     @server.tool(title="Query Historical Data", annotations=_READ_ONLY)
@@ -1190,7 +1698,7 @@ def register_read_tools(server, settings, settings_file=None):
         aggregation: str = "raw",
         group_by: "str | None" = None,
         limit: int = DEFAULT_RESULT_POINTS,
-        bridge: "str | None" = None,
+        instance: "str | None" = None,
     ) -> dict:
         """Query a field's history for a source from InfluxDB. Reads only; to
         change a device use that source's control tool, e.g. `hue_set_light`
@@ -1207,21 +1715,27 @@ def register_read_tools(server, settings, settings_file=None):
           sum/count/first/last/spread/stddev, which each require a group_by interval.
         - group_by: a bucket interval like '5m'/'1h'/'1d' (only with aggregation).
         - limit: max points returned, 1..5000 (values outside are clamped).
-        - bridge: Hue only - rejected for any other source, which has a single target.
-          Only useful with more than one bridge configured. Restricts the
-          query to that bridge; omitted, the query covers every bridge, since they share one
-          measurement. Two bridges can hold the same field name (a "Kitchen" per floor), so
-          an unqualified query can mix them - pass `bridge` when the answer must be about
-          one. `get_current_state` lists the configured bridges. The result echoes `bridge`
-          when one was used, so a single-bridge answer is distinguishable from an
-          estate-wide one.
+
+        - instance: for a source whose measurement holds several producers, restricts
+          the query to one of them - Speedtest tags each point with the collecting
+          host, so `instance='pi4'` asks only about that machine, and Hue tags each
+          point with the bridge, so `instance='hue.example.com'` asks about one bridge.
+          Omit it to get every producer reported *separately* under `instances`, keyed
+          by tag value: results are never merged, because two producers' values in one
+          unlabelled list would be a wrong answer rather than an incomplete one - two
+          Hue bridges can each hold a "Kitchen", and two hosts each hold a ping.
+          `list_fields` reports the tag name and its accepted values, which are the
+          producers found in the data plus any configured but not yet collecting. An
+          unknown value is an error, and so is passing this for a single-producer source.
 
         Points come back newest-first, each with a unix-seconds `time` and
         `value`; coded fields (e.g. Nuki lock state) also carry a decoded `label`.
-        The result also reports the effective `limit` and a `truncated` flag -
-        `truncated` is true when the query returned as many points as the limit
-        allowed, so more data may exist beyond it; narrow the range or use an
-        aggregation to be sure of a complete view.
+        The result also reports a `truncated` flag - true when the query returned as
+        many points as the limit allowed, so more data may exist beyond it; narrow the
+        range or use an aggregation to be sure of a complete view. A scoped or
+        single-producer result reports the `limit` in force; a per-instance one reports
+        `limit_per_instance` instead, because InfluxDB applies the limit to each
+        producer separately and calling that a total would misstate it.
         """
         return await anyio.to_thread.run_sync(
             lambda: _query_history_result(
@@ -1234,7 +1748,7 @@ def register_read_tools(server, settings, settings_file=None):
                 aggregation=aggregation,
                 group_by=group_by,
                 limit=limit,
-                bridge=bridge,
+                instance=instance,
             )
         )
 

@@ -768,3 +768,171 @@ class TestMcpBlockValidation:
         settings = dict(sample_settings)
         settings["mcp"] = dict(self.ENABLED_BLOCK)
         validate_settings(settings)
+
+
+class TestNonMappingSourceSection:
+    """A configured source section that is not a mapping.
+
+    Before this, ``"interval" not in source_cfg`` was reached with whatever the section
+    parsed to, and Python refuses a containment test against a non-container - so a section
+    set to null or a scalar came out of validation as a raw ``TypeError``. That is a
+    traceback where ``--check-config`` exists to give a clear message, and the same
+    traceback in the journal on startup under systemd.
+
+    The null case is the one to reach by accident: commenting out every field under a
+    section leaves the bare key behind, and YAML parses that as ``None``.
+    """
+
+    BASE = {"influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"}}
+
+    @pytest.mark.parametrize("source", ["hue", "octopus"])
+    @pytest.mark.parametrize(
+        "block,expected",
+        [
+            (None, "has no settings"),
+            (5, "must be a mapping of settings (got int)"),
+            (True, "must be a mapping of settings (got bool)"),
+            ("oops", "must be a mapping of settings (got str)"),
+            ([], "must be a mapping of settings (got list)"),
+        ],
+    )
+    def test_a_non_mapping_section_is_a_config_error_not_a_crash(self, source, block, expected):
+        """Across two sources, because the check lives in the shared per-source path and a
+        Hue-only fix would have looked identical from the Hue tests alone."""
+        settings = {**self.BASE, "sources": [source], source: block}
+        with pytest.raises(ConfigError) as caught:
+            validate_settings(settings, source=source)
+        assert source in str(caught.value)
+        assert expected in str(caught.value)
+
+    @pytest.mark.parametrize(
+        "source,block",
+        [
+            ("hue", {"db": "d", "interval": 300, "host": "bridge.example.com", "user": "token"}),
+            ("octopus", {"db": "d", "interval": 1800, "api_key": "k", "mpan": "1", "meter_serial": "s"}),
+        ],
+    )
+    def test_a_valid_mapping_still_passes(self, source, block):
+        """The guard must not reject the shape it exists to protect."""
+        validate_settings({**self.BASE, "sources": [source], source: block}, source=source)
+
+    def test_the_report_names_only_the_real_fault(self):
+        """No "interval is required" alongside it: the section has no fields at all, so
+        listing the fields it is missing buries the cause under its consequences."""
+        settings = {**self.BASE, "sources": ["hue"], "hue": None}
+        with pytest.raises(ConfigError) as caught:
+            validate_settings(settings, source="hue")
+        message = str(caught.value)
+        assert "interval is required" not in message
+        assert "db is required" not in message
+
+    def test_hue_does_not_report_the_type_twice(self):
+        """Hue enumerates its bridges separately, and that enumerator guards its own type -
+        it has to, since Hue.bridge() calls it at runtime where no validation has run. It
+        must not repeat what the shared check already said, in the same words."""
+        settings = {**self.BASE, "sources": ["hue"], "hue": 5}
+        with pytest.raises(ConfigError) as caught:
+            validate_settings(settings, source="hue")
+        assert str(caught.value).count("must be a mapping") == 1
+
+
+class TestUnknownSourceName:
+    """A source name nothing can collect.
+
+    ``get_class()`` has always refused an unknown name, but only when a worker got as far as
+    constructing a handler - so ``--check-config`` reported "Configuration OK" for a source
+    that then failed on every collection cycle, forever, via the worker loop's broad
+    handler. Validation is where that belongs.
+    """
+
+    BASE = {"influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"}}
+
+    def test_the_abstract_myenergi_parent_is_not_a_source(self):
+        """It holds the shared API auth for Zappi/Eddi/Harvi and defines no get_data(), so
+        it is not collectable. While it was registered, a settings file naming it validated
+        cleanly and then died with AttributeError: 'MyEnergi' object has no attribute
+        'get_data' on every cycle."""
+        settings = {**self.BASE, "sources": ["myenergi"], "myenergi": {"apikey": "k", "db": "d", "interval": 300}}
+        with pytest.raises(ConfigError, match="not a known source"):
+            validate_settings(settings)
+
+    def test_it_is_refused_via_the_source_argument_too(self):
+        settings = {**self.BASE, "myenergi": {"apikey": "k", "db": "d", "interval": 300}}
+        with pytest.raises(ConfigError, match="not a known source"):
+            validate_settings({**settings, "sources": []}, source="myenergi")
+
+    def test_a_plain_typo_is_refused_the_same_way(self):
+        """The same guard catches an ordinary mistake, which is the everyday value of it -
+        a typo with a matching section would otherwise validate and fail at runtime."""
+        settings = {**self.BASE, "sources": ["speedtst"], "speedtst": {"db": "d", "interval": 60}}
+        with pytest.raises(ConfigError, match="not a known source"):
+            validate_settings(settings)
+
+    def test_the_message_lists_what_is_accepted(self):
+        """An error that says only "no" costs the reader a trip to the documentation."""
+        settings = {**self.BASE, "sources": ["myenergi"], "myenergi": {"apikey": "k", "db": "d", "interval": 300}}
+        with pytest.raises(ConfigError) as caught:
+            validate_settings(settings)
+        for name in ("zappi", "eddi", "harvi", "speedtest"):
+            assert name in str(caught.value)
+
+    def test_get_class_refuses_it_as_well(self):
+        """The registry and validation must agree: filtering the parent out after the fact
+        was what let them disagree about whether it was a source."""
+        with pytest.raises(ConfigError):
+            get_class("myenergi")
+
+    def test_known_sources_holds_only_collectable_sources(self):
+        from toinflux.general import known_sources
+
+        assert "myenergi" not in known_sources()
+        assert {"zappi", "eddi", "harvi"} <= set(known_sources())
+
+    @pytest.mark.parametrize("source", ["zappi", "eddi", "harvi"])
+    def test_the_three_device_types_still_share_the_myenergi_measurement(self, source):
+        """The parent's removal must not change how the real types resolve their shared
+        measurement - the read layer decides whether a discovered tag value can be trusted
+        from exactly this."""
+        from toinflux.general import measurement_for, shares_measurement
+
+        assert measurement_for(source) == "myenergi"
+        assert shares_measurement(source) is True
+
+
+class TestFactoryVersusClassLookup:
+    """`get_class()` constructs; `source_class()` does not.
+
+    Two functions one word apart, and the docstring on the first said "class object" long
+    after it became a factory - which is exactly the sort of thing that costs someone an
+    AttributeError on the first attribute they reach for. Pinning the distinction so a later
+    tidy-up cannot quietly turn one into the other.
+    """
+
+    SETTINGS = {
+        "influx": {"url": "http://influx.example.com:8086", "user": "u", "password": "p"},
+        "speedtest": {"db": "sdb", "interval": 3600},
+    }
+
+    def test_get_class_returns_a_constructed_handler(self):
+        from toinflux.speedtest import Speedtest
+
+        with patch("toinflux.influx.load_settings", return_value=self.SETTINGS):
+            handler = get_class("speedtest")
+        assert isinstance(handler, Speedtest)
+        assert not isinstance(handler, type), "get_class must construct, not return the class"
+
+    def test_source_class_returns_the_class_without_constructing_it(self):
+        from toinflux.general import source_class
+        from toinflux.speedtest import Speedtest
+
+        # No load_settings patch: this must not touch configuration at all, which is the
+        # reason it exists - callers with no handler need the class's own metadata.
+        assert source_class("speedtest") is Speedtest
+
+    def test_both_match_the_name_case_insensitively(self):
+        from toinflux.general import source_class
+        from toinflux.speedtest import Speedtest
+
+        assert source_class("SpeedTest") is Speedtest
+        with patch("toinflux.influx.load_settings", return_value=self.SETTINGS):
+            assert isinstance(get_class("SpeedTest"), Speedtest)

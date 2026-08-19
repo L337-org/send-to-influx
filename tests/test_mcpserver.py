@@ -264,8 +264,91 @@ class TestResolveStatePath:
         assert resolve_state_path(settings) == "/var/lib/x/state.json"
 
     def test_defaults_next_to_settings_file(self):
-        path = resolve_state_path({"mcp": {}}, "/etc/send-to-influx/settings.yaml")
+        """The non-systemd default, and it must stay that way: a source checkout or a screen
+        session is treated as equally first-class here, and there the process is run by
+        someone who can write beside their own settings file."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("STATE_DIRECTORY", None)
+            path = resolve_state_path({"mcp": {}}, "/etc/send-to-influx/settings.yaml")
         assert path == "/etc/send-to-influx/mcp-oauth-state.json"
+
+    def test_systemd_state_directory_is_preferred(self):
+        """Under the packaged service the file belongs in StateDirectory=, not /etc.
+
+        This is the bug: the service runs as send-to-influx while /etc/send-to-influx is
+        root-owned 755, so creating the state file - and the .tmp the atomic write needs
+        beside it - failed with PermissionError on every save. Persistence silently degraded
+        to nothing and a connected MCP client had to re-authorize after every restart,
+        noticed only at upgrades because that is when the service restarts.
+        """
+        with patch.dict(os.environ, {"STATE_DIRECTORY": "/var/lib/send-to-influx"}):
+            path = resolve_state_path({"mcp": {}}, "/etc/send-to-influx/settings.yaml")
+        assert path == "/var/lib/send-to-influx/mcp-oauth-state.json"
+
+    def test_only_the_first_state_directory_is_used(self):
+        """systemd makes it colon-separated when a unit declares several, so adding a second
+        StateDirectory= later must not silently move this file."""
+        with patch.dict(os.environ, {"STATE_DIRECTORY": "/var/lib/send-to-influx:/var/lib/other"}):
+            path = resolve_state_path({"mcp": {}}, "/etc/send-to-influx/settings.yaml")
+        assert path == "/var/lib/send-to-influx/mcp-oauth-state.json"
+
+    def test_a_blank_state_directory_falls_back(self):
+        """An empty or whitespace value is not a path. Treating it as one would put the file
+        at the filesystem root."""
+        for value in ("", "   ", ":"):
+            with patch.dict(os.environ, {"STATE_DIRECTORY": value}):
+                path = resolve_state_path({"mcp": {}}, "/etc/send-to-influx/settings.yaml")
+            assert path == "/etc/send-to-influx/mcp-oauth-state.json", value
+
+    def test_an_explicit_setting_beats_the_state_directory(self):
+        """An operator who named a path meant it, systemd or not."""
+        with patch.dict(os.environ, {"STATE_DIRECTORY": "/var/lib/send-to-influx"}):
+            path = resolve_state_path({"mcp": {"state_file": "/srv/custom/state.json"}})
+        assert path == "/srv/custom/state.json"
+
+    def test_the_state_is_actually_writable_where_it_lands(self, tmp_path):
+        """The property that was broken, exercised rather than assumed: a save must produce a
+        file. Asserting the *path* alone is what let a permanently-failing write go unnoticed -
+        save() logs the error and carries on by design, so nothing raises."""
+        state_dir = tmp_path / "var-lib"
+        state_dir.mkdir()
+        with patch.dict(os.environ, {"STATE_DIRECTORY": str(state_dir)}):
+            store = OAuthStateStore(resolve_state_path({"mcp": {}}, "/etc/send-to-influx/settings.yaml"))
+            store.clients["client-1"] = {"client_id": "client-1"}
+            store.save()
+        written = state_dir / "mcp-oauth-state.json"
+        assert written.is_file(), "save() produced no file"
+        assert "client-1" in written.read_text(encoding="utf8")
+        assert oct(written.stat().st_mode)[-3:] == "600"
+
+    def test_a_permission_denied_save_is_logged_not_raised(self, tmp_path, caplog):
+        """The behaviour that hid the bug, pinned on the failure that actually occurred.
+
+        PermissionError specifically, not "some OSError": that is what a root-owned directory
+        gives a service user, and it is the case where the server must keep serving while
+        saying clearly that persistence is gone - the log line was the only signal anyone got
+        for three releases.
+
+        Raised from a patched os.open rather than by chmod-ing a real directory, so the test
+        does not quietly pass when run as root - which it would, since root ignores the mode.
+        """
+        store = OAuthStateStore(str(tmp_path / "mcp-oauth-state.json"))
+        with patch("toinflux.mcpserver.os.open", side_effect=PermissionError(13, "Permission denied")):
+            with caplog.at_level(logging.ERROR):
+                store.save()  # must not raise
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("Could not persist MCP OAuth state" in m for m in messages), messages
+        assert any("Permission denied" in m for m in messages), "the underlying cause must survive"
+        assert not (tmp_path / "mcp-oauth-state.json").exists()
+
+    def test_a_missing_directory_is_also_logged_not_raised(self, tmp_path, caplog):
+        """The other way a save can fail - a state_file pointing somewhere that does not
+        exist. Separate from the permission case rather than standing in for it, because the
+        two are different faults and only one of them was the bug."""
+        store = OAuthStateStore(str(tmp_path / "nope" / "mcp-oauth-state.json"))
+        with caplog.at_level(logging.ERROR):
+            store.save()  # must not raise
+        assert any("Could not persist MCP OAuth state" in r.getMessage() for r in caplog.records)
 
 
 class TestBuildServerImport:

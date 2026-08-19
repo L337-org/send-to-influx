@@ -119,41 +119,98 @@ def flatten_dict(data, parent_key="", sep="_"):
 
 def get_class(source, settings_file=None, instance=None):
     """
-    Create and return a class object for the given data source name
+    Construct and return a DataHandler for the given data source name.
 
-    This function modifies the case of the source so that the user can
-    input this in any case and it will still work.
+    Returns an *instance*, not the class - ``source_class()`` is the one that returns the
+    type, without constructing it. The wording here said "class object" long after this
+    became a factory, which is actively misleading now that both functions exist side by
+    side, and costs whoever believes it an ``AttributeError`` on the first attribute they
+    reach for.
 
-    When adding a new data source, import its class inside this function
-    and add it to the classes dictionary.
+    The source name is matched case-insensitively, so it can be given in any case.
+
+    A new data source is registered in ``_source_classes()``, not here.
 
     :param source: data source name
     :type source: str
     :param settings_file: path to the settings file (default: settings.yaml in the project root)
     :type settings_file: str or None
     :param instance: which instance of the source this handler serves, for a source that
-        can have several targets behind one settings block (only Hue today, whose instance
-        is a bridge host). ``None`` - the default, and what every caller that does not care
-        about instances passes - means the source's single target, or for Hue the first
-        configured bridge, which is what keeps single-bridge installs and the MCP tools
-        behaving exactly as they did before slots existed.
-    :return: class object
+        can have several targets behind one settings block - Hue, whose instance is a
+        bridge host, and each MyEnergi type, whose instance is a device label. ``None`` -
+        the default, and what every caller that does not care about instances passes -
+        means the source's single target, or the first configured bridge or device, which
+        is what keeps single-target installs and the MCP tools behaving exactly as they
+        did before instances existed.
+    :return: a constructed handler for the source
     :rtype: DataHandler
+    :raises ConfigError: the name is not a known source
+    """
+    return source_class(source)(source.lower(), settings_file=settings_file, instance=instance)
+
+
+def source_class(source):
+    """
+    Return the DataHandler subclass for a source name, without constructing it.
+
+    Separated from ``get_class()`` so a caller that only needs the class's static domain
+    knowledge - the MCP read layer asking which measurement a source writes to - can get it
+    without building a handler, which loads and validates settings and opens a session. One
+    mapping serves both, so the two cannot disagree about which class a name means.
+
+    Imports live inside the function for the same reason they do in ``get_class()``: these
+    modules import ``influx``, which imports this one, so a module-level import is circular.
+
+    :param source: data source name, any case
+    :type source: str
+    :return: the DataHandler subclass
+    :rtype: type
+    :raises ConfigError: the name is not a known source
+    """
+    classes = _source_classes()
+    class_name = next((k for k in classes if k.lower() == source.lower()), source)
+    try:
+        return classes[class_name]
+    except KeyError:
+        raise ConfigError(f"Source {class_name} not found") from None
+
+
+def _source_classes():
+    """
+    Return the source-name to class mapping - the single registration point.
+
+    Every caller that needs to know what sources exist, or which class one means, reads it
+    from here: ``get_class()``, ``source_class()`` and ``known_sources()``. A second copy of
+    the names would drift the moment a source was added, which is precisely why the mapping
+    *is* the registration rather than being accompanied by a list.
+
+    Imports live inside the function because these modules import ``influx``, which imports
+    this one, so a module-level import is circular.
+
+    :return: class name to class
+    :rtype: dict
     """
     from toinflux.carbonintensity import CarbonIntensity
-    from toinflux.myenergi import MyEnergi, Zappi, Eddi, Harvi
+    from toinflux.myenergi import Zappi, Eddi, Harvi
     from toinflux.nuki import Nuki
     from toinflux.octopus import Octopus
     from toinflux.openmeteo import OpenMeteo
     from toinflux.philipshue import Hue
     from toinflux.speedtest import Speedtest
 
-    classes = {
+    return {
         "CarbonIntensity": CarbonIntensity,
         "Eddi": Eddi,
         "Harvi": Harvi,
         "Hue": Hue,
-        "MyEnergi": MyEnergi,
+        # The MyEnergi parent is deliberately absent. It holds the shared API auth for
+        # Zappi/Eddi/Harvi and defines no get_data(), so it is not collectable - but while
+        # it was registered, `--source myenergi` passed validation, reported
+        # "Configuration OK", and then failed at the first collection with
+        # `AttributeError: 'MyEnergi' object has no attribute 'get_data'` - which the worker
+        # loop's broad handler retried forever without ever naming the cause. Registering
+        # only collectable sources makes it an ordinary unknown-source ConfigError instead,
+        # caught by --check-config. Same reasoning as DataHandler, which is likewise absent.
         "Nuki": Nuki,
         "Octopus": Octopus,
         "OpenMeteo": OpenMeteo,
@@ -161,13 +218,73 @@ def get_class(source, settings_file=None, instance=None):
         "Zappi": Zappi,
     }
 
-    class_name = next((k for k in classes if k.lower() == source.lower()), source)
-    source_name = source.lower()
+
+def measurement_for(source):
+    """
+    Return the InfluxDB measurement a source writes to, from its class alone.
+
+    ``MCP_MEASUREMENT`` when the class overrides it, else the source name - the same rule
+    ``build_schema()`` applies, kept here so a caller that has no handler can ask.
+
+    :param source: data source name, any case
+    :type source: str
+    :return: the measurement name
+    :rtype: str
+    :raises ConfigError: the name is not a known source
+    """
+    return source_class(source).MCP_MEASUREMENT or source.lower()
+
+
+def known_sources():
+    """
+    Return every source name this build knows about, lowercased.
+
+    Read from the one class mapping, so it cannot drift from what ``get_class()`` accepts.
+
+    :return: sorted source names
+    :rtype: list
+    """
+    # Read from the one mapping, never a second list - see _source_classes(). No filtering
+    # here any more: the mapping holds only collectable sources, so anything it accepts is
+    # something that can actually run. Filtering afterwards was what let get_class() and
+    # known_sources() disagree about whether the MyEnergi parent was a source.
+    return sorted(name.lower() for name in _source_classes())
+
+
+def shares_measurement(source):
+    """
+    Return True when any *other* known source writes to the same measurement.
+
+    Derived from the classes rather than declared on them, and deliberately from every
+    *known* source rather than the currently configured ones. Sharing is a property of the
+    software, not of one install: a database can still hold eddi history after eddi is
+    removed from ``sources:``, so deciding by what happens to be configured today would let
+    a tag value discovered in the data be attributed to the wrong type tomorrow. Found by
+    testing exactly that case.
+
+    The read layer uses this to know when a discovered tag value cannot be attributed to a
+    single source, and must therefore trust the configuration instead. A class flag would
+    have said the same thing but could fall out of step; this covers a future shared
+    measurement without anyone remembering to mark it.
+
+    :param source: the source in question
+    :type source: str
+    :return: True when the measurement is shared with another known source
+    :rtype: bool
+    """
     try:
-        my_class = classes[class_name](source_name, settings_file=settings_file, instance=instance)
-    except KeyError:
-        raise ConfigError(f"Source {class_name} not found") from None
-    return my_class
+        measurement = measurement_for(source)
+    except ConfigError:
+        return False
+    for other in known_sources():
+        if other == source.lower():
+            continue
+        try:
+            if measurement_for(other) == measurement:
+                return True
+        except ConfigError:
+            continue
+    return False
 
 
 # Sources that collect over MQTT and therefore need the shared top-level mqtt block.
@@ -202,14 +319,46 @@ def _hue_bridge_hosts(settings):
 
 # Sources that can have more than one target behind a single settings block, and so run one
 # worker per target rather than one per source - mapped to the function that enumerates
-# those targets. Only Hue today: one worker per bridge, so that one unreachable bridge
-# cannot stop the others.
+# those targets. Hue runs one worker per bridge and each MyEnergi type one per configured
+# device, so that one unreachable target cannot stop the others.
 #
 # The mapping *is* the registration: membership and expansion behaviour are the same
 # structure, so a source cannot be listed as instanced while still being expanded as a
 # single unit. Add a source by adding its enumerator here, and nothing else can be
 # forgotten.
-_INSTANCE_ENUMERATORS = {"hue": _hue_bridge_hosts}
+def _myenergi_device_labels(source):
+    """
+    Return an enumerator giving the labels of every configured device for one MyEnergi source.
+
+    One worker per device, so a second zappi collects on its own schedule with its own
+    backoff and write buffer, and one unreachable device delays only itself.
+
+    Imported inside the returned function for the same circular-import reason as
+    ``_hue_bridge_hosts``. Enumeration errors are dropped here exactly as they are there:
+    ``validate_settings()`` has already reported them fatally, and this function's only job
+    is to say what will actually run.
+
+    :param source: the source name this enumerator serves
+    :type source: str
+    :return: a function taking settings and returning device labels
+    :rtype: callable
+    """
+
+    def enumerate_labels(settings):
+        from toinflux.myenergi import enumerate_devices
+
+        devices, _, _ = enumerate_devices(source, settings.get(source))
+        return [device.label for device in devices]
+
+    return enumerate_labels
+
+
+_INSTANCE_ENUMERATORS = {
+    "hue": _hue_bridge_hosts,
+    "zappi": _myenergi_device_labels("zappi"),
+    "eddi": _myenergi_device_labels("eddi"),
+    "harvi": _myenergi_device_labels("harvi"),
+}
 
 # Derived, never hand-maintained - see above.
 INSTANCED_SOURCES = frozenset(_INSTANCE_ENUMERATORS)
@@ -348,6 +497,12 @@ def _validate_hue_bridges(settings, sources):
     # which is true but misleading - the problem is that it isn't there, not that it's the
     # wrong type. One cause, one message.
     if "hue" not in sources or "hue" not in settings:
+        return ([], [])
+    # Same rule for a section that is present but not a mapping: the shared per-source
+    # check reports the type, so enumerating would only say it again in the same words.
+    # enumerate_bridges keeps its own guard regardless - Hue.bridge() calls it at runtime,
+    # where no validation has run.
+    if not isinstance(settings.get("hue"), dict):
         return ([], [])
     from toinflux.philipshue import enumerate_bridges
 
@@ -595,6 +750,49 @@ def _validate_influx_block(influx):
     return errors
 
 
+def _unusable_source_block(source, settings):
+    """Return the one error that stops a source section being validated at all, or None.
+
+    Split from the field checks below both to keep them within the complexity limit and
+    because these four faults are terminal: none of the field checks can run, and reporting
+    them anyway would bury the real cause under "interval is required" for a section that
+    has no fields.
+
+    :param source: source name, already lowercased
+    :type source: str
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :return: the error message, or None when the section can be validated
+    :rtype: str or None
+    """
+    # The name first: a source nothing can collect is the primary fault, and reporting a
+    # missing section for it would send the reader off to write configuration for something
+    # that will never run. get_class() raises the same way at runtime, but only once a
+    # worker tries to collect - so without this, --check-config reported "Configuration OK"
+    # for a source that then failed on every cycle forever.
+    # Once, not twice: the membership test and the message must describe the same set, and
+    # each call rebuilds the registry.
+    collectable = known_sources()
+    if source not in collectable:
+        return f"'{source}' is not a known source (known: {', '.join(collectable)})"
+    if source not in settings:
+        return f"no configuration section found for source '{source}'"
+    source_cfg = settings[source]
+    # Guard the type before anything indexes or searches it. `"interval" not in source_cfg`
+    # is a containment test, and Python refuses that against a non-container, so a section
+    # set to null or a scalar raised a raw TypeError out of validation - a traceback where
+    # --check-config exists to give a clear message, and the same traceback in the journal
+    # on startup under systemd.
+    if source_cfg is None:
+        return (
+            f"{source} has no settings: the section is present but empty. A key with nothing "
+            f"under it parses as null, which is what commenting out every field leaves behind"
+        )
+    if not isinstance(source_cfg, dict):
+        return f"{source} must be a mapping of settings (got {type(source_cfg).__name__})"
+    return None
+
+
 def _validate_source_block(source, settings, is_v2):
     """Return a list of error strings for a single source configuration section.
 
@@ -606,8 +804,9 @@ def _validate_source_block(source, settings, is_v2):
     """
     if not source:
         return []
-    if source not in settings:
-        return [f"no configuration section found for source '{source}'"]
+    unusable = _unusable_source_block(source, settings)
+    if unusable:
+        return [unusable]
     errors = []
     source_cfg = settings[source]
     if "interval" not in source_cfg:
@@ -646,6 +845,41 @@ def _log_config_warnings(warnings_found, settings_path, warn):
         return
     for warning in warnings_found:
         logging.warning("%s: %s", settings_path, warning)
+
+
+def _validate_myenergi_devices(settings, sources):
+    """
+    Validate the configured MyEnergi devices for every selected device source.
+
+    Same severity split as the Hue bridges: self-contradictory configuration is fatal (a
+    devices entry with no label, a duplicate label or serial, a non-list devices key), while
+    "nothing configured yet" is only a warning, because ``example_settings.yaml`` ships the
+    blocks with placeholder serials and a fresh install is exactly that state.
+
+    Label uniqueness is checked across all three blocks whenever *any* of them is selected,
+    not per block: the label is the shared ``device`` tag, so a zappi and an eddi agreeing on
+    one would merge into a single series carrying both devices' fields. Checking it per block
+    would miss precisely the collision that matters.
+
+    :param settings: parsed settings dictionary
+    :type settings: dict
+    :param sources: the configured (lowercased) source names
+    :type sources: list
+    :return: (errors, warnings)
+    :rtype: tuple
+    """
+    from toinflux.myenergi import DEVICE_SOURCES, duplicate_label_errors, enumerate_devices
+
+    selected = [source for source in DEVICE_SOURCES if source in sources]
+    if not selected:
+        return [], []
+    errors, warnings = [], []
+    for source in selected:
+        _, source_errors, source_warnings = enumerate_devices(source, settings.get(source))
+        errors.extend(source_errors)
+        warnings.extend(source_warnings)
+    errors.extend(duplicate_label_errors(settings))
+    return errors, warnings
 
 
 def validate_settings(settings, source=None, settings_path="settings.yaml", warn=False):
@@ -720,6 +954,9 @@ def validate_settings(settings, source=None, settings_path="settings.yaml", warn
         errors.extend(_validate_source_block(src, settings, is_v2))
     hue_errors, hue_warnings = _validate_hue_bridges(settings, sources)
     errors.extend(hue_errors)
+    myenergi_errors, myenergi_warnings = _validate_myenergi_devices(settings, sources)
+    errors.extend(myenergi_errors)
+    hue_warnings.extend(myenergi_warnings)
     errors.extend(_validate_mqtt_block(settings, sources))
     errors.extend(mcp_block_errors(settings))
     _log_config_warnings(hue_warnings, settings_path, warn)
