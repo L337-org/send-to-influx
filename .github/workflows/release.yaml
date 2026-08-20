@@ -117,7 +117,7 @@ jobs:
     name: Report a cancelled release run as a failure
     needs: [build-and-release]
     if: always() && needs.build-and-release.result == 'cancelled'
-    runs-on: ubuntu-latest
+    runs-on: [ubuntu-latest]
     # Only has to bound runner startup: this job emits an annotation and exits.
     timeout-minutes: 5
     steps:
