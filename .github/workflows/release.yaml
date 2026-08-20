@@ -22,6 +22,12 @@ jobs:
     runs-on: [ubuntu-latest]
     name: Build .deb and attach it to the release
     # tests, build and upload in one job; the widest budget because a slow registry or release upload must not be cut off mid-publish.
+    # Note what this timeout does and does not buy: a job it kills reports
+    # `conclusion: cancelled`, never `failure` and never `timed_out`, so on its own it
+    # raises no workflow-failure notification and no failed-run sweep can see it. On a
+    # workflow that runs unattended on `release: published`, that means a release could
+    # quietly fail to complete. The `report-cancelled-as-failure` job below converts the
+    # cancellation into a real failure so it is actually reported.
     timeout-minutes: 30
     steps:
       - name: Check out source repository
@@ -94,3 +100,28 @@ jobs:
   # published from this workflow. It's owned by https://github.com/L337-org/apt,
   # whose hourly aggregator pulls the .deb assets straight from this repo's GitHub
   # Releases - so attaching the .deb above is all this workflow needs to do.
+
+  # A job killed by `timeout-minutes` ends as `cancelled`, not `failure`, so GitHub
+  # raises no workflow-failure notification for it and anything sweeping for failed
+  # runs never sees it. This workflow is the one place here where that really bites:
+  # it runs unattended when a release is published, so nothing else would notice that
+  # the .deb was never attached. This job turns the cancellation into a failure.
+  #
+  # Safe because this workflow declares no `concurrency` block, so nothing supersedes
+  # it: the only routes to `cancelled` are the timeout and a human pressing cancel,
+  # and both are worth reporting on a publish. `premerge.yaml` deliberately has no
+  # equivalent - `cancel-in-progress: true` there cancels superseded runs as a matter
+  # of course, and a cancelled premerge run blocks the merge in front of a human
+  # anyway. Same guard, same reasoning, as the scheduled workflows in L337-org/apt.
+  report-cancelled-as-failure:
+    name: Report a cancelled release run as a failure
+    needs: [build-and-release]
+    if: always() && needs.build-and-release.result == 'cancelled'
+    runs-on: [ubuntu-latest]
+    # Only has to bound runner startup: this job emits an annotation and exits.
+    timeout-minutes: 5
+    steps:
+      - name: Fail the run, because a cancellation would not notify
+        run: |
+          echo "::error::The build-and-release job ended as cancelled, which is the conclusion a timeout-minutes kill produces. Failing this run so the release notifies instead of silently not completing."
+          exit 1

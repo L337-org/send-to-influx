@@ -40,6 +40,19 @@ afterward. The cheap ones (lint, type-check, pytest, `action-pins`) also gate th
 new one. Dependency and GitHub Actions updates are managed by Dependabot
 (`.github/dependabot.yml`), weekly.
 
+Every job declares `timeout-minutes`, but be careful what that buys: a job GitHub kills on its
+timeout reports `conclusion: cancelled`, never `failure` and never `timed_out`. No workflow-failure
+notification fires, and any tooling sweeping for failed runs misses it entirely - confirmed
+behaviour, found when a hang in [L337-org/apt](https://github.com/L337-org/apt) recurred five times
+undetected because its CI responder swept only `--status failure`. For the premerge jobs that is
+tolerable, because a non-green run blocks the merge where a human sees it, and `cancel-in-progress:
+true` means superseded runs cancel routinely. `release.yaml` is different: it runs unattended on
+`release: published`, so a timeout there would mean the `.deb` never got attached and nothing said
+so. It therefore carries a `report-cancelled-as-failure` job - `needs: [build-and-release]`, `if:
+always() && needs.build-and-release.result == 'cancelled'`, annotate and exit non-zero - purely to
+turn that cancellation into a reported failure. Do not add the same job to `premerge.yaml`: it would
+fire on every superseded re-push.
+
 `action-pins` ("Action pins are immutable") fails the build when any `uses:` reference in
 `.github/workflows` or `.github/actions` names a tag or branch rather than a full 40-hex commit SHA.
 A tag can be repointed by its owner at any time, so `@v7` means CI runs whatever that owner last
