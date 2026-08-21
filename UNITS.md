@@ -66,7 +66,15 @@ in an untagged series.
 | `sta` | numeric status code | Not a physical unit |
 | `wifiLink`, `ethernetLink` | N/A | Diagnostic/status fields, not documented as physical units |
 | `newAppAvailable`, `newBootloaderAvailable` | boolean (0/1) | Update-available flags |
-| `Charge`, `Import`, `Export`, `Genera` | kWh | Energy for the **current hour**, computed by this project from the day/hour endpoint's raw values (divided by 3,600,000 and rounded to 4 dp); always collected regardless of `fields`. Each accumulates through the hour and drops back at the top of the next, so read the last value within an hour rather than a mean across several. Where the current hour's entry is missing from the API's response - MyEnergi omits all-zero entries, so this happens around midnight - the value is the day so far instead |
+| `Charge`, `Import`, `Export`, `Genera` | kWh | Energy for the **current hour**, not a daily total - always collected regardless of `fields`; see below |
+
+Those four are computed by this project from the day/hour endpoint's raw values (divided by
+3,600,000 and rounded to 4 dp), and they are **hourly, not daily** despite coming from an endpoint
+named for the day. Each accumulates through the hour and drops back at the top of the next, so read
+the last value within an hour rather than a mean across several - a mean spans a reset and means
+nothing. One wrinkle: where the current hour's entry is missing from the API's response, which
+happens around midnight because MyEnergi omits all-zero entries, the value is the day so far
+instead. Releases before 6.0 described these as daily totals, which was wrong.
 
 ## MyEnergi Eddi (`eddi`)
 
