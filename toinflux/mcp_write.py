@@ -284,17 +284,24 @@ def _register_hue_write_tools(server, settings, settings_file):
         annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
     )
     async def hue_list_devices() -> dict:
-        """List the controllable Hue lights and plugs across every configured bridge, each
-        with its id, name, the bridge it is on, and the controls it supports (on/off,
-        brightness, colour temperature, colour), plus the kelvin range for
+        """List the controllable Hue lights and plugs across every configured bridge,
+        each with its id, name, the bridge it is on, and the controls it supports
+        (on/off, brightness, colour temperature, colour), plus the kelvin range for
         colour-temperature lights.
 
-        Call this before `hue_set_light` to get exact ids/names and see what a given light
-        can do - an unknown or ambiguous device, or a control the light lacks, is rejected
-        there. Light ids are per-bridge, so the same id (and often the same name) appears on
-        more than one bridge: use the `bridge` value to tell them apart. If a bridge is
-        unreachable its lights are absent and it is listed under `unreachable`, so a short
-        list means "could not ask", not "no such light"."""
+        Hue-only, and about controllability: it exists to feed `hue_set_light`'s
+        `device` and `bridge` arguments, where an unknown or ambiguous device, or a
+        control the light lacks, is rejected. To read what any source reports right
+        now - including which Hue lights are on - use the source-agnostic
+        `get_current_state` instead.
+
+        Reads the bridges and changes nothing. Light ids are per-bridge, so the same
+        id (and often the same name) appears on more than one bridge: use the
+        `bridge` value to tell them apart. An
+        unreachable bridge's lights are absent and the bridge is named under
+        `unreachable`, so a short list means "could not ask", not "no such light" -
+        and that includes the case where no bridge answers at all, which returns an
+        empty `devices` list rather than an error."""
         return await anyio.to_thread.run_sync(_hue_list_devices_result, settings, settings_file)
 
     # Additive/reversible (turns a light on/off, adjusts brightness/colour) and
@@ -321,9 +328,9 @@ def _register_hue_write_tools(server, settings, settings_file):
         `hue_list_devices` first. An unknown device, an ambiguous name (use the id
         instead), a value out of range, both `color_temp_k` and `color` at once, a
         control the light doesn't have, or setting nothing all return an error
-        *before* any change. A transport failure mid-write is reported, not hidden;
-        the bridge applies fields one at a time, so an error can mean part of the
-        change already took effect - re-read to confirm.
+        *before* any change. A transport failure
+        mid-write is reported, not hidden; the bridge applies fields one at a time, so
+        an error can mean part of the change already took effect - re-read to confirm.
 
         - device: the light id or its exact name (from `hue_list_devices`).
         - bridge: which bridge the light is on, when more than one is configured. Only
@@ -373,8 +380,8 @@ def _register_speedtest_write_tools(server, settings, settings_file):
     async def speedtest_run(host: "str | None" = None) -> dict:
         """Run an internet speed test now, on the host this server runs on, and
         return the result (download/upload throughput and latency). Use this for an
-        on-demand check; `get_current_state`/`query_history` report the last
-        recorded run without starting a new one.
+        on-demand check; `get_current_state`/`query_history` report the last recorded
+        run without starting a new one, and `get_data_range` how far the records go.
 
         The result names the machine that ran it in `host`, which matters when several
         hosts collect into one database: it can only ever measure *this* machine's

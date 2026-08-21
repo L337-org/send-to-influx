@@ -13,6 +13,12 @@ the device-write tools, for the tasks this server is actually for:
 
 Kept generic/parameterised (a free-text focus/question/request), never hard-coding
 specific devices, so they fit any install's sources.
+
+Each carries a ``title`` and a one-line ``description`` naming the sibling prompt
+a user might otherwise pick. Both are deliberately kept to one line: unlike a tool
+description, a prompt's is picker text a person reads, and the instructions the
+model follows live in the returned message rather than in the advertised surface.
+``tests/test_mcp_surface.py`` is the guard.
 """
 
 __author__ = "Gavin Lucas"
@@ -41,7 +47,11 @@ def register_prompts(server, settings, settings_file=None, enabled_sources=None)
 
     @server.prompt(
         name="home_status",
-        description="Summarise your devices' current state (optionally a focus like 'lights' or 'energy').",
+        title="Home Status",
+        description=(
+            "Summarise your devices' state right now, optionally narrowed to a focus like 'lights' "
+            "or 'energy'. For recorded history rather than the present moment, use usage_trends."
+        ),
     )
     def home_status(focus: str = "") -> str:
         scope = f" Focus on: {focus.strip()}." if focus.strip() else ""
@@ -57,7 +67,11 @@ def register_prompts(server, settings, settings_file=None, enabled_sources=None)
 
     @server.prompt(
         name="usage_trends",
-        description="Analyse historical trends, e.g. 'electricity this month vs last month'.",
+        title="Usage Trends",
+        description=(
+            "Answer a question from recorded history, e.g. 'electricity this month vs last month'. "
+            "For the present moment rather than a trend, use home_status."
+        ),
     )
     def usage_trends(question: str) -> str:
         return (
@@ -75,7 +89,12 @@ def register_prompts(server, settings, settings_file=None, enabled_sources=None)
 
         @server.prompt(
             name="control_device",
-            description="Carry out a device control request, e.g. 'turn on the kitchen light'.",
+            title="Control a Device",
+            description=(
+                "Carry out a device control request, e.g. 'turn on the kitchen light' - checking "
+                "state first and confirming what changed. Offered only where a source has writes "
+                "enabled; home_status and usage_trends only read."
+            ),
         )
         def control_device(request: str) -> str:
             return (

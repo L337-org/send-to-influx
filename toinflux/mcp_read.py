@@ -1647,6 +1647,12 @@ def register_read_tools(server, settings, settings_file=None):
     runs in a worker thread so the async event loop isn't stalled during an
     InfluxDB round trip.
 
+    Every tool's description is part of the advertised surface and is held to the
+    AI-consumer standard: it names the sibling tools a caller might otherwise reach
+    for, and states preconditions, side effects and error behaviour in prose rather
+    than leaving them to the annotation fields (which clients are told to treat as
+    untrusted hints). ``tests/test_mcp_surface.py`` is the guard.
+
     :param server: the MCPServer instance
     :param settings: the parsed settings dict
     :param settings_file: settings path, for re-resolving handlers per call
@@ -1655,38 +1661,48 @@ def register_read_tools(server, settings, settings_file=None):
 
     @server.tool(title="List Data Sources", annotations=_READ_ONLY)
     async def list_sources() -> dict:
-        """List the collector sources whose history can be queried, each with its
-        InfluxDB measurement.
+        """List the configured collector sources whose data can be read, each with
+        its InfluxDB measurement and a line on what it reports.
 
-        The entry point for reads and the only one needing no arguments: start
-        here, then `list_fields` for a source's fields, then `query_history` to
-        read them. Takes no parameters and returns every configured source; use
-        `list_fields` when you already know the source and want its fields.
+        The entry point for reads: start here, then `list_fields` for a source's
+        exact field names, then `query_history` for recorded history or
+        `get_current_state` for the present moment. `get_documentation` is the other
+        no-argument call - it explains what every field means, where this names the
+        sources and their measurements.
 
         A source whose measurement holds several producers (e.g. Speedtest, one per
-        collecting host) reports the tag that tells them apart as `instance_tag`. The
-        values it holds come from `list_fields`, not here, because listing them means
-        querying InfluxDB per source."""
+        collecting host) reports the tag that tells them apart as `instance_tag`; the
+        values that tag holds come from `list_fields`, because listing them costs a
+        query per source.
+
+        Reads configuration only and changes nothing - no InfluxDB or device request -
+        so it answers even when nothing is reachable, and a configured source whose
+        settings are unusable is left out rather than failing the call."""
         return await anyio.to_thread.run_sync(_list_sources_result, settings, settings_file)
 
     @server.tool(title="List Source Fields", annotations=_READ_ONLY)
     async def list_fields(source: str) -> dict:
-        """List the field keys available for one source, each with any known unit
-        and, for coded fields, what each numeric value means.
+        """List one source's field keys, each with any known unit and, for coded
+        fields, what each numeric value means.
 
-        Call this before `query_history`: a field name it did not list is
-        rejected as an error, so use it to discover exact field names (they can
-        contain spaces-as-underscores and punctuation). Use `list_sources`
-        instead when you don't yet know which source you want. `source` is a
-        source name from `list_sources`; an unknown one returns an error.
+        Call this before `query_history`: it rejects a field this did not list, and
+        exact names are not guessable (spaces become underscores, and a Nuki lock
+        prefixes its own fields). Use `list_sources` when you don't yet know which
+        source you want, or `get_documentation` for every source's field meanings at
+        once without an InfluxDB round trip.
 
         Where the source's measurement holds several producers, also returns
-        `instance_tag` (what tells them apart, e.g. 'host') and `instances` - the values
-        `query_history`'s `instance` accepts, which are the producers present in the data
-        plus any target that is configured but has not collected yet. So a newly added Hue
-        bridge appears here before it has written anything, and a decommissioned one still
-        appears while its history remains. This is where to look before scoping a query or
-        comparing producers."""
+        `instance_tag` (what tells them apart, e.g. 'host') and `instances` - the
+        values `query_history`'s `instance` accepts, being the producers present in
+        the data plus any target configured but not yet collecting. So a newly added
+        Hue bridge appears here before it has written anything, and a decommissioned
+        one still appears while its history remains.
+
+        The field set is discovered live from InfluxDB, and reading it changes
+        nothing. A source that has never written anything lists no fields - that
+        is "nothing recorded yet", not "no such source". An unknown source is an
+        error, and so is an unreachable InfluxDB: neither is reported as an empty
+        list."""
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file)
 
     @server.tool(title="Query Historical Data", annotations=_READ_ONLY)
@@ -1700,42 +1716,38 @@ def register_read_tools(server, settings, settings_file=None):
         limit: int = DEFAULT_RESULT_POINTS,
         instance: "str | None" = None,
     ) -> dict:
-        """Query a field's history for a source from InfluxDB. Reads only; to
-        change a device use that source's control tool, e.g. `hue_set_light`
-        (when write-enabled).
+        """Read a field's recorded history for one source from InfluxDB.
 
-        Discover valid `source`/`field` names with `list_sources`/`list_fields`
-        first - an unknown field, or a start/end/aggregation/group_by that does
-        not parse, returns an error rather than empty data.
+        Reads only, and changes nothing: to change a device use that source's control
+        tool (e.g. `hue_set_light`), for the present moment use `get_current_state`,
+        and to find out what range of history exists use `get_data_range`.
 
-        - start/end: 'now', a relative past offset like '-24h'/'-7d' (leading '-'
-          required; the future has no data), or an ISO 8601 timestamp. Defaults to
+        Get valid `source`/`field` names from `list_sources`/`list_fields` first. An
+        unknown field, or a start/end/aggregation/group_by/instance that does not
+        parse, is an error rather than empty data - as is an unreachable InfluxDB.
+
+        - start/end: 'now', a past offset like '-24h'/'-7d' (the leading '-' is
+          required; the future holds no data), or an ISO 8601 timestamp. Defaults to
           the last 24 hours; start must be before end.
-        - aggregation: 'raw' (individual points) or one of mean/median/min/max/
-          sum/count/first/last/spread/stddev, which each require a group_by interval.
-        - group_by: a bucket interval like '5m'/'1h'/'1d' (only with aggregation).
-        - limit: max points returned, 1..5000 (values outside are clamped).
+        - aggregation: 'raw' for individual points, or one of mean/median/min/max/
+          sum/count/first/last/spread/stddev, each of which requires a `group_by`.
+        - group_by: a bucket interval like '5m'/'1h'/'1d' (only with an aggregation).
+        - limit: maximum points returned, 1..5000 (a value outside that is clamped).
+        - instance: restricts the read to one producer, where the source's
+          measurement holds several - `instance='pi4'` for one Speedtest host,
+          `instance='hue.example.com'` for one Hue bridge. Omit it and every producer
+          is reported separately under `instances`, keyed by tag value, never merged
+          into one series. `list_fields` lists the accepted values; an unknown one is
+          an error, and so is passing this at all for a single-producer source.
 
-        - instance: for a source whose measurement holds several producers, restricts
-          the query to one of them - Speedtest tags each point with the collecting
-          host, so `instance='pi4'` asks only about that machine, and Hue tags each
-          point with the bridge, so `instance='hue.example.com'` asks about one bridge.
-          Omit it to get every producer reported *separately* under `instances`, keyed
-          by tag value: results are never merged, because two producers' values in one
-          unlabelled list would be a wrong answer rather than an incomplete one - two
-          Hue bridges can each hold a "Kitchen", and two hosts each hold a ping.
-          `list_fields` reports the tag name and its accepted values, which are the
-          producers found in the data plus any configured but not yet collecting. An
-          unknown value is an error, and so is passing this for a single-producer source.
-
-        Points come back newest-first, each with a unix-seconds `time` and
-        `value`; coded fields (e.g. Nuki lock state) also carry a decoded `label`.
-        The result also reports a `truncated` flag - true when the query returned as
-        many points as the limit allowed, so more data may exist beyond it; narrow the
-        range or use an aggregation to be sure of a complete view. A scoped or
-        single-producer result reports the `limit` in force; a per-instance one reports
-        `limit_per_instance` instead, because InfluxDB applies the limit to each
-        producer separately and calling that a total would misstate it.
+        Points come back newest-first, each with a unix-seconds `time` and `value`,
+        plus a decoded `label` for a coded field (e.g. a Nuki lock state).
+        `truncated` is true when as many points came back as the limit allowed, so
+        more may exist beyond it - narrow the range or aggregate to be sure of a
+        complete view. A scoped or single-producer result reports the `limit` in
+        force; a per-instance one reports `limit_per_instance`, because InfluxDB
+        applies the limit to each producer separately and calling that a total would
+        misstate it.
         """
         return await anyio.to_thread.run_sync(
             lambda: _query_history_result(
@@ -1754,62 +1766,77 @@ def register_read_tools(server, settings, settings_file=None):
 
     @server.tool(title="Get Current State", annotations=_READ_ONLY)
     async def get_current_state(source: str) -> dict:
-        """Get a source's current state *now* - the live answer to "is the light
-        on?", "is the door locked?", "which devices are on?". Use this, not
-        `query_history`, for the present moment; history is for trends and "when
-        did X change?".
+        """Read a source's state *now* - is the light on, is the door locked, what is
+        the power draw at this moment.
 
-        For most sources this reads the device live (Hue bridge, Nuki, MyEnergi,
-        weather, carbon intensity). For Speedtest and Octopus it returns the
-        latest recorded reading from InfluxDB instead (a live read would be slow
-        or no fresher) - the `state` field says which: 'live' or 'last_recorded'.
+        Use this rather than `query_history` (trends, and "when did X change") or
+        `get_data_range` (how far back the records go); it covers every configured
+        source, where `hue_list_devices` covers only Hue's controllable devices.
 
-        `source` is a name from `list_sources`; an unknown one returns an error.
-        Returns the source, its `state`/`as_of` (unix seconds), and a `fields` map
-        of each field to its `value` plus any `unit` and decoded `label` (so a
-        lock state reads back as 'locked', not a bare number)."""
+        Most sources are read live from the device or API (Hue bridge, Nuki,
+        MyEnergi, weather, carbon intensity); Speedtest and Octopus instead return
+        the latest point recorded in InfluxDB, because a live read would be slow or
+        no fresher. The `state` field says which: 'live' or 'last_recorded'. Reading
+        changes nothing.
+
+        `source` is a name from `list_sources`; an unknown one is an error. Returns
+        `state` and `as_of` (unix seconds) with a `fields` map of each field's value
+        plus any `unit` and decoded `label`, so a lock state reads back as 'locked'
+        rather than a bare number. Where a source has several producers (Hue bridges,
+        Nuki locks, Speedtest hosts) the fields are grouped per producer under
+        `instances` instead, even when there is only one. An unreachable producer
+        carries an `error` there while the rest still report fields; only when every
+        one fails is the whole call an error."""
         return await anyio.to_thread.run_sync(current_state_result, source, settings, settings_file)
 
     @server.tool(title="Get Data Range & Retention", annotations=_READ_ONLY)
     async def get_data_range(source: str) -> dict:
-        """Get how far back a source's data goes, and how long InfluxDB keeps it.
+        """Report how far back a source's data goes, and how long InfluxDB keeps it.
 
-        Answers "how far back do my records go", "when did collection start", "how long is
-        data kept". Use this before `query_history` when you don't know what range exists -
-        history needs a range, this tells you what range is there. Unlike
-        `get_current_state` (the present moment) this describes the whole span.
-
-        `source` is a name from `list_sources`; an unknown one returns an error.
+        Answers "when did collection start", "how far back can I query", "how long is
+        data kept". Use it before `query_history`, which needs a range you already
+        know; `get_current_state` describes only the present moment, and
+        `list_fields` only which fields exist.
 
         Two different facts, both reported, because they answer different questions:
 
-        - `earliest`/`latest` (unix seconds) and `span_seconds`: the oldest and newest
-          points actually present - the real floor on what history can return.
-          `points_present` is false when nothing has been collected yet, with the
-          timestamps null.
-        - `retention`: what InfluxDB is configured to keep, independent of what was
-          collected. `duration` is a string like '720h0m0s', or 'infinite' when data is
-          never expired, with `duration_seconds` alongside for arithmetic; v1 also reports
-          the `policy` name, and both versions report the shard group duration.
+        - `earliest`/`latest` (unix seconds) and `span_seconds`: the oldest and
+          newest points actually present - the real floor on what history can
+          return. `points_present` is false, with null timestamps, when nothing has
+          been collected yet.
+        - `retention`: what InfluxDB is configured to keep, whatever was actually
+          collected. `duration` is a string like '720h0m0s', or 'infinite' when data
+          never expires, with `duration_seconds` alongside for arithmetic; v1 also
+          reports the `policy` name, and both versions the shard group duration.
 
-        The two differ, and the difference is the point: an install collecting for three
-        years with 30-day retention has 30 days of data, not three years.
+        The two differ, and the difference is the point: an install collecting for
+        three years under 30-day retention has 30 days of data.
 
-        `retention.known` is false, with a `reason`, when the configuration could not be
-        read - the range is still returned in that case rather than failing the call. It is
-        reported rather than omitted so an unreadable retention is never mistaken for
+        Where a source has several producers, each also gets its own range under
+        `instances`, with the overall figures alongside - retention bounds the
+        database rather than any one producer.
+
+        `source` is a name from `list_sources`; an unknown one is an error, as is an
+        unreachable InfluxDB, and reading changes nothing. A failure to read
+        retention alone does not fail the call: `retention.known` comes back false
+        with a `reason`, reported rather than omitted so it is never mistaken for
         unlimited retention."""
         return await anyio.to_thread.run_sync(data_range_result, source, settings, settings_file)
 
     @server.tool(title="Get Field Documentation", annotations=_READ_ONLY)
     async def get_documentation() -> dict:
-        """Get a reference for what every source reports and what its values mean -
-        units, and the meaning of coded values (e.g. Nuki lock/door state codes).
+        """Return a Markdown reference of what every configured source reports and
+        what its values mean - units, and the meaning of coded values (e.g. Nuki
+        lock and door state codes).
 
-        A good first call for orientation: it needs no arguments and no InfluxDB
-        round trip, and covers all sources in one go (unlike `list_fields`, which
-        is per-source and lists only the fields currently in InfluxDB). Returns
-        `{format: 'markdown', content: ...}`."""
+        The cheapest orientation call: no arguments, no InfluxDB round trip, every
+        source at once. `list_fields` is the per-source counterpart and lists the
+        fields actually present in InfluxDB, which this cannot know; `list_sources`
+        names the sources and their measurements without the field detail.
+
+        Returns `{format: 'markdown', content: ...}`. Built from the source classes'
+        own metadata, so it changes nothing and cannot fail on an unreachable source
+        or InfluxDB; a source whose configuration is unusable is omitted."""
         return await anyio.to_thread.run_sync(_documentation_result, settings, settings_file)
 
     return server
