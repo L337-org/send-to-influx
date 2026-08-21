@@ -128,9 +128,10 @@ class Nuki(MqttDataHandler):
     # on the field name directly with no suffix matching - but a pre-migration install still
     # holds prefixed keys, which metadata_for's suffix match resolves to these same entries.
     #
-    # Every field here is a "state": Nuki reports codes, flags, text and timestamps, and the
-    # only numeric quantity is the battery level. So a chart of any of them wants a state
-    # timeline or a table, never a line through averaged values.
+    # Every field here is a "state" except one: Nuki reports codes, flags, text and
+    # timestamps, so a chart of any of those wants a state timeline or a table rather than a
+    # line through averaged values. `batteryChargeState` is the exception and is a genuine
+    # gauge - a percentage level, where a mean and a trend line both mean something.
     MCP_FIELD_METADATA = {
         "stateValue": {"codes": STATE_VALUE_CODES, "kind": "state"},
         "doorsensorStateValue": {"codes": DOORSENSOR_STATE_CODES, "kind": "state"},
