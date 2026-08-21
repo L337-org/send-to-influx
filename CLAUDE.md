@@ -1282,9 +1282,9 @@ from `postinst`, once package files are unpacked and everything's been answered.
 
 Three rulesets, in decreasing order of strictness - `release/**/*` and `feature/**/*` mirror the same
 tiering pattern used on the maintainer's other repos (e.g. `docker-mcp`), adapted to this repo's own
-CI check names. All three enforce a PR, resolved review threads, dismiss-stale-reviews, Copilot
-auto-review, and no branch deletion; what the tiers vary is who must approve, what may be
-force-pushed, and which checks block the merge.
+CI check names. All three enforce Copilot auto-review on push and no branch deletion; what the tiers
+vary is whether a PR is required at all, who must approve, what may be force-pushed, and which checks
+block the merge.
 
 **Every tier requires the same eight checks**: "Run flake8", "Run mypy", "Run pytest (3.10)"-"Run
 pytest (3.14)", and "Action pins are immutable". What the looser tiers drop is the slow and expensive
@@ -1304,10 +1304,12 @@ settles the next one.
   force-pushes, but merge method widened to squash/merge/rebase and the four expensive checks dropped
   as a merge gate (they still *run*) - for longer-lived release-prep branches that don't need the full
   ceremony of `main` on every push.
-- `feature/**/*`: one tier looser again - force-pushes/rebasing allowed (no `non_fast_forward` rule),
-  and the PR rule relaxed to 0 required approvals and no code-owner review (changes still go through a
-  PR and must have review threads resolved, just without needing anyone's sign-off) - for fast
-  iteration on shared topic branches without losing CI coverage entirely.
+- `feature/**/*`: one tier looser again - **no PR rule at all**, so changes are pushed straight to the
+  branch, and force-pushes/rebasing are allowed (no `non_fast_forward` rule). Deletion is still
+  blocked, the eight cheap checks still gate it, and Copilot still reviews on push. The PR rule was
+  dropped in August 2026: a fix for a review comment on a feature->`main` PR is pushed to the feature
+  branch, and requiring a PR for that is a PR to fix a PR - it had only been working via an admin
+  bypass, and depending on a bypass is the wrong shape.
 
 The widened merge methods on the two looser tiers are theoretical: the repo-level settings disable
 merge-commit and rebase-merge outright, so squash is the only method actually available anywhere. The
