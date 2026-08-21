@@ -207,7 +207,7 @@ class TestBuildSchema:
         handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {"temperature_2m": {"unit": "°C"}}
-        schema = build_schema(handler, {"temperature_2m", "precipitation"}, "weather_db")
+        schema = build_schema(handler, _keys({"temperature_2m", "precipitation"}), "weather_db")
         assert schema.measurement == "weather"
         assert schema.db == "weather_db"
         assert schema.allowed_fields == {"temperature_2m", "precipitation"}
@@ -219,7 +219,7 @@ class TestBuildSchema:
         handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
-        schema = build_schema(handler, set(), "hue_db")
+        schema = build_schema(handler, _keys(set()), "hue_db")
         assert schema.measurement == "hue"
         assert schema.db == "hue_db"
 

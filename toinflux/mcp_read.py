@@ -189,24 +189,22 @@ def build_schema(handler, discovered, db, instance_values=None):
     source owns its measurement, so this only affects the MyEnergi trio.
 
     :param handler: a constructed DataHandler subclass instance
-    :param discovered: the measurement's keys from discover_measurement_keys(), or
-        a plain collection of field-key strings where only the allowlist matters
+    :param discovered: the measurement's keys, from discover_measurement_keys()
     :param db: the resolved database/bucket name (from resolve_db)
     :param instance_values: values of the source's instance tag found via
         discover_tag_values(), or None when it has no instance tag
     :return: ReadSchema
     """
     measurement = handler.MCP_MEASUREMENT or handler.source
-    keys = discovered if isinstance(discovered, MeasurementKeys) else MeasurementKeys.from_field_names(discovered)
     return ReadSchema(
         source=handler.source,
         measurement=measurement,
         db=db,
         tag_filters=handler.mcp_tag_filters(),
-        allowed_fields=keys.field_names,
+        allowed_fields=discovered.field_names,
         field_metadata=dict(handler.MCP_FIELD_METADATA),
-        field_types=dict(keys.field_types),
-        tag_keys=set(keys.tag_keys),
+        field_types=dict(discovered.field_types),
+        tag_keys=set(discovered.tag_keys),
         instance_tag=handler.MCP_INSTANCE_TAG,
         instance_values=set(instance_values or ()),
     )
@@ -692,15 +690,6 @@ class MeasurementKeys:
     def field_names(self):
         """The field keys as a set - the injection allowlist."""
         return set(self.field_types)
-
-    @classmethod
-    def from_field_names(cls, names):
-        """Build keys from field names alone, with no types and no tags.
-
-        For a caller that has only the allowlist to offer, so an incomplete schema
-        reports nothing rather than reporting a wrong type.
-        """
-        return cls(field_types={name: None for name in names}, tag_keys=frozenset())
 
 
 def _statement_results(payload, description):
@@ -1220,7 +1209,7 @@ def _list_sources_result(settings, settings_file):
     return {"sources": out}
 
 
-def field_entry(schema, name, detail=False):
+def _field_entry(schema, name, detail=False):
     """Describe one field of a schema: its name, type, unit, coded values, kind and
     (on request) its description.
 
@@ -1263,7 +1252,7 @@ def list_fields_result(source, settings, settings_file, detail=False):
     """
     handler, schema = resolve_schema(source, settings, settings_file)
     try:
-        fields = [field_entry(schema, name, detail=detail) for name in sorted(schema.allowed_fields)]
+        fields = [_field_entry(schema, name, detail=detail) for name in sorted(schema.allowed_fields)]
         result = {
             "source": source,
             "measurement": schema.measurement,
