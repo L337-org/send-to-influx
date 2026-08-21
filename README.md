@@ -680,6 +680,21 @@ Once connected, the client has these read tools:
 - **`get_documentation`** - a one-call reference of what every source reports and what its coded
   values mean.
 
+Alongside the tools, the server offers **resources** - the same read data as addressable items a
+client can list and attach, rather than call:
+
+- **`docs://reference`** - the `get_documentation` reference as Markdown.
+- **`schema://<source>`** - one per configured source: its fields, units and coded-value meanings.
+- **`state://<source>`** - one per configured source: its state right now.
+
+Anything offered as a resource is also a tool, deliberately: clients vary in how much they use
+resources, so the tools stay the workhorses and each resource says which tool covers the same data.
+
+There are also **prompts** - ready-made tasks you pick in the client rather than typing out:
+`home_status` (summarise everything now, optionally a focus like "lights"), `usage_trends` (answer a
+question from recorded history) and, only where a source has writes enabled, `control_device` (check
+state, act, confirm what changed).
+
 ### Several MyEnergi devices of one type
 
 Each of `zappi`, `eddi` and `harvi` collects one device by default, using the `serial` at the top

@@ -696,6 +696,63 @@ advertises a capability that isn't there. `home_status`/`usage_trends` are alway
 falls back to computing it when called standalone), so the per-source handler construction that
 computation costs isn't done twice at startup.
 
+**The advertised surface** - every tool, prompt and resource description, plus their titles - is
+held to the AI-consumer standard rather than to ordinary documentation standards, because a model
+reads it to choose what to call and every byte is paid for on each session that loads it.
+`tests/test_mcp_surface.py` is the guard for the prose half, spanning all four registration modules
+(the per-module tests already fail on a missing title or safety hint). It enforces: a description
+and a distinct title on everything registered; a `SIBLINGS` table that must name every registered
+tool, so a new tool fails until someone has decided which neighbours it must be told apart from;
+that no description names a tool which does not exist (a rename otherwise leaves an authoritative
+pointer to nothing); that every tool says how it fails and whether it changes anything; and a
+recorded byte budget. Line wrapping is normalised away before matching - a docstring keeps its
+newlines, so `changes nothing` split across a break would fail a guard the description satisfies.
+
+Measured with that module's fixture (two sources, both write-enabled: nine tools, three prompts,
+five resources), the surface went from **10,162 bytes to 13,297** in 5.4 - tools 9,937 -> 11,253,
+prompts 225 -> 523, resources 0 -> 1,521. The growth is where the surface was *silent* rather than
+merely terse:
+
+- The three resources carried no description at all from 5.0 to 5.3, so a client enumerating
+  `resources/list` saw a URI and a name and nothing about what it held, what reading it cost, or
+  which tool covered the same data.
+- `get_current_state` and `get_data_range` documented neither the per-producer `instances` grouping
+  they return nor the partial-failure reporting - both shipped in earlier releases without their
+  descriptions following.
+- `list_sources` claimed to be "the only one needing no arguments", which `get_documentation`
+  disproves; the false claim was itself the sibling-discrimination failure.
+- `hue_list_devices` named only `hue_set_light`, so nothing ruled out the reading that it lists
+  devices for every collector - the question that raised this work. It now names
+  `get_current_state`, the source-agnostic tool a caller would otherwise be reaching for.
+
+`query_history`, the largest single description, *shrank* by 301 bytes: its behaviour kept, the
+justifications for that behaviour dropped. A caller needs to know what a tool does, not why it was
+designed that way - the reasoning belongs here, where it is loaded by a person, not on every
+session.
+
+**Two things deliberately left out**, both being context that buys nothing. A *registration*
+precondition ("requires `hue.mcp_read_write: true`") is guaranteed true whenever the model can see
+the tool at all, since a disabled capability is not registered - it was drafted into all three write
+tools and then removed. And a `title` on a *prompt* stays a short display name with the model-facing
+instructions in the returned message, not in the advertised list.
+
+**What the published criteria actually require, checked rather than recalled** (2026-08-21): the
+authority on the fields is the MCP specification, revision **2026-07-28**, whose data types make
+`title`, `description` and `annotations` all *optional* on Tool, and `title`/`description` optional
+on Prompt and Resource - so nothing but a test stops a registration shipping without them. It also
+tells clients they **MUST** treat tool annotations as untrusted unless the server is trusted, which
+is the reason preconditions, side effects and error behaviour go in prose and not only in
+`readOnlyHint`/`destructiveHint`. The official registry at `registry.modelcontextprotocol.io` turns
+out to impose **nothing** on per-tool description prose: its moderation policy is explicitly
+permissive ("we only remove illegal content, malware, spam, and completely broken servers", and it
+"does not make guarantees about moderation"), removing low-quality servers only where they are spam
+- for which one named example is "a description stuffed with marketing copy". Its one hard
+description rule is on the *server-level* `description` in `server.json`: `minLength` 1,
+`maxLength` **100**, "should focus on capabilities, not implementation details". This project
+publishes no `server.json` and is not registry-listed, so that limit does not currently bind - worth
+knowing before ever listing it, since the constraint is far tighter than a tool description's. The
+real per-tool review is done by downstream directories, not the official registry.
+
 ### MyEnergi multiple devices
 
 Each of `zappi`/`eddi`/`harvi` collects **one worker per configured device**, registered through
