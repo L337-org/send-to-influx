@@ -23,7 +23,7 @@ from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamErr
 Bridge = namedtuple("Bridge", "slot host user")
 
 # Slot 1 is the unnumbered ``host``/``user`` pair that every install has always had;
-# further bridges are ``host2``/``user2`` … ``hostN``/``userN``. Deliberately no cap.
+# further bridges are ``host2``/``user2`` ... ``hostN``/``userN``. Deliberately no cap.
 # The suffix must be canonical: ``host1`` is rejected rather than silently accepted as
 # a synonym for ``host`` (it would be a second way to spell slot 1), and a leading zero
 # is rejected rather than folded onto its unpadded twin (``host02`` vs ``host2``).
