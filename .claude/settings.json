@@ -1,0 +1,10 @@
+{
+  "attribution": {
+    "sessionUrl": false,
+    "commit": "",
+    "pr": ""
+  },
+  "env": {
+    "CLAUDE_CODE_SUPPRESS_SESSION_ATTRIBUTION": "1"
+  }
+}
