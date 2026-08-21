@@ -17,6 +17,13 @@ Three kinds:
 The per-source resources are registered concretely (one per configured source),
 not as a single URI template, so a client's ``resources/list`` enumerates each
 source's snapshot and schema directly.
+
+Each carries a ``title`` and a ``description`` as well as its URI, name and MIME
+type: the description is the only thing telling a client enumerating
+``resources/list`` what a URI holds, whether reading it costs an InfluxDB round
+trip, and which tool covers the same data. Both fields are optional in the MCP
+schema and were absent until 5.4, so a client saw a URI and a name and nothing
+else. ``tests/test_mcp_surface.py`` is the guard.
 """
 
 __author__ = "Gavin Lucas"
@@ -39,7 +46,18 @@ def register_resources(server, settings, settings_file=None):
     """
     import anyio
 
-    @server.resource("docs://reference", name="data-reference", mime_type="text/markdown")
+    @server.resource(
+        "docs://reference",
+        name="data-reference",
+        title="Data Reference",
+        description=(
+            "What every configured source reports and what its values mean: units, and the "
+            "meaning of coded values (e.g. Nuki lock and door state codes). The same content "
+            "the `get_documentation` tool returns. Static metadata, so reading it makes no "
+            "InfluxDB or device request."
+        ),
+        mime_type="text/markdown",
+    )
     async def _documentation_resource() -> str:
         return await anyio.to_thread.run_sync(build_documentation, settings, settings_file)
 
@@ -56,10 +74,33 @@ def _register_source_resources(server, anyio, source, settings, settings_file):
     the last source.
     """
 
-    @server.resource(f"schema://{source}", name=f"{source}-schema", mime_type="application/json")
+    @server.resource(
+        f"schema://{source}",
+        name=f"{source}-schema",
+        title=f"{source} schema",
+        description=(
+            f"The field keys recorded for {source}, each with any unit and the meaning of a "
+            f"coded value, plus its measurement and - where several producers write to it - "
+            f"the tag that tells them apart and the values it accepts. Discovered live from "
+            f"InfluxDB, which must be reachable; the same payload the `list_fields` tool "
+            f"returns for {source}."
+        ),
+        mime_type="application/json",
+    )
     async def _schema_resource() -> dict:
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file)
 
-    @server.resource(f"state://{source}", name=f"{source}-state", mime_type="application/json")
+    @server.resource(
+        f"state://{source}",
+        name=f"{source}-state",
+        title=f"{source} current state",
+        description=(
+            f"{source}'s state at the moment it is read, each field with its unit and any "
+            f"decoded label - read live from the device where that is cheap, otherwise the "
+            f"latest point recorded in InfluxDB, as the `state` field says. Reading changes "
+            f"nothing; the same payload the `get_current_state` tool returns for {source}."
+        ),
+        mime_type="application/json",
+    )
     async def _state_resource() -> dict:
         return await anyio.to_thread.run_sync(current_state_result, source, settings, settings_file)
