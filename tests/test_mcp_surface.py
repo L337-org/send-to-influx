@@ -35,16 +35,23 @@ What is checked, and why each is a guard rather than a preference:
 Measured surface (this module's fixture: two sources, both write-enabled, so all
 nine tools, three prompts and five resources register):
 
-===========  =============  ============  ============
-category     before (5.3)   after (5.4)   after (5.5)
-===========  =============  ============  ============
-tools                9,937        11,252        11,655
-prompts                225           523           523
-resources                0         1,521         1,653
-**total**       **10,162**    **13,296**    **13,831**
-===========  =============  ============  ============
+===========  ==============  ==================  ===================
+category     5.3 (released)  after the prose     after the schema
+                             pass                pass
+===========  ==============  ==================  ===================
+tools                 9,937              11,252               11,655
+prompts                 225                 523                  523
+resources                 0               1,521                1,653
+**total**        **10,162**          **13,296**           **13,831**
+===========  ==============  ==================  ===================
 
-The 5.5 growth is 535 bytes across three descriptions, and all of it is contract rather
+The columns are named after the change that produced each measurement rather than after a
+release, because 5.3 is the last released version and both later columns are unreleased -
+naming a release here would invent one. The "prose pass" is the change that gave every
+registration a description and a title; the "schema pass" is the one that made
+``list_fields`` sufficient to build a query and a chart from.
+
+The schema pass adds 535 bytes across three descriptions, and all of it is contract rather
 than commentary - a caller cannot use a payload key it has not been told about:
 
 * ``list_fields`` +310 (1,165 -> 1,475): four keys that were not in the payload before
@@ -61,7 +68,7 @@ than commentary - a caller cannot use a payload key it has not been told about:
   had stopped describing what they return. The generated reference now carries how each
   field may be aggregated and a per-field description, and the schema resource now
   carries the database, the tag keys and each field's type and kind - and both still
-  advertised only "units and coded values". This is the same defect the 5.4 pass was for,
+  advertised only "units and coded values". This is the same defect the prose pass was for,
   reappearing on the same day the payload grew, which is the argument for finding it in a
   review of the diff rather than trusting that a description follows its behaviour.
 

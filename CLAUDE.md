@@ -767,7 +767,7 @@ recorded byte budget. Line wrapping is normalised away before matching - a docst
 newlines, so `changes nothing` split across a break would fail a guard the description satisfies.
 
 Measured with that module's fixture (two sources, both write-enabled: nine tools, three prompts,
-five resources), the surface went from **10,162 bytes to 13,296** in 5.4 - tools 9,937 -> 11,252,
+five resources), the surface went from **10,162 bytes to 13,296** in the prose pass - tools 9,937 -> 11,252,
 prompts 225 -> 523, resources 0 -> 1,521. The growth is where the surface was *silent* rather than
 merely terse:
 

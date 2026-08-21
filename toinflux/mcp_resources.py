@@ -22,8 +22,8 @@ Each carries a ``title`` and a ``description`` as well as its URI, name and MIME
 type: the description is the only thing telling a client enumerating
 ``resources/list`` what a URI holds, whether reading it costs an InfluxDB round
 trip, and which tool covers the same data. Both fields are optional in the MCP
-schema and were absent until 5.4, so a client saw a URI and a name and nothing
-else. ``tests/test_mcp_surface.py`` is the guard.
+schema and were absent until the surface pass that added them, so a client saw a
+URI and a name and nothing else. ``tests/test_mcp_surface.py`` is the guard.
 """
 
 __author__ = "Gavin Lucas"
