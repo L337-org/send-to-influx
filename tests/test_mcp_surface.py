@@ -38,25 +38,32 @@ nine tools, three prompts and five resources register):
 ===========  =============  ============  ============
 category     before (5.3)   after (5.4)   after (5.5)
 ===========  =============  ============  ============
-tools                9,937        11,252        11,562
+tools                9,937        11,252        11,655
 prompts                225           523           523
-resources                0         1,521         1,521
-**total**       **10,162**    **13,296**    **13,606**
+resources                0         1,521         1,653
+**total**       **10,162**    **13,296**    **13,831**
 ===========  =============  ============  ============
 
-The 5.5 growth is 310 bytes, all of it ``list_fields`` (1,165 -> 1,475), and all of it
-contract rather than commentary: four keys that were not in the payload before
-(``database``, ``tag_keys``, and each field's ``type`` and ``kind``), a new ``detail``
-parameter, and the three-word vocabulary ``kind`` uses. A caller cannot use a key it has
-not been told about, and ``kind`` in particular is unusable without knowing that
-'counter' forbids a mean - which is the failure the payload exists to prevent. Written
-straight into that description rather than left to ``get_documentation``, because the
-decision it informs is made while reading this tool's result.
+The 5.5 growth is 535 bytes across three descriptions, and all of it is contract rather
+than commentary - a caller cannot use a payload key it has not been told about:
 
-Two things the same edit *removed* from that description, to keep the raise to what the
-contract needed: an example of which bridges appear in ``instances`` (the sentence before
-it already states the rule), and a note that ``detail`` saves a round trip (a
-justification for the design, not something a caller acts on).
+* ``list_fields`` +310 (1,165 -> 1,475): four keys that were not in the payload before
+  (``database``, ``tag_keys``, and each field's ``type`` and ``kind``), a new ``detail``
+  parameter, and the three-word vocabulary ``kind`` uses. ``kind`` in particular is
+  unusable without knowing that 'counter' forbids a mean - which is the failure the
+  payload exists to prevent - so it is stated here rather than left to
+  ``get_documentation``, because the decision it informs is made while reading this
+  tool's result. The same edit *removed* two things to hold the raise down: an example of
+  which bridges appear in ``instances`` (the sentence before it already states the rule),
+  and a note that ``detail`` saves a round trip (a justification for the design, not
+  something a caller acts on).
+* ``get_documentation`` +93 and ``schema://<source>`` +132 between the two of them: both
+  had stopped describing what they return. The generated reference now carries how each
+  field may be aggregated and a per-field description, and the schema resource now
+  carries the database, the tag keys and each field's type and kind - and both still
+  advertised only "units and coded values". This is the same defect the 5.4 pass was for,
+  reappearing on the same day the payload grew, which is the argument for finding it in a
+  review of the diff rather than trusting that a description follows its behaviour.
 
 Identical on every supported Python since ``register_tool()`` dedents each docstring:
 before it, 3.10-3.12 advertised 14,569 bytes where 3.13+ advertised 13,297, the
@@ -145,11 +152,11 @@ WRITE_EFFECT_PHRASES = {
 # Recorded ceilings, not predictions - see the table in this module's docstring for
 # what is actually measured. Raising one is a deliberate decision that belongs in the
 # commit message with its reason.
-MAX_TOOL_BYTES = 11_800
+MAX_TOOL_BYTES = 11_900
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 13_850
+MAX_TOTAL_BYTES = 14_050
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],

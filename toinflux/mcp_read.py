@@ -2048,8 +2048,9 @@ def register_read_tools(server, settings, settings_file=None):
     @register_tool(server, title="Get Field Documentation", annotations=_READ_ONLY)
     async def get_documentation() -> dict:
         """Return a Markdown reference of what every configured source reports and
-        what its values mean - units, and the meaning of coded values (e.g. Nuki
-        lock and door state codes).
+        what its values mean: units, the meaning of coded values (e.g. Nuki lock and
+        door state codes), how each field may be aggregated, and a description where
+        a field's name does not say what it is.
 
         The cheapest orientation call: no arguments, no InfluxDB round trip, every
         source at once. `list_fields` is the per-source counterpart and lists the

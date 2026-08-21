@@ -11,7 +11,7 @@ via :mod:`toinflux.mcp_read`.
 Three kinds:
 
 * ``docs://reference`` - the units/coded-value documentation (Markdown).
-* ``schema://<source>`` - one per source: its fields, units and code meanings.
+* ``schema://<source>`` - one per source: the ``list_fields`` payload for it.
 * ``state://<source>`` - one per source: its current/live state.
 
 The per-source resources are registered concretely (one per configured source),
@@ -79,11 +79,11 @@ def _register_source_resources(server, anyio, source, settings, settings_file):
         name=f"{source}-schema",
         title=f"{source} schema",
         description=(
-            f"The field keys recorded for {source}, each with any unit and the meaning of a "
-            f"coded value, plus its measurement and - where several producers write to it - "
-            f"the tag that tells them apart and the values it accepts. Discovered live from "
-            f"InfluxDB, which must be reachable; the same payload the `list_fields` tool "
-            f"returns for {source}."
+            f"Everything needed to query {source}: its database and measurement, the tag keys to "
+            f"group by, and each field with its type, unit, coded-value meanings and how it may be "
+            f"aggregated - plus, where several producers write to it, the tag telling them apart "
+            f"and the values it accepts. Discovered live from InfluxDB, which must be "
+            f"reachable; the `list_fields` payload, minus its per-field descriptions."
         ),
         mime_type="application/json",
     )
