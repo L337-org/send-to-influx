@@ -538,6 +538,58 @@ def _select_and_group(field, aggregation, group_by, instance_clause):
     return f"{func}({_quote_identifier(field)})", f" GROUP BY time({group_by}){instance_clause} fill(none)"
 
 
+def build_panel_query(schema, field, aggregation, group_by_tags=()):
+    """Build an InfluxQL SELECT for a *dashboard panel*, using Grafana's own macros
+    for the time window and the bucket width.
+
+    Deliberately separate from :func:`build_query` rather than a flag on it, because
+    the two produce different things and mixing them would let one leak into the
+    other. ``build_query`` runs here and now: it resolves concrete RFC3339 bounds and
+    applies a LIMIT so a result cannot be unbounded. A panel query is never executed
+    by this server at all - the panel supplies the window - so it carries ``$timeFilter``
+    and ``time($__interval)`` in place of both, and no LIMIT, which would fight the
+    panel's own ``maxDataPoints``. Verified against a real Grafana 13.2 and InfluxDB
+    1.8 that both macros resolve and return data.
+
+    The identifier handling is shared, which is the point of building it here rather
+    than in the dashboard module: the measurement, field and tag keys go through the
+    same charset validation and quoting as every other query, so the injection defence
+    cannot drift between the two builders.
+
+    :param schema: a ReadSchema (measurement, tag filters, allowed fields)
+    :param field: the field key (must be in the schema's live allowlist)
+    :param aggregation: one of AGGREGATIONS - never "raw", since a panel bucketed by
+        ``$__interval`` always aggregates
+    :param group_by_tags: tag keys to separate into their own series
+    :return: the InfluxQL query string
+    :raises ToolParamError: for an unknown field or aggregation
+    """
+    if field not in schema.allowed_fields:
+        raise ToolParamError(
+            f"unknown field {field!r} for source {schema.source!r}; "
+            f"available fields: {', '.join(sorted(schema.allowed_fields)) or '(none)'}"
+        )
+    func = AGGREGATIONS.get(aggregation)
+    if func is None:
+        raise ToolParamError(f"unknown aggregation {aggregation!r}; choose one of: {', '.join(sorted(AGGREGATIONS))}")
+    _validate_identifier(schema.measurement, "measurement")
+    _validate_identifier(field, "field")
+    tags = ""
+    for tag in group_by_tags:
+        _validate_identifier(tag, "tag")
+        tags += f", {_quote_identifier(tag)}"
+    # $timeFilter is Grafana's placeholder for the panel's own window, so it is the
+    # whole WHERE clause a panel needs beyond this source's disambiguating tags.
+    where = ["$timeFilter"]
+    for tag_key, tag_value in sorted(schema.tag_filters.items()):
+        _validate_identifier(tag_key, "tag")
+        where.append(f"{_quote_identifier(tag_key)} = {_quote_string_literal(tag_value)}")
+    return (
+        f"SELECT {func}({_quote_identifier(field)}) FROM {_quote_identifier(schema.measurement)} "
+        f"WHERE {' AND '.join(where)} GROUP BY time($__interval){tags} fill(none)"
+    )
+
+
 def _build_single_point_query(measurement, tag_filters, fields, order, group_by_tag=None):
     """Build an InfluxQL SELECT for one point at either end of a measurement.
 

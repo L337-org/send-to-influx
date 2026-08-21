@@ -729,6 +729,57 @@ field set. Design points:
     caller/model mistake) surfaces to the model as a tool error; `SourceConnectionError` is a
     transient transport failure the collector loop would retry, so the two are kept distinct.
 
+**Dashboard panels** (`toinflux/mcp_dashboards.py`, `register_dashboard_tools()`): one tool,
+`suggest_dashboard_panels`, turning a source's schema into what a Grafana panel needs - per field an
+InfluxQL query, a panel type, the aggregation to use, the aggregations to avoid, a Grafana unit,
+value mappings decoding a coded field, and a series alias.
+
+- **A tool rather than a prompt, decided deliberately.** A prompt would have cost no permanent
+  surface, but it is not in the model's tool list, so nothing would tell a model this data can be
+  charted - which was the entire problem. Clients also vary in whether they surface prompts at all.
+  And a tool is the only form that can be *tested*: "never take the mean of a counter" is a hope in
+  prose and an assertion in CI. The cross-server workflow prose lives in README.md instead, where a
+  human reads it and it costs no context.
+- **Its own module, and that boundary is the design.** Every Grafana-specific fact this project
+  knows lives here: the panel type names, `GRAFANA_UNITS`, the value-mapping shape.
+  `MCP_FIELD_METADATA` and `list_fields` stay vendor-neutral, which was scoped as a deliberate
+  exclusion - encoding another product's vocabulary into the schema would undo the separation the
+  schema depends on. `mcp_read` does not import this module, so the leak is structurally impossible
+  rather than merely avoided.
+- **It emits panel parts, never dashboard JSON.** Measured against a real Grafana 13.2, a saved
+  dashboard came back *verbatim* with nothing added and **no `schemaVersion` at all**
+  (`meta.apiVersion` is `v0alpha1`), where older Grafana carries that field and more defaults. A
+  template for a product we do not control and cannot assert against in CI would rot silently, so
+  the caller assembles the envelope, copying one of its own dashboards for the shape.
+- **`build_panel_query()` lives in `mcp_read.py`, not here**, so the injection defence cannot drift:
+  measurement, field and tag keys go through the same charset validation, quoting and live-allowlist
+  check as every other query. It is deliberately *not* a flag on `build_query()` - that one resolves
+  concrete RFC3339 bounds and applies a LIMIT because it executes here, where a panel query carries
+  `$timeFilter` and `time($__interval)` and no LIMIT, which would fight the panel's `maxDataPoints`.
+- **`avoid_aggregations` is the load-bearing field**, not `aggregation`. A caller composing its own
+  query needs to recognise the mistake, not just copy the suggestion - and the mistake is invisible:
+  the mean of a resetting counter is a plausible line with no referent.
+- **An undeclared numeric field gets no `kind` and is suggested `last`**, the one aggregation that
+  cannot be wrong for any kind. Suggesting `mean` would say averaging is safe about a field that may
+  be a counter, which is the failure the whole feature exists to prevent.
+- **A tag already pinned by `MCP_TAG_FILTERS` is not grouped by** (`series_tags()`): a Zappi pins
+  `device` to its own label, so grouping by it would add a series dimension with one member. Hue's
+  `host` and Nuki's `device` are real axes and are grouped.
+- **Every panel is aliased, including single-series ones.** Without an alias Grafana names the series
+  after the query - a Zappi energy panel came back as `myenergi.last` on a real Grafana - so a
+  grouped panel gets `$tag_<key>` and an ungrouped one the bare field name (a literal alias, verified
+  to pass through unchanged). Two or more tags is the space-joined form and is **untested**: no source
+  ships more than one unpinned tag, so it is documented as such rather than left looking verified.
+- **An unmappable unit is omitted, not passed through.** Grafana accepts any string as a unit id
+  server-side and silently renders an unknown one as no unit, so a raw `W/m²` would look configured
+  and do nothing. `GRAFANA_UNITS` covers only ids read out of a running Grafana's own bundle; W/m²,
+  gCO2/kWh, pence/kWh and "kWh or m³" have no equivalent and get no `unit` key.
+- **Everything Grafana-side was established by execution**, against Grafana 13.2.0 and InfluxDB 1.8:
+  the target field names (`query`/`rawQuery`/`resultFormat`/`alias`), that `$timeFilter` and
+  `$__interval` both resolve and return data, the value-mapping shape, and every unit id. The panels
+  this tool suggests were assembled into a real dashboard, saved, and re-executed through
+  `/api/ds/query` to confirm each returns rows.
+
 **Resources** (`toinflux/mcp_resources.py`, `register_resources()`): the addressable/listable view of
 the same read data - the design rule is *anything exposed as a resource is also a tool* (MCP clients
 use resources in limited ways, so the tools stay the workhorses). Three kinds, all built from the
@@ -1005,8 +1056,12 @@ needs no filter. `measurement_for()`/`shares_measurement()` are unaffected - the
    several overwriting each other. Leave `MCP_LIVE_STATE` at its `True` default *unless*
    `get_data()` is expensive or pointless to call live (a full run like Speedtest, or delayed data
    like Octopus) - set it `False` and current-state will read the latest InfluxDB point instead.
-   Nothing else is needed - the source is exposed by the read tools *and* resources automatically once
-   it's in `sources:`.
+   Nothing else is needed - the source is exposed by the read tools, the resources *and*
+   `suggest_dashboard_panels` automatically once it's in `sources:`; that tool derives its panel type
+   and aggregation from the `kind` set here. If the source's unit has no `GRAFANA_UNITS` entry
+   (`toinflux/mcp_dashboards.py`), add one **only** if the identifier is real - read it out of a
+   running Grafana, which accepts any string and renders an unknown one as no unit at all - otherwise
+   leave it out and the panel goes unitless.
 4c. (Only if the source can be *controlled* or *actioned*, and its vendor API has a documented write
    path.) Set `MCP_WRITABLE = True` and implement the source's vendor write logic as method(s) on the
    class (see `Hue`'s `mcp_set_device_state`/`mcp_list_writable_devices`, or `Speedtest`'s

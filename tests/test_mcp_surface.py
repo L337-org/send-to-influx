@@ -32,24 +32,31 @@ What is checked, and why each is a guard rather than a preference:
   every session that loads the surface, so growth is a deliberate act with a reason
   in the commit message, not a drift nobody measured.
 
-Measured surface (this module's fixture: two sources, both write-enabled, so all
-nine tools, three prompts and five resources register):
+Measured surface (this module's fixture: two sources, both write-enabled, so all ten
+tools, three prompts and five resources register):
 
-===========  ==============  ==================  ===================
-category     5.3 (released)  after the prose     after the schema
-                             pass                pass
-===========  ==============  ==================  ===================
-tools                 9,937              11,252               11,809
-prompts                 225                 523                  523
-resources                 0               1,521                1,651
-**total**        **10,162**          **13,296**           **13,983**
-===========  ==============  ==================  ===================
+===========  ==============  ===============  ================  ================
+category     5.3 (released)  after the prose  after the schema  after the panel
+                             pass             pass              tool
+===========  ==============  ===============  ================  ================
+tools                 9,937           11,252            11,809           13,119
+prompts                 225              523               523              523
+resources                 0            1,521             1,651            1,651
+**total**        **10,162**       **13,296**        **13,983**       **15,293**
+===========  ==============  ===============  ================  ================
+
+The panel tool is a whole new registration, so its 1,310 bytes are the cost of the
+capability existing rather than a description growing. It was chosen over a prompt for
+exactly the reason that makes it cost this: a prompt is not in the model's tool list,
+so nothing would tell a model the data can be charted - and not every client surfaces
+prompts at all. See ``toinflux/mcp_dashboards.py`` for the rest of that reasoning.
 
 The columns are named after the change that produced each measurement rather than after a
-release, because 5.3 is the last released version and both later columns are unreleased -
+release, because 5.3 is the last released version and every later column is unreleased -
 naming a release here would invent one. The "prose pass" is the change that gave every
 registration a description and a title; the "schema pass" is the one that made
-``list_fields`` sufficient to build a query and a chart from.
+``list_fields`` sufficient to build a query from; the "panel tool" is
+``suggest_dashboard_panels``.
 
 The schema pass adds 687 bytes, and all of it is contract rather than commentary - a
 caller cannot use a payload key it has not been told about, nor rely on one it was told
@@ -98,6 +105,7 @@ from mcp.server.mcpserver import MCPServer
 import anyio
 import pytest
 
+from toinflux.mcp_dashboards import register_dashboard_tools
 from toinflux.mcp_prompts import register_prompts
 from toinflux.mcp_read import register_read_tools
 from toinflux.mcp_resources import register_resources
@@ -109,6 +117,9 @@ from toinflux.mcp_write import register_write_tools
 SIBLINGS = {
     "list_sources": {"list_fields", "query_history", "get_current_state", "get_documentation"},
     "list_fields": {"list_sources", "query_history", "get_documentation"},
+    # The dashboard tool's neighbours are the two a caller would otherwise reach for:
+    # the raw schema, and running a query rather than being handed one.
+    "suggest_dashboard_panels": {"list_fields", "query_history"},
     "query_history": {"list_sources", "list_fields", "get_current_state", "get_data_range"},
     # The pair a caller most often confuses: now versus recorded history.
     "get_current_state": {"query_history", "get_data_range", "list_sources"},
@@ -137,6 +148,9 @@ NON_TOOL_IDENTIFIERS = {
     "retention.known",
     "span_seconds",
     "tag_keys",
+    "panel_type",
+    "value_mappings",
+    "avoid_aggregations",
 }
 
 # Words that describe how a call fails. A description mentioning none of them is
@@ -164,11 +178,11 @@ WRITE_EFFECT_PHRASES = {
 # Recorded ceilings, not predictions - see the table in this module's docstring for
 # what is actually measured. Raising one is a deliberate decision that belongs in the
 # commit message with its reason.
-MAX_TOOL_BYTES = 11_900
+MAX_TOOL_BYTES = 13_350
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 14_050
+MAX_TOTAL_BYTES = 15_550
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],
@@ -188,6 +202,7 @@ def _server():
     """
     server = MCPServer(name="surface")
     register_read_tools(server, SETTINGS, None)
+    register_dashboard_tools(server, SETTINGS, None)
     register_write_tools(server, SETTINGS, None, enabled_sources=["hue", "speedtest"])
     register_prompts(server, SETTINGS, None, enabled_sources=["hue", "speedtest"])
     register_resources(server, SETTINGS, None)
