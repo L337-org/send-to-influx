@@ -47,9 +47,9 @@ class Speedtest(DataHandler):
     # scope a query to one, and report per host instead of merging them.
     MCP_INSTANCE_TAG = "host"
     MCP_FIELD_METADATA = {
-        "download": {"unit": "bits/s"},
-        "upload": {"unit": "bits/s"},
-        "ping": {"unit": "ms"},
+        "download": {"unit": "bits/s", "kind": "gauge"},
+        "upload": {"unit": "bits/s", "kind": "gauge"},
+        "ping": {"unit": "ms", "kind": "gauge"},
     }
 
     # One speed test at a time per host: a scheduled collection cycle and an

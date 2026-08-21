@@ -174,11 +174,28 @@ class DataHandler:
     # measurement (e.g. {"device": "zappi"}); empty for a source that owns its
     # measurement outright.
     MCP_TAG_FILTERS: dict = {}
-    # Field annotation for the read tool: maps a field key - or a _-delimited
+    # Field annotation for the read tools: maps a field key - or a _-delimited
     # suffix, for collectors with dynamic prefixes (Nuki's per-lock fields) - to
-    # {"unit": str} and/or {"codes": {int: str}} for decoding numeric state
-    # codes. Sourced from UNITS.md; kept here so the read tool is domain-aware
-    # without a parallel schema to maintain.
+    # any of:
+    #   "unit"        display unit, e.g. "W", "kWh", "°C". Omitted where a field
+    #                 genuinely has none (a flag, a text label, a status code).
+    #   "codes"       {int: str} meanings for a numeric-coded field, so a state
+    #                 reads back as its label rather than a bare number.
+    #   "kind"        how the value may be aggregated - one of mcp_read's
+    #                 FIELD_KINDS ("gauge"/"counter"/"state"). The one thing here
+    #                 that is not derivable from the value: nothing else
+    #                 distinguishes a cumulative total, whose mean is a
+    #                 plausible-looking number that means nothing, from an
+    #                 instantaneous reading.
+    #   "description" what the field is, *only* where its name, unit and coded
+    #                 values do not already say. One that restates the name costs
+    #                 context on every detailed call and conveys nothing, so a
+    #                 self-describing field (openmeteo's temperature_2m,
+    #                 speedtest's download) deliberately has none.
+    # Every declared entry carries at least one of unit/codes/description, and a
+    # kind; tests/test_field_metadata.py enforces both, and that the units and
+    # coded values agree with UNITS.md. Kept here rather than in a parallel schema
+    # so the read tools, the generated reference and the resources cannot drift.
     MCP_FIELD_METADATA: dict = {}
     # A short human description of what this source reports, surfaced by the MCP
     # read tools/resources (list_sources, the documentation tool, the per-source

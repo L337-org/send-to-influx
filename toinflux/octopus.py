@@ -22,9 +22,20 @@ class Octopus(DataHandler):
     # reads the latest recorded point instead of calling get_data() (see DataHandler).
     MCP_LIVE_STATE = False
     MCP_FIELD_METADATA = {
-        "consumption_kwh": {"unit": "kWh"},
-        "gas_consumption": {"unit": "kWh or m³"},
-        "unit_rate_p_per_kwh": {"unit": "pence/kWh (inc. VAT)"},
+        # Per interval, not cumulative: summing over a range gives the total for it,
+        # and a mean is the average half hour. Both are wrong to read as a meter
+        # reading, which is what "consumption" suggests on its own.
+        "consumption_kwh": {
+            "unit": "kWh",
+            "kind": "gauge",
+            "description": "Electricity used during one half-hour interval, not a running meter total.",
+        },
+        "gas_consumption": {
+            "unit": "kWh or m³",
+            "kind": "gauge",
+            "description": "Gas used during one interval, in whichever unit the meter reports; never converted.",
+        },
+        "unit_rate_p_per_kwh": {"unit": "pence/kWh (inc. VAT)", "kind": "gauge"},
     }
 
     def _get(self, path):

@@ -125,11 +125,42 @@ class Nuki(MqttDataHandler):
     # current-state path report per lock rather than only the handler's own.
     MCP_LIVE_STATE_COVERS_ALL_INSTANCES = True
     # Field keys are bare now (stateValue, not Front_Door_stateValue), so the metadata keys
-    # on the field name directly with no suffix matching.
+    # on the field name directly with no suffix matching - but a pre-migration install still
+    # holds prefixed keys, which metadata_for's suffix match resolves to these same entries.
+    #
+    # Every field here is a "state": Nuki reports codes, flags, text and timestamps, and the
+    # only numeric quantity is the battery level. So a chart of any of them wants a state
+    # timeline or a table, never a line through averaged values.
     MCP_FIELD_METADATA = {
-        "stateValue": {"codes": STATE_VALUE_CODES},
-        "doorsensorStateValue": {"codes": DOORSENSOR_STATE_CODES},
-        "batteryChargeState": {"unit": "%"},
+        "stateValue": {"codes": STATE_VALUE_CODES, "kind": "state"},
+        "doorsensorStateValue": {"codes": DOORSENSOR_STATE_CODES, "kind": "state"},
+        "batteryChargeState": {"unit": "%", "kind": "gauge"},
+        "batteryCritical": {"kind": "state", "description": "True once the lock's own batteries need replacing."},
+        "batteryCharging": {"kind": "state", "description": "True while a rechargeable battery pack is charging."},
+        "keypadBatteryCritical": {"kind": "state", "description": "Only published when a keypad is paired."},
+        "doorsensorBatteryCritical": {"kind": "state", "description": "Only published when a door sensor is paired."},
+        # Both liveness signals, and they fail for different reasons - which is the whole
+        # value of saying so: a lock off the network and a lock that cannot reach Nuki's
+        # cloud look identical in stateValue, because retained state keeps its last value.
+        "connected": {
+            "kind": "state",
+            "description": "Broker liveness (MQTT Last Will): false once the lock stops responding, so "
+            "retained state that has gone stale is detectable.",
+        },
+        "serverConnected": {"kind": "state", "description": "Whether the lock can currently reach Nuki's cloud."},
+        # Text, not a number - and the point's own InfluxDB timestamp is what a chart's time
+        # axis should use, so this is a diagnostic rather than a series.
+        "timestamp": {
+            "kind": "state",
+            "description": "ISO8601 text of the lock's last state change, as Nuki reported it.",
+        },
+        "ringactionTimestamp": {
+            "kind": "state",
+            "description": "ISO8601 text of the last doorbell ring; published by a Nuki Opener, never by a lock.",
+        },
+        "mode": {"kind": "state", "description": "Raw Nuki operating-mode code, passed through uninterpreted."},
+        "deviceType": {"kind": "state", "description": "Raw Nuki device-type code, passed through uninterpreted."},
+        "firmware": {"kind": "state", "description": 'Firmware version as text (e.g. "3.9.5"), never a number.'},
     }
 
     # The live subscription filter for the streaming path - the same topic filter the

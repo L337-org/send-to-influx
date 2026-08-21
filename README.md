@@ -664,8 +664,13 @@ To allow triggering a speed test on demand, set `speedtest.mcp_read_write: true`
 Once connected, the client has these read tools:
 
 - **`list_sources`** - the collectors that can be queried, each with a short description.
-- **`list_fields`** - the fields available for a source, with their units and (for coded fields
-  like Nuki lock state) what each value means.
+- **`list_fields`** - everything needed to write a query or build a chart for one source: the
+  database and measurement to query, the tag keys available to group by, and every field with its
+  InfluxDB type, its unit, what each value means for a coded field like Nuki lock state, and how it
+  may be aggregated. That last part - `kind` - is the one a dashboard gets silently wrong without:
+  a `gauge` is an instantaneous reading, a `counter` a running total that resets (read its last
+  value or a difference, never its mean), a `state` a discrete code or label. Pass `detail: true`
+  for the per-field descriptions as well, in the same call.
 - **`get_current_state`** - a source's state *right now* ("is the door locked?", "which lights are
   on?"). Most sources are read live from the device; Speedtest and Octopus report their latest
   recorded reading instead.
@@ -684,7 +689,7 @@ Alongside the tools, the server offers **resources** - the same read data as add
 client can list and attach, rather than call:
 
 - **`docs://reference`** - the `get_documentation` reference as Markdown.
-- **`schema://<source>`** - one per configured source: its fields, units and coded-value meanings.
+- **`schema://<source>`** - one per configured source: the `list_fields` payload for it.
 - **`state://<source>`** - one per configured source: its state right now.
 
 Anything offered as a resource is also a tool, deliberately: clients vary in how much they use

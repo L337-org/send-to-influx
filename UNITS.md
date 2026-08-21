@@ -5,10 +5,19 @@ It reflects what the API returns; `send-to-influx` does not convert or rescale a
 unless explicitly noted below.
 
 The optional MCP server's read tools surface these units and coded-value meanings to Claude
-(see each source class's `MCP_FIELD_METADATA` in `toinflux/`); keep the two in step when adding
-a source or field. The server's `get_documentation` tool / `docs://reference` resource generate
-a machine-readable version of this from `MCP_FIELD_METADATA` plus each source's `MCP_DESCRIPTION`,
-so those class attributes - not this file - are what the model actually reads.
+(see each source class's `MCP_FIELD_METADATA` in `toinflux/`). The two are kept in step by
+`tests/test_field_metadata.py` rather than by anyone remembering: it fails if a declared field is
+missing from this file, or if the unit or a coded value here disagrees with the metadata. The check
+is one-way, since this file legitimately documents things that are not field keys - Hue's rows are
+by device class, because its field keys are your own device names, and `gen_<fuel>` is a pattern.
+
+Alongside a unit and coded values, the metadata carries two things this file does not tabulate: how
+each field may be aggregated (`gauge`, `counter` or `state` - see `list_fields` in the README), and
+a short description where a field's name does not say what it is. Those are prose for a model to
+read, where the Notes column below is prose for you; neither is generated from the other, and no
+test compares them. The server's `get_documentation` tool / `docs://reference` resource generate the
+model-facing view from `MCP_FIELD_METADATA` plus each source's `MCP_DESCRIPTION`, so those class
+attributes - not this file - are what the model actually reads.
 
 ## Hue Bridge (`hue`)
 
@@ -57,7 +66,7 @@ in an untagged series.
 | `sta` | numeric status code | Not a physical unit |
 | `wifiLink`, `ethernetLink` | N/A | Diagnostic/status fields, not documented as physical units |
 | `newAppAvailable`, `newBootloaderAvailable` | boolean (0/1) | Update-available flags |
-| `Charge`, `Import`, `Export`, `Genera` | kWh | Daily totals computed by this project from the day/hour endpoint's raw values (divided by 3,600,000 and rounded to 4 dp); always collected regardless of `fields` |
+| `Charge`, `Import`, `Export`, `Genera` | kWh | Energy for the **current hour**, computed by this project from the day/hour endpoint's raw values (divided by 3,600,000 and rounded to 4 dp); always collected regardless of `fields`. Each accumulates through the hour and drops back at the top of the next, so read the last value within an hour rather than a mean across several. Where the current hour's entry is missing from the API's response - MyEnergi omits all-zero entries, so this happens around midnight - the value is the day so far instead |
 
 ## MyEnergi Eddi (`eddi`)
 
@@ -172,7 +181,7 @@ identifies nothing, and moving to a different broker should not start a new seri
 
 | Field | Unit | Notes |
 |---|---|---|
-| `download`, `upload` | bits per second | From `speedtest-cli` |
+| `download`, `upload` | bits/s | Bits per second, from `speedtest-cli` |
 | `ping` | ms | Round-trip time to the test server |
 
 Other fields available from `speedtest-cli`'s results (e.g. `bytes_sent`, `bytes_received`, `server.*`) can also

@@ -100,6 +100,25 @@ DEFAULT_RESULT_POINTS = 500
 
 _RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
+# How a field's value may legitimately be aggregated, which is not derivable from
+# the value itself: "gauge" is an instantaneous reading, so every function in
+# AGGREGATIONS means something; "counter" is a running total that resets, where a
+# mean produces a plausible number that means nothing and only the last value or a
+# difference between two does; "state" is a discrete code, flag or label, where
+# nothing but first/last/count says anything at all. Declared per field in a
+# source's MCP_FIELD_METADATA and reported by list_fields.
+FIELD_KINDS = frozenset({"gauge", "counter", "state"})
+
+# An InfluxDB field type that can only be a state, whatever (if anything) the
+# source declared: a string or a boolean has no arithmetic, so first/last/count is
+# all there is. This is what lets a field carrying *no* static metadata still be
+# aggregated safely, which matters because some field keys cannot be tabulated in
+# advance - Hue's are the operator's own device names. A numeric field with nothing
+# declared is deliberately left with no kind rather than assumed to be a gauge:
+# "averaging this is fine" is exactly the wrong thing to say about a counter, and
+# saying nothing is recoverable where saying that is not.
+_STATE_INFLUX_TYPES = frozenset({"string", "boolean"})
+
 
 @dataclass
 class ReadSchema:
@@ -109,8 +128,8 @@ class ReadSchema:
     knowledge (never model input); ``allowed_fields`` is the live field set
     discovered from InfluxDB (the injection allowlist); ``field_metadata`` maps a
     field key - or a ``_``-delimited suffix, for collectors with dynamic prefixes
-    like Nuki's per-lock fields - to ``{"unit": str, "codes": {int: str}}`` for
-    result annotation.
+    like Nuki's per-lock fields - to ``{"unit": str, "codes": {int: str},
+    "kind": str, "description": str}`` for result annotation.
     """
 
     source: str
@@ -119,6 +138,14 @@ class ReadSchema:
     tag_filters: dict = dataclass_field(default_factory=dict)
     allowed_fields: set = dataclass_field(default_factory=set)
     field_metadata: dict = dataclass_field(default_factory=dict)
+    # ``field_types`` maps a discovered field key to its InfluxDB type ("float",
+    # "integer", "string", "boolean") and ``tag_keys`` holds every tag the
+    # measurement carries - both from the same SHOW ... KEYS request that produced
+    # ``allowed_fields``. Annotation only: ``allowed_fields`` remains the single
+    # injection allowlist, so a schema built without them (a test, or a caller that
+    # only needs the gate) simply reports no type and no dimensions.
+    field_types: dict = dataclass_field(default_factory=dict)
+    tag_keys: set = dataclass_field(default_factory=set)
     # The tag distinguishing producers within this measurement (from
     # MCP_INSTANCE_TAG), and the values it currently holds - the live allowlist for
     # an `instance` argument. None/empty for a source with a single producer, which
@@ -150,9 +177,9 @@ def resolve_db(source_settings, influx_settings):
     return source_settings.get("db")
 
 
-def build_schema(handler, discovered_fields, db, instance_values=None):
+def build_schema(handler, discovered, db, instance_values=None):
     """Assemble a ReadSchema from a DataHandler instance's static class metadata,
-    the live discovered field set, and the resolved db (see resolve_db).
+    the live discovered keys, and the resolved db (see resolve_db).
 
     Note the field set comes from ``SHOW FIELD KEYS``, which is per-measurement,
     not per-tag. For the three MyEnergi devices that share the ``myenergi``
@@ -162,20 +189,24 @@ def build_schema(handler, discovered_fields, db, instance_values=None):
     source owns its measurement, so this only affects the MyEnergi trio.
 
     :param handler: a constructed DataHandler subclass instance
-    :param discovered_fields: field keys found via discover_fields()
+    :param discovered: the measurement's keys from discover_measurement_keys(), or
+        a plain collection of field-key strings where only the allowlist matters
     :param db: the resolved database/bucket name (from resolve_db)
     :param instance_values: values of the source's instance tag found via
         discover_tag_values(), or None when it has no instance tag
     :return: ReadSchema
     """
     measurement = handler.MCP_MEASUREMENT or handler.source
+    keys = discovered if isinstance(discovered, MeasurementKeys) else MeasurementKeys.from_field_names(discovered)
     return ReadSchema(
         source=handler.source,
         measurement=measurement,
         db=db,
         tag_filters=handler.mcp_tag_filters(),
-        allowed_fields=set(discovered_fields),
+        allowed_fields=keys.field_names,
         field_metadata=dict(handler.MCP_FIELD_METADATA),
+        field_types=dict(keys.field_types),
+        tag_keys=set(keys.tag_keys),
         instance_tag=handler.MCP_INSTANCE_TAG,
         instance_values=set(instance_values or ()),
     )
@@ -213,6 +244,25 @@ def metadata_for(field_metadata, field):
         if field.endswith(f"_{key}") and (best_key is None or len(key) > len(best_key)):
             best_key = key
     return field_metadata[best_key] if best_key is not None else {}
+
+
+def field_kind(meta, influx_type=None):
+    """Return how a field may legitimately be aggregated, or None if unknown.
+
+    A declared ``kind`` wins. Failing that, a coded field is a state by definition,
+    and so is any string or boolean field - see ``_STATE_INFLUX_TYPES`` for why a
+    *numeric* field with nothing declared is left unanswered instead of assumed to
+    be a gauge.
+
+    :param meta: the field's metadata dict (from :func:`metadata_for`)
+    :param influx_type: the field's InfluxDB type, where discovery reported one
+    :return: one of ``FIELD_KINDS``, or None
+    """
+    if meta.get("kind"):
+        return meta["kind"]
+    if meta.get("codes") or influx_type in _STATE_INFLUX_TYPES:
+        return "state"
+    return None
 
 
 def _decode_code(value, codes):
@@ -496,7 +546,7 @@ def _build_single_point_query(measurement, tag_filters, fields, order, group_by_
     Selects each field explicitly (not ``*``) so tag columns are excluded, and applies the
     source's static tag filters. Measurement, field and tag keys are charset-validated and
     double-quoted, tag values quoted string literals - the same layered defence as
-    build_query. Fields come from discover_fields (the live allowlist), never model input.
+    build_query. Fields come from key discovery (the live allowlist), never model input.
 
     :param measurement: the InfluxDB measurement name
     :param tag_filters: static tag key/value filters (may be empty)
@@ -618,32 +668,124 @@ def _get(session, url, kwargs, description):
         raise SourceConnectionError(f"InfluxDB read failed ({description}): {exc}") from exc
 
 
-def discover_fields(session, influx_settings, db, measurement):
-    """Return the set of field keys present in a measurement, via SHOW FIELD
-    KEYS. This is the live allowlist a queried field is checked against. The
-    measurement is charset-validated (it comes from the source class's static
-    schema, but validating is cheap) before interpolation.
+@dataclass(frozen=True)
+class MeasurementKeys:
+    """What a measurement currently holds: its field keys with their InfluxDB
+    types, and its tag keys.
 
-    :return: set of field-key strings (possibly empty)
-    :raises SourceConnectionError: on a transport/parse failure
+    ``field_types`` maps a field key to ``"float"``/``"integer"``/``"string"``/
+    ``"boolean"`` as ``SHOW FIELD KEYS`` reports it. The type is not a nicety: it
+    is what tells a caller that a text or coded field wants a state-timeline
+    rendering rather than a line, and it arrives in the same response as the key
+    names, so keeping it costs nothing where discarding it cost a guess.
+
+    ``tag_keys`` is every dimension the measurement can be grouped by. Only the
+    one tag a source declares as its instance axis was reachable before; the rest
+    (a MyEnergi ``device``, a Nuki lock) existed in the data and nowhere in the
+    schema a caller could see.
+    """
+
+    field_types: dict
+    tag_keys: frozenset
+
+    @property
+    def field_names(self):
+        """The field keys as a set - the injection allowlist."""
+        return set(self.field_types)
+
+    @classmethod
+    def from_field_names(cls, names):
+        """Build keys from field names alone, with no types and no tags.
+
+        For a caller that has only the allowlist to offer, so an incomplete schema
+        reports nothing rather than reporting a wrong type.
+        """
+        return cls(field_types={name: None for name in names}, tag_keys=frozenset())
+
+
+def _statement_results(payload, description):
+    """Split a multi-statement InfluxQL response into ``{statement_id: [series]}``.
+
+    A per-result error (wrong db, auth, a rejected statement) arrives inside a 200
+    body, so it is raised here rather than left to look like an empty answer - the
+    same reasoning as :func:`run_query`, and it matters more with several statements
+    in flight: verified against InfluxDB 1.8 and 2.7's v1-compatibility endpoint that
+    an unusable database answers with statement 0 carrying ``"error": "not
+    executed"`` and *no result at all* for the statements after it, so a caller that
+    ignored the error would read the missing statement as "this measurement has no
+    tags".
+
+    ``statement_id`` is present on both versions; positional order is the fallback
+    so a response without it degrades to the same reading rather than to nothing.
+
+    :param payload: the parsed response body
+    :param description: what was being discovered, for the error message
+    :return: {statement id: list of series dicts}
+    :raises SourceConnectionError: if any statement reported an error
+    """
+    out = {}
+    for index, result in enumerate(payload.get("results", [])):
+        if result.get("error"):
+            raise SourceConnectionError(f"InfluxDB rejected the {description}: {result['error']}")
+        out[result.get("statement_id", index)] = result.get("series", [])
+    return out
+
+
+def _key_column(all_series, column):
+    """Yield each row's value from a named column across a statement's series.
+
+    Skips a series that has no such column, with a warning, rather than falling
+    back to a positional guess: a wrong key list would put fields in the tag list
+    or invent dimensions that cannot be grouped by, and both read as authoritative.
+
+    :param all_series: the series list for one statement
+    :param column: the column name to read (e.g. "fieldKey")
+    :return: iterator of (series, row, value) triples, the value always a string,
+        so a caller can read a second column of the same row
+    """
+    for series in all_series:
+        columns = series.get("columns", [])
+        if column not in columns:
+            logging.warning("Key discovery returned a series with no %r column (%s); ignoring it", column, columns)
+            continue
+        index = columns.index(column)
+        for row in series.get("values", []):
+            if len(row) > index and isinstance(row[index], str):
+                yield series, row, row[index]
+
+
+def discover_measurement_keys(session, influx_settings, db, measurement):
+    """Return a measurement's field keys (with their types) and tag keys.
+
+    One request carrying two statements, not two requests: InfluxQL accepts
+    semicolon-separated statements and returns a result per statement, so the tag
+    keys cost no extra round trip on a call that was already making one. Verified
+    against InfluxDB 1.8 and 2.7's v1-compatibility endpoint, whose responses here
+    are byte-identical.
+
+    The field set this returns is the live allowlist a queried field is checked
+    against. The measurement is charset-validated (it comes from the source class's
+    static schema, but validating is cheap) before interpolation.
+
+    :return: MeasurementKeys, both halves possibly empty
+    :raises SourceConnectionError: on a transport/parse failure, or a statement the
+        server rejected
     """
     _validate_identifier(measurement, "measurement")
-    query = f"SHOW FIELD KEYS FROM {_quote_identifier(measurement)}"
+    quoted = _quote_identifier(measurement)
+    query = f"SHOW FIELD KEYS FROM {quoted}; SHOW TAG KEYS FROM {quoted}"
     url, kwargs = _influx_read_request(influx_settings, db, query)
-    payload = _get(session, url, kwargs, f"discover fields for {measurement}")
-    fields = set()
-    for result in payload.get("results", []):
-        # A per-result error (wrong db, auth, ...) is returned in a 200 body, same
-        # as run_query - surface it, or an empty field set would later masquerade
-        # as every field being "unknown" and hide the real InfluxDB failure.
-        if result.get("error"):
-            raise SourceConnectionError(f"InfluxDB rejected the field discovery: {result['error']}")
-        for series in result.get("series", []):
-            name_index = series.get("columns", []).index("fieldKey") if "fieldKey" in series.get("columns", []) else 0
-            for row in series.get("values", []):
-                if row and isinstance(row[name_index], str):
-                    fields.add(row[name_index])
-    return fields
+    payload = _get(session, url, kwargs, f"discover keys for {measurement}")
+    results = _statement_results(payload, f"key discovery for {measurement}")
+    field_types = {}
+    for series, row, name in _key_column(results.get(0, []), "fieldKey"):
+        columns = series.get("columns", [])
+        type_index = columns.index("fieldType") if "fieldType" in columns else None
+        # No fieldType column means no honest answer about the type, so the field is
+        # still listed and simply carries none.
+        field_types[name] = row[type_index] if type_index is not None and len(row) > type_index else None
+    tag_keys = {name for _, _, name in _key_column(results.get(1, []), "tagKey")}
+    return MeasurementKeys(field_types=field_types, tag_keys=frozenset(tag_keys))
 
 
 @dataclass(frozen=True)
@@ -662,7 +804,7 @@ class QuerySeries:
 def discover_tag_values(session, influx_settings, db, measurement, tag):
     """Return the set of values a tag actually holds in a measurement.
 
-    The exact analogue of :func:`discover_fields`, and it carries the same role: the
+    The exact analogue of :func:`discover_measurement_keys`, and it carries the same role: the
     live allowlist an ``instance`` argument is validated against, so a value that was
     never written is refused rather than producing a confidently empty answer. Being
     discovered rather than configured also means a collector host that started
@@ -685,7 +827,7 @@ def discover_tag_values(session, influx_settings, db, measurement, tag):
     payload = _get(session, url, kwargs, f"discover {tag} values for {measurement}")
     values = set()
     for result in payload.get("results", []):
-        # Same reasoning as discover_fields: a per-result error arrives in a 200 body,
+        # Same reasoning as discover_measurement_keys: a per-result error arrives in a 200 body,
         # and swallowing it would make a broken query look like "no instances".
         if result.get("error"):
             raise SourceConnectionError(f"InfluxDB rejected the tag-value discovery: {result['error']}")
@@ -1010,7 +1152,7 @@ def resolve_schema(source, settings, settings_file, instance=None):
     influx_settings = handler.settings["influx"]
     db = resolve_db(handler.source_settings, influx_settings)
     try:
-        fields = discover_fields(handler.session, influx_settings, db, measurement)
+        keys = discover_measurement_keys(handler.session, influx_settings, db, measurement)
         # Only for a source that declares an instance axis, so nothing else pays for
         # an extra round trip. Discovered rather than configured: the values are
         # whatever has actually been written, so a new collector host is queryable
@@ -1048,7 +1190,7 @@ def resolve_schema(source, settings, settings_file, instance=None):
         # the returned handler and closes its session when done.
         close_session(handler.session)
         raise
-    return handler, build_schema(handler, fields, db, instance_values)
+    return handler, build_schema(handler, keys, db, instance_values)
 
 
 def _list_sources_result(settings, settings_file):
@@ -1078,20 +1220,63 @@ def _list_sources_result(settings, settings_file):
     return {"sources": out}
 
 
-def list_fields_result(source, settings, settings_file):
-    """Build the list_fields tool payload (runs in a worker thread)."""
+def field_entry(schema, name, detail=False):
+    """Describe one field of a schema: its name, type, unit, coded values, kind and
+    (on request) its description.
+
+    Every key but ``field`` is omitted when there is nothing to say, so a caller
+    can tell "no unit" from "unit unknown" the only way that is honest - by the key
+    not being there at all.
+
+    :param schema: the source's ReadSchema
+    :param name: the field key
+    :param detail: include the prose description, where the field has one
+    :return: the entry dict
+    """
+    meta = schema.metadata_for(name)
+    entry = {"field": name}
+    influx_type = schema.field_types.get(name)
+    if influx_type:
+        entry["type"] = influx_type
+    if meta.get("unit"):
+        entry["unit"] = meta["unit"]
+    kind = field_kind(meta, influx_type)
+    if kind:
+        entry["kind"] = kind
+    if meta.get("codes"):
+        entry["codes"] = {str(code): label for code, label in meta["codes"].items()}
+    if detail and meta.get("description"):
+        entry["description"] = meta["description"]
+    return entry
+
+
+def list_fields_result(source, settings, settings_file, detail=False):
+    """Build the list_fields tool payload (runs in a worker thread).
+
+    Everything needed to construct a query is in one payload: the database, the
+    measurement, every field with its type/unit/coded values/kind, and the tag keys
+    that are available to group by. Only the per-field prose is optional, being the
+    one bulky part - see the ``detail`` flag, which adds it to this same call rather
+    than to a second one.
+
+    :param detail: include each field's description where it has one
+    """
     handler, schema = resolve_schema(source, settings, settings_file)
     try:
-        fields = []
-        for name in sorted(schema.allowed_fields):
-            meta = schema.metadata_for(name)
-            entry = {"field": name}
-            if meta.get("unit"):
-                entry["unit"] = meta["unit"]
-            if meta.get("codes"):
-                entry["codes"] = {str(code): label for code, label in meta["codes"].items()}
-            fields.append(entry)
-        result = {"source": source, "measurement": schema.measurement, "fields": fields}
+        fields = [field_entry(schema, name, detail=detail) for name in sorted(schema.allowed_fields)]
+        result = {
+            "source": source,
+            "measurement": schema.measurement,
+            # The db/bucket a query has to name. Previously only get_data_range
+            # reported it, so building a query meant a second call that also did
+            # retention work for one short string.
+            "database": schema.db,
+            "fields": fields,
+            # Every dimension the measurement can be grouped by, not just the one a
+            # source declares as its instance axis - a MyEnergi device or a Nuki lock
+            # was in the data and in no schema a caller could see.
+            "tag_keys": sorted(schema.tag_keys),
+        }
         if schema.instance_tag:
             # Reported here rather than in list_sources because this call already makes
             # an InfluxDB round trip: the values are live, so listing them costs nothing
@@ -1286,7 +1471,7 @@ def _latest_recorded(handler):
     influx_settings = handler.settings["influx"]
     db = resolve_db(handler.source_settings, influx_settings)
     measurement = handler.MCP_MEASUREMENT or handler.source
-    fields = discover_fields(handler.session, influx_settings, db, measurement)
+    fields = discover_measurement_keys(handler.session, influx_settings, db, measurement).field_names
     if not fields:
         return {}, None
     query = build_latest_query(measurement, handler.mcp_tag_filters(), fields)
@@ -1326,7 +1511,7 @@ def _latest_recorded_per_instance(handler):
     influx_settings = handler.settings["influx"]
     db = resolve_db(handler.source_settings, influx_settings)
     measurement = handler.MCP_MEASUREMENT or handler.source
-    fields = discover_fields(handler.session, influx_settings, db, measurement)
+    fields = discover_measurement_keys(handler.session, influx_settings, db, measurement).field_names
     if not fields:
         return {}
     tag = handler.MCP_INSTANCE_TAG
@@ -1594,15 +1779,55 @@ def data_range_result(source, settings, settings_file):
         close_session(handler.session)
 
 
+# How each kind is worded in the generated reference. Written once here rather than
+# at the call site, so the document and the tool payload cannot describe the same
+# vocabulary differently.
+_KIND_PROSE = {
+    "gauge": "gauge (instantaneous)",
+    "counter": "counter (running total, resets)",
+    "state": "state (discrete code or label)",
+}
+
+
+def _documentation_field_line(key, meta):
+    """Render one field as a Markdown bullet for the generated reference.
+
+    Kept out of :func:`build_documentation` so that function stays within the
+    project's complexity limit as the metadata grows more keys.
+
+    :param key: the field key (or the ``_``-suffix that stands for a family of them)
+    :param meta: the field's metadata dict
+    :return: the bullet line
+    """
+    bits = []
+    if meta.get("unit"):
+        bits.append(f"unit {meta['unit']}")
+    kind = field_kind(meta)
+    if kind:
+        bits.append(_KIND_PROSE[kind])
+    codes = meta.get("codes")
+    if codes:
+        bits.append("values: " + ", ".join(f"{code}={label}" for code, label in sorted(codes.items())))
+    line = f"- `{key}`" + (f" - {'; '.join(bits)}" if bits else "")
+    # The description is its own sentence, keeping its full stop, rather than another
+    # semicolon-separated bit: several of them contain a semicolon themselves, which left
+    # no visible boundary between the short facts and the prose.
+    if meta.get("description"):
+        line += (". " if bits else " - ") + meta["description"]
+    return line
+
+
 def build_documentation(settings, settings_file):
     """Assemble a static Markdown reference of every configured source: its
-    description and, per annotated field, the unit and any coded-value meanings.
+    description and, per annotated field, the unit, any coded-value meanings, how it
+    may be aggregated, and what it means where the name does not say.
 
     Generated from the source classes' own MCP metadata (MCP_DESCRIPTION +
     MCP_FIELD_METADATA), so it can't drift from what the tools expose and needs no
     packaged docs file. Gives the model a one-call, InfluxDB-free overview of what
     every source and field means - orientation the per-source list_fields (a live
-    InfluxDB round trip) doesn't provide in one place.
+    InfluxDB round trip) doesn't provide in one place, and the place the per-field
+    prose is available for every source at once rather than one at a time.
 
     :param settings: parsed settings dict
     :param settings_file: settings path, for constructing handlers
@@ -1611,8 +1836,11 @@ def build_documentation(settings, settings_file):
     lines = [
         "# send-to-influx data reference",
         "",
-        "What each configured source reports, and what its values mean. Field keys may carry a "
-        "per-device prefix (e.g. a Nuki lock's name); the meanings below are keyed by the base name.",
+        "What each configured source reports, and what its values mean. Each field gives its unit "
+        "where it has one and how it may be aggregated: a gauge is an instantaneous reading, a counter "
+        "a running total that resets (take its last value or a difference, never its mean), a state a "
+        "discrete code or label. Field keys may carry a per-device prefix (e.g. a Nuki lock's name); "
+        "the meanings below are keyed by the base name.",
         "",
     ]
     for source in configured_sources(settings):
@@ -1630,14 +1858,7 @@ def build_documentation(settings, settings_file):
             lines.append(description)
         lines.append("")
         for key in sorted(field_metadata):
-            meta = field_metadata[key]
-            bits = []
-            if meta.get("unit"):
-                bits.append(f"unit {meta['unit']}")
-            codes = meta.get("codes")
-            if codes:
-                bits.append("values: " + ", ".join(f"{code}={label}" for code, label in sorted(codes.items())))
-            lines.append(f"- `{key}`" + (f" - {'; '.join(bits)}" if bits else ""))
+            lines.append(_documentation_field_line(key, field_metadata[key]))
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -1687,29 +1908,35 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(_list_sources_result, settings, settings_file)
 
     @register_tool(server, title="List Source Fields", annotations=_READ_ONLY)
-    async def list_fields(source: str) -> dict:
-        """List one source's field keys, each with any known unit and, for coded
-        fields, what each numeric value means.
+    async def list_fields(source: str, detail: bool = False) -> dict:
+        """Describe one source well enough to query it and chart the result: its
+        `database` and `measurement`, its `tag_keys` to group by, and every field with
+        its InfluxDB `type`, any `unit`, any coded values, and its `kind`.
+
+        `kind` is how a value may legitimately be aggregated: 'gauge' is an
+        instantaneous reading, 'counter' a running total that resets (read its last
+        value or a difference, never its mean), 'state' a discrete code or label.
+        Absent means the source has not said - not that averaging is safe.
+
+        `detail` adds each field's description, where its name and unit do not already
+        say what it is. `get_documentation` carries the same prose for every source at
+        once, with no InfluxDB round trip.
 
         Call this before `query_history`: it rejects a field this did not list, and
-        exact names are not guessable (spaces become underscores, and a Nuki lock
-        prefixes its own fields). Use `list_sources` when you don't yet know which
-        source you want, or `get_documentation` for every source's field meanings at
-        once without an InfluxDB round trip.
+        exact names are not guessable (spaces become underscores). Use `list_sources`
+        when you don't yet know which source you want.
 
         Where the source's measurement holds several producers, also returns
         `instance_tag` (what tells them apart, e.g. 'host') and `instances` - the
         values `query_history`'s `instance` accepts, being the producers present in
-        the data plus any target configured but not yet collecting. So a newly added
-        Hue bridge appears here before it has written anything, and a decommissioned
-        one still appears while its history remains.
+        the data plus any target configured but not yet collecting.
 
         The field set is discovered live from InfluxDB, and reading it changes
         nothing. A source that has never written anything lists no fields - that
         is "nothing recorded yet", not "no such source". An unknown source is an
         error, and so is an unreachable InfluxDB: neither is reported as an empty
         list."""
-        return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file)
+        return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file, detail)
 
     @register_tool(server, title="Query Historical Data", annotations=_READ_ONLY)
     async def query_history(

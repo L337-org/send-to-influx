@@ -25,12 +25,29 @@ class OpenMeteo(DataHandler):
     # variables use that API's own default unit, so only the common ones are
     # annotated here.
     MCP_FIELD_METADATA = {
-        "temperature_2m": {"unit": "°C"},
-        "relative_humidity_2m": {"unit": "%"},
-        "precipitation": {"unit": "mm"},
-        "cloud_cover": {"unit": "%"},
-        "wind_speed_10m": {"unit": "km/h"},
-        "direct_radiation": {"unit": "W/m²"},
+        "temperature_2m": {"unit": "°C", "kind": "gauge"},
+        "relative_humidity_2m": {"unit": "%", "kind": "gauge"},
+        # An accumulation over the preceding interval, not a reading at an instant,
+        # which "mm" alone does not say. The interval is whatever the underlying
+        # model uses (the API reports it as `interval` alongside the value - 900 s
+        # observed, the hourly series documents an hour), so the description says
+        # "interval" rather than naming a duration this collector never records.
+        "precipitation": {
+            "unit": "mm",
+            "kind": "gauge",
+            "description": "Rain, showers and snow accumulated over the preceding interval, not a rate.",
+        },
+        "cloud_cover": {"unit": "%", "kind": "gauge"},
+        "wind_speed_10m": {"unit": "km/h", "kind": "gauge"},
+        # Horizontal plane, per Open-Meteo's own parameter definition - not the
+        # normal plane, which is its separate direct_normal_irradiance variable.
+        # Worth saying, because a solar-yield comparison wants one or the other and
+        # the names alone do not distinguish them.
+        "direct_radiation": {
+            "unit": "W/m²",
+            "kind": "gauge",
+            "description": "Direct beam solar radiation on the horizontal plane, excluding diffuse light.",
+        },
     }
 
     def get_data(self):

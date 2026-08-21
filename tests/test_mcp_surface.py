@@ -35,14 +35,28 @@ What is checked, and why each is a guard rather than a preference:
 Measured surface (this module's fixture: two sources, both write-enabled, so all
 nine tools, three prompts and five resources register):
 
-===========  =============  ============
-category     before (5.3)   after (5.4)
-===========  =============  ============
-tools                9,937        11,252
-prompts                225           523
-resources                0         1,521
-**total**       **10,162**    **13,296**
-===========  =============  ============
+===========  =============  ============  ============
+category     before (5.3)   after (5.4)   after (5.5)
+===========  =============  ============  ============
+tools                9,937        11,252        11,562
+prompts                225           523           523
+resources                0         1,521         1,521
+**total**       **10,162**    **13,296**    **13,606**
+===========  =============  ============  ============
+
+The 5.5 growth is 310 bytes, all of it ``list_fields`` (1,165 -> 1,475), and all of it
+contract rather than commentary: four keys that were not in the payload before
+(``database``, ``tag_keys``, and each field's ``type`` and ``kind``), a new ``detail``
+parameter, and the three-word vocabulary ``kind`` uses. A caller cannot use a key it has
+not been told about, and ``kind`` in particular is unusable without knowing that
+'counter' forbids a mean - which is the failure the payload exists to prevent. Written
+straight into that description rather than left to ``get_documentation``, because the
+decision it informs is made while reading this tool's result.
+
+Two things the same edit *removed* from that description, to keep the raise to what the
+contract needed: an example of which bridges appear in ``instances`` (the sentence before
+it already states the rule), and a note that ``detail`` saves a round trip (a
+justification for the design, not something a caller acts on).
 
 Identical on every supported Python since ``register_tool()`` dedents each docstring:
 before it, 3.10-3.12 advertised 14,569 bytes where 3.13+ advertised 13,297, the
@@ -103,6 +117,7 @@ NON_TOOL_IDENTIFIERS = {
     "points_present",
     "retention.known",
     "span_seconds",
+    "tag_keys",
 }
 
 # Words that describe how a call fails. A description mentioning none of them is
@@ -130,11 +145,11 @@ WRITE_EFFECT_PHRASES = {
 # Recorded ceilings, not predictions - see the table in this module's docstring for
 # what is actually measured. Raising one is a deliberate decision that belongs in the
 # commit message with its reason.
-MAX_TOOL_BYTES = 11_500
+MAX_TOOL_BYTES = 11_800
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 13_500
+MAX_TOTAL_BYTES = 13_850
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],

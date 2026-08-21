@@ -577,7 +577,7 @@ field set. Design points:
     layer flattened it. Set on `Speedtest` (`host`), and deliberately per source rather than one
     global "collector" tag, because the axis means different things (a collecting host, a bridge,
     a lock, a device) and most sources genuinely have one producer.
-    - `discover_tag_values()` is the exact analogue of `discover_fields()`: `SHOW TAG VALUES`
+    - `discover_tag_values()` is the exact analogue of `discover_measurement_keys()`: `SHOW TAG VALUES`
       gives the live allowlist an `instance` argument is validated against, so a value never
       written is refused rather than answering confidently with nothing. Discovered rather than
       configured, so a host that started reporting yesterday is queryable today with no config
@@ -662,9 +662,67 @@ field set. Design points:
     MyEnergi devices `list_fields` shows the others' fields too; a query for a cross-device field
     is safe and returns no points (the tag filter excludes it). Documented accepted limitation.
   - **`MCP_FIELD_METADATA`** maps a field key - or a `_`-delimited suffix, for dynamically-prefixed
-    fields like Nuki's `Front_Door_stateValue` - to `{"unit": ...}` and/or `{"codes": {int: str}}`;
-    `annotate_rows()` attaches units and decodes coded values to labels (an undocumented code passes
-    through with a null label, matching the collector's raw-passthrough rule). Sourced from UNITS.md.
+    fields like Nuki's `Front_Door_stateValue` - to any of `unit`, `codes` (`{int: str}`), `kind` and
+    `description`; `annotate_rows()` attaches units and decodes coded values to labels (an
+    undocumented code passes through with a null label, matching the collector's raw-passthrough
+    rule). Sourced from UNITS.md.
+  - **`list_fields` answers the whole question a dashboard asks, in one call**: `database` (previously
+    only reachable through `get_data_range`, which also does retention work, so a query cost a second
+    call for one short string), `measurement`, `tag_keys` (every dimension to group by - a MyEnergi
+    `device` or a Nuki lock was in the data and in no payload unless the source happened to declare it
+    as its instance axis), and per field its `type`, `unit`, `codes` and `kind`. A key is omitted
+    rather than nulled, so "no unit" and "unit unknown" are told apart the only honest way there is.
+  - **`kind` is the one field-level fact that cannot be recovered from the value**, which is why it is
+    declared rather than derived: taking the mean of a cumulative counter produces a plausible chart
+    that means nothing, and no unit, type or coded value distinguishes those fields from an
+    instantaneous reading. Three values (`FIELD_KINDS`): `gauge`, `counter`, `state`.
+    - **A numeric field with nothing declared reports no kind at all, deliberately.** Defaulting to
+      `gauge` would say "averaging this is fine" about a counter, which is the exact failure the
+      field exists to prevent; saying nothing is recoverable where saying that is not. A *string* or
+      *boolean* field does get `state` from its InfluxDB type without being declared, which is what
+      makes an untabulatable field key answerable at all - Hue's field keys are the operator's own
+      device names, so no static table can cover them.
+  - **`description` sits behind `detail=False`, and is the only optional part** because it is the only
+    bulky one. Every other addition is a handful of bytes and always present. It exists to decode an
+    unobvious key (MyEnergi's `ectp1`, `che`) or to carry semantics the name cannot - cumulative,
+    forecast-not-actual, accumulated-over-an-interval. **A description that restates the name is
+    worse than none**, costing context on every detailed call and conveying nothing, so
+    self-describing fields (`temperature_2m`, `download`) have none; `tests/test_field_metadata.py`
+    fails on one whose words are all derivable from its field key.
+  - **Field keys and tag keys come from one request, not two** (`discover_measurement_keys()`,
+    replacing `discover_fields()`): InfluxQL takes semicolon-separated statements and answers with a
+    result per statement, so `SHOW TAG KEYS` costs no round trip on a call already making one.
+    Verified on real 1.8 and 2.7's v1-compatibility endpoint - identical responses, `statement_id`
+    present on both (position is the fallback), and `fieldType` giving `float`/`integer`/`string`/
+    `boolean`. **The per-statement error check is load-bearing here in a way it was not before**: an
+    unusable database answers with statement 0 carrying `"error": "not executed"` and *no result at
+    all* for the statements after it, so a caller ignoring the error would read the missing statement
+    as "this measurement has no tags" rather than as a failure.
+  - **`tests/test_field_metadata.py` is the coverage ratchet**, replacing prose asking someone to
+    remember: every declared entry must say something (a unit, coded values *or* a description - not
+    all three, since a flag, a label and a status code genuinely have no unit and demanding one
+    invites a made-up unit) and must declare a valid `kind`; and UNITS.md must agree about every unit
+    string and every coded value. **The UNITS.md check is deliberately one-way** - metadata implies a
+    UNITS.md row, never the reverse - because that file legitimately documents things that are not
+    field keys: Hue's rows are by device class, and carbon intensity's `gen_<fuel>` is a pattern. It
+    compares units and coded values only, **never prose**: the MCP `description` and the Notes column
+    serve different readers (a model choosing a field, versus a maintainer reading caveats and
+    disagreements with vendor documentation), so neither is derived from the other and comparing them
+    would force them to converge on whichever reader was served worse.
+    - Two real defects it caught on its first run, neither of which any existing test could see:
+      UNITS.md gave Speedtest's unit as "bits per second" where the metadata says `bits/s` (the cell
+      now leads with the symbol and keeps the words as a note), and the checker's own code-table
+      parser read past `stateValue`'s table into `doorsensorStateValue`'s, so every code the two
+      share was reported as a disagreement that did not exist.
+  - **The four MyEnergi day/hour fields are hourly, not daily, and UNITS.md said otherwise.** Found
+    while writing their descriptions: `get_data()` calls `dayhour_results(..., now.hour)`, and the
+    matching-hour branch *assigns* that hour's value and breaks rather than accumulating, so
+    `Charge`/`Import`/`Export`/`Genera` hold the current hour's energy and reset on the hour. Where
+    the current hour's entry is absent from the response - MyEnergi omits all-zero entries, so this
+    happens around midnight - the loop falls through to summing every bucket and the value is the day
+    so far instead. UNITS.md's "Daily totals" was corrected, and the hourly reset is what the
+    descriptions state, since it is the fact that governs how to aggregate them either way. The
+    meaning flipping between hourly and daily is a separate defect, not fixed here.
   - Blocking InfluxDB HTTP runs in a worker thread (`anyio.to_thread.run_sync`) so a query doesn't
     stall the server's async event loop. `ToolParamError` (a bad field/time/aggregation/device -
     shared by the read and write tools, defined in `toinflux/exceptions.py`; a non-retryable
@@ -930,9 +988,14 @@ needs no filter. `measurement_for()`/`shares_measurement()` are unaffected - the
    `CREDENTIAL_FIELDS`/`PLACEHOLDER_VALUES` (`toinflux/credentials.py`) — that alone makes
    `send-to-influx-set-credential <name>` work, the machinery is fully table-driven.
 4. Add tests in `tests/test_newsource.py`, reusing fixtures from `tests/conftest.py`.
-4b. For the MCP read tools/resources: set `MCP_FIELD_METADATA` on the class (units, and `codes` for
-   any numeric-coded field) from the UNITS.md entry, and a one-line `MCP_DESCRIPTION` of what the
-   source reports (surfaced by `list_sources`, the documentation tool, and the per-source resources).
+4b. For the MCP read tools/resources: set `MCP_FIELD_METADATA` on the class from the UNITS.md entry -
+   `unit` where the field has one, `codes` for any numeric-coded field, a `kind` on **every** entry
+   (`gauge`/`counter`/`state`), and a `description` **only** where the name, unit and coded values do
+   not already say what the field is. `tests/test_field_metadata.py` fails on an entry with no kind,
+   on one saying nothing at all, on a description whose every word comes from the field key, and on a
+   unit or code that disagrees with UNITS.md - so add the UNITS.md row in the same change. Also set a
+   one-line `MCP_DESCRIPTION` of what the source reports (surfaced by `list_sources`, the
+   documentation tool, and the per-source resources).
    Set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS` if the source's InfluxDB measurement isn't its own name or
    it shares a measurement with others. Set `MCP_INSTANCE_TAG` only if several *producers* write to
    the one measurement and a tag tells them apart (Speedtest's collecting `host`) - that makes the
