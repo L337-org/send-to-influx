@@ -76,7 +76,7 @@ SIBLINGS = {
     "get_current_state": {"query_history", "get_data_range", "list_sources"},
     "get_data_range": {"query_history", "get_current_state", "list_fields", "list_sources"},
     "get_documentation": {"list_fields", "list_sources"},
-    # SI-39's originating question: nothing in this description ruled out the reading
+    # The question that raised this work: nothing in this description ruled out the reading
     # that it lists devices for every collector, because it never named the tool that
     # actually does that.
     "hue_list_devices": {"hue_set_light", "get_current_state"},
@@ -93,13 +93,11 @@ NON_TOOL_IDENTIFIERS = {
     "group_by",
     "color_temp_k",
     "duration_seconds",
-    "hue.mcp_read_write",
     "instance_tag",
     "limit_per_instance",
     "points_present",
     "retention.known",
     "span_seconds",
-    "speedtest.mcp_read_write",
 }
 
 # Words that describe how a call fails. A description mentioning none of them is
@@ -112,6 +110,17 @@ FAILURE_WORDS = ("error", "reject", "refus", "fail", "unreachable")
 # phrase rather than a list of accepted wordings: the surface reads as one voice, and a
 # guard that accepts any of six phrasings stops guarding anything.
 READ_ONLY_PHRASE = "changes nothing"
+
+# What each writing tool must say it does, since "read_only_hint is False" is a field a
+# client may distrust and says nothing about *what* changes. Declared per tool rather
+# than matched against a list of hopeful keywords: an earlier version of this guard
+# accepted the substring "run", which "truncated" satisfies, so it passed on
+# descriptions that said nothing at all. A new write tool fails until its own phrase is
+# named here.
+WRITE_EFFECT_PHRASES = {
+    "hue_set_light": "changes a real device",
+    "speedtest_run": "saturates the connection",
+}
 
 # Recorded ceilings, not predictions - see the table in this module's docstring for
 # what is actually measured. Raising one is a deliberate decision that belongs in the
@@ -259,9 +268,14 @@ class TestToolDescriptionsDiscriminate:
                     f"{tool.name} is read-only but does not say so in prose " f"(expected {READ_ONLY_PHRASE!r})"
                 )
             else:
-                assert (
-                    "changes a real device" in lowered or "run" in lowered
-                ), f"{tool.name} writes but its description does not say what it does"
+                phrase = WRITE_EFFECT_PHRASES.get(tool.name)
+                assert phrase, (
+                    f"{tool.name} writes but WRITE_EFFECT_PHRASES does not say what it "
+                    f"changes - decide, then assert it"
+                )
+                assert phrase in lowered, (
+                    f"{tool.name} writes but its description does not say so " f"(expected {phrase!r})"
+                )
 
 
 class TestSurfaceBudget:
