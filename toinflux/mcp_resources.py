@@ -79,11 +79,11 @@ def _register_source_resources(server, anyio, source, settings, settings_file):
         name=f"{source}-schema",
         title=f"{source} schema",
         description=(
-            f"Everything needed to query {source}: its database and measurement, the tag keys to "
-            f"group by, and each field with its type, unit, coded-value meanings and how it may be "
-            f"aggregated - plus, where several producers write to it, the tag telling them apart "
-            f"and the values it accepts. Discovered live from InfluxDB, which must be "
-            f"reachable; the `list_fields` payload, minus its per-field descriptions."
+            f"Everything needed to query {source}: database, measurement, the tag keys to group "
+            f"by, and each field's type, unit, coded-value meanings and aggregation - each omitted "
+            f"where unknown, `type` included. Where several producers write to it, also the tag "
+            f"telling them apart and the values it accepts. Discovered live from InfluxDB, which "
+            f"must be reachable; the `list_fields` payload, `detail` false."
         ),
         mime_type="application/json",
     )

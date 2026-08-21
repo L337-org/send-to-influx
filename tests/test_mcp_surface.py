@@ -39,10 +39,10 @@ nine tools, three prompts and five resources register):
 category     5.3 (released)  after the prose     after the schema
                              pass                pass
 ===========  ==============  ==================  ===================
-tools                 9,937              11,252               11,655
+tools                 9,937              11,252               11,809
 prompts                 225                 523                  523
-resources                 0               1,521                1,653
-**total**        **10,162**          **13,296**           **13,831**
+resources                 0               1,521                1,651
+**total**        **10,162**          **13,296**           **13,983**
 ===========  ==============  ==================  ===================
 
 The columns are named after the change that produced each measurement rather than after a
@@ -51,10 +51,11 @@ naming a release here would invent one. The "prose pass" is the change that gave
 registration a description and a title; the "schema pass" is the one that made
 ``list_fields`` sufficient to build a query and a chart from.
 
-The schema pass adds 535 bytes across three descriptions, and all of it is contract rather
-than commentary - a caller cannot use a payload key it has not been told about:
+The schema pass adds 687 bytes, and all of it is contract rather than commentary - a
+caller cannot use a payload key it has not been told about, nor rely on one it was told
+about unconditionally:
 
-* ``list_fields`` +310 (1,165 -> 1,475): four keys that were not in the payload before
+* ``list_fields`` +464 (1,165 -> 1,629): four keys that were not in the payload before
   (``database``, ``tag_keys``, and each field's ``type`` and ``kind``), a new ``detail``
   parameter, and the three-word vocabulary ``kind`` uses. ``kind`` in particular is
   unusable without knowing that 'counter' forbids a mean - which is the failure the
@@ -63,8 +64,12 @@ than commentary - a caller cannot use a payload key it has not been told about:
   tool's result. The same edit *removed* two things to hold the raise down: an example of
   which bridges appear in ``instances`` (the sentence before it already states the rule),
   and a note that ``detail`` saves a round trip (a justification for the design, not
-  something a caller acts on).
-* ``get_documentation`` +93 and ``schema://<source>`` +132 between the two of them: both
+  something a caller acts on). A later +154 states the rule that *every* per-field key is
+  absent rather than null when there is nothing to say - written once as a rule rather than
+  as a caveat on each key, which is both shorter and more complete. ``type`` is the key
+  where that surprises a reader, since InfluxDB does not report one for every field, and
+  three separate descriptions had promised it unconditionally.
+* ``get_documentation`` +93 and ``schema://<source>`` +130 between the two of them: both
   had stopped describing what they return. The generated reference now carries how each
   field may be aggregated and a per-field description, and the schema resource now
   carries the database, the tag keys and each field's type and kind - and both still

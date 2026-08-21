@@ -667,7 +667,8 @@ Once connected, the client has these read tools:
 - **`list_fields`** - everything needed to write a query or build a chart for one source: the
   database and measurement to query, the tag keys available to group by, and every field with its
   InfluxDB type, its unit, what each value means for a coded field like Nuki lock state, and how it
-  may be aggregated. That last part - `kind` - is the one a dashboard gets silently wrong without:
+  may be aggregated. Each of those is omitted rather than nulled where it is not known - including
+  the type, which InfluxDB does not report for every field. That last part - `kind` - is the one a dashboard gets silently wrong without:
   a `gauge` is an instantaneous reading, a `counter` a running total that resets (read its last
   value or a difference, never its mean), a `state` a discrete code or label. Pass `detail: true`
   for the per-field descriptions as well, in the same call.

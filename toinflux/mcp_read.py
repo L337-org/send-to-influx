@@ -1908,7 +1908,9 @@ def register_read_tools(server, settings, settings_file=None):
     async def list_fields(source: str, detail: bool = False) -> dict:
         """Describe one source well enough to query it and chart the result: its
         `database` and `measurement`, its `tag_keys` to group by, and every field with
-        its InfluxDB `type`, any `unit`, any coded values, and its `kind`.
+        its InfluxDB `type`, any `unit`, any coded values, and its `kind`. Every
+        per-field key except the name is absent rather than null when there is nothing
+        to say - `type` included, since InfluxDB does not always report one.
 
         `kind` is how a value may legitimately be aggregated: 'gauge' is an
         instantaneous reading, 'counter' a running total that resets (read its last
