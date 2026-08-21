@@ -128,8 +128,11 @@ class ReadSchema:
     knowledge (never model input); ``allowed_fields`` is the live field set
     discovered from InfluxDB (the injection allowlist); ``field_metadata`` maps a
     field key - or a ``_``-delimited suffix, for collectors with dynamic prefixes
-    like Nuki's per-lock fields - to ``{"unit": str, "codes": {int: str},
-    "kind": str, "description": str}`` for result annotation.
+    like Nuki's per-lock fields - to a dict of annotations, **every key optional**:
+    ``unit`` (str), ``codes`` (``{int: str}``), ``kind`` (one of
+    :data:`FIELD_KINDS`) and ``description`` (str). A key is absent rather than
+    empty where a source has nothing to say, so read it with ``.get()`` - a flag
+    has no unit, and most fields need no description at all.
     """
 
     source: str
@@ -139,11 +142,12 @@ class ReadSchema:
     allowed_fields: set = dataclass_field(default_factory=set)
     field_metadata: dict = dataclass_field(default_factory=dict)
     # ``field_types`` maps a discovered field key to its InfluxDB type ("float",
-    # "integer", "string", "boolean") and ``tag_keys`` holds every tag the
-    # measurement carries - both from the same SHOW ... KEYS request that produced
-    # ``allowed_fields``. Annotation only: ``allowed_fields`` remains the single
-    # injection allowlist, so a schema built without them (a test, or a caller that
-    # only needs the gate) simply reports no type and no dimensions.
+    # "integer", "string" or "boolean"), or to None where discovery could not say -
+    # the key is always present, its value may not be. ``tag_keys`` holds every tag
+    # the measurement carries. Both come from the same SHOW ... KEYS request that
+    # produced ``allowed_fields``. Annotation only: ``allowed_fields`` remains the
+    # single injection allowlist, so a schema built without them (a test, or a caller
+    # that only needs the gate) simply reports no type and no dimensions.
     field_types: dict = dataclass_field(default_factory=dict)
     tag_keys: set = dataclass_field(default_factory=set)
     # The tag distinguishing producers within this measurement (from
@@ -672,10 +676,14 @@ class MeasurementKeys:
     types, and its tag keys.
 
     ``field_types`` maps a field key to ``"float"``/``"integer"``/``"string"``/
-    ``"boolean"`` as ``SHOW FIELD KEYS`` reports it. The type is not a nicety: it
-    is what tells a caller that a text or coded field wants a state-timeline
-    rendering rather than a line, and it arrives in the same response as the key
-    names, so keeping it costs nothing where discarding it cost a guess.
+    ``"boolean"`` as ``SHOW FIELD KEYS`` reports it, **or to None** where the
+    response carried no ``fieldType`` column to read: the field is still listed,
+    because dropping it would remove it from the query allowlist, but nothing
+    honest can be said about its type. Every discovered key is therefore present;
+    its value may be None, so treat None as "unknown" and never as a type. The type
+    is not a nicety: it is what tells a caller that a text or coded field wants a
+    state-timeline rendering rather than a line, and it arrives in the same response
+    as the key names, so keeping it costs nothing where discarding it cost a guess.
 
     ``tag_keys`` is every dimension the measurement can be grouped by. Only the
     one tag a source declares as its instance axis was reachable before; the rest
