@@ -73,9 +73,24 @@ GRAFANA_UNITS = {
 # only the right one, because a caller composing its own query needs to recognise the
 # mistake, not just copy the suggestion.
 _KIND_PANELS = {
-    # An instantaneous reading: every arithmetic function means something except a sum,
-    # which adds up readings that were never quantities of anything.
-    "gauge": {"panel_type": "timeseries", "aggregation": "mean", "avoid": ("sum",)},
+    # An instantaneous reading - and nothing is ruled out, deliberately.
+    #
+    # An earlier version listed `sum` here, on the reasoning that adding up readings
+    # which were never quantities of anything is meaningless. True of a temperature or a
+    # power in watts, and wrong for a third of the gauges this project declares: Octopus'
+    # `consumption_kwh` and `gas_consumption` are the energy used *during one interval*,
+    # and Open-Meteo's `precipitation` is what fell during one - for those, summing is
+    # not merely allowed, it is how you get a daily total, and the tool was steering
+    # callers away from the right answer.
+    #
+    # The three-kind vocabulary cannot separate those two cases: an interval quantity is
+    # neither instantaneous nor a resetting cumulative total, so it sits in `gauge` for
+    # want of anywhere better. While that holds, no blanket claim about `sum` is true of
+    # the whole class, so none is made - the same omit-rather-than-guess rule the rest of
+    # this payload follows. A fourth kind for interval quantities would let us say "sum
+    # this" positively rather than staying silent; that is a schema change and a separate
+    # decision.
+    "gauge": {"panel_type": "timeseries", "aggregation": "mean", "avoid": ()},
     # A running total that resets. The last value in a bucket is the total for it; a
     # mean or a median of a sawtooth is a number with no referent, and summing totals
     # double-counts.

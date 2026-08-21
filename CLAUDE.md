@@ -759,6 +759,19 @@ value mappings decoding a coded field, and a series alias.
 - **`avoid_aggregations` is the load-bearing field**, not `aggregation`. A caller composing its own
   query needs to recognise the mistake, not just copy the suggestion - and the mistake is invisible:
   the mean of a resetting counter is a plausible line with no referent.
+- **`gauge` rules nothing out, and that is a consequence of there being three kinds rather than
+  four.** An earlier version of the tool listed `sum` under gauge's `avoid`, which is right for a
+  temperature or a power in watts and *wrong for a third of the gauges this project declares*:
+  Octopus's `consumption_kwh` and `gas_consumption` are the energy used during one interval and
+  Open-Meteo's `precipitation` is what fell during one, so summing them is not merely allowed, it is
+  how a daily total is obtained. The tool was steering callers away from the correct answer, and only
+  a suppressed review comment surfaced it. An interval quantity is neither instantaneous nor a
+  resetting cumulative total, so it sits in `gauge` for want of anywhere better; while that holds, no
+  blanket claim about `sum` is true of the class, so none is made. **A fourth kind for interval
+  quantities would let the schema say "sum this" positively instead of staying silent** - that is a
+  change to `FIELD_KINDS` and to what `list_fields` emits, so it is a separate decision, not a
+  detail. `test_the_declared_interval_gauges_are_still_gauges` fails if one of those three is
+  reclassified, so the reasoning cannot go stale unnoticed.
 - **An undeclared numeric field gets no `kind` and is suggested `last`**, the one aggregation that
   cannot be wrong for any kind. Suggesting `mean` would say averaging is safe about a field that may
   be a counter, which is the failure the whole feature exists to prevent.

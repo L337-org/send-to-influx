@@ -99,11 +99,38 @@ class TestAggregationRules:
         assert "sum" in spec["avoid_aggregations"]
         assert "LAST(" in spec["query"]
 
-    def test_a_gauge_is_averaged_but_never_summed(self):
+    def test_a_gauge_is_averaged_and_nothing_is_ruled_out(self):
         schema = _schema(field_metadata={"tp1": {"unit": "°C", "kind": "gauge"}}, allowed_fields={"tp1"})
         spec = panel_spec(schema, "tp1", [])
         assert spec["aggregation"] == "mean"
-        assert spec["avoid_aggregations"] == ["sum"]
+        assert "avoid_aggregations" not in spec
+
+    def test_an_interval_quantity_is_not_warned_away_from_sum(self):
+        # The defect this pins: `gauge` covers both instantaneous readings and
+        # per-interval quantities, and for the latter - Octopus half-hourly consumption,
+        # Open-Meteo precipitation - summing is how you get a total for the day. An
+        # earlier version listed `sum` under gauge's `avoid`, so the tool steered callers
+        # away from the correct aggregation for a third of the gauges declared here.
+        schema = _schema(
+            source="octopus",
+            measurement="octopus",
+            field_metadata={"consumption_kwh": {"unit": "kWh", "kind": "gauge"}},
+            allowed_fields={"consumption_kwh"},
+            field_types={"consumption_kwh": "float"},
+        )
+        spec = panel_spec(schema, "consumption_kwh", [])
+        assert "avoid_aggregations" not in spec
+
+    def test_the_declared_interval_gauges_are_still_gauges(self):
+        # If any of these is ever reclassified - a fourth `kind` for interval quantities
+        # is the obvious candidate - the reasoning above stops applying and gauge's
+        # `avoid` list should be revisited rather than left silently permissive.
+        from toinflux.octopus import Octopus
+        from toinflux.openmeteo import OpenMeteo
+
+        assert Octopus.MCP_FIELD_METADATA["consumption_kwh"]["kind"] == "gauge"
+        assert Octopus.MCP_FIELD_METADATA["gas_consumption"]["kind"] == "gauge"
+        assert OpenMeteo.MCP_FIELD_METADATA["precipitation"]["kind"] == "gauge"
 
     def test_a_state_gets_a_state_timeline_and_no_arithmetic(self):
         schema = _schema(

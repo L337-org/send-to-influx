@@ -686,7 +686,7 @@ Once connected, the client has these read tools:
 - **`get_documentation`** - a one-call reference of what every source reports and what its coded
   values mean.
 - **`suggest_dashboard_panels`** - the same schema turned into chart panels: per field a ready-to-run
-  InfluxQL query, the panel type to draw it as, the aggregation to use and the ones to avoid, a
+  InfluxQL query, the panel type to draw it as, the aggregation to use and any that would be wrong, a
   Grafana unit, value mappings decoding a coded field to labels, and an alias naming each series
   after its tag. It returns panel *parts*, not a dashboard document - see "Building a Grafana
   dashboard" below.
