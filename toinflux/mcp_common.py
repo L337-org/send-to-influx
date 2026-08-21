@@ -13,10 +13,41 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT License"
 
+import inspect
 import logging
 
 from toinflux.exceptions import ConfigError, ToolParamError
 from toinflux.general import INSTANCED_SOURCES, expand_sources, get_class
+
+
+def register_tool(server, **kwargs):
+    """Register a tool whose advertised description is its dedented docstring.
+
+    The one registration entry point for every MCP tool, read or write, and the
+    reason it exists is a version difference that would otherwise ship silently.
+    CPython 3.13 strips a docstring's leading indentation at compile time; 3.10-3.12
+    do not, and the SDK advertises ``fn.__doc__`` verbatim (``func_doc = description
+    or fn.__doc__ or ""``). So on the older half of the supported range - which the
+    packaged ``.deb`` explicitly allows, ``Depends: python3 (>= 3.10)`` - every
+    continuation line of every tool description reached the model with eight leading
+    spaces on it: measured at 1,272 bytes of pure whitespace across the surface,
+    paid for on every session that loads it, and invisible to anyone developing on
+    3.13+.
+
+    Dedenting here rather than per tool means a new tool cannot forget it, and
+    ``tests/test_mcp_surface.py`` asserts that nothing bypasses this function.
+
+    :param server: the MCPServer instance
+    :param kwargs: passed to ``server.tool()`` (title, annotations, ...); a
+        ``description`` given explicitly wins, as it does in the SDK
+    :return: a decorator registering the function as a tool
+    """
+
+    def decorator(fn):
+        kwargs.setdefault("description", inspect.cleandoc(fn.__doc__ or ""))
+        return server.tool(**kwargs)(fn)
+
+    return decorator
 
 
 def configured_sources(settings):

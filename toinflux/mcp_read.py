@@ -42,7 +42,13 @@ from mcp.types import ToolAnnotations
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
 from toinflux.general import INSTANCED_SOURCES, expand_sources, shares_measurement
-from toinflux.mcp_common import close_session, configured_sources, resolve_handler, resolve_handlers
+from toinflux.mcp_common import (
+    close_session,
+    configured_sources,
+    register_tool,
+    resolve_handler,
+    resolve_handlers,
+)
 
 # Every read tool is read-only and scoped to this server's own configured
 # sources/measurements, never an open-ended external domain - shared so the six
@@ -1659,7 +1665,7 @@ def register_read_tools(server, settings, settings_file=None):
     """
     import anyio
 
-    @server.tool(title="List Data Sources", annotations=_READ_ONLY)
+    @register_tool(server, title="List Data Sources", annotations=_READ_ONLY)
     async def list_sources() -> dict:
         """List the configured collector sources whose data can be read, each with
         its InfluxDB measurement and a line on what it reports.
@@ -1680,7 +1686,7 @@ def register_read_tools(server, settings, settings_file=None):
         settings are unusable is left out rather than failing the call."""
         return await anyio.to_thread.run_sync(_list_sources_result, settings, settings_file)
 
-    @server.tool(title="List Source Fields", annotations=_READ_ONLY)
+    @register_tool(server, title="List Source Fields", annotations=_READ_ONLY)
     async def list_fields(source: str) -> dict:
         """List one source's field keys, each with any known unit and, for coded
         fields, what each numeric value means.
@@ -1705,7 +1711,7 @@ def register_read_tools(server, settings, settings_file=None):
         list."""
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file)
 
-    @server.tool(title="Query Historical Data", annotations=_READ_ONLY)
+    @register_tool(server, title="Query Historical Data", annotations=_READ_ONLY)
     async def query_history(
         source: str,
         field: str,
@@ -1764,7 +1770,7 @@ def register_read_tools(server, settings, settings_file=None):
             )
         )
 
-    @server.tool(title="Get Current State", annotations=_READ_ONLY)
+    @register_tool(server, title="Get Current State", annotations=_READ_ONLY)
     async def get_current_state(source: str) -> dict:
         """Read a source's state *now* - is the light on, is the door locked, what is
         the power draw at this moment.
@@ -1789,7 +1795,7 @@ def register_read_tools(server, settings, settings_file=None):
         one fails is the whole call an error."""
         return await anyio.to_thread.run_sync(current_state_result, source, settings, settings_file)
 
-    @server.tool(title="Get Data Range & Retention", annotations=_READ_ONLY)
+    @register_tool(server, title="Get Data Range & Retention", annotations=_READ_ONLY)
     async def get_data_range(source: str) -> dict:
         """Report how far back a source's data goes, and how long InfluxDB keeps it.
 
@@ -1823,7 +1829,7 @@ def register_read_tools(server, settings, settings_file=None):
         unlimited retention."""
         return await anyio.to_thread.run_sync(data_range_result, source, settings, settings_file)
 
-    @server.tool(title="Get Field Documentation", annotations=_READ_ONLY)
+    @register_tool(server, title="Get Field Documentation", annotations=_READ_ONLY)
     async def get_documentation() -> dict:
         """Return a Markdown reference of what every configured source reports and
         what its values mean - units, and the meaning of coded values (e.g. Nuki

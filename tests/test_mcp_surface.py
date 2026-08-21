@@ -38,11 +38,16 @@ nine tools, three prompts and five resources register):
 ===========  =============  ============
 category     before (5.3)   after (5.4)
 ===========  =============  ============
-tools                9,937        11,253
+tools                9,937        11,252
 prompts                225           523
 resources                0         1,521
-**total**       **10,162**    **13,297**
+**total**       **10,162**    **13,296**
 ===========  =============  ============
+
+Identical on every supported Python since ``register_tool()`` dedents each docstring:
+before it, 3.10-3.12 advertised 14,569 bytes where 3.13+ advertised 13,297, the
+difference being pure leading whitespace. The budget assertions below are what found
+that, on their first CI run.
 
 The growth is concentrated where the surface was previously silent rather than
 merely terse: the resources advertised nothing at all; three tools stated no
@@ -276,6 +281,57 @@ class TestToolDescriptionsDiscriminate:
                 assert phrase in lowered, (
                     f"{tool.name} writes but its description does not say so " f"(expected {phrase!r})"
                 )
+
+
+class TestTheSurfaceIsVersionIndependent:
+    """The same bytes on every supported Python, and nothing bypassing the registrar.
+
+    CPython 3.13 strips a docstring's leading indentation at compile time and 3.10-3.12
+    do not, while the SDK advertises ``fn.__doc__`` verbatim - so before
+    ``register_tool()`` existed, the older half of the supported range shipped every
+    continuation line with eight leading spaces on it, 1,272 bytes of whitespace across
+    the surface, invisible to anyone developing on 3.13+. The budget test below found it
+    on its first CI run; these two keep it found.
+    """
+
+    def test_every_advertised_description_is_already_normalised(self, surface):
+        # cleandoc is idempotent, so a correctly registered description equals its own
+        # cleandoc - and an un-dedented one does not, because a common margin is exactly
+        # what cleandoc removes. Real on 3.10-3.12, trivially true on 3.13+.
+        #
+        # Deliberately not "no line starts with whitespace": the bullet lists in
+        # query_history and get_data_range wrap with a two-space hanging indent, which is
+        # meaningful structure in the text rather than an artefact of the source. An
+        # earlier version of this assertion banned all leading whitespace and failed on
+        # exactly those, which would have meant flattening readable prose to satisfy a
+        # guard that had the wrong rule.
+        import inspect
+
+        for kind in ("tools", "prompts", "resources"):
+            for item in surface[kind]:
+                label = getattr(item, "name", None) or str(item.uri)
+                description = item.description or ""
+                assert description == inspect.cleandoc(description), (
+                    f"{kind[:-1]} {label} advertises an un-normalised description "
+                    f"({len(description.encode())} bytes, "
+                    f"{len(inspect.cleandoc(description).encode())} once dedented) - "
+                    f"register through register_tool() so every supported Python "
+                    f"advertises the same bytes"
+                )
+
+    def test_nothing_registers_a_tool_around_the_registrar(self):
+        # The effect test above cannot catch a bypass on 3.13+, where the compiler hides
+        # it, so the source is checked directly - the one guard that fails on every
+        # version, including the machine the mistake is made on.
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        for module in ("toinflux/mcp_read.py", "toinflux/mcp_write.py"):
+            text = (root / module).read_text(encoding="utf-8")
+            assert "@server.tool(" not in text, (
+                f"{module} registers a tool directly with @server.tool - use "
+                f"@register_tool(server, ...) so the docstring is dedented first"
+            )
 
 
 class TestSurfaceBudget:

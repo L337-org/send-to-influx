@@ -29,7 +29,13 @@ from toinflux.exceptions import SourceConnectionError, ToolParamError
 
 # Shared per-call handler lifecycle (construct from current settings, close the
 # session afterwards) - writes use the same plumbing as reads, from one place.
-from toinflux.mcp_common import close_session, configured_sources, resolve_handler, resolve_handlers
+from toinflux.mcp_common import (
+    close_session,
+    configured_sources,
+    register_tool,
+    resolve_handler,
+    resolve_handlers,
+)
 
 
 def writable_enabled_sources(settings, settings_file=None):
@@ -279,7 +285,8 @@ def _register_hue_write_tools(server, settings, settings_file):
     # A read despite living in the write registrar: it only lists devices and
     # their capabilities, changing nothing - grouped here because it exists
     # purely to feed hue_set_light's device/bridge arguments.
-    @server.tool(
+    @register_tool(
+        server,
         title="List Hue Devices",
         annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
     )
@@ -307,7 +314,8 @@ def _register_hue_write_tools(server, settings, settings_file):
     # Additive/reversible (turns a light on/off, adjusts brightness/colour) and
     # idempotent (setting the same state twice ends in the same state), so
     # neither destructive_hint nor a false idempotent_hint would be accurate.
-    @server.tool(
+    @register_tool(
+        server,
         title="Set Hue Light State",
         annotations=ToolAnnotations(
             read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
@@ -371,7 +379,8 @@ def _register_speedtest_write_tools(server, settings, settings_file):
     # result - and, unlike every other tool here, genuinely open-world: it
     # picks a best server from speedtest.net's public network rather than a
     # fixed set of configured devices.
-    @server.tool(
+    @register_tool(
+        server,
         title="Run Speed Test",
         annotations=ToolAnnotations(
             read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True

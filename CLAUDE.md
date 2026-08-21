@@ -709,7 +709,7 @@ recorded byte budget. Line wrapping is normalised away before matching - a docst
 newlines, so `changes nothing` split across a break would fail a guard the description satisfies.
 
 Measured with that module's fixture (two sources, both write-enabled: nine tools, three prompts,
-five resources), the surface went from **10,162 bytes to 13,297** in 5.4 - tools 9,937 -> 11,253,
+five resources), the surface went from **10,162 bytes to 13,296** in 5.4 - tools 9,937 -> 11,252,
 prompts 225 -> 523, resources 0 -> 1,521. The growth is where the surface was *silent* rather than
 merely terse:
 
@@ -729,6 +729,24 @@ merely terse:
 justifications for that behaviour dropped. A caller needs to know what a tool does, not why it was
 designed that way - the reasoning belongs here, where it is loaded by a person, not on every
 session.
+
+**Every tool registers through `register_tool()` in `toinflux/mcp_common.py`, and that
+exists for a version trap the budget guard caught on its first CI run.** CPython 3.13
+strips a docstring's leading indentation at compile time; 3.10-3.12 do not, and the SDK
+advertises `fn.__doc__` verbatim (`func_doc = description or fn.__doc__ or ""`). So on the
+older half of the supported range - which the `.deb` explicitly allows, `Depends: python3
+(>= 3.10)` - every continuation line of every tool description reached the model carrying
+eight leading spaces: **14,569 bytes advertised on 3.12 against 13,297 on 3.14**, the
+1,272-byte difference being pure whitespace, paid for on every session and completely
+invisible to anyone developing on 3.13+. `register_tool()` passes
+`description=inspect.cleandoc(fn.__doc__)`, so every supported version advertises the same
+bytes. Two guards, because one cannot do it: the *effect* is asserted (no advertised
+description carries an indented line), which is real on 3.10-3.12 and trivially true on
+3.13+; and the *source* is asserted (`@server.tool(` appears in neither registration
+module), which is the only check that fails on the machine where the mistake is made.
+Verified by simulation as well as by CI - re-indenting each 3.14 description the way
+3.10-3.12 present it and pushing it back through `cleandoc` reproduces `query_history` at
+exactly the 2,209 bytes CI reported, and returns all nine to byte-identical.
 
 **Two things deliberately left out**, both being context that buys nothing. A *registration*
 precondition ("requires `hue.mcp_read_write: true`") is guaranteed true whenever the model can see
