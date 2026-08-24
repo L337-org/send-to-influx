@@ -73,24 +73,24 @@ GRAFANA_UNITS = {
 # only the right one, because a caller composing its own query needs to recognise the
 # mistake, not just copy the suggestion.
 _KIND_PANELS = {
-    # An instantaneous reading - and nothing is ruled out, deliberately.
+    # An instantaneous reading, so a sum adds up quantities that never existed.
     #
-    # An earlier version listed `sum` here, on the reasoning that adding up readings
-    # which were never quantities of anything is meaningless. True of a temperature or a
-    # power in watts, and wrong for a third of the gauges this project declares: Octopus'
-    # `consumption_kwh` and `gas_consumption` are the energy used *during one interval*,
-    # and Open-Meteo's `precipitation` is what fell during one - for those, summing is
-    # not merely allowed, it is how you get a daily total, and the tool was steering
-    # callers away from the right answer.
+    # That warning is only sound because interval quantities have their own kind now.
+    # While they were declared gauges, `sum` was listed here and the tool advised callers
+    # away from the right aggregation for Octopus consumption and Open-Meteo
+    # precipitation; dropping it then made the warning useless for a real temperature.
+    # Splitting the kind is what lets both statements be true at once, which is the
+    # argument for having done it rather than picking whichever error was cheaper.
+    "gauge": {"panel_type": "timeseries", "aggregation": "mean", "avoid": ("sum",)},
+    # A quantity accumulated during its reporting interval. Summing gives the total for
+    # any range, which is the whole point of the kind, and nothing is ruled out: a mean
+    # is the average interval, legitimately, so long as nobody reads it as a rate.
     #
-    # The three-kind vocabulary cannot separate those two cases: an interval quantity is
-    # neither instantaneous nor a resetting cumulative total, so it sits in `gauge` for
-    # want of anywhere better. While that holds, no blanket claim about `sum` is true of
-    # the whole class, so none is made - the same omit-rather-than-guess rule the rest of
-    # this payload follows. A fourth kind for interval quantities would let us say "sum
-    # this" positively rather than staying silent; that is a schema change and a separate
-    # decision.
-    "gauge": {"panel_type": "timeseries", "aggregation": "mean", "avoid": ()},
+    # Charted as a time series rather than a bar chart, which would arguably suit an
+    # interval total better - `barchart` is a real Grafana panel type but is not one this
+    # was verified against, and an unverified panel type is exactly what this module
+    # refuses to emit elsewhere.
+    "interval": {"panel_type": "timeseries", "aggregation": "sum", "avoid": ()},
     # A running total that resets. The last value in a bucket is the total for it; a
     # mean or a median of a sawtooth is a number with no referent, and summing totals
     # double-counts.
@@ -254,8 +254,9 @@ def register_dashboard_tools(server, settings, settings_file=None):
         the measurement, this source's disambiguating tags, `$timeFilter` and
         `time($__interval)`, so it drops into a panel target with `rawQuery` true.
 
-        Read `avoid_aggregations`: averaging a counter that resets gives a plausible
-        line that means nothing, and no unit or value reveals it.
+        Read `aggregation` and `avoid_aggregations` together: averaging a counter that
+        resets gives a plausible line that means nothing, and summing an instantaneous
+        reading adds up quantities that never existed - no unit or value reveals either.
 
         These are panel *parts*, not a dashboard document. Assemble them into the shape
         your Grafana wants - copy an existing dashboard for the envelope and its

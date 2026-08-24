@@ -12,7 +12,8 @@ is one-way, since this file legitimately documents things that are not field key
 by device class, because its field keys are your own device names, and `gen_<fuel>` is a pattern.
 
 Alongside a unit and coded values, the metadata carries two things this file does not tabulate: how
-each field may be aggregated (`gauge`, `counter` or `state` - see `list_fields` in the README), and
+each field may be aggregated (`gauge`, `interval`, `counter` or `state` - see `list_fields` in the
+README), and
 a short description where a field's name does not say what it is. Those are prose for a model to
 read, where the Notes column below is prose for you; neither is generated from the other, and no
 test compares them. The server's `get_documentation` tool / `docs://reference` resource generate the

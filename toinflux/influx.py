@@ -182,7 +182,7 @@ class DataHandler:
     #   "codes"       {int: str} meanings for a numeric-coded field, so a state
     #                 reads back as its label rather than a bare number.
     #   "kind"        how the value may be aggregated - one of mcp_read's
-    #                 FIELD_KINDS ("gauge"/"counter"/"state"). The one thing here
+    #                 FIELD_KINDS ("gauge"/"interval"/"counter"/"state"). The one
     #                 that is not derivable from the value: nothing else
     #                 distinguishes a cumulative total, whose mean is a
     #                 plausible-looking number that means nothing, from an

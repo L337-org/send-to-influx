@@ -1206,6 +1206,26 @@ class TestBuildDocumentation:
         # because several of them contain a semicolon themselves.
         assert "`che` - unit kWh; counter (running total, resets). Energy this session." in doc
 
+    def test_an_interval_total_is_worded_distinctly_and_says_to_sum_it(self):
+        # The reference is where a caller not using list_fields' detail flag learns this,
+        # so the four kinds must read differently. An earlier version had no test here,
+        # and the interval wording could be replaced with gauge's without failing.
+        handler = MagicMock()
+        handler.source = "octopus"
+        handler.MCP_DESCRIPTION = "Octopus"
+        handler.MCP_FIELD_METADATA = {"consumption_kwh": {"unit": "kWh", "kind": "interval"}}
+        handler.session = MagicMock()
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            doc = build_documentation({"sources": ["octopus"]}, None)
+        bullet = next(line for line in doc.splitlines() if line.startswith("- `consumption_kwh`"))
+        assert "interval total" in bullet
+        assert "sum it" in bullet
+        # And its own line must not call it an instantaneous reading, which is what it was
+        # wrongly declared as before this kind existed. Scoped to the bullet on purpose:
+        # the document's header paragraph explains all four kinds, so "instantaneous"
+        # appears there legitimately.
+        assert "instantaneous" not in bullet
+
     def test_a_coded_field_is_described_as_a_state_without_declaring_one(self):
         handler = MagicMock()
         handler.source = "nuki"

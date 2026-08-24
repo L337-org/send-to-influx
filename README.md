@@ -669,9 +669,11 @@ Once connected, the client has these read tools:
   InfluxDB type, its unit, what each value means for a coded field like Nuki lock state, and how it
   may be aggregated. Each of those is omitted rather than nulled where it is not known - including
   the type, which InfluxDB does not report for every field. That last part - `kind` - is the one a dashboard gets silently wrong without:
-  a `gauge` is an instantaneous reading, a `counter` a running total that resets (read its last
-  value or a difference, never its mean), a `state` a discrete code or label. Pass `detail: true`
-  for the per-field descriptions as well, in the same call.
+  a `gauge` is an instantaneous reading (never sum them), an `interval` total is a quantity
+  accumulated over its reporting period (sum them to get a total for a day or a week), a `counter` a
+  running total that resets (read its last value or a difference, never its mean), a `state` a
+  discrete code or label. Pass `detail: true` for the per-field descriptions as well, in the same
+  call.
 - **`get_current_state`** - a source's state *right now* ("is the door locked?", "which lights are
   on?"). Most sources are read live from the device; Speedtest and Octopus report their latest
   recorded reading instead.

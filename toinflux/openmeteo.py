@@ -34,7 +34,7 @@ class OpenMeteo(DataHandler):
         # "interval" rather than naming a duration this collector never records.
         "precipitation": {
             "unit": "mm",
-            "kind": "gauge",
+            "kind": "interval",
             "description": "Rain, showers and snow accumulated over the preceding interval, not a rate.",
         },
         "cloud_cover": {"unit": "%", "kind": "gauge"},

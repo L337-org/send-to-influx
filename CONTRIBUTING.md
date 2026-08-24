@@ -111,7 +111,9 @@ through it rather than inferring the shape from an existing source.
 Needed for the read tools, the resources and `suggest_dashboard_panels`, which all derive from it.
 
 6. **`MCP_FIELD_METADATA`** on the class, from the UNITS.md entry: `unit` where the field has one,
-   `codes` for any numeric-coded field, a `kind` on **every** entry (`gauge`, `counter` or `state`),
+   `codes` for any numeric-coded field, a `kind` on **every** entry (`gauge`, `interval`, `counter`
+   or `state` - `interval` for a quantity accumulated over its reporting period, which is summed
+   rather than averaged),
    and a `description` **only** where the name, unit and coded values do not already say what the
    field is. Add the UNITS.md row in the same change: `tests/test_field_metadata.py` fails on an entry
    with no kind, one saying nothing at all, a description whose every word comes from the field key,

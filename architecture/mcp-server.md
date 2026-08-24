@@ -330,7 +330,7 @@ field set. Design points:
   - **`kind` is the one field-level fact that cannot be recovered from the value**, which is why it is
     declared rather than derived: taking the mean of a cumulative counter produces a plausible chart
     that means nothing, and no unit, type or coded value distinguishes those fields from an
-    instantaneous reading. Three values (`FIELD_KINDS`): `gauge`, `counter`, `state`.
+    instantaneous reading. Four values (`FIELD_KINDS`): `gauge`, `interval`, `counter`, `state`.
     - **A numeric field with nothing declared reports no kind at all, deliberately.** Defaulting to
       `gauge` would say "averaging this is fine" about a counter, which is the exact failure the
       field exists to prevent; saying nothing is recoverable where saying that is not. A *string* or
@@ -414,19 +414,27 @@ value mappings decoding a coded field, and a series alias.
 - **`avoid_aggregations` is the load-bearing field**, not `aggregation`. A caller composing its own
   query needs to recognise the mistake, not just copy the suggestion - and the mistake is invisible:
   the mean of a resetting counter is a plausible line with no referent.
-- **`gauge` rules nothing out, and that is a consequence of there being three kinds rather than
-  four.** An earlier version of the tool listed `sum` under gauge's `avoid`, which is right for a
-  temperature or a power in watts and *wrong for a third of the gauges this project declares*:
-  Octopus's `consumption_kwh` and `gas_consumption` are the energy used during one interval and
-  Open-Meteo's `precipitation` is what fell during one, so summing them is not merely allowed, it is
-  how a daily total is obtained. The tool was steering callers away from the correct answer, and only
-  a suppressed review comment surfaced it. An interval quantity is neither instantaneous nor a
-  resetting cumulative total, so it sits in `gauge` for want of anywhere better; while that holds, no
-  blanket claim about `sum` is true of the class, so none is made. **A fourth kind for interval
-  quantities would let the schema say "sum this" positively instead of staying silent** - that is a
-  change to `FIELD_KINDS` and to what `list_fields` emits, so it is a separate decision, not a
-  detail. `test_the_declared_interval_gauges_are_still_gauges` fails if one of those three is
-  reclassified, so the reasoning cannot go stale unnoticed.
+- **`interval` exists because one vocabulary could not serve two facts.** `gauge` warns against
+  `sum`, which is right for a temperature or a power in watts and *wrong* for a quantity accumulated
+  over a reporting period: Octopus's `consumption_kwh` and `gas_consumption` are the energy used
+  during one interval and Open-Meteo's `precipitation` is what fell during one, so summing them is
+  not merely allowed - it is how a daily total is obtained. Those three were declared gauges, so the
+  tool steered callers away from the correct aggregation, and **only a suppressed review comment
+  surfaced it**. Dropping `sum` from gauge's list fixed those three and made the warning useless for
+  every real gauge; keeping it kept the wrong advice. Neither statement is true of one class, so the
+  class was split. `gauge` now warns against `sum` soundly, and `interval` recommends it.
+  - **The interval's duration is deliberately not in the schema.** A sum is correct whatever it is,
+    so the aggregation guidance does not need it; it is observable anyway, since Octopus stamps each
+    point at its own `interval_start` and consecutive timestamps are therefore spaced by it; and it
+    is not uniformly knowable - gas granularity follows the meter type, the same dependence its unit
+    has, and Open-Meteo's is the model's own (900 s observed live, an hour in the documented hourly
+    series) which this project discards. A field populated for one of three cases would be worse
+    than none.
+  - Two tests hold the split in place: `test_an_interval_quantity_is_a_kind_of_its_own` fails if one
+    of the three moves back to `gauge`, and `test_no_declared_gauge_is_really_an_interval_quantity`
+    fails if any *other* field describes itself as per-interval while calling itself a gauge - which
+    is how the contradiction arose the first time. It exempts a description saying "average", since
+    an average over an interval is still a reading and summing averages means nothing.
 - **An undeclared numeric field gets no `kind` and is suggested `last`**, the one aggregation that
   cannot be wrong for any kind. Suggesting `mean` would say averaging is safe about a field that may
   be a counter, which is the failure the whole feature exists to prevent.

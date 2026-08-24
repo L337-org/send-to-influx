@@ -99,38 +99,66 @@ class TestAggregationRules:
         assert "sum" in spec["avoid_aggregations"]
         assert "LAST(" in spec["query"]
 
-    def test_a_gauge_is_averaged_and_nothing_is_ruled_out(self):
+    def test_a_gauge_is_averaged_and_never_summed(self):
+        # Summing instantaneous readings adds up quantities that never existed. This
+        # warning is only sound because interval quantities are their own kind: while
+        # they were gauges, keeping `sum` here steered callers off the right aggregation
+        # for Octopus consumption, and dropping it made the warning useless for a real
+        # temperature. See test_an_interval_quantity_is_a_kind_of_its_own.
         schema = _schema(field_metadata={"tp1": {"unit": "°C", "kind": "gauge"}}, allowed_fields={"tp1"})
         spec = panel_spec(schema, "tp1", [])
         assert spec["aggregation"] == "mean"
-        assert "avoid_aggregations" not in spec
+        assert spec["avoid_aggregations"] == ["sum"]
 
-    def test_an_interval_quantity_is_not_warned_away_from_sum(self):
-        # The defect this pins: `gauge` covers both instantaneous readings and
-        # per-interval quantities, and for the latter - Octopus half-hourly consumption,
-        # Open-Meteo precipitation - summing is how you get a total for the day. An
-        # earlier version listed `sum` under gauge's `avoid`, so the tool steered callers
-        # away from the correct aggregation for a third of the gauges declared here.
+    def test_an_interval_quantity_is_summed_and_nothing_is_ruled_out(self):
+        # Summing is the whole point: it gives the total for whatever range is charted.
+        # Nothing is ruled out, because a mean is legitimately the average interval.
         schema = _schema(
             source="octopus",
             measurement="octopus",
-            field_metadata={"consumption_kwh": {"unit": "kWh", "kind": "gauge"}},
+            field_metadata={"consumption_kwh": {"unit": "kWh", "kind": "interval"}},
             allowed_fields={"consumption_kwh"},
             field_types={"consumption_kwh": "float"},
         )
         spec = panel_spec(schema, "consumption_kwh", [])
+        assert spec["kind"] == "interval"
+        assert spec["aggregation"] == "sum"
+        assert "SUM(" in spec["query"]
         assert "avoid_aggregations" not in spec
 
-    def test_the_declared_interval_gauges_are_still_gauges(self):
-        # If any of these is ever reclassified - a fourth `kind` for interval quantities
-        # is the obvious candidate - the reasoning above stops applying and gauge's
-        # `avoid` list should be revisited rather than left silently permissive.
+    def test_an_interval_quantity_is_a_kind_of_its_own(self):
+        # The three fields whose own descriptions say they are per-interval. They were
+        # declared gauges, which is what made gauge's `sum` warning unsound - one
+        # vocabulary cannot rule a sum out for a temperature and endorse it for half an
+        # hour of consumption. If one of these moves back, gauge's avoid list has to be
+        # revisited rather than left quietly wrong.
         from toinflux.octopus import Octopus
         from toinflux.openmeteo import OpenMeteo
 
-        assert Octopus.MCP_FIELD_METADATA["consumption_kwh"]["kind"] == "gauge"
-        assert Octopus.MCP_FIELD_METADATA["gas_consumption"]["kind"] == "gauge"
-        assert OpenMeteo.MCP_FIELD_METADATA["precipitation"]["kind"] == "gauge"
+        assert Octopus.MCP_FIELD_METADATA["consumption_kwh"]["kind"] == "interval"
+        assert Octopus.MCP_FIELD_METADATA["gas_consumption"]["kind"] == "interval"
+        assert OpenMeteo.MCP_FIELD_METADATA["precipitation"]["kind"] == "interval"
+
+    def test_no_declared_gauge_is_really_an_interval_quantity(self):
+        # The other half of that guard, mechanised: a field whose description talks about
+        # an interval or an accumulation while calling itself a gauge is the exact
+        # contradiction this kind was added to remove, and would silently reinstate a
+        # wrong `sum` warning.
+        from toinflux.general import known_sources, source_class
+
+        suspicious = []
+        for source in known_sources():
+            for field, meta in source_class(source).MCP_FIELD_METADATA.items():
+                if meta.get("kind") != "gauge":
+                    continue
+                description = (meta.get("description") or "").lower()
+                # "average of the preceding hour" is a gauge: an average over an interval
+                # is still a reading, and summing averages means nothing.
+                if "average" in description:
+                    continue
+                if any(word in description for word in ("during one", "accumulated", "preceding interval")):
+                    suspicious.append(f"{source}.{field}")
+        assert not suspicious, f"declared gauge(s) describing themselves as per-interval: {suspicious}"
 
     def test_a_state_gets_a_state_timeline_and_no_arithmetic(self):
         schema = _schema(

@@ -101,13 +101,33 @@ DEFAULT_RESULT_POINTS = 500
 _RELATIVE_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 # How a field's value may legitimately be aggregated, which is not derivable from
-# the value itself: "gauge" is an instantaneous reading, so every function in
-# AGGREGATIONS means something; "counter" is a running total that resets, where a
-# mean produces a plausible number that means nothing and only the last value or a
-# difference between two does; "state" is a discrete code, flag or label, where
-# nothing but first/last/count says anything at all. Declared per field in a
-# source's MCP_FIELD_METADATA and reported by list_fields.
-FIELD_KINDS = frozenset({"gauge", "counter", "state"})
+# the value itself:
+#
+#   "gauge"    an instantaneous reading (or an average over one interval, like
+#              Open-Meteo's radiation). Summing them adds up quantities that never
+#              existed, so a sum is the one thing ruled out.
+#   "interval" a quantity accumulated *during* its reporting interval - Octopus's
+#              half-hourly consumption, Open-Meteo's precipitation. Summing is how a
+#              total for a day or a week is obtained, which is what separates these
+#              from a gauge and why they are not one.
+#   "counter"  a running total that resets, where a mean produces a plausible number
+#              that means nothing and only the last value or a difference between two
+#              does.
+#   "state"    a discrete code, flag or label, where nothing but first/last/count says
+#              anything at all.
+#
+# Declared per field in a source's MCP_FIELD_METADATA and reported by list_fields.
+#
+# "interval" exists because three fields were previously declared gauges while their own
+# descriptions said they were per-interval quantities, and the panel tool then advised
+# callers away from `sum` - the correct aggregation for them. One vocabulary cannot both
+# rule a sum out for a temperature and endorse it for a half-hour of consumption, so
+# neither statement was true of "gauge" and it made the wrong one. The interval's
+# *duration* is deliberately not part of the schema: a sum is right whatever it is, and
+# it is observable anyway, since a point is stamped at its interval start so consecutive
+# timestamps are spaced by it. It is also not uniformly knowable - gas granularity
+# depends on the meter, and Open-Meteo's is the model's own.
+FIELD_KINDS = frozenset({"gauge", "interval", "counter", "state"})
 
 # An InfluxDB field type that can only be a state, whatever (if anything) the
 # source declared: a string or a boolean has no arithmetic, so first/last/count is
@@ -1833,6 +1853,9 @@ def data_range_result(source, settings, settings_file):
 # vocabulary differently.
 _KIND_PROSE = {
     "gauge": "gauge (instantaneous)",
+    # Says where to find the period rather than naming one, since it varies by field and
+    # is not recorded: a point is stamped at its interval start, so the spacing shows it.
+    "interval": "interval total (sum it; the period is the spacing between points)",
     "counter": "counter (running total, resets)",
     "state": "state (discrete code or label)",
 }
@@ -1886,10 +1909,11 @@ def build_documentation(settings, settings_file):
         "# send-to-influx data reference",
         "",
         "What each configured source reports, and what its values mean. Each field gives its unit "
-        "where it has one and how it may be aggregated: a gauge is an instantaneous reading, a counter "
-        "a running total that resets (take its last value or a difference, never its mean), a state a "
-        "discrete code or label. Field keys may carry a per-device prefix (e.g. a Nuki lock's name); "
-        "the meanings below are keyed by the base name.",
+        "where it has one and how it may be aggregated: a gauge is an instantaneous reading (never "
+        "sum them), an interval total is a quantity accumulated over its reporting period (sum them "
+        "for a total), a counter a running total that resets (take its last value or a difference, "
+        "never its mean), a state a discrete code or label. Field keys may carry a per-device prefix "
+        "(e.g. a Nuki lock's name); the meanings below are keyed by the base name.",
         "",
     ]
     for source in configured_sources(settings):
@@ -1965,9 +1989,10 @@ def register_read_tools(server, settings, settings_file=None):
         to say - `type` included, since InfluxDB does not always report one.
 
         `kind` is how a value may legitimately be aggregated: 'gauge' is an
-        instantaneous reading, 'counter' a running total that resets (read its last
-        value or a difference, never its mean), 'state' a discrete code or label.
-        Absent means the source has not said - not that averaging is safe.
+        instantaneous reading (never sum them), 'interval' a quantity accumulated over
+        its reporting period (sum them for a total), 'counter' a running total that
+        resets (read its last value or a difference, never its mean), 'state' a discrete
+        code or label. Absent means the source has not said - not that averaging is safe.
 
         `detail` adds each field's description, where its name and unit do not already
         say what it is. `get_documentation` carries the same prose for every source at

@@ -51,6 +51,12 @@ exactly the reason that makes it cost this: a prompt is not in the model's tool 
 so nothing would tell a model the data can be charted - and not every client surfaces
 prompts at all. See ``toinflux/mcp_dashboards.py`` for the rest of that reasoning.
 
+A later 205 bytes (15,293 -> 15,498) added the fourth field kind, ``interval``, to the
+three descriptions that enumerate the vocabulary. That is the price of the vocabulary
+being usable at all: a kind a caller has not been told about is a kind it cannot act on,
+and the two facts bought here - never sum a gauge, do sum an interval total - are each
+the difference between a correct panel and a plausible wrong one.
+
 The columns are named after the change that produced each measurement rather than after a
 release, because 5.3 is the last released version and every later column is unreleased -
 naming a release here would invent one. The "prose pass" is the change that gave every
@@ -178,11 +184,11 @@ WRITE_EFFECT_PHRASES = {
 # Recorded ceilings, not predictions - see the table in this module's docstring for
 # what is actually measured. Raising one is a deliberate decision that belongs in the
 # commit message with its reason.
-MAX_TOOL_BYTES = 13_350
+MAX_TOOL_BYTES = 13_600
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 15_550
+MAX_TOTAL_BYTES = 15_750
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],
