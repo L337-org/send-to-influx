@@ -608,7 +608,20 @@ class Hue(DataHandler):
         :raises InfluxWriteError: the data write failed (never the description)
         """
         super().send_data(data=data, timestamp=timestamp, use_buffer=use_buffer, flush=flush)
-        self._write_device_classes(timestamp)
+        # Only when writing our *own* readings. `data is None` is what the collection path
+        # passes (send_data() with no arguments, so the base writes self.data); every other
+        # caller supplies its own, and the one that matters is send_heartbeat(), which
+        # borrows this method with the header swapped to collector_status.
+        #
+        # Without this the heartbeat re-emitted the device classes on every cycle, doubling
+        # the write volume - and worse, a *failed* cycle still heartbeats, so it would
+        # rewrite the last successful parse's classes with a fresh timestamp and keep a
+        # removed device described indefinitely. Tested by reproducing both.
+        #
+        # Deliberately not a test on the header: it is built in another module, so matching
+        # its text here would couple the two and break silently if either changed.
+        if data is None:
+            self._write_device_classes(timestamp)
 
     def _write_device_classes(self, timestamp=None):
         """Write one ``SCHEMA_MEASUREMENT`` point per device, saying which class it is.

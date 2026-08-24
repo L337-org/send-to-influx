@@ -915,6 +915,45 @@ class TestHueWritesDeviceClasses:
             with pytest.raises(InfluxWriteError):
                 hue.send_data()
 
+    def test_a_heartbeat_does_not_re_emit_the_device_classes(self, sample_settings):
+        # send_heartbeat() borrows send_data() with the header swapped to
+        # collector_status, so without a guard every heartbeat wrote the classes again -
+        # doubling the write volume for no new information.
+        hue = self._collected(sample_settings)
+        written = []
+
+        def _record(self, data=None, timestamp=None, use_buffer=True, flush=True):
+            written.append(self.influx_header.split(",")[0])
+
+        with patch("toinflux.influx.DataHandler.send_data", _record):
+            hue.send_data()
+            original = hue.influx_header
+            hue.influx_header = "collector_status,source=hue,host=x "
+            hue.send_data(data={"ok": 1, "consecutive_failures": 0}, use_buffer=False)
+            hue.influx_header = original
+        # One hue_devices point per described device - that is the design - and the
+        # heartbeat must add none of its own, so the last write is the heartbeat itself.
+        expected = len(hue._device_classes)
+        assert written.count("hue_devices") == expected, f"expected {expected} per collection, got {written}"
+        assert written[0] == "hue"
+        assert written[-1] == "collector_status", f"the heartbeat re-emitted device classes: {written}"
+
+    def test_a_failed_cycle_does_not_rewrite_stale_classes(self, sample_settings):
+        # The worse half of the same bug. A failed collection still heartbeats, and the
+        # class map still holds the last successful parse - so an unguarded heartbeat would
+        # stamp a removed device's class with a fresh timestamp and keep it described for
+        # as long as the collector kept failing.
+        hue = self._collected(sample_settings)
+        written = []
+
+        def _record(self, data=None, timestamp=None, use_buffer=True, flush=True):
+            written.append(self.influx_header.split(",")[0])
+
+        with patch("toinflux.influx.DataHandler.send_data", _record):
+            hue.influx_header = "collector_status,source=hue,host=x "
+            hue.send_data(data={"ok": 0, "consecutive_failures": 3}, use_buffer=False)
+        assert "hue_devices" not in written
+
     def test_the_original_header_is_restored(self, sample_settings):
         hue = self._collected(sample_settings)
         before = hue.influx_header
