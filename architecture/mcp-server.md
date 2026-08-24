@@ -370,8 +370,18 @@ field set. Design points:
       InfluxDB cannot be read, so a live current-state read never fails because an annotation could
       not be resolved.
     - **`build_documentation` deliberately does not use the hook.** The generated reference promises
-      no InfluxDB round trip, so it keeps reading the class attribute and a source with only
-      per-install metadata is simply absent from it.
+      no InfluxDB round trip - `get_documentation`'s own description says so - so it keeps reading
+      the class attribute, and a source with only per-install metadata is absent from it. That is
+      the honest trade: `list_fields` is where those fields are described. It was wired to the hook
+      by mistake once, which broke the promise with nothing failing, so
+      `test_the_reference_uses_the_class_attribute_and_never_the_hook` now asserts the hook is not
+      called at all.
+    - **A field key is not unique across bridges**, so the lookup groups by `host` as well as
+      `device`: two bridges with a device of the same name write the *same* field key under
+      different host tags. Where they are the same class it is described once; where they disagree
+      it is described not at all, because no unit is correct for a key that means two things and the
+      data cannot separate them either. Grouping by `device` alone would let InfluxDB merge the
+      bridges and `last()` pick a winner silently, so the query text is asserted.
   - **`description` sits behind `detail=False`, and is the only optional part** because it is the only
     bulky one. Every other addition is a handful of bytes and always present. It exists to decode an
     unobvious key (MyEnergi's `ectp1`, `che`) or to carry semantics the name cannot - cumulative,

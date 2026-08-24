@@ -1930,7 +1930,13 @@ def build_documentation(settings, settings_file):
             continue
         try:
             description = handler.MCP_DESCRIPTION
-            field_metadata = handler.mcp_field_metadata()
+            # The class attribute, NOT mcp_field_metadata(): this function's whole
+            # contract is that it needs no InfluxDB round trip, and the tool description
+            # says so. Calling the hook here made get_documentation query InfluxDB once
+            # per Hue source and quietly broke that promise. The cost is that a source
+            # with only per-install metadata is absent from the generated reference,
+            # which is the honest trade - list_fields is where those fields are described.
+            field_metadata = handler.MCP_FIELD_METADATA
         finally:
             close_session(handler.session)
         lines.append(f"## {source}")

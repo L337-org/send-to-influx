@@ -1246,6 +1246,23 @@ class TestBuildDocumentation:
         # because several of them contain a semicolon themselves.
         assert "`che` - unit kWh; counter (running total, resets). Energy this session." in doc
 
+    def test_the_reference_uses_the_class_attribute_and_never_the_hook(self):
+        # get_documentation's whole contract is that it needs no InfluxDB round trip, and
+        # its description says so. Calling mcp_field_metadata() here made it query InfluxDB
+        # once per Hue source and broke that promise silently - nothing failed, because the
+        # two return the same thing for every source but Hue.
+        handler = MagicMock()
+        handler.source = "hue"
+        handler.MCP_DESCRIPTION = "Hue"
+        handler.MCP_FIELD_METADATA = {"declared": {"unit": "W", "kind": "gauge"}}
+        handler.mcp_field_metadata.return_value = {"per_install": {"unit": "°C", "kind": "gauge"}}
+        handler.session = MagicMock()
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            doc = build_documentation({"sources": ["hue"]}, None)
+        handler.mcp_field_metadata.assert_not_called()
+        assert "`declared`" in doc
+        assert "per_install" not in doc
+
     def test_an_interval_total_is_worded_distinctly_and_says_to_sum_it(self):
         # The reference is where a caller not using list_fields' detail flag learns this,
         # so the four kinds must read differently. An earlier version had no test here,

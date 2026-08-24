@@ -523,7 +523,7 @@ class Hue(DataHandler):
         raise ConfigError(f"no Hue bridge configured at '{self.instance}' (configured: {configured})")
 
     def mcp_field_metadata(self):
-        """Describe this bridge's fields, resolved per install from what was recorded.
+        """Describe this source's fields, resolved per install from what was recorded.
 
         Hue is the one source whose field keys are the operator's own device names, so a
         static table cannot cover them. The classification the collector wrote to
@@ -549,20 +549,42 @@ class Hue(DataHandler):
         try:
             influx_settings = self.settings["influx"]
             db = resolve_db(self.source_settings, influx_settings)
+            # Grouped by host as well as device, because a field key is not unique across
+            # bridges: two bridges with a light of the same name write the *same* field
+            # key under different host tags (see UNITS.md). Grouping by device alone would
+            # let one bridge's class silently win for a name the other uses differently.
+            #
             # Every part of this query is a literal - no device name or other input reaches
             # it - so there is nothing here to escape or validate.
-            query = f'SELECT last("class") FROM "{SCHEMA_MEASUREMENT}" GROUP BY "device"'
+            query = f'SELECT last("class") FROM "{SCHEMA_MEASUREMENT}" GROUP BY "device", "host"'
             series = run_query(self.session, influx_settings, db, query)
         except Exception as exc:
             logging.debug("Could not read Hue device classes: %s", self._redact(str(exc)))
             return dict(self.MCP_FIELD_METADATA)
 
-        metadata = dict(self.MCP_FIELD_METADATA)
+        # Collect every class seen for a name before deciding, so a name two bridges
+        # disagree about can be spotted rather than resolved by write order.
+        seen = {}
         for one in series:
             device = one.tags.get("device")
             if not device or not one.values:
                 continue
-            entry = self._metadata_for_class(one.values[0][-1])
+            seen.setdefault(device, set()).add(one.values[0][-1])
+
+        metadata = dict(self.MCP_FIELD_METADATA)
+        for device, classes in seen.items():
+            if len(classes) > 1:
+                # The same field key means different things on different bridges, so no
+                # unit is correct for it - and the data model cannot separate them either,
+                # since both bridges write that one key. Omit rather than pick a side, the
+                # same rule the rest of this metadata follows.
+                logging.debug(
+                    "Hue field %r is a %s on different bridges; leaving it undescribed",
+                    device,
+                    " and a ".join(sorted(classes)),
+                )
+                continue
+            entry = self._metadata_for_class(next(iter(classes)))
             if entry:
                 metadata[device] = entry
         return metadata

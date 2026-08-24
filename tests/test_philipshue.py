@@ -968,7 +968,11 @@ class TestHueFieldMetadata:
     def _series(self, pairs):
         from toinflux.mcp_read import QuerySeries
 
-        return [QuerySeries(tags={"device": n}, columns=["time", "last"], values=[[0, c]]) for n, c in pairs]
+        # One series per (device, host), which is how the grouped query answers.
+        return [
+            QuerySeries(tags={"device": n, "host": f"bridge{i}"}, columns=["time", "last"], values=[[0, c]])
+            for i, (n, c) in enumerate(pairs)
+        ]
 
     def _metadata(self, sample_settings, pairs, **overrides):
         hue = _hue(sample_settings, **overrides)
@@ -1000,6 +1004,31 @@ class TestHueFieldMetadata:
         overrides = {} if configured is None else {"temperature_units": configured}
         meta = self._metadata(sample_settings, [("Study_Temp", "ZLLTemperature")], **overrides)
         assert meta["Study_Temp"]["unit"] == expected
+
+    def test_the_query_groups_by_host_as_well_as_device(self, sample_settings):
+        # Not a style assertion: the grouping is what makes a cross-bridge disagreement
+        # visible at all. Grouped by device alone, InfluxDB merges the bridges into one
+        # series and last() silently picks a winner, so the ambiguity check below could
+        # never fire. The query text is the contract with InfluxDB here.
+        hue = _hue(sample_settings)
+        with patch("toinflux.mcp_read.run_query", return_value=[]) as query:
+            hue.mcp_field_metadata()
+        assert query.call_args.args[-1] == ('SELECT last("class") FROM "hue_devices" GROUP BY "device", "host"')
+
+    def test_two_bridges_agreeing_describe_the_field_once(self, sample_settings):
+        # The normal multi-bridge case: the same device name on both bridges, same class.
+        meta = self._metadata(sample_settings, [("Hall_Light", "Dimmable light"), ("Hall_Light", "Dimmable light")])
+        assert meta["Hall_Light"] == {"kind": "gauge", "unit": "%"}
+
+    def test_two_bridges_disagreeing_leave_the_field_undescribed(self, sample_settings):
+        # A field key is not unique across bridges - two bridges with a device of the same
+        # name write the *same* field key under different host tags. If they are different
+        # classes, no unit is correct for that key and the data cannot separate them
+        # either, so it gets none rather than whichever bridge wrote last.
+        meta = self._metadata(
+            sample_settings, [("Hall_Light", "Dimmable light"), ("Hall_Light", "On/Off plug-in unit")]
+        )
+        assert "Hall_Light" not in meta
 
     def test_an_unrecognised_class_is_left_undescribed(self, sample_settings):
         # A Hue device type we have never seen should appear with no unit, not with
