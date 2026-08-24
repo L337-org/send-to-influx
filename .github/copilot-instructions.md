@@ -155,7 +155,12 @@ In order. The first two are where real defects in this codebase have come from.
 
 - Documentation changes in the **same** commit as the behaviour change, never a follow-up.
 - **`CLAUDE.md` and this file are mirrors and must change together.** This is the most-forgotten step.
-  Flag a change that touches one and not the other.
+  Flag a change that touches one and not the other. The `Check docs mirror` CI job flags this too, but
+  it is **not a required check** (a red X there is a prompt, not a blocker) and it only tests whether
+  each file was *touched* - it cannot see that the same rule actually reached both, so the review
+  judgement is still needed.
+- A change to a rule that lives in `architecture/` should reach whichever instruction files carry the
+  rule-level version of it. Detail-only edits to `architecture/` legitimately touch nothing else.
 - A change to a subsystem's behaviour updates the relevant `architecture/` file too.
 - Emitted-data changes update UNITS.md, and a breaking one updates UPGRADING.md.
 

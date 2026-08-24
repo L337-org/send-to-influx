@@ -65,6 +65,64 @@ jobs:
           fi
           echo "All action references are pinned to commit SHAs."
 
+  mirror-check:
+    # Ported from L337-org/docker-mcp's job of the same name - one copy of the logic per
+    # repo, deliberately the same logic, like action-pins above. Two deliberate
+    # divergences: this repo requires timeout-minutes on every job, and the documentation
+    # set here has a third member, architecture/, which docker-mcp does not have.
+    #
+    # CLAUDE.md and .github/copilot-instructions.md are mirrors of each other (the same
+    # rules for an implementer and for a reviewer); architecture/ holds the detail both
+    # point at. Together they are one documentation set, so a change touching some but not
+    # all of it is worth a second look.
+    #
+    # Deliberately NOT a required status check, so the red X is a prompt to double-check
+    # rather than a merge blocker - one-sided edits are legitimate and a blocker here
+    # would eventually be switched off wholesale. Fork-safe: read-only, no secrets, plain
+    # git diff.
+    runs-on: [ubuntu-latest]
+    name: Check docs mirror
+    if: github.event_name == 'pull_request'
+    # 12s observed - a name-only diff.
+    timeout-minutes: 5
+    steps:
+      - name: Check out source repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # need the merge-base with the PR base branch
+
+      - name: Compare changes across CLAUDE.md, copilot-instructions.md and architecture/
+        run: |
+          base="$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)"
+          changed="$(git diff --name-only "$base" HEAD)"
+
+          # -F throughout: an unanchored '.' in the copilot path would otherwise be a
+          # wildcard. docker-mcp's copy uses -cx; the fixed-string form is the same check
+          # without that latent bug.
+          claude=no; copilot=no; arch=no
+          if grep -Fqx 'CLAUDE.md' <<<"$changed"; then claude=yes; fi
+          if grep -Fqx '.github/copilot-instructions.md' <<<"$changed"; then copilot=yes; fi
+          if grep -q '^architecture/' <<<"$changed"; then arch=yes; fi
+
+          echo "CLAUDE.md=$claude  copilot-instructions.md=$copilot  architecture/=$arch"
+
+          if [ "$claude" = no ] && [ "$copilot" = no ] && [ "$arch" = no ]; then
+            echo "Docs mirror OK: this change touches none of the documentation set."
+            exit 0
+          fi
+          if [ "$claude" = yes ] && [ "$copilot" = yes ] && [ "$arch" = yes ]; then
+            echo "Docs mirror OK: the whole documentation set changed together."
+            exit 0
+          fi
+
+          missing=""
+          [ "$claude"  = no ] && missing="$missing CLAUDE.md"
+          [ "$copilot" = no ] && missing="$missing .github/copilot-instructions.md"
+          [ "$arch"    = no ] && missing="$missing architecture/"
+
+          echo "::error::MIRROR RULE: this PR changes part of the documentation set but not all of it. Untouched:${missing}. CLAUDE.md and .github/copilot-instructions.md carry the same rules for an implementer and a reviewer, and architecture/ carries the detail they point at, so a rule that changed in one usually needs to reach the others. Legitimate one-sided edits exist - a detail-only architecture/ edit, a reviewer-only 'do not flag' entry, a typo - and this check is not required for merge, so say which it is in the PR description and carry on. Before mirroring, check the change belongs in an always-loaded file at all: if a CI test already enforces it, neither mirror should carry it."
+          exit 1
+
   pytest-run:
     runs-on: [ubuntu-latest]
     name: Run pytest

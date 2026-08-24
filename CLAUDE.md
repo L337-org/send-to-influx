@@ -55,6 +55,14 @@ suite in `debian:12` for systemd 252, the oldest systemd-creds supported), and `
   therefore carries a `report-cancelled-as-failure` job to turn that into a reported failure, because
   it runs unattended and a timeout would mean the `.deb` was never attached with nothing saying so.
   **Never add that job to `premerge.yaml`** - it would fire on every superseded re-push.
+- **`mirror-check` ("Check docs mirror") is the one job that is deliberately not required**, so its
+  red X is a prompt, never a blocker - one-sided edits are legitimate and a blocker would get
+  switched off wholesale. It flags a PR touching part of the documentation set (`CLAUDE.md`,
+  `.github/copilot-instructions.md`, `architecture/`) but not all of it. **It is a touch-test, not a
+  semantics test**: it cannot tell that the *same rule* reached each file, so an unrelated edit to
+  the other mirror in the same PR masks a genuine one-sided change. Ported from `docker-mcp`'s job of
+  the same name, with `architecture/` added because this repo has that third layer and that one does
+  not.
 - **`action-pins` requires every `uses:` in `.github/workflows` and `.github/actions` to name a full
   40-hex commit SHA**, not a tag or branch: a tag can be repointed, and `release.yaml` runs at
   `contents: write`. No exemption for first-party `actions/*`. Local `./` actions *are* exempt. The
