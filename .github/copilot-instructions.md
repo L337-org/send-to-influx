@@ -76,10 +76,6 @@ In order. The first two are where real defects in this codebase have come from.
 - Every tool needs a `title=` distinct from its own name, and `annotations=ToolAnnotations(...)` with
   `read_only_hint` set explicitly plus `destructive_hint` when it is `False`.
 - Grafana vocabulary stays in `toinflux/mcp_dashboards.py`. `mcp_read` must not import it.
-- Every `MCP_FIELD_METADATA` entry declares a `kind`, and getting it wrong is silent: `interval` is a
-  quantity accumulated over its reporting period and must be summed, `gauge` is instantaneous and must
-  not be. A field whose description says "during one interval" while its kind says `gauge` is the bug
-  this vocabulary exists to prevent - check the two agree.
 - **Injection defence:** measurement and tags from the static schema, fields matched against a
   live-discovered allowlist, every identifier charset-validated and quoted, times re-emitted as
   RFC3339, aggregations from a fixed map. Reject any query path that bypasses this.

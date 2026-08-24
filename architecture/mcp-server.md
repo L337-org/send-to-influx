@@ -435,6 +435,10 @@ value mappings decoding a coded field, and a series alias.
     fails if any *other* field describes itself as per-interval while calling itself a gauge - which
     is how the contradiction arose the first time. It exempts a description saying "average", since
     an average over an interval is still a reading and summing averages means nothing.
+  - **That second test is a keyword heuristic, not a proof**: it matches "during one",
+    "accumulated" and "preceding interval". A per-interval field phrased another way ("per
+    half-hour") passes it while still being wrong, so the word list is a floor to extend when a new
+    phrasing appears, not a guarantee the contradiction cannot recur.
 - **An undeclared numeric field gets no `kind` and is suggested `last`**, the one aggregation that
   cannot be wrong for any kind. Suggesting `mean` would say averaging is safe about a field that may
   be a counter, which is the failure the whole feature exists to prevent.
