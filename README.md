@@ -674,6 +674,12 @@ Once connected, the client has these read tools:
   running total that resets (read its last value or a difference, never its mean), a `state` a
   discrete code or label. Pass `detail: true` for the per-field descriptions as well, in the same
   call.
+Hue is a special case worth knowing about: its field keys are your own device names, so no built-in
+table can say what they mean. The collector therefore records each device's class alongside the
+readings (see `hue_devices` in [UNITS.md](UNITS.md)), and the MCP server reads that back - so a Hue
+temperature sensor reports °C and a smart plug reports as a state, the same as any other source.
+Nothing else needs configuring, and it starts working from the first collection.
+
 - **`get_current_state`** - a source's state *right now* ("is the door locked?", "which lights are
   on?"). Most sources are read live from the device; Speedtest and Octopus report their latest
   recorded reading instead.

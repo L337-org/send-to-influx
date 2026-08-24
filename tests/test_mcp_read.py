@@ -207,6 +207,7 @@ class TestBuildSchema:
         handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {"temperature_2m": {"unit": "°C"}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         schema = build_schema(handler, _keys({"temperature_2m", "precipitation"}), "weather_db")
         assert schema.measurement == "weather"
         assert schema.db == "weather_db"
@@ -219,6 +220,7 @@ class TestBuildSchema:
         handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         schema = build_schema(handler, _keys(set()), "hue_db")
         assert schema.measurement == "hue"
         assert schema.db == "hue_db"
@@ -565,6 +567,7 @@ class TestResolveSchema:
         # schema's filters would compare against that instead.
         handler.mcp_tag_filters.return_value = {"device": "zappi"}
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.source_settings = {"db": "zappi_db"}
         handler.session = MagicMock()
         settings = {"sources": ["zappi"], "influx": {"url": "http://x", "user": "u", "password": "p"}}
@@ -587,6 +590,7 @@ class TestResolveSchema:
         handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.source_settings = {"db": "zappi_db"}
         handler.session = MagicMock()
         handler.settings = {"influx": {"url": "http://FRESH", "user": "u", "password": "p"}}
@@ -647,6 +651,7 @@ class TestListFieldsPayload:
             "che": {"unit": "kWh", "kind": "counter"},
             "sta": {"kind": "state", "codes": {3: "charging"}},
         }
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.source_settings = {"db": "zappi_db"}
         handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
         handler.session = MagicMock()
@@ -695,6 +700,21 @@ class TestListFieldsPayload:
         assert detailed["gen"]["description"] == "Power generated locally."
         # detail is not a promise that every field has one.
         assert "description" not in detailed["che"]
+
+    def test_the_payload_comes_from_the_hook_not_the_class_attribute(self):
+        # The two agree for every source but Hue, whose field keys are per-install and are
+        # resolved by the hook at call time. Nothing else here would notice the difference,
+        # so this pins it deliberately: revert build_schema to the attribute and Hue's
+        # metadata silently disappears.
+        handler = self._handler()
+        handler.MCP_FIELD_METADATA = {}
+        handler.mcp_field_metadata.return_value = {"gen": {"unit": "W", "kind": "gauge"}}
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"gen"})),
+        ):
+            result = list_fields_result("zappi", self.SETTINGS, None)
+        assert result["fields"][0] == {"field": "gen", "unit": "W", "kind": "gauge"}
 
     def test_detail_costs_no_extra_round_trip(self):
         # The point of a flag rather than a second tool: the prose arrives in the call the
@@ -749,6 +769,7 @@ class TestRegisterReadTools:
         # schema's filters would compare against that instead.
         handler.mcp_tag_filters.return_value = {"device": "zappi"}
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.source_settings = {"db": "zappi_db"}
         handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
         handler.session = MagicMock()
@@ -798,6 +819,7 @@ class TestRegisterReadTools:
         register_read_tools(server, self._settings(), None)
         handler = self._handler()
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W", "kind": "gauge", "description": "Solar power."}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
             patch(
@@ -918,6 +940,7 @@ class TestRegisterReadTools:
         handler.MCP_DESCRIPTION = "Zappi desc"
         handler.get_data.return_value = {"sta": 3}
         handler.MCP_FIELD_METADATA = {"sta": {"codes": {3: "charging"}}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         with patch("toinflux.mcp_common.get_class", return_value=handler):
             result = anyio.run(server.call_tool, "get_current_state", {"source": "zappi"})
         text = _tool_text(result)
@@ -929,6 +952,7 @@ class TestRegisterReadTools:
         handler = self._handler()
         handler.MCP_DESCRIPTION = "Zappi desc"
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         with patch("toinflux.mcp_common.get_class", return_value=handler):
             result = anyio.run(server.call_tool, "get_documentation", {})
         text = _tool_text(result)
@@ -987,6 +1011,7 @@ class TestCurrentStateResult:
         handler.MCP_LIVE_STATE = True
         handler.MCP_DESCRIPTION = "Zappi desc"
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}, "sta": {"codes": {3: "charging"}}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.get_data.return_value = {"gen": 1234, "sta": 3}
         handler.session = MagicMock()
         return handler
@@ -1017,6 +1042,7 @@ class TestCurrentStateResult:
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_DESCRIPTION = "speed"
         handler.MCP_FIELD_METADATA = {"ping": {"unit": "ms"}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.source_settings = {"db": "sdb"}
         handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
         handler.session = MagicMock()
@@ -1174,12 +1200,25 @@ class TestInstancedReadsWithARealHandler:
         assert "instances" not in result
 
 
+class TestAnnotateState:
+    def test_current_state_is_annotated_from_the_hook_not_the_class_attribute(self):
+        # A live current-state read gets the same units list_fields reports, which for Hue
+        # means resolving them per install rather than reading an empty class table.
+        from toinflux.mcp_read import _annotate_state
+
+        handler = MagicMock()
+        handler.MCP_FIELD_METADATA = {}
+        handler.mcp_field_metadata.return_value = {"Conservatory": {"unit": "°C", "kind": "gauge"}}
+        assert _annotate_state(handler, {"Conservatory": 21.5}) == {"Conservatory": {"value": 21.5, "unit": "°C"}}
+
+
 class TestBuildDocumentation:
     def test_includes_descriptions_units_and_codes(self):
         handler = MagicMock()
         handler.source = "zappi"
         handler.MCP_DESCRIPTION = "Zappi desc"
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}, "sta": {"codes": {1: "paused", 3: "charging"}}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.session = MagicMock()
         with patch("toinflux.mcp_common.get_class", return_value=handler):
             doc = build_documentation({"sources": ["zappi"]}, None)
@@ -1199,6 +1238,7 @@ class TestBuildDocumentation:
         handler.MCP_FIELD_METADATA = {
             "che": {"unit": "kWh", "kind": "counter", "description": "Energy this session."},
         }
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.session = MagicMock()
         with patch("toinflux.mcp_common.get_class", return_value=handler):
             doc = build_documentation({"sources": ["zappi"]}, None)
@@ -1214,6 +1254,7 @@ class TestBuildDocumentation:
         handler.source = "octopus"
         handler.MCP_DESCRIPTION = "Octopus"
         handler.MCP_FIELD_METADATA = {"consumption_kwh": {"unit": "kWh", "kind": "interval"}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.session = MagicMock()
         with patch("toinflux.mcp_common.get_class", return_value=handler):
             doc = build_documentation({"sources": ["octopus"]}, None)
@@ -1231,6 +1272,7 @@ class TestBuildDocumentation:
         handler.source = "nuki"
         handler.MCP_DESCRIPTION = "Nuki desc"
         handler.MCP_FIELD_METADATA = {"stateValue": {"codes": {1: "locked"}}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.session = MagicMock()
         with patch("toinflux.mcp_common.get_class", return_value=handler):
             doc = build_documentation({"sources": ["nuki"]}, None)

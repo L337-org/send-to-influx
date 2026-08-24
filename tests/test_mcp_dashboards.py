@@ -278,6 +278,7 @@ class TestSuggestPanelsResult:
             "stateValue": {"kind": "state", "codes": {1: "locked"}},
             "batteryChargeState": {"unit": "%", "kind": "gauge"},
         }
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.source_settings = {"db": "home"}
         handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
         handler.session = MagicMock()

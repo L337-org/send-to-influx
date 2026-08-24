@@ -45,6 +45,11 @@ import pytest
 
 from toinflux.general import known_sources, source_class
 from toinflux.mcp_read import FIELD_KINDS
+from toinflux.philipshue import (
+    HUE_DEFAULT_TEMPERATURE_UNIT,
+    HUE_DEVICE_CLASSES,
+    HUE_TEMPERATURE_UNITS,
+)
 
 UNITS_MD = pathlib.Path(__file__).resolve().parent.parent / "UNITS.md"
 
@@ -222,6 +227,56 @@ class TestDescriptionsEarnTheirBytes:
         description = meta["description"]
         assert description[0].isupper(), f"{source}.{field}'s description should start with a capital"
         assert description.endswith("."), f"{source}.{field}'s description should end with a full stop"
+
+
+class TestHueClassTableAgrees:
+    """Hue is the exception the one-way rule was written for, and it need not be.
+
+    Its field keys are the operator's device names, so they can never be tabulated - but
+    UNITS.md's Hue table is written by *device class*, and so is
+    ``HUE_DEVICE_CLASSES``. Keying the check on the class rather than the field name is
+    what lets the one source the drift test could not cover be covered after all.
+    """
+
+    HUE_SECTION = SECTIONS.get("hue", [])
+    CLASSES = sorted(HUE_DEVICE_CLASSES.items())
+
+    @pytest.mark.parametrize("device_class,declared", CLASSES, ids=[c for c, _ in CLASSES])
+    def test_each_class_names_a_row_that_exists(self, device_class, declared):
+        rows = {cells[0] for cells in _rows(self.HUE_SECTION)}
+        assert declared["documented_as"] in rows, (
+            f"{device_class} says it is documented as {declared['documented_as']!r}, which is not a "
+            f"row in UNITS.md's Hue table"
+        )
+
+    @pytest.mark.parametrize("device_class,declared", CLASSES, ids=[c for c, _ in CLASSES])
+    def test_a_declared_unit_appears_in_that_row(self, device_class, declared):
+        if not declared.get("unit"):
+            # A flag declares no unit on purpose; UNITS.md says "boolean (0/1)", which is a
+            # representation rather than a unit, so there is nothing to agree about.
+            pytest.skip("no unit declared")
+        cells = {cells[0]: cells[1] for cells in _rows(self.HUE_SECTION) if len(cells) > 1}
+        cell = cells.get(declared["documented_as"], "")
+        assert declared["unit"] in cell, (
+            f"{device_class} declares unit {declared['unit']!r}, absent from its UNITS.md row "
+            f"{declared['documented_as']!r} ({cell!r})"
+        )
+
+    def test_every_temperature_unit_is_documented(
+        self,
+    ):
+        # The one class whose unit is an operator setting, so all three possible values
+        # have to appear in the row rather than just the default.
+        cells = {cells[0]: cells[1] for cells in _rows(self.HUE_SECTION) if len(cells) > 1}
+        cell = cells.get("Temperature sensors", "")
+        for unit in [HUE_DEFAULT_TEMPERATURE_UNIT, *HUE_TEMPERATURE_UNITS.values()]:
+            assert unit in cell, f"temperature unit {unit!r} is absent from UNITS.md's row ({cell!r})"
+
+    def test_every_declared_kind_is_valid(
+        self,
+    ):
+        for device_class, declared in HUE_DEVICE_CLASSES.items():
+            assert declared["kind"] in FIELD_KINDS, f"{device_class} declares kind {declared['kind']!r}"
 
 
 class TestUnitsDocumentationAgrees:

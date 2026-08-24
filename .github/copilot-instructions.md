@@ -76,6 +76,12 @@ In order. The first two are where real defects in this codebase have come from.
 - Every tool needs a `title=` distinct from its own name, and `annotations=ToolAnnotations(...)` with
   `read_only_hint` set explicitly plus `destructive_hint` when it is `False`.
 - Grafana vocabulary stays in `toinflux/mcp_dashboards.py`. `mcp_read` must not import it.
+- **`mcp_field_metadata()` is the hook for a source whose field keys are per-install**, and Hue is
+  the only one - its keys are the operator's device names, so the collector writes each device's
+  class to the `hue_devices` measurement and the hook reads it back. Flag an override that can
+  raise: metadata is an annotation, and it must degrade rather than fail a schema or current-state
+  call. Flag one that reads the *device* rather than InfluxDB - every schema tool touches InfluxDB
+  and nothing else, and a device read there would answer differently between calls.
 - **Injection defence:** measurement and tags from the static schema, fields matched against a
   live-discovered allowlist, every identifier charset-validated and quoted, times re-emitted as
   RFC3339, aggregations from a fixed map. Reject any query path that bypasses this.

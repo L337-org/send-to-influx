@@ -37,6 +37,19 @@ the same field key under different `host` tags. Filter or group by `host` to sep
 and note that replacing a bridge with one at a different address starts a new series - see
 the README's "Multiple Hue bridges" section.
 
+Hue also writes a second measurement, **`hue_devices`**, saying which class each device is:
+one point per device, tagged `host` and `device`, with a single string field `class` holding the
+bridge's own type (`ZLLTemperature`, `On/Off plug-in unit` and so on). It exists because Hue's field
+keys are your device names, so no static table can say that `Conservatory_Temperature_Sensor` is a
+temperature in °C - the bridge knows, and this records it. The MCP server reads it to give those
+fields a unit; `HUE_DEVICE_CLASSES` in `toinflux/philipshue.py` maps a class to the rows above, and
+a test holds the two in step.
+
+It is a separate measurement, so nothing that queries `hue` sees it and no existing dashboard is
+affected. It is rewritten every collection, so a renamed or removed device corrects itself, and it
+expires under the same retention as everything else - by which point there is no data left to
+describe either.
+
 The `collector_status` heartbeat for `hue` also carries a `host` tag, so each bridge's
 `ok`/`consecutive_failures` are recorded separately. Grouping by `source` alone aggregates
 across bridges, which can hide a failing one behind a healthy one - group by `source, host`

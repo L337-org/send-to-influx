@@ -158,6 +158,12 @@ writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_re
 - **Per-source domain knowledge lives on the `DataHandler` subclass** as class attributes
   (`MCP_MEASUREMENT`, `MCP_TAG_FILTERS`, `MCP_INSTANCE_TAG`, `MCP_FIELD_METADATA`, `MCP_DESCRIPTION`,
   `MCP_LIVE_STATE`), never as a parallel schema in the MCP modules.
+- **A source whose field keys are per-install describes them through `mcp_field_metadata()`**, the
+  hook the read layer calls instead of reading `MCP_FIELD_METADATA` directly. Hue is the only one:
+  its keys are the operator's device names, so the collector records each device's class to the
+  `hue_devices` measurement and the hook reads it back. An override must be best-effort and never
+  raise - metadata is an annotation, and a field with none is a smaller failure than a schema call
+  that errors. Read [architecture/mcp-server.md](architecture/mcp-server.md) before changing it.
 - **Every tool registers through `register_tool()`** in `toinflux/mcp_common.py`, never
   `@server.tool()` directly: CPython 3.13+ strips docstring indentation at compile time and 3.10-3.12
   do not, so a direct registration advertises ~1.2 KB of leading whitespace on the older half of the

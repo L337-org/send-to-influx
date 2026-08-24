@@ -226,7 +226,10 @@ def build_schema(handler, discovered, db, instance_values=None):
         db=db,
         tag_filters=handler.mcp_tag_filters(),
         allowed_fields=discovered.field_names,
-        field_metadata=dict(handler.MCP_FIELD_METADATA),
+        # The hook, not the class attribute: a source whose field keys are per-install
+        # (Hue's are the operator's device names) resolves them here. Every other source
+        # returns its declared table unchanged.
+        field_metadata=handler.mcp_field_metadata(),
         field_types=dict(discovered.field_types),
         tag_keys=set(discovered.tag_keys),
         instance_tag=handler.MCP_INSTANCE_TAG,
@@ -1711,11 +1714,15 @@ def _annotate_state(handler, data):
     back as its label in both - a second copy would eventually annotate one and not the
     other.
 
-    :param handler: the source's DataHandler, for its MCP_FIELD_METADATA
+    :param handler: the source's DataHandler, for its field metadata
     :param data: raw field name -> value
     :return: field name -> annotated value
     """
-    field_metadata = handler.MCP_FIELD_METADATA
+    # The hook, so a live current-state read is annotated with the same units list_fields
+    # reports. For Hue that costs an InfluxDB lookup on a call that has just read the
+    # bridge; the override degrades to nothing if InfluxDB is unreachable, so a device
+    # read never fails because the annotation could not be resolved.
+    field_metadata = handler.mcp_field_metadata()
     return {name: _annotate_state_field(field_metadata, name, value) for name, value in sorted(data.items())}
 
 
@@ -1923,7 +1930,7 @@ def build_documentation(settings, settings_file):
             continue
         try:
             description = handler.MCP_DESCRIPTION
-            field_metadata = handler.MCP_FIELD_METADATA
+            field_metadata = handler.mcp_field_metadata()
         finally:
             close_session(handler.session)
         lines.append(f"## {source}")

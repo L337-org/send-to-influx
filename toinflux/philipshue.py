@@ -392,6 +392,53 @@ def _url_host(host):
     return f"[{text}]" if address.version == 6 else text
 
 
+# The companion measurement carrying which Hue device each field key belongs to.
+#
+# Hue is the one source whose field keys cannot be tabulated in advance: they are the
+# operator's own device names, so `Conservatory_Temperature_Sensor` means nothing to a
+# static table. Everything needed to describe them *is* known - the bridge reports each
+# device's type on every poll - it was simply thrown away. This measurement keeps it.
+#
+# Written rather than cached because the alternatives are all inconsistent between runs:
+# an in-process cache is empty until the first poll and after every restart, and reading
+# the bridge from the read tools would make a schema listing depend on a device being
+# awake, so the same field would have a unit on Monday and not on Tuesday. InfluxDB is
+# already what list_fields depends on, so putting it there adds no new dependency - and
+# unlike a local cache file, it is visible to everything else reading the database,
+# Grafana included.
+#
+# A separate measurement, so it is invisible to existing queries: a query names its
+# measurement, so nothing selecting from `hue` can see this. The same pattern, and the
+# same fire-and-forget write, as the `collector_status` heartbeat.
+SCHEMA_MEASUREMENT = "hue_devices"
+
+# Only the *varying* fact is written: which class a device is. The class -> unit/kind
+# mapping below is universal, so it stays declared here where a test can hold it against
+# UNITS.md, rather than being duplicated into every point and left free to drift.
+#
+# `documented_as` names the UNITS.md row this class corresponds to. That file's Hue table
+# is written by device class rather than by field key - which is exactly why Hue was
+# excluded from the metadata drift test - so naming the row is what lets it be checked.
+#
+# A boolean class declares no unit: 0/1 is a representation, not a unit, and the rest of
+# this project's metadata leaves a flag's unit absent rather than inventing one.
+HUE_DEVICE_CLASSES = {
+    "ZLLTemperature": {"kind": "gauge", "documented_as": "Temperature sensors"},
+    "ZLLLightLevel": {"unit": "lux", "kind": "gauge", "documented_as": "Light level sensors"},
+    "ZLLPresence": {"kind": "state", "documented_as": "Motion/presence sensors"},
+    "On/Off plug-in unit": {"kind": "state", "documented_as": "Smart plugs"},
+    "Dimmable light": {"unit": "%", "kind": "gauge", "documented_as": "Dimmable lights"},
+    "Color temperature light": {"unit": "%", "kind": "gauge", "documented_as": "Dimmable lights"},
+    "Extended color light": {"unit": "%", "kind": "gauge", "documented_as": "Dimmable lights"},
+}
+
+# Temperature is the one class whose unit is an operator setting rather than a constant,
+# so it is resolved per install from hue.temperature_units (matching parse_hue_data's own
+# conversion) instead of being declared above.
+HUE_TEMPERATURE_UNITS = {"F": "°F", "K": "K"}
+HUE_DEFAULT_TEMPERATURE_UNIT = "°C"
+
+
 class Hue(DataHandler):
     """Child class of DataHandler to get data from a Hue Bridge"""
 
@@ -474,6 +521,120 @@ class Hue(DataHandler):
                 return bridge
         configured = ", ".join(bridge.host for bridge in bridges)
         raise ConfigError(f"no Hue bridge configured at '{self.instance}' (configured: {configured})")
+
+    def mcp_field_metadata(self):
+        """Describe this bridge's fields, resolved per install from what was recorded.
+
+        Hue is the one source whose field keys are the operator's own device names, so a
+        static table cannot cover them. The classification the collector wrote to
+        ``SCHEMA_MEASUREMENT`` supplies the missing half: it says which class each field
+        key is, and :data:`HUE_DEVICE_CLASSES` turns a class into a unit and a kind.
+
+        Reads InfluxDB rather than the bridge, deliberately. The read tools' schema path
+        already depends on InfluxDB and on nothing else, so this adds no new dependency -
+        where asking the bridge would make a schema listing depend on a device being awake
+        and give the same field a unit on one call and not the next.
+
+        **Best-effort, and never raises.** A failure here means fields are listed without
+        units, which is what happens today; it must not turn a schema call - or a live
+        current-state read - into an error.
+
+        :return: {field key: {"unit", "kind"}}, empty when nothing has been recorded
+        :rtype: dict
+        """
+        # Imported here, not at module scope: mcp_read reaches the source classes through
+        # toinflux.general, so a module-level import would be circular.
+        from toinflux.mcp_read import resolve_db, run_query
+
+        try:
+            influx_settings = self.settings["influx"]
+            db = resolve_db(self.source_settings, influx_settings)
+            # Every part of this query is a literal - no device name or other input reaches
+            # it - so there is nothing here to escape or validate.
+            query = f'SELECT last("class") FROM "{SCHEMA_MEASUREMENT}" GROUP BY "device"'
+            series = run_query(self.session, influx_settings, db, query)
+        except Exception as exc:
+            logging.debug("Could not read Hue device classes: %s", self._redact(str(exc)))
+            return dict(self.MCP_FIELD_METADATA)
+
+        metadata = dict(self.MCP_FIELD_METADATA)
+        for one in series:
+            device = one.tags.get("device")
+            if not device or not one.values:
+                continue
+            entry = self._metadata_for_class(one.values[0][-1])
+            if entry:
+                metadata[device] = entry
+        return metadata
+
+    def _metadata_for_class(self, device_class):
+        """Turn a bridge class string into a field metadata entry.
+
+        :param device_class: the bridge's own type string, e.g. "ZLLTemperature"
+        :return: {"unit", "kind"} for a known class, else None
+        """
+        declared = HUE_DEVICE_CLASSES.get(device_class)
+        if not declared:
+            # An unrecognised class is left undescribed rather than guessed at - a new Hue
+            # device type should appear with no unit, not with someone else's.
+            return None
+        entry = {"kind": declared["kind"]}
+        if declared.get("unit"):
+            entry["unit"] = declared["unit"]
+        elif device_class == "ZLLTemperature":
+            # The one class whose unit is an operator setting; read the same way
+            # parse_hue_data reads it, so the declared unit and the written value agree.
+            configured = self.settings["hue"].get("temperature_units")
+            entry["unit"] = HUE_TEMPERATURE_UNITS.get(configured, HUE_DEFAULT_TEMPERATURE_UNIT)
+        return entry
+
+    def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True):
+        """Write the readings, then describe the devices they came from.
+
+        The data write is unchanged and its contract is untouched: it happens first, and
+        an ``InfluxWriteError`` from it propagates exactly as before so the worker still
+        backs off and buffers.
+
+        The description that follows is best-effort and can never fail a collection. It
+        carries no reading, so there is nothing to replay and nothing to lose - the same
+        reasoning that makes the ``collector_status`` heartbeat ``use_buffer=False``. A
+        failure is logged and swallowed, because a schema annotation that cannot be written
+        is not a reason to declare a successful collection failed.
+
+        :param data: readings to write, defaulting to ``self.data``
+        :param timestamp: unix-epoch seconds, defaulting to the base implementation's choice
+        :param use_buffer: buffer and retry the *data* point on failure
+        :param flush: flush the backlog before writing
+        :raises InfluxWriteError: the data write failed (never the description)
+        """
+        super().send_data(data=data, timestamp=timestamp, use_buffer=use_buffer, flush=flush)
+        self._write_device_classes(timestamp)
+
+    def _write_device_classes(self, timestamp=None):
+        """Write one ``SCHEMA_MEASUREMENT`` point per device, saying which class it is.
+
+        Uses the header-swap idiom ``send_heartbeat()`` established, so buffering, escaping
+        and the write path itself are the base implementation's rather than a second copy.
+        The device name is a tag and therefore escaped; it is never normalised, for the same
+        reason the host tag is not - rewriting it would change series identity.
+
+        :param timestamp: unix-epoch seconds to stamp the points with
+        """
+        classes = getattr(self, "_device_classes", None)
+        if not classes:
+            return
+        original_header, original_data = self.influx_header, self.data
+        host = escape_key_or_tag_value(self.bridge().host)
+        try:
+            for name, device_class in sorted(classes.items()):
+                self.influx_header = f"{SCHEMA_MEASUREMENT},host={host},device={escape_key_or_tag_value(name)} "
+                super().send_data(data={"class": device_class}, timestamp=timestamp, use_buffer=False, flush=False)
+        except Exception as exc:
+            # Deliberately broad and deliberately swallowed: this is an annotation, and no
+            # failure to write one should turn a successful collection into a failed one.
+            logging.warning("Could not record Hue device classes: %s", self._redact(str(exc)))
+        finally:
+            self.influx_header, self.data = original_header, original_data
 
     def get_data(self):
         """
@@ -653,6 +814,10 @@ class Hue(DataHandler):
         :rtype: dict
         """
         data = {}
+        # Field key -> the bridge's own type string, collected as the data is parsed and
+        # written to SCHEMA_MEASUREMENT by send_data(). Reset per parse so a device removed
+        # from the bridge stops being described rather than lingering from an earlier cycle.
+        self._device_classes = {}
         hue_data = self.get_data_from_hue_bridge()
 
         # parse the sensor data
@@ -673,12 +838,22 @@ class Hue(DataHandler):
             elif device["type"] == "ZLLPresence":
                 # convert presence to boolean 0 or 1
                 data[name] = int(1 if device["state"]["presence"] else 0)
+            else:
+                # Daylight and ZLLSwitch reach here; nothing is written for them, so
+                # nothing should be described either.
+                continue
+            self._device_classes[name] = device["type"]
 
         for device in hue_data["lights"].values():
             name = self.hue_device_name_to_name(device["name"])
             # convert brightness to percentage if the light is dimmable (has a "bri" attribute)
             # otherwise boolean 0 or 1 to cover smart plugs which are also listed as lights
             data[name] = int(device["state"].get("bri", 2.54) / 2.54) if device["state"]["on"] else 0
+            # The bridge's own type, not the "does state have bri" test the value uses: a
+            # plug reports "On/Off plug-in unit" outright, so the class is stated rather
+            # than inferred. Both agree today; the type is simply the direct answer.
+            if device.get("type"):
+                self._device_classes[name] = device["type"]
 
         return data
 

@@ -120,6 +120,13 @@ Needed for the read tools, the resources and `suggest_dashboard_panels`, which a
    or a unit or code that disagrees with UNITS.md.
 7. **`MCP_DESCRIPTION`** - one line on what the source reports, surfaced by `list_sources`, the
    documentation tool and the per-source resources.
+7a. **Only if the source's field keys are not knowable in advance** - because they are the operator's
+   own device names, say - override `mcp_field_metadata()` instead of declaring a static table, and
+   have the collector record whatever the keys mean as it collects. Hue is the worked example: it
+   writes each device's class to a companion measurement and reads it back. Two rules for such an
+   override: read InfluxDB, never the device (every schema tool touches InfluxDB and nothing else,
+   and a device read answers differently between calls); and never raise, since metadata is an
+   annotation and must degrade rather than fail the call.
 8. **`MCP_MEASUREMENT` and `MCP_TAG_FILTERS`** - only if the InfluxDB measurement is not the source's
    own name, or it shares a measurement with others.
 9. **`MCP_INSTANCE_TAG`** - only if several *producers* write to one measurement and a tag tells them

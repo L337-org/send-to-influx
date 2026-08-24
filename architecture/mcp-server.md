@@ -337,6 +337,41 @@ field set. Design points:
       *boolean* field does get `state` from its InfluxDB type without being declared, which is what
       makes an untabulatable field key answerable at all - Hue's field keys are the operator's own
       device names, so no static table can cover them.
+  - **Hue's fields are described from a companion measurement, not from a static table.** Its field
+    keys are the operator's own device names, so nothing declared in advance can say that
+    `Conservatory_Temperature_Sensor` is a temperature in °C. The bridge reports each device's type
+    on every poll and the collector used to discard it; it now writes it to `hue_devices` (one point
+    per device, tagged `host`/`device`, one string field `class`), and `mcp_field_metadata()` reads
+    it back. `HUE_DEVICE_CLASSES` maps a class to a unit and a kind.
+    - **Only the varying fact is written.** Which class a device is goes to InfluxDB; the class ->
+      unit/kind mapping stays declared in `philipshue.py`, because writing the unit into every point
+      would duplicate the table and give it somewhere to drift. `documented_as` names the UNITS.md
+      row each class corresponds to, which is what lets Hue join the metadata drift test after all -
+      that file's Hue table is keyed by *device class*, which is precisely why Hue was excluded
+      before.
+    - **Three alternatives were rejected, all for the same reason: they answer differently on
+      different runs.** An in-process cache is empty until the first poll and after every restart. A
+      git-excluded state file survives restarts but goes stale - swap a plug for a dimmable bulb
+      under the same name and it reports the old unit until something refreshes it - and is private
+      to this process. Reading the bridge from the read tools would make a schema listing depend on a
+      device being awake, so the same field would have a unit on one call and none on the next; it
+      would also let a model generate device traffic by calling `list_fields`, and cross the line
+      `MCP_LIVE_STATE` exists to draw, since every other schema tool touches InfluxDB and nothing
+      else. Writing it to InfluxDB adds no dependency the schema path did not already have, is
+      rewritten every cycle so it self-corrects, and is visible to everything else reading the
+      database rather than only to us.
+    - **It is a separate measurement, so it is transparent to existing queries** - a query names its
+      measurement, so nothing selecting from `hue` can see it. Same pattern and same fire-and-forget
+      write as the `collector_status` heartbeat, and it expires under the same retention as the data
+      it describes.
+    - **The description can never fail a collection.** The readings are written first and their
+      `InfluxWriteError` contract is untouched; the description follows, and a failure is logged and
+      swallowed. In the other direction `mcp_field_metadata()` degrades to the static table if
+      InfluxDB cannot be read, so a live current-state read never fails because an annotation could
+      not be resolved.
+    - **`build_documentation` deliberately does not use the hook.** The generated reference promises
+      no InfluxDB round trip, so it keeps reading the class attribute and a source with only
+      per-install metadata is simply absent from it.
   - **`description` sits behind `detail=False`, and is the only optional part** because it is the only
     bulky one. Every other addition is a handful of bytes and always present. It exists to decode an
     unobvious key (MyEnergi's `ectp1`, `che`) or to carry semantics the name cannot - cumulative,

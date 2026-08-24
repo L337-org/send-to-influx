@@ -258,6 +258,29 @@ class DataHandler:
         """
         return dict(self.MCP_TAG_FILTERS)
 
+    def mcp_field_metadata(self):
+        """Return this source's field metadata, keyed by field key.
+
+        The declared ``MCP_FIELD_METADATA`` for every source but one. It is a method
+        rather than a bare attribute read so a source whose field keys cannot be
+        tabulated in advance can resolve them per install - Hue's are the operator's
+        own device names, so no static table can cover them.
+
+        **An override must be best-effort and must never raise.** Callers treat metadata
+        as an annotation: a field with none is listed with no unit, which is a smaller
+        failure than a schema call that errors. Hue's override therefore degrades to the
+        static table if its lookup fails.
+
+        Called by the read layer's schema path (``build_schema``), not by
+        ``build_documentation`` - the generated reference promises to need no InfluxDB
+        round trip, so it keeps reading the class attribute directly and a source with
+        only per-install metadata is simply absent from it.
+
+        :return: {field key: {"unit"/"codes"/"kind"/"description"}}
+        :rtype: dict
+        """
+        return dict(self.MCP_FIELD_METADATA)
+
     def heartbeat_tags(self):
         """Return extra tags for this handler's ``collector_status`` heartbeat.
 
