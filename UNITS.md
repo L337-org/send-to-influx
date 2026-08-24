@@ -86,9 +86,12 @@ Those four are computed by this project from the day/hour endpoint's raw values 
 3,600,000 and rounded to 4 dp), and they are **hourly, not daily** despite coming from an endpoint
 named for the day. Each accumulates through the hour and drops back at the top of the next, so read
 the last value within an hour rather than a mean across several - a mean spans a reset and means
-nothing. One wrinkle: where the current hour's entry is missing from the API's response, which
-happens around midnight because MyEnergi omits all-zero entries, the value is the day so far
-instead. Releases before 6.0 described these as daily totals, which was wrong.
+nothing. An hour the API has no entry for reads as 0, meaning nothing has been recorded in it yet.
+
+Releases before 6.0 got this wrong in two ways: they described these fields as daily totals, and
+where the current hour had no entry the value silently became the day so far - so at 13:00 on a day
+importing 1 kWh an hour, "this hour" read 13 kWh. Both are fixed, and both are now covered by
+tests.
 
 ## MyEnergi Eddi (`eddi`)
 

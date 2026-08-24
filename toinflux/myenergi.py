@@ -556,6 +556,24 @@ class MyEnergi(DataHandler):
             f"the account reports these {device_key} serials: {found}"
         )
 
+    @staticmethod
+    def _entry_hour(item):
+        """Return which hour a day/hour entry describes.
+
+        A missing ``hr`` is read as hour 0, not as "unknown". The MyEnergi API omits keys
+        whose value is zero - which is why every reader here is a ``.get(key, 0)`` - so
+        the midnight entry arrives without one. The previous ``-1`` default meant hour 0
+        could never be matched, and asking for it fell through to summing the whole day.
+
+        Harmless under the other reading, too: if the API does always send ``hr``, this
+        default never fires. It can only turn a miss into a hit.
+
+        :param item: one entry from the day/hour response
+        :return: the hour the entry describes
+        :rtype: int
+        """
+        return item.get("hr", 0)
+
     def dayhour_results(self, year, month, day, hour=None):
         """
         Get the data for a specific day
@@ -581,19 +599,26 @@ class MyEnergi(DataHandler):
         export_amount = 0
         genera_amount = 0
 
-        # Tot up the data for the day/hour
-        if response_data.get("U" + serial, False):
-            for item in response_data["U" + serial]:
-                if hour is not None and item.get("hr", -1) == hour:
-                    charge_amount = item.get("h1d", 0)
-                    import_amount = item.get("imp", 0)
-                    export_amount = item.get("exp", 0)
-                    genera_amount = item.get("gep", 0)
-                    break
-                charge_amount += item.get("h1d", 0)
-                import_amount += item.get("imp", 0)
-                export_amount += item.get("exp", 0)
-                genera_amount += item.get("gep", 0)
+        # Select, then total. The two modes were entangled - accumulate every entry, and
+        # overwrite with one of them on a match - which is what let a *failure* to match
+        # fall through and return the day so far under a field meaning "this hour".
+        # Demonstrated on a day importing 1 kWh per hour: asking for hour 13 with that
+        # hour's entry missing returned 13 kWh. Midnight was the only harmless case, the
+        # day so far and hour 0 being the same thing, so the error grew through the day.
+        entries = response_data.get("U" + serial) or []
+        if hour is not None:
+            # An absent hour means no energy recorded in it yet, which is zero - not the
+            # accumulated day. There is deliberately no fallback: a wrong value under the
+            # right name is worse than a zero, because nothing downstream can tell.
+            matched = next((item for item in entries if self._entry_hour(item) == hour), None)
+            entries = [matched] if matched is not None else []
+
+        # Tot up the data: one entry for a specific hour, every entry for the whole day.
+        for item in entries:
+            charge_amount += item.get("h1d", 0)
+            import_amount += item.get("imp", 0)
+            export_amount += item.get("exp", 0)
+            genera_amount += item.get("gep", 0)
 
         # Convert and round the data to 4 decimal places
         data = {
@@ -631,11 +656,10 @@ class Zappi(MyEnergi):
         # back at the top of the next. A mean across a day is therefore meaningless, and the
         # useful reading is the last value within each hour.
         #
-        # There is one wrinkle not worth putting in a model-facing description: when the
-        # current hour's bucket is absent from the response (MyEnergi omits all-zero
-        # entries, so this happens around midnight), dayhour_results falls through to
-        # summing every bucket and the value is the day so far instead. The hourly reset is
-        # the fact that governs how to aggregate it either way.
+        # An hour the API has no entry for reads 0 - nothing recorded in it yet. That used
+        # to fall through to the day so far under this same field name; see
+        # dayhour_results for what that cost and why it is now a selection rather than an
+        # accumulation.
         "Charge": {"unit": "kWh", "kind": "counter", "description": _HOURLY_DESCRIPTION.format("delivered to the car")},
         "Import": {"unit": "kWh", "kind": "counter", "description": _HOURLY_DESCRIPTION.format("imported")},
         "Export": {"unit": "kWh", "kind": "counter", "description": _HOURLY_DESCRIPTION.format("exported")},

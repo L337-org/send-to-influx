@@ -154,6 +154,64 @@ class TestMyEnergi:
                 assert result["Charge"] == round(3600 / 3600 / 1000, 4)
                 assert result["Import"] == round(1000 / 3600 / 1000, 4)
 
+    def test_dayhour_results_missing_hour_is_zero_not_the_day_so_far(self, sample_settings):
+        """A requested hour with no entry reports nothing, never the accumulated day.
+
+        The regression this guards is silent and grows through the day: the loop used to
+        accumulate every entry and only overwrite on a match, so failing to match fell
+        through to the day's total under a field that means "this hour". On a day
+        importing 1 kWh per hour, asking for hour 13 returned 13 kWh.
+        """
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            handler = MyEnergi(source="zappi")
+            serial = handler.source_settings["serial"]
+            # Hours 0-12 present, each importing 1 kWh; the hour we ask for is absent.
+            response_data = {f"U{serial}": [{"hr": n, "h1d": 0, "imp": 3600000, "exp": 0, "gep": 0} for n in range(13)]}
+            with patch.object(handler, "get_data_from_myenergi", return_value=response_data):
+                result = handler.dayhour_results("2025", "01", "15", hour=13)
+        assert result["Import"] == 0, "an hour with no entry must report zero"
+        assert result["Import"] != 13, "the day's total must never be reported as one hour"
+        assert result == {"Charge": 0, "Import": 0, "Export": 0, "Genera": 0}
+
+    def test_dayhour_results_matches_midnight_when_hr_is_omitted(self, sample_settings):
+        """A missing ``hr`` means hour 0, because the API omits keys whose value is zero.
+
+        Every other reader here is a ``.get(key, 0)`` for the same reason. The previous
+        ``-1`` default meant the midnight entry could never be matched, so asking for hour
+        0 fell through to summing the day - which happened to give the right answer, since
+        at hour 0 the day so far *is* hour 0. It stops being right the moment the fallback
+        is removed, so the two changes belong together.
+        """
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            handler = MyEnergi(source="zappi")
+            serial = handler.source_settings["serial"]
+            # A later hour is present too, deliberately: with only the midnight entry the
+            # test cannot discriminate, because summing one entry gives the same answer as
+            # selecting it. The second entry is what makes a fall-through visible.
+            response_data = {
+                f"U{serial}": [
+                    {"h1d": 3600000, "imp": 1800000, "exp": 0, "gep": 0},
+                    {"hr": 1, "h1d": 0, "imp": 3600000, "exp": 0, "gep": 0},
+                ]
+            }
+            with patch.object(handler, "get_data_from_myenergi", return_value=response_data):
+                result = handler.dayhour_results("2025", "01", "15", hour=0)
+        assert result["Charge"] == 1.0
+        assert result["Import"] == 0.5, "hour 0 only; 1.5 would mean hour 1 was summed in too"
+
+    def test_dayhour_results_reports_one_hour_not_the_hours_before_it(self, sample_settings):
+        """The selected hour's own value, with earlier hours neither added nor leaked."""
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            handler = MyEnergi(source="zappi")
+            serial = handler.source_settings["serial"]
+            response_data = {f"U{serial}": [{"hr": n, "h1d": 0, "imp": 3600000, "exp": 0, "gep": 0} for n in range(14)]}
+            with patch.object(handler, "get_data_from_myenergi", return_value=response_data):
+                result = handler.dayhour_results("2025", "01", "15", hour=13)
+        assert result["Import"] == 1.0, "one hour's worth, not the thirteen before it"
+
     def test_dayhour_results_empty_when_no_serial_key(self, sample_settings):
         """dayhour_results returns zeroed data when response has no U+serial key."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:

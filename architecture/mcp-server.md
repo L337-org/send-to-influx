@@ -419,8 +419,9 @@ field set. Design points:
     matching-hour branch *assigns* that hour's value and breaks rather than accumulating, so
     `Charge`/`Import`/`Export`/`Genera` hold the current hour's energy and reset on the hour. Where
     the current hour's entry is absent from the response - MyEnergi omits all-zero entries, so this
-    happens around midnight - the loop falls through to summing every bucket and the value is the day
-    so far instead. UNITS.md's "Daily totals" was corrected, and the hourly reset is what the
+    happened at any hour the API had no entry for - the loop fell through to summing every bucket and
+    the value silently became the day so far. Fixed: the hour is selected and totalled, and an hour
+    with no entry reads 0. UNITS.md's "Daily totals" was corrected, and the hourly reset is what the
     descriptions state, since it is the fact that governs how to aggregate them either way. The
     meaning flipping between hourly and daily is a separate defect, not fixed here.
   - Blocking InfluxDB HTTP runs in a worker thread (`anyio.to_thread.run_sync`) so a query doesn't
