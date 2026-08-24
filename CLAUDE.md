@@ -57,12 +57,16 @@ suite in `debian:12` for systemd 252, the oldest systemd-creds supported), and `
   **Never add that job to `premerge.yaml`** - it would fire on every superseded re-push.
 - **`mirror-check` ("Check docs mirror") is the one job that is deliberately not required**, so its
   red X is a prompt, never a blocker - one-sided edits are legitimate and a blocker would get
-  switched off wholesale. It flags a PR touching part of the documentation set (`CLAUDE.md`,
-  `.github/copilot-instructions.md`, `architecture/`) but not all of it. **It is a touch-test, not a
-  semantics test**: it cannot tell that the *same rule* reached each file, so an unrelated edit to
-  the other mirror in the same PR masks a genuine one-sided change. Ported from `docker-mcp`'s job of
-  the same name, with `architecture/` added because this repo has that third layer and that one does
-  not.
+  switched off wholesale. It flags a PR touching part of the documentation set but not all of it:
+  `CLAUDE.md`, `.github/copilot-instructions.md`, and the rule-carrying detail layer
+  (`architecture/` and `CONTRIBUTING.md`, which owns the new-data-source checklist).
+  **Membership is about carrying a rule, not about being linked to** - both instruction files also
+  link to README, SECURITY, PRIVACY and CODE_OF_CONDUCT, and a change to those implies nothing about
+  the mirror. The list is therefore curated, not derived, and needs revisiting whenever a document
+  starts carrying rules. **It is also a touch-test, not a semantics test**: it cannot tell that the
+  *same rule* reached each file, so an unrelated edit to the other mirror in the same PR masks a
+  genuine one-sided change. Ported from `docker-mcp`'s job of the same name, extended for the detail
+  layer this repo has and that one does not.
 - **`action-pins` requires every `uses:` in `.github/workflows` and `.github/actions` to name a full
   40-hex commit SHA**, not a tag or branch: a tag can be repointed, and `release.yaml` runs at
   `contents: write`. No exemption for first-party `actions/*`. Local `./` actions *are* exempt. The

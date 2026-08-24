@@ -159,8 +159,11 @@ In order. The first two are where real defects in this codebase have come from.
   it is **not a required check** (a red X there is a prompt, not a blocker) and it only tests whether
   each file was *touched* - it cannot see that the same rule actually reached both, so the review
   judgement is still needed.
-- A change to a rule that lives in `architecture/` should reach whichever instruction files carry the
-  rule-level version of it. Detail-only edits to `architecture/` legitimately touch nothing else.
+- A change to a rule living in the detail layer - `architecture/`, or `CONTRIBUTING.md`, which owns the
+  new-data-source checklist - should reach whichever instruction files carry the rule-level version of
+  it. Detail-only edits there legitimately touch nothing else. Membership of that set is about carrying
+  a rule, not about being linked to: README, SECURITY, PRIVACY and CODE_OF_CONDUCT are referenced by
+  these files and are not part of it.
 - A change to a subsystem's behaviour updates the relevant `architecture/` file too.
 - Emitted-data changes update UNITS.md, and a breaking one updates UPGRADING.md.
 

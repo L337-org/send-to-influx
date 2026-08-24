@@ -72,8 +72,9 @@ jobs:
     # set here has a third member, architecture/, which docker-mcp does not have.
     #
     # CLAUDE.md and .github/copilot-instructions.md are mirrors of each other (the same
-    # rules for an implementer and for a reviewer); architecture/ holds the detail both
-    # point at. Together they are one documentation set, so a change touching some but not
+    # rules for an implementer and for a reviewer); architecture/ and CONTRIBUTING.md hold
+    # rule-level detail both point at - membership is about carrying a rule, not about
+    # being linked to. Together they are one documentation set, so a change touching some but not
     # all of it is worth a second look.
     #
     # Deliberately NOT a required status check, so the red X is a prompt to double-check
@@ -99,12 +100,18 @@ jobs:
           # -F throughout: an unanchored '.' in the copilot path would otherwise be a
           # wildcard. docker-mcp's copy uses -cx; the fixed-string form is the same check
           # without that latent bug.
+          # The rule-carrying set is CURATED, not derived from what the instruction files
+          # link to - they also link to README/SECURITY/PRIVACY/CODE_OF_CONDUCT, and a
+          # change to those implies nothing about the mirror. The test for membership is
+          # whether the document carries a rule that would otherwise live in an
+          # instruction file. CONTRIBUTING.md qualifies: it owns the new-data-source
+          # checklist. Revisit this list whenever a document starts carrying rules.
           claude=no; copilot=no; arch=no
           if grep -Fqx 'CLAUDE.md' <<<"$changed"; then claude=yes; fi
           if grep -Fqx '.github/copilot-instructions.md' <<<"$changed"; then copilot=yes; fi
-          if grep -q '^architecture/' <<<"$changed"; then arch=yes; fi
+          if grep -qE '^(architecture/|CONTRIBUTING\.md$)' <<<"$changed"; then arch=yes; fi
 
-          echo "CLAUDE.md=$claude  copilot-instructions.md=$copilot  architecture/=$arch"
+          echo "CLAUDE.md=$claude  copilot-instructions.md=$copilot  detail-layer=$arch"
 
           if [ "$claude" = no ] && [ "$copilot" = no ] && [ "$arch" = no ]; then
             echo "Docs mirror OK: this change touches none of the documentation set."
@@ -118,9 +125,9 @@ jobs:
           missing=""
           [ "$claude"  = no ] && missing="$missing CLAUDE.md"
           [ "$copilot" = no ] && missing="$missing .github/copilot-instructions.md"
-          [ "$arch"    = no ] && missing="$missing architecture/"
+          [ "$arch"    = no ] && missing="$missing architecture/ or CONTRIBUTING.md"
 
-          echo "::error::MIRROR RULE: this PR changes part of the documentation set but not all of it. Untouched:${missing}. CLAUDE.md and .github/copilot-instructions.md carry the same rules for an implementer and a reviewer, and architecture/ carries the detail they point at, so a rule that changed in one usually needs to reach the others. Legitimate one-sided edits exist - a detail-only architecture/ edit, a reviewer-only 'do not flag' entry, a typo - and this check is not required for merge, so say which it is in the PR description and carry on. Before mirroring, check the change belongs in an always-loaded file at all: if a CI test already enforces it, neither mirror should carry it."
+          echo "::error::MIRROR RULE: this PR changes part of the documentation set but not all of it. Untouched:${missing}. CLAUDE.md and .github/copilot-instructions.md carry the same rules for an implementer and a reviewer, and architecture/ plus CONTRIBUTING.md carry the rule-level detail they point at, so a rule that changed in one usually needs to reach the others. Legitimate one-sided edits exist - a detail-only architecture/ edit, a reviewer-only 'do not flag' entry, a typo - and this check is not required for merge, so say which it is in the PR description and carry on. Before mirroring, check the change belongs in an always-loaded file at all: if a CI test already enforces it, neither mirror should carry it."
           exit 1
 
   pytest-run:
