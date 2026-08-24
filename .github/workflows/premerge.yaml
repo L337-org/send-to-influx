@@ -97,9 +97,12 @@ jobs:
           base="$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)"
           changed="$(git diff --name-only "$base" HEAD)"
 
-          # -F throughout: an unanchored '.' in the copilot path would otherwise be a
-          # wildcard. docker-mcp's copy uses -cx; the fixed-string form is the same check
-          # without that latent bug.
+          # -F for the two exact filenames: an unanchored '.' in the copilot path would
+          # otherwise be a wildcard. docker-mcp's copy uses -cx; the fixed-string form is
+          # the same check without that latent bug. The third test is deliberately a
+          # regex and cannot be -F: it needs a *prefix* match on architecture/ (the files
+          # below it are architecture/mcp-server.md and friends) alongside an anchored
+          # whole-name match on CONTRIBUTING.md, which -Fqx cannot express.
           # The rule-carrying set is CURATED, not derived from what the instruction files
           # link to - they also link to README/SECURITY/PRIVACY/CODE_OF_CONDUCT, and a
           # change to those implies nothing about the mirror. The test for membership is
