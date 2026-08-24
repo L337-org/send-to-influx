@@ -137,9 +137,13 @@ Needed for the read tools, the resources and `suggest_dashboard_panels`, which a
 10. **`MCP_LIVE_STATE`** - leave at its `True` default unless `get_data()` is expensive or pointless to
     call live (a full Speedtest run, or Octopus's ~24 h delayed data). Set `False` and current-state
     reads the latest InfluxDB point instead.
-11. **`GRAFANA_UNITS`** (`toinflux/mcp_dashboards.py`) - add an entry only if the identifier is real.
-    Read it out of a running Grafana, which accepts any string and silently renders an unknown one as
-    no unit at all. Otherwise leave it out and the panel goes unitless.
+11. **`GRAFANA_UNITS`** (`toinflux/mcp_dashboards.py`) - map the unit to a real Grafana identifier,
+    read out of a running Grafana rather than guessed. Where Grafana has none, use its custom-suffix
+    form (`suffix:W/m²`) rather than leaving the panel unitless: an unrecognised id is *not* dropped,
+    it renders as a literal suffix, so a typo appears on the axis rather than vanishing. Prefer
+    `suffix:` to a bare string, since a bare one would silently adopt Grafana's own formatter -
+    possibly one that rescales - if an identifier of that name were ever added. A test fails if a
+    unit is neither mapped nor listed as having no honest label.
 
 ### Write support
 

@@ -740,9 +740,12 @@ Two things worth knowing when you ask:
   measurement but cannot know your Grafana's datasource uid, so the model has to look that up (or
   copy it from an existing dashboard). Saying "use my existing InfluxDB datasource" is usually
   enough.
-- **Some units come out bare.** Where a unit has no Grafana equivalent - W/m² for solar radiation,
-  gCO2/kWh for carbon intensity, pence/kWh for tariff rates - no unit is set rather than a wrong one
-  guessed, so those axes show plain numbers. Ask for a custom unit on the panel if you want a label.
+- **A few units use Grafana's custom-suffix form.** Grafana has no identifier for W/m² (solar
+  radiation), gCO2/kWh (carbon intensity) or pence/kWh (tariff rates), so those are emitted as
+  `suffix:W/m²` and the like, and the axis reads "812 W/m²". The tariff one is shortened to `p/kWh`,
+  because the suffix repeats on every tick; the full "pence/kWh (inc. VAT)" is what `list_fields`
+  reports. Octopus's gas reading is the one field with no unit at all - it is kWh or m³ depending on
+  your meter, so no single label is right.
 
 If you would rather assemble the dashboard yourself, `suggest_dashboard_panels` output drops almost
 straight into a panel: its `query` goes in a target with `rawQuery` set true and `resultFormat`

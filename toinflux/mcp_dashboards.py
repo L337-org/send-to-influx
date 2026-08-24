@@ -58,13 +58,13 @@ from toinflux.mcp_read import build_panel_query, field_kind, resolve_schema
 # The consequence for a typo: it does not vanish, it appears on the axis. That is more
 # visible than the "unformatted axis" this comment used to claim, not less.
 #
-# A unit with no entry is currently *omitted* rather than passed through. W/m2, gCO2/kWh,
-# pence/kWh and "kWh or m3" have no Grafana equivalent, and the omission dates from
-# believing a passed-through string would render as nothing. It would in fact render
-# correctly, so whether to emit them as `suffix:` forms is an open decision rather than a
-# settled one - `suffix:` being preferable to a bare string, since a bare one would
-# silently adopt Grafana's own formatter (possibly one that rescales the value) if a real
-# id of that name were ever added.
+# So a unit Grafana has no identifier for is *emitted* as its `suffix:` form rather than
+# withheld: W/m2, gCO2/kWh and pence/kWh all label their axis correctly. They were
+# withheld while this comment claimed a passed-through string rendered as nothing, which
+# cost a correct label for no reason.
+#
+# "kWh or m3" is the one exception and stays absent: it is two units rather than one,
+# because Octopus reports gas in whichever the meter uses, so no single suffix is honest.
 GRAFANA_UNITS = {
     "W": "watt",
     "kWh": "kwatth",
@@ -305,9 +305,9 @@ def register_dashboard_tools(server, settings, settings_file=None):
         `list_fields` is the schema behind this, when you want fields and not a chart;
         `query_history` runs a query here rather than handing you one.
 
-        `unit` is absent where the source's unit has no Grafana equivalent, and `kind`
-        and `avoid_aggregations` are absent where the source never said how a field may
-        be aggregated - which is not permission to average it. Reads the field set live
-        from InfluxDB and changes nothing; an unknown source or field is an error, and
-        so is an unreachable InfluxDB."""
+        `unit` is a Grafana identifier, or its `suffix:` form where Grafana has none.
+        `kind` and `avoid_aggregations` are absent where the source never said how a
+        field may be aggregated - which is not permission to average it. Reads the
+        field set live from InfluxDB and changes nothing; an unknown source or field
+        is an error, and so is an unreachable InfluxDB."""
         return await anyio.to_thread.run_sync(suggest_panels_result, source, settings, settings_file, fields)
