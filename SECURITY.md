@@ -21,13 +21,13 @@ being deliberate about are credential storage and TLS verification:
   environment-variable override for InfluxDB's credentials was implemented and then deliberately
   removed - splitting secrets into a second file with the same effective permissions added no real
   security boundary, and risked the file being created less securely than `settings.yaml` itself. See
-  `CLAUDE.md`'s "Rejected: environment-variable secrets" for the full reasoning.
+  `architecture/packaging.md`'s "Rejected: environment-variable secrets" for the full reasoning.
 - **`systemd-creds` for the packaged install**: on a systemd host (`systemd >= 250`),
   `send-to-influx-set-credential <name>` moves a credential out of `settings.yaml` and into
   `systemd-creds` - TPM-bound or host-derived encryption at rest, decrypted only into a restricted,
   in-memory location for the service's lifetime, a real security boundary rather than an
-  organizational one. See the README's "Storing secrets in systemd-creds" section and CLAUDE.md's
-  "Credential storage (`systemd-creds`)" for details. This is opt-in and per-field. The interactive
+  organizational one. See the README's "Storing secrets in systemd-creds" section and
+  `architecture/packaging.md`'s "Credential storage (`systemd-creds`)" for details. This is opt-in and per-field. The interactive
   `.deb` install prompt (debconf) can also collect these directly, using debconf's `Type: password`
   widget - contrary to an earlier version of this note, debconf *does* write password-type answers to
   disk (a dedicated `passwords.dat` store, kept separate from its general-purpose, more widely-readable

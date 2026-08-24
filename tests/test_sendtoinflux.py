@@ -225,7 +225,7 @@ class TestMain:
     def test_main_exits_when_nothing_configured(self, caplog):
         """main with no --source and no (or empty) sources: list logs plainly that
         nothing is configured and exits 1, rather than falling back to any default -
-        default_source was removed rather than deprecated (see CLAUDE.md)."""
+        default_source was removed rather than deprecated (see architecture/runtime.md)."""
         with (
             patch("sendtoinflux.signal.signal"),
             patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,

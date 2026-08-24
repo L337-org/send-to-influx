@@ -11,10 +11,11 @@ for visualisation in Grafana. Each data source is a small, mostly-independent Py
 practical mental model for finding your way around is a parent/child class hierarchy with one
 module per source.
 
-`CLAUDE.md` (repo root) is the full architecture reference - written to brief Claude Code, but
-equally the canonical source for humans. This file (`CONTRIBUTING.md`) covers the practical
-day-to-day: project layout, the checklist for adding a new source, testing, and submitting
-changes. If something isn't covered here, it's almost certainly in `CLAUDE.md`.
+The `architecture/` directory is the deep implementation reference, one file per area. This file
+(`CONTRIBUTING.md`) covers the practical day-to-day: project layout, the checklist for adding a new
+source, testing, and submitting changes. `CLAUDE.md` and `.github/copilot-instructions.md` brief
+Claude Code and Copilot respectively and carry the same rules in condensed form. If something isn't
+covered here, look in `architecture/`.
 
 ## Project layout
 
@@ -34,7 +35,8 @@ changes. If something isn't covered here, it's almost certainly in `CLAUDE.md`.
 │   └── speedtest.py        # Speedtest
 ├── tests/                  # pytest suite, mirrors toinflux/ one-to-one
 │   └── conftest.py         # shared fixtures (e.g. sample_settings)
-├── packaging/              # .deb + systemd packaging (see CLAUDE.md's "Packaging" section)
+├── packaging/              # .deb + systemd packaging (see architecture/packaging.md)
+├── architecture/           # deep implementation reference, one file per area
 ├── example_settings.yaml   # template settings file - copy to settings.yaml to run
 └── UNITS.md                # field-by-field reference of what each source collects and its units
 ```
@@ -230,8 +232,8 @@ merging:
 
 Run all three locally before pushing (see "Local development" above) to avoid CI failures.
 
-Per repo convention, update `README.md`, `CLAUDE.md`, and `.github/copilot-instructions.md`
-alongside any behaviour change, before committing - see the "Checklist when adding a new data
+Per repo convention, update `README.md`, the relevant file under `architecture/`, `CLAUDE.md`, and
+`.github/copilot-instructions.md` alongside any behaviour change, before committing - see the "Checklist when adding a new data
 source" above for the common case, but the same applies to any change to CLI flags, settings
 keys, or exit-code/retry behaviour.
 
