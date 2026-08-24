@@ -664,8 +664,22 @@ To allow triggering a speed test on demand, set `speedtest.mcp_read_write: true`
 Once connected, the client has these read tools:
 
 - **`list_sources`** - the collectors that can be queried, each with a short description.
-- **`list_fields`** - the fields available for a source, with their units and (for coded fields
-  like Nuki lock state) what each value means.
+- **`list_fields`** - everything needed to write a query or build a chart for one source: the
+  database and measurement to query, the tag keys available to group by, and every field with its
+  InfluxDB type, its unit, what each value means for a coded field like Nuki lock state, and how it
+  may be aggregated. Each of those is omitted rather than nulled where it is not known - including
+  the type, which InfluxDB does not report for every field. That last part - `kind` - is the one a dashboard gets silently wrong without:
+  a `gauge` is an instantaneous reading (never sum them), an `interval` total is a quantity
+  accumulated over its reporting period (sum them to get a total for a day or a week), a `counter` a
+  running total that resets (read its last value or a difference, never its mean), a `state` a
+  discrete code or label. Pass `detail: true` for the per-field descriptions as well, in the same
+  call.
+Hue is a special case worth knowing about: its field keys are your own device names, so no built-in
+table can say what they mean. The collector therefore records each device's class alongside the
+readings (see `hue_devices` in [UNITS.md](UNITS.md)), and the MCP server reads that back - so a Hue
+temperature sensor reports °C and a smart plug reports as a state, the same as any other source.
+Nothing else needs configuring, and it starts working from the first collection.
+
 - **`get_current_state`** - a source's state *right now* ("is the door locked?", "which lights are
   on?"). Most sources are read live from the device; Speedtest and Octopus report their latest
   recorded reading instead.
@@ -679,16 +693,64 @@ Once connected, the client has these read tools:
   data, not three years.
 - **`get_documentation`** - a one-call reference of what every source reports and what its coded
   values mean.
+- **`suggest_dashboard_panels`** - the same schema turned into chart panels: per field a ready-to-run
+  InfluxQL query, the panel type to draw it as, the aggregation to use and any that would be wrong, a
+  Grafana unit, value mappings decoding a coded field to labels, and an alias naming each series
+  after its tag. It returns panel *parts*, not a dashboard document - see "Building a Grafana
+  dashboard" below.
 
 Alongside the tools, the server offers **resources** - the same read data as addressable items a
 client can list and attach, rather than call:
 
 - **`docs://reference`** - the `get_documentation` reference as Markdown.
-- **`schema://<source>`** - one per configured source: its fields, units and coded-value meanings.
+- **`schema://<source>`** - one per configured source: the `list_fields` payload for it.
 - **`state://<source>`** - one per configured source: its state right now.
 
 Anything offered as a resource is also a tool, deliberately: clients vary in how much they use
 resources, so the tools stay the workhorses and each resource says which tool covers the same data.
+
+### Building a Grafana dashboard
+
+Grafana has [its own MCP server](https://github.com/grafana/mcp-grafana), which is what creates and
+edits dashboards. This project does not talk to Grafana at all - it just describes its own data well
+enough that a model can chart it correctly. Connect both servers to the same client and ask for what
+you want; the model calls `suggest_dashboard_panels` here for the queries and panel settings, then
+Grafana's own dashboard tool to create it.
+
+Some prompts that work, in rough order of ambition:
+
+> Using send-to-influx and Grafana, create a dashboard called "Home" with a panel for each Nuki lock's
+> state and battery level. Use `suggest_dashboard_panels` for the queries and panel settings.
+
+> What can you chart from my send-to-influx data? List the sources, then for the two or three most
+> interesting ones show me what panels you would build and why, before creating anything.
+
+> Build me a Grafana dashboard relating conservatory temperature, the heater's state and solar
+> radiation over the last week, so I can see whether the sun is doing the heating. Put the
+> temperature and radiation on one panel with two axes and the heater state on a state timeline
+> underneath.
+
+> Add a panel to my "Home" dashboard for today's grid import, and check with
+> `suggest_dashboard_panels` how that field should be aggregated before you pick a function - it is a
+> counter, so a mean would be meaningless.
+
+Two things worth knowing when you ask:
+
+- **The datasource is yours, not ours.** `suggest_dashboard_panels` returns the database and
+  measurement but cannot know your Grafana's datasource uid, so the model has to look that up (or
+  copy it from an existing dashboard). Saying "use my existing InfluxDB datasource" is usually
+  enough.
+- **A few units use Grafana's custom-suffix form.** Grafana has no identifier for W/m² (solar
+  radiation), gCO2/kWh (carbon intensity) or pence/kWh (tariff rates), so those are emitted as
+  `suffix:W/m²` and the like, and the axis reads "812 W/m²". The tariff one is shortened to `p/kWh`,
+  because the suffix repeats on every tick; the full "pence/kWh (inc. VAT)" is what `list_fields`
+  reports. Octopus's gas reading is the one field with no unit at all - it is kWh or m³ depending on
+  your meter, so no single label is right.
+
+If you would rather assemble the dashboard yourself, `suggest_dashboard_panels` output drops almost
+straight into a panel: its `query` goes in a target with `rawQuery` set true and `resultFormat`
+`time_series`, its `unit` and `value_mappings` go in `fieldConfig.defaults`, and its `alias` goes in
+the target.
 
 There are also **prompts** - ready-made tasks you pick in the client rather than typing out:
 `home_status` (summarise everything now, optionally a focus like "lights"), `usage_trends` (answer a

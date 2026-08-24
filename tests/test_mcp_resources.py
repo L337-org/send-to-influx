@@ -31,6 +31,7 @@ def _live_handler():
     handler.MCP_DESCRIPTION = "Zappi desc"
     handler.MCP_MEASUREMENT = "myenergi"
     handler.MCP_FIELD_METADATA = {"sta": {"codes": {3: "charging"}}}
+    handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
     handler.get_data.return_value = {"sta": 3}
     handler.session = MagicMock()
     return handler

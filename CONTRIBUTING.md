@@ -11,10 +11,11 @@ for visualisation in Grafana. Each data source is a small, mostly-independent Py
 practical mental model for finding your way around is a parent/child class hierarchy with one
 module per source.
 
-`CLAUDE.md` (repo root) is the full architecture reference - written to brief Claude Code, but
-equally the canonical source for humans. This file (`CONTRIBUTING.md`) covers the practical
-day-to-day: project layout, the checklist for adding a new source, testing, and submitting
-changes. If something isn't covered here, it's almost certainly in `CLAUDE.md`.
+The `architecture/` directory is the deep implementation reference, one file per area. This file
+(`CONTRIBUTING.md`) covers the practical day-to-day: project layout, the checklist for adding a new
+source, testing, and submitting changes. `CLAUDE.md` and `.github/copilot-instructions.md` brief
+Claude Code and Copilot respectively and carry the same rules in condensed form. If something isn't
+covered here, look in `architecture/`.
 
 ## Project layout
 
@@ -34,7 +35,8 @@ changes. If something isn't covered here, it's almost certainly in `CLAUDE.md`.
 │   └── speedtest.py        # Speedtest
 ├── tests/                  # pytest suite, mirrors toinflux/ one-to-one
 │   └── conftest.py         # shared fixtures (e.g. sample_settings)
-├── packaging/              # .deb + systemd packaging (see CLAUDE.md's "Packaging" section)
+├── packaging/              # .deb + systemd packaging (see architecture/packaging.md)
+├── architecture/           # deep implementation reference, one file per area
 ├── example_settings.yaml   # template settings file - copy to settings.yaml to run
 └── UNITS.md                # field-by-field reference of what each source collects and its units
 ```
@@ -82,21 +84,126 @@ in CI on every push and pull request.
 
 ## Checklist when adding a new data source
 
-1. **`toinflux/newsource.py`** - a class inheriting `DataHandler`, implementing `get_data()`. If
-   it's a new device from a manufacturer that already has a module (e.g. another MyEnergi
-   device), add a subclass to the existing file instead of a new one.
-2. **`toinflux/general.py`** - register the class in `get_class()`'s factory map.
-3. **`toinflux/__init__.py`** - add the import/re-export.
-4. **`example_settings.yaml`** - add a commented-out section showing the required/optional keys.
-5. **`tests/test_newsource.py`** - unit tests using mocks (no real config or network), reusing
-   `tests/conftest.py` fixtures.
-6. **`README.md`** - a short section describing the source and any setup steps (getting an API
-   key, etc.), and **`UNITS.md`** - the fields it collects and their units.
-7. **`CLAUDE.md`** and **`.github/copilot-instructions.md`** - update the class hierarchy and any
-   other architecture notes that changed.
+This is the canonical checklist. Every step is a convention something already depends on, so work
+through it rather than inferring the shape from an existing source.
 
-If you're only adding a field or fixing a bug in an *existing* source rather than adding a new
-one, items 2-3 don't apply, but the rest still do wherever relevant.
+### The collector
+
+1. **`toinflux/newsource.py`** - a class inheriting `DataHandler`, implementing `get_data()`, which
+   populates `self.data` and `self.influx_header`. If it is a new device from a manufacturer that
+   already has a module (another MyEnergi device, say), add a subclass to the existing file instead of
+   a new one. For an MQTT-based source inherit `MqttDataHandler` instead, and add the source's name to
+   `MQTT_SOURCES` in `toinflux/general.py` so `--check-config` validates the shared `mqtt:` block for
+   it.
+2. **`toinflux/general.py`** - register the class in `get_class()`'s factory map. Only collectable
+   sources belong there: an abstract parent that is registered will validate, construct, and then die
+   with `AttributeError` on every cycle.
+3. **`toinflux/__init__.py`** - add the import and re-export.
+4. **`example_settings.yaml`** - add a commented-out section showing the required and optional keys.
+   Any credential field also needs an entry in `CREDENTIAL_FIELDS` and `PLACEHOLDER_VALUES`
+   (`toinflux/credentials.py`); that alone makes `send-to-influx-set-credential <name>` work, because
+   the machinery is fully table-driven.
+5. **`tests/test_newsource.py`** - unit tests using mocks, no real config or network, reusing the
+   fixtures in `tests/conftest.py`.
+
+### MCP metadata
+
+Needed for the read tools, the resources and `suggest_dashboard_panels`, which all derive from it.
+
+6. **`MCP_FIELD_METADATA`** on the class, from the UNITS.md entry: `unit` where the field has one,
+   `codes` for any numeric-coded field, a `kind` on **every** entry (`gauge`, `interval`, `counter`
+   or `state` - `interval` for a quantity accumulated over its reporting period, which is summed
+   rather than averaged),
+   and a `description` **only** where the name, unit and coded values do not already say what the
+   field is. Add the UNITS.md row in the same change: `tests/test_field_metadata.py` fails on an entry
+   with no kind, one saying nothing at all, a description whose every word comes from the field key,
+   or a unit or code that disagrees with UNITS.md.
+7. **`MCP_DESCRIPTION`** - one line on what the source reports, surfaced by `list_sources`, the
+   documentation tool and the per-source resources.
+7a. **Only if the source's field keys are not knowable in advance** - because they are the operator's
+   own device names, say - override `mcp_field_metadata()` instead of declaring a static table, and
+   have the collector record whatever the keys mean as it collects. Hue is the worked example: it
+   writes each device's class to a companion measurement and reads it back. Two rules for such an
+   override: read InfluxDB, never the device (every schema tool touches InfluxDB and nothing else,
+   and a device read answers differently between calls); and never raise, since metadata is an
+   annotation and must degrade rather than fail the call.
+8. **`MCP_MEASUREMENT` and `MCP_TAG_FILTERS`** - only if the InfluxDB measurement is not the source's
+   own name, or it shares a measurement with others.
+9. **`MCP_INSTANCE_TAG`** - only if several *producers* write to one measurement and a tag tells them
+   apart (Speedtest's collecting `host`). That makes the read tools enumerate it, accept `instance`,
+   and report per producer instead of merging. Leave it `None` otherwise, which keeps the flat payload
+   shape. A source setting it should also override `heartbeat_tags()`, or its `collector_status` points
+   are attributable to no single writer and overwrite each other.
+10. **`MCP_LIVE_STATE`** - leave at its `True` default unless `get_data()` is expensive or pointless to
+    call live (a full Speedtest run, or Octopus's ~24 h delayed data). Set `False` and current-state
+    reads the latest InfluxDB point instead.
+11. **`GRAFANA_UNITS`** (`toinflux/mcp_dashboards.py`) - map the unit to a real Grafana identifier,
+    read out of a running Grafana rather than guessed. Where Grafana has none, use its custom-suffix
+    form (`suffix:W/m²`) rather than leaving the panel unitless: an unrecognised id is *not* dropped,
+    it renders as a literal suffix, so a typo appears on the axis rather than vanishing. Prefer
+    `suffix:` to a bare string, since a bare one would silently adopt Grafana's own formatter -
+    possibly one that rescales - if an identifier of that name were ever added. A test fails if a
+    unit is neither mapped nor listed as having no honest label.
+
+### Write support
+
+Only if the source can be *controlled* or *actioned* and its vendor API has a documented write path.
+Most sources are read-only and skip this.
+
+12. Set **`MCP_WRITABLE = True`** and implement the vendor write logic as methods on the class, keeping
+    the name-to-id, parameter and capability mapping there (see `Hue.mcp_set_device_state` or
+    `Speedtest.mcp_trigger_run`).
+13. Add a per-source registrar to **`_WRITE_TOOL_REGISTRARS`** in `toinflux/mcp_write.py`. A
+    write-enabled source with no registrar is logged and skipped, not silently controllable.
+14. Every tool needs a **`title=`** distinct from its own name and an **`annotations=ToolAnnotations(...)`**
+    with `read_only_hint` set explicitly, plus `destructive_hint` when `read_only_hint=False`. A
+    client's auto-permission logic and a registry review read these fields, never the description.
+15. Add **`<source>.mcp_read_write`** (bool, default false) to `example_settings.yaml`. The tools
+    appear once the operator opts in.
+
+### The debconf install flow
+
+Mechanical, not a judgment call: every rule below is an existing tested convention.
+
+16. Add the source's name to the `sources-to-configure` multiselect `Choices` in
+    `packaging/deb/send-to-influx.templates`, **appending at the end**. The question-visibility
+    scenario in `test-packaging.sh` selects sources by position number, so inserting mid-list silently
+    retargets those tests.
+17. Credential, identity and connection fields get conditional questions (templates plus a
+    `case "$SOURCES"` block in `packaging/deb/config`), all at priority `high`. Debconf's default
+    threshold is `high`, so anything lower is silently skipped on a normal install. Tuning fields
+    (`interval`, `db`, `timeout`, `fields` lists) are **never** prompted for.
+18. Secrets are `Type: password` templates. `postinst` migrates them via
+    `send-to-influx-set-credential` and clears the stored answer with `db_set ""` immediately after
+    `db_get` - never `db_unregister`, which deletes the seen flag and causes blank re-prompts on every
+    upgrade. Add every credential-bearing answer to the final unconditional sweep loop too.
+19. A *shared* infrastructure block (like `mqtt:`) is asked once, gated on any source needing it being
+    selected - not per source, and not unconditionally, which is InfluxDB's special status only. A
+    credential already in systemd-creds satisfies a blank secret prompt on reconfigure, and non-secret
+    fields provided alongside a blank secret are still applied.
+20. If the source introduces a **new settings section**, `postinst` must `--ensure-section` it before
+    writing fields or enabling the source. `settings.yaml` is written once at install time and never
+    rewritten by an upgrade, so a section added by a later release simply does not exist on existing
+    installs: `--set-field` fails, `--enable-source` then writes the source into `sources:` with no
+    block behind it, and `load_settings()` raises a fatal `ConfigError` that stops the **whole
+    service**.
+21. Auto-enable with `--enable-source` only when every required field actually resolved and
+    `INFLUX_OK=1`. "Was it ticked" is not enough; otherwise print a specific "not fully configured"
+    warning and leave it opt-in.
+22. Extend `packaging/deb/test-packaging.sh`: seed the new source's answers in the seeded-install
+    scenario (asserting fields land in `settings.yaml`, credentials in the credstore, and the
+    plaintext secret is absent from both `settings.yaml` and debconf's own database), and extend the
+    question-visibility scenario.
+
+### Documentation
+
+23. Update **README.md** (a short section on the source and any setup steps such as getting an API
+    key) and **UNITS.md** (the fields it collects and their units).
+24. Update **CLAUDE.md**, **`.github/copilot-instructions.md`**, and the relevant file under
+    **`architecture/`**. The two instruction files are mirrors and must change together.
+
+If you are only adding a field or fixing a bug in an *existing* source, steps 2, 3 and 16-22 do not
+apply, but the rest still do wherever relevant.
 
 ## Local development
 
@@ -138,8 +245,8 @@ merging:
 
 Run all three locally before pushing (see "Local development" above) to avoid CI failures.
 
-Per repo convention, update `README.md`, `CLAUDE.md`, and `.github/copilot-instructions.md`
-alongside any behaviour change, before committing - see the "Checklist when adding a new data
+Per repo convention, update `README.md`, the relevant file under `architecture/`, `CLAUDE.md`, and
+`.github/copilot-instructions.md` alongside any behaviour change, before committing - see the "Checklist when adding a new data
 source" above for the common case, but the same applies to any change to CLI flags, settings
 keys, or exit-code/retry behaviour.
 

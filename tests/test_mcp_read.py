@@ -21,7 +21,9 @@ from toinflux.mcp_read import (
     build_query,
     build_schema,
     current_state_result,
-    discover_fields,
+    MeasurementKeys,
+    discover_measurement_keys,
+    field_kind,
     discover_tag_values,
     list_fields_result,
     metadata_for,
@@ -205,7 +207,8 @@ class TestBuildSchema:
         handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {"temperature_2m": {"unit": "°C"}}
-        schema = build_schema(handler, {"temperature_2m", "precipitation"}, "weather_db")
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
+        schema = build_schema(handler, _keys({"temperature_2m", "precipitation"}), "weather_db")
         assert schema.measurement == "weather"
         assert schema.db == "weather_db"
         assert schema.allowed_fields == {"temperature_2m", "precipitation"}
@@ -217,7 +220,8 @@ class TestBuildSchema:
         handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
-        schema = build_schema(handler, set(), "hue_db")
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
+        schema = build_schema(handler, _keys(set()), "hue_db")
         assert schema.measurement == "hue"
         assert schema.db == "hue_db"
 
@@ -332,30 +336,108 @@ def _mock_session(json_payload=None, exc=None):
     return session
 
 
-class TestDiscoverFields:
-    def test_parses_field_keys(self):
-        payload = {
-            "results": [
-                {"series": [{"columns": ["fieldKey", "fieldType"], "values": [["gen", "float"], ["grd", "float"]]}]}
-            ]
-        }
-        fields = discover_fields(
-            _mock_session(payload), {"url": "http://x", "token": "t", "org": "o"}, "db", "myenergi"
+def _keys(field_names, tag_keys=(), types=None):
+    """A MeasurementKeys for a test.
+
+    ``field_names`` alone gives fields with no known type, which is exactly what a
+    caller needing only the injection allowlist sees; pass ``types`` where the
+    assertion is about the type itself.
+
+    :param field_names: the field keys
+    :param tag_keys: the measurement's tag keys
+    :param types: {field: influx type}, overriding the untyped default
+    :return: MeasurementKeys
+    """
+    field_types = dict(types) if types else {name: None for name in field_names}
+    return MeasurementKeys(field_types=field_types, tag_keys=frozenset(tag_keys))
+
+
+# The real shape of a two-statement discovery response, recorded from InfluxDB 1.8 and
+# confirmed byte-identical from 2.7's v1-compatibility endpoint. Kept whole rather than
+# reduced to the columns each test reads, so a change in either version's response shape
+# fails here rather than in whichever assertion happened to depend on it.
+_KEYS_PAYLOAD = {
+    "results": [
+        {
+            "statement_id": 0,
+            "series": [
+                {
+                    "name": "myenergi",
+                    "columns": ["fieldKey", "fieldType"],
+                    "values": [["che", "float"], ["ectt1", "string"], ["gen", "float"]],
+                }
+            ],
+        },
+        {
+            "statement_id": 1,
+            "series": [{"name": "myenergi", "columns": ["tagKey"], "values": [["device"]]}],
+        },
+    ]
+}
+
+
+class TestDiscoverMeasurementKeys:
+    def test_parses_field_types_and_tag_keys_from_one_request(self):
+        session = _mock_session(_KEYS_PAYLOAD)
+        keys = discover_measurement_keys(session, {"url": "http://x", "token": "t", "org": "o"}, "db", "myenergi")
+        assert keys.field_types == {"che": "float", "ectt1": "string", "gen": "float"}
+        assert keys.field_names == {"che", "ectt1", "gen"}
+        assert keys.tag_keys == frozenset({"device"})
+        # One round trip, not two: the whole reason the tag keys are free here.
+        assert session.get.call_count == 1
+        query = session.get.call_args.kwargs["params"]["q"]
+        assert query == 'SHOW FIELD KEYS FROM "myenergi"; SHOW TAG KEYS FROM "myenergi"'
+
+    def test_statements_are_matched_by_id_not_by_order(self):
+        # Nothing in the HTTP contract promises the results arrive in statement order,
+        # and reading them positionally would put tag keys in the field list.
+        payload = {"results": list(reversed(_KEYS_PAYLOAD["results"]))}
+        keys = discover_measurement_keys(
+            _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "d", "myenergi"
         )
-        assert fields == {"gen", "grd"}
+        assert keys.field_names == {"che", "ectt1", "gen"}
+        assert keys.tag_keys == frozenset({"device"})
+
+    def test_falls_back_to_position_when_no_statement_id(self):
+        payload = {"results": [{k: v for k, v in r.items() if k != "statement_id"} for r in _KEYS_PAYLOAD["results"]]}
+        keys = discover_measurement_keys(
+            _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "d", "myenergi"
+        )
+        assert keys.field_names == {"che", "ectt1", "gen"}
+        assert keys.tag_keys == frozenset({"device"})
+
+    def test_field_with_no_type_column_is_still_listed(self):
+        # No fieldType column means no honest answer about the type; the field must stay
+        # queryable rather than vanish from the allowlist.
+        payload = {"results": [{"statement_id": 0, "series": [{"columns": ["fieldKey"], "values": [["gen"]]}]}]}
+        keys = discover_measurement_keys(
+            _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "d", "hue"
+        )
+        assert keys.field_types == {"gen": None}
+
+    def test_series_missing_the_named_column_is_skipped_not_guessed(self, caplog):
+        # A positional fallback would read some other cell and invent a field key.
+        payload = {"results": [{"statement_id": 0, "series": [{"columns": ["nope"], "values": [["gen"]]}]}]}
+        with caplog.at_level("WARNING"):
+            keys = discover_measurement_keys(
+                _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "d", "hue"
+            )
+        assert keys.field_names == set()
+        assert "no 'fieldKey' column" in caplog.text
 
     def test_empty_when_no_series(self):
-        fields = discover_fields(
+        keys = discover_measurement_keys(
             _mock_session({"results": [{}]}), {"url": "http://x", "user": "u", "password": "p"}, "db", "hue"
         )
-        assert fields == set()
+        assert keys.field_names == set()
+        assert keys.tag_keys == frozenset()
 
     def test_transport_failure_raises_source_connection_error(self):
         import requests
 
         session = _mock_session(exc=requests.exceptions.ConnectionError("down"))
         with pytest.raises(SourceConnectionError):
-            discover_fields(session, {"url": "http://x", "user": "u", "password": "p"}, "db", "hue")
+            discover_measurement_keys(session, {"url": "http://x", "user": "u", "password": "p"}, "db", "hue")
 
     def test_non_json_body_surfaces_as_unparseable(self):
         # requests' JSONDecodeError is a ValueError AND a RequestException; the parse
@@ -369,14 +451,18 @@ class TestDiscoverFields:
         response.json.side_effect = requests.exceptions.JSONDecodeError("Expecting value", "", 0)
         session.get.return_value = response
         with pytest.raises(SourceConnectionError, match="unparseable response"):
-            discover_fields(session, {"url": "http://x", "user": "u", "password": "p"}, "db", "hue")
+            discover_measurement_keys(session, {"url": "http://x", "user": "u", "password": "p"}, "db", "hue")
 
     def test_result_error_surfaces_not_empty_set(self):
-        # An InfluxDB error in a 200 payload (wrong db/auth) must raise, not come
-        # back as an empty field set that later reads as every field "unknown".
-        payload = {"results": [{"error": "database not found: hue_db"}]}
-        with pytest.raises(SourceConnectionError, match="rejected the field discovery"):
-            discover_fields(_mock_session(payload), {"url": "http://x", "token": "t", "org": "o"}, "db", "hue")
+        # An InfluxDB error in a 200 payload (wrong db/auth) must raise, not come back as
+        # an empty key set. Recorded from a real 1.8 and 2.7: an unusable database answers
+        # with statement 0 erroring and *no* result for statement 1, so ignoring the error
+        # would read the missing statement as "this measurement has no tags".
+        payload = {"results": [{"statement_id": 0, "error": "not executed"}]}
+        with pytest.raises(SourceConnectionError, match="rejected the key discovery for hue"):
+            discover_measurement_keys(
+                _mock_session(payload), {"url": "http://x", "token": "t", "org": "o"}, "db", "hue"
+            )
 
 
 class TestRunQuery:
@@ -481,12 +567,13 @@ class TestResolveSchema:
         # schema's filters would compare against that instead.
         handler.mcp_tag_filters.return_value = {"device": "zappi"}
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.source_settings = {"db": "zappi_db"}
         handler.session = MagicMock()
         settings = {"sources": ["zappi"], "influx": {"url": "http://x", "user": "u", "password": "p"}}
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value={"gen", "grd"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"gen", "grd"})),
         ):
             _handler, schema = resolve_schema("zappi", settings, None)
         assert schema.measurement == "myenergi"
@@ -503,16 +590,141 @@ class TestResolveSchema:
         handler.MCP_INSTANCE_TAG = None
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_FIELD_METADATA = {}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.source_settings = {"db": "zappi_db"}
         handler.session = MagicMock()
         handler.settings = {"influx": {"url": "http://FRESH", "user": "u", "password": "p"}}
         stale = {"sources": ["zappi"], "influx": {"url": "http://STALE", "user": "u", "password": "p"}}
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value=set()) as discover,
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys(set())) as discover,
         ):
             resolve_schema("zappi", stale, None)
         assert discover.call_args.args[1]["url"] == "http://FRESH"
+
+
+class TestFieldKind:
+    """How a value may be aggregated - the one piece of field metadata that cannot be
+    derived from the value, and the one whose absence produces a chart that looks right."""
+
+    def test_a_declared_kind_wins(self):
+        assert field_kind({"kind": "counter"}, "float") == "counter"
+
+    def test_a_coded_field_is_a_state(self):
+        assert field_kind({"codes": {1: "locked"}}) == "state"
+
+    def test_text_and_boolean_types_are_states_without_being_declared(self):
+        # Some field keys cannot be tabulated in advance - Hue's are the operator's own
+        # device names - so a string or boolean has to answer for itself.
+        assert field_kind({}, "string") == "state"
+        assert field_kind({}, "boolean") == "state"
+
+    def test_a_numeric_field_with_nothing_declared_is_left_unanswered(self):
+        # Not "gauge". Defaulting would say "averaging this is fine" about a counter,
+        # which is precisely the wrong answer this field exists to prevent.
+        assert field_kind({}, "float") is None
+        assert field_kind({}, "integer") is None
+        assert field_kind({}, None) is None
+
+    def test_a_declared_kind_overrides_the_type_derived_one(self):
+        assert field_kind({"kind": "gauge", "codes": {1: "x"}}, "string") == "gauge"
+
+
+class TestListFieldsPayload:
+    """One call has to carry everything a query and a panel need, or the caller pays a
+    round trip per fact."""
+
+    SETTINGS = {
+        "sources": ["zappi"],
+        "influx": {"url": "http://x", "user": "u", "password": "p"},
+        "zappi": {"db": "zappi_db", "serial": "12345"},
+    }
+
+    def _handler(self):
+        handler = MagicMock()
+        handler.source = "zappi"
+        handler.MCP_MEASUREMENT = "myenergi"
+        handler.MCP_INSTANCE_TAG = None
+        handler.mcp_tag_filters.return_value = {"device": "zappi"}
+        handler.MCP_FIELD_METADATA = {
+            "gen": {"unit": "W", "kind": "gauge", "description": "Power generated locally."},
+            "che": {"unit": "kWh", "kind": "counter"},
+            "sta": {"kind": "state", "codes": {3: "charging"}},
+        }
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
+        handler.source_settings = {"db": "zappi_db"}
+        handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
+        handler.session = MagicMock()
+        return handler
+
+    def _result(self, keys, **kwargs):
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=self._handler()),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=keys),
+        ):
+            return list_fields_result("zappi", self.SETTINGS, None, **kwargs)
+
+    def test_carries_the_database_measurement_and_tag_keys(self):
+        # The database was previously only reachable through get_data_range, which also
+        # does retention work, so a query needed a second call for one short string. The
+        # tag keys were in the data and in no payload at all unless the source happened to
+        # declare one of them as its instance axis.
+        result = self._result(_keys({"gen"}, tag_keys={"device", "host"}))
+        assert result["database"] == "zappi_db"
+        assert result["measurement"] == "myenergi"
+        assert result["tag_keys"] == ["device", "host"]
+
+    def test_each_field_carries_its_type_unit_kind_and_codes(self):
+        keys = _keys(None, types={"gen": "float", "che": "float", "sta": "float"})
+        by_name = {entry["field"]: entry for entry in self._result(keys)["fields"]}
+        assert by_name["gen"] == {"field": "gen", "type": "float", "unit": "W", "kind": "gauge"}
+        assert by_name["che"] == {"field": "che", "type": "float", "unit": "kWh", "kind": "counter"}
+        assert by_name["sta"] == {
+            "field": "sta",
+            "type": "float",
+            "kind": "state",
+            "codes": {"3": "charging"},
+        }
+
+    def test_a_field_with_nothing_known_carries_only_its_name(self):
+        # "No unit" and "unit unknown" are told apart the only honest way there is: by the
+        # key being absent rather than holding a placeholder.
+        entry = self._result(_keys({"unknown"}))["fields"][0]
+        assert entry == {"field": "unknown"}
+
+    def test_descriptions_are_omitted_by_default_and_added_by_detail(self):
+        keys = _keys({"gen", "che"})
+        plain = {entry["field"]: entry for entry in self._result(keys)["fields"]}
+        assert "description" not in plain["gen"]
+        detailed = {entry["field"]: entry for entry in self._result(keys, detail=True)["fields"]}
+        assert detailed["gen"]["description"] == "Power generated locally."
+        # detail is not a promise that every field has one.
+        assert "description" not in detailed["che"]
+
+    def test_the_payload_comes_from_the_hook_not_the_class_attribute(self):
+        # The two agree for every source but Hue, whose field keys are per-install and are
+        # resolved by the hook at call time. Nothing else here would notice the difference,
+        # so this pins it deliberately: revert build_schema to the attribute and Hue's
+        # metadata silently disappears.
+        handler = self._handler()
+        handler.MCP_FIELD_METADATA = {}
+        handler.mcp_field_metadata.return_value = {"gen": {"unit": "W", "kind": "gauge"}}
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"gen"})),
+        ):
+            result = list_fields_result("zappi", self.SETTINGS, None)
+        assert result["fields"][0] == {"field": "gen", "unit": "W", "kind": "gauge"}
+
+    def test_detail_costs_no_extra_round_trip(self):
+        # The point of a flag rather than a second tool: the prose arrives in the call the
+        # caller was already making.
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=self._handler()),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"gen"})) as discover,
+        ):
+            list_fields_result("zappi", self.SETTINGS, None, detail=True)
+        assert discover.call_count == 1
 
 
 def _tool_text(result):
@@ -557,6 +769,7 @@ class TestRegisterReadTools:
         # schema's filters would compare against that instead.
         handler.mcp_tag_filters.return_value = {"device": "zappi"}
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.source_settings = {"db": "zappi_db"}
         handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
         handler.session = MagicMock()
@@ -598,13 +811,37 @@ class TestRegisterReadTools:
         text = _tool_text(result)
         assert "myenergi" in text and "zappi" in text
 
+    def test_list_fields_end_to_end_passes_detail_through(self):
+        # The tool wrapper had no end-to-end test, so nothing would have caught `detail`
+        # being threaded into run_sync in the wrong argument position - it would simply
+        # have arrived as the settings path and been ignored.
+        server = self._server()
+        register_read_tools(server, self._settings(), None)
+        handler = self._handler()
+        handler.MCP_FIELD_METADATA = {"gen": {"unit": "W", "kind": "gauge", "description": "Solar power."}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
+        with (
+            patch("toinflux.mcp_common.get_class", return_value=handler),
+            patch(
+                "toinflux.mcp_read.discover_measurement_keys",
+                return_value=_keys(None, tag_keys={"device"}, types={"gen": "float"}),
+            ),
+        ):
+            plain = _tool_text(anyio.run(server.call_tool, "list_fields", {"source": "zappi"}))
+            detailed = _tool_text(anyio.run(server.call_tool, "list_fields", {"source": "zappi", "detail": True}))
+        assert '"database": "zappi_db"' in plain
+        assert '"tag_keys"' in plain and '"device"' in plain
+        assert '"type": "float"' in plain and '"kind": "gauge"' in plain
+        assert "Solar power." not in plain
+        assert "Solar power." in detailed
+
     def test_query_history_end_to_end(self):
         server = self._server()
         register_read_tools(server, self._settings(), None)
         payload = {"results": [{"series": [{"columns": ["time", "gen"], "values": [[100, 42]]}]}]}
         with (
             patch("toinflux.mcp_common.get_class", return_value=self._handler()),
-            patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"gen"})),
             patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], [[100, 42]])]),
         ):
             result = anyio.run(
@@ -626,7 +863,7 @@ class TestRegisterReadTools:
         rows = [[i, i] for i in range(3)]
         with (
             patch("toinflux.mcp_common.get_class", return_value=self._handler()),
-            patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"gen"})),
             patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], rows)]),
         ):
             result = anyio.run(
@@ -645,7 +882,7 @@ class TestRegisterReadTools:
         handler = self._handler()
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"gen"})),
             patch("toinflux.mcp_read.run_query", return_value=[QuerySeries({}, ["time", "gen"], [[1, 2]])]),
         ):
             anyio.run(
@@ -661,7 +898,7 @@ class TestRegisterReadTools:
         handler = self._handler()
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", side_effect=SourceConnectionError("boom")),
+            patch("toinflux.mcp_read.discover_measurement_keys", side_effect=SourceConnectionError("boom")),
         ):
             with pytest.raises(Exception, match="boom"):
                 anyio.run(
@@ -669,7 +906,7 @@ class TestRegisterReadTools:
                     "query_history",
                     {"source": "zappi", "field": "gen", "start": "-1h", "end": "now"},
                 )
-        # discover_fields failed inside resolve_schema -> its except path closed it.
+        # Key discovery failed inside resolve_schema -> its except path closed it.
         handler.session.close.assert_called_once()
 
     def test_list_sources_closes_each_session(self):
@@ -685,7 +922,7 @@ class TestRegisterReadTools:
         register_read_tools(server, self._settings(), None)
         with (
             patch("toinflux.mcp_common.get_class", return_value=self._handler()),
-            patch("toinflux.mcp_read.discover_fields", return_value={"gen"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"gen"})),
         ):
             with pytest.raises(Exception) as excinfo:
                 anyio.run(
@@ -703,6 +940,7 @@ class TestRegisterReadTools:
         handler.MCP_DESCRIPTION = "Zappi desc"
         handler.get_data.return_value = {"sta": 3}
         handler.MCP_FIELD_METADATA = {"sta": {"codes": {3: "charging"}}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         with patch("toinflux.mcp_common.get_class", return_value=handler):
             result = anyio.run(server.call_tool, "get_current_state", {"source": "zappi"})
         text = _tool_text(result)
@@ -714,6 +952,7 @@ class TestRegisterReadTools:
         handler = self._handler()
         handler.MCP_DESCRIPTION = "Zappi desc"
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         with patch("toinflux.mcp_common.get_class", return_value=handler):
             result = anyio.run(server.call_tool, "get_documentation", {})
         text = _tool_text(result)
@@ -772,6 +1011,7 @@ class TestCurrentStateResult:
         handler.MCP_LIVE_STATE = True
         handler.MCP_DESCRIPTION = "Zappi desc"
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}, "sta": {"codes": {3: "charging"}}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.get_data.return_value = {"gen": 1234, "sta": 3}
         handler.session = MagicMock()
         return handler
@@ -802,12 +1042,13 @@ class TestCurrentStateResult:
         handler.MCP_TAG_FILTERS = {}
         handler.MCP_DESCRIPTION = "speed"
         handler.MCP_FIELD_METADATA = {"ping": {"unit": "ms"}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.source_settings = {"db": "sdb"}
         handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
         handler.session = MagicMock()
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value={"ping", "download"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"ping", "download"})),
             patch(
                 "toinflux.mcp_read.run_query",
                 return_value=[QuerySeries({}, ["time", "download", "ping"], [[1700, None, 12.5]])],
@@ -865,7 +1106,7 @@ class TestInstancedReadsWithARealHandler:
         ]
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value={"ping", "download"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"ping", "download"})),
             patch("toinflux.mcp_read.discover_tag_values", return_value={"alpha", "beta"}),
             patch("toinflux.mcp_read.run_query", return_value=series),
         ):
@@ -889,7 +1130,7 @@ class TestInstancedReadsWithARealHandler:
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
             patch.object(type(handler), "get_data", side_effect=AssertionError("get_data was called")),
-            patch("toinflux.mcp_read.discover_fields", return_value={"ping"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"ping"})),
             patch("toinflux.mcp_read.discover_tag_values", return_value={"alpha"}),
             patch(
                 "toinflux.mcp_read.run_query",
@@ -909,7 +1150,7 @@ class TestInstancedReadsWithARealHandler:
         ]
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value={"ping"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"ping"})),
             patch("toinflux.mcp_read.discover_tag_values", return_value={"alpha"}),
             patch("toinflux.mcp_read.run_query", return_value=series),
         ):
@@ -922,7 +1163,7 @@ class TestInstancedReadsWithARealHandler:
         handler = self._handler()
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value={"ping", "download"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"ping", "download"})),
             patch("toinflux.mcp_read.discover_tag_values", return_value={"beta", "alpha"}),
         ):
             result = list_fields_result("speedtest", self.SETTINGS, None)
@@ -952,11 +1193,23 @@ class TestInstancedReadsWithARealHandler:
         handler.session = MagicMock()
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value={"intensity"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"intensity"})),
         ):
             result = list_fields_result("carbonintensity", settings, None)
         assert "instance_tag" not in result
         assert "instances" not in result
+
+
+class TestAnnotateState:
+    def test_current_state_is_annotated_from_the_hook_not_the_class_attribute(self):
+        # A live current-state read gets the same units list_fields reports, which for Hue
+        # means resolving them per install rather than reading an empty class table.
+        from toinflux.mcp_read import _annotate_state
+
+        handler = MagicMock()
+        handler.MCP_FIELD_METADATA = {}
+        handler.mcp_field_metadata.return_value = {"Conservatory": {"unit": "°C", "kind": "gauge"}}
+        assert _annotate_state(handler, {"Conservatory": 21.5}) == {"Conservatory": {"value": 21.5, "unit": "°C"}}
 
 
 class TestBuildDocumentation:
@@ -965,6 +1218,7 @@ class TestBuildDocumentation:
         handler.source = "zappi"
         handler.MCP_DESCRIPTION = "Zappi desc"
         handler.MCP_FIELD_METADATA = {"gen": {"unit": "W"}, "sta": {"codes": {1: "paused", 3: "charging"}}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
         handler.session = MagicMock()
         with patch("toinflux.mcp_common.get_class", return_value=handler):
             doc = build_documentation({"sources": ["zappi"]}, None)
@@ -974,6 +1228,72 @@ class TestBuildDocumentation:
         assert "`gen` - unit W" in doc
         assert "1=paused, 3=charging" in doc
         handler.session.close.assert_called_once()
+
+    def test_carries_the_kind_and_the_description(self):
+        # This is where the per-field prose is available for every source at once, so a
+        # caller that does not want list_fields' detail flag still gets it.
+        handler = MagicMock()
+        handler.source = "zappi"
+        handler.MCP_DESCRIPTION = "Zappi desc"
+        handler.MCP_FIELD_METADATA = {
+            "che": {"unit": "kWh", "kind": "counter", "description": "Energy this session."},
+        }
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
+        handler.session = MagicMock()
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            doc = build_documentation({"sources": ["zappi"]}, None)
+        # The description is its own sentence rather than another semicolon-separated bit,
+        # because several of them contain a semicolon themselves.
+        assert "`che` - unit kWh; counter (running total, resets). Energy this session." in doc
+
+    def test_the_reference_uses_the_class_attribute_and_never_the_hook(self):
+        # get_documentation's whole contract is that it needs no InfluxDB round trip, and
+        # its description says so. Calling mcp_field_metadata() here made it query InfluxDB
+        # once per Hue source and broke that promise silently - nothing failed, because the
+        # two return the same thing for every source but Hue.
+        handler = MagicMock()
+        handler.source = "hue"
+        handler.MCP_DESCRIPTION = "Hue"
+        handler.MCP_FIELD_METADATA = {"declared": {"unit": "W", "kind": "gauge"}}
+        handler.mcp_field_metadata.return_value = {"per_install": {"unit": "°C", "kind": "gauge"}}
+        handler.session = MagicMock()
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            doc = build_documentation({"sources": ["hue"]}, None)
+        handler.mcp_field_metadata.assert_not_called()
+        assert "`declared`" in doc
+        assert "per_install" not in doc
+
+    def test_an_interval_total_is_worded_distinctly_and_says_to_sum_it(self):
+        # The reference is where a caller not using list_fields' detail flag learns this,
+        # so the four kinds must read differently. An earlier version had no test here,
+        # and the interval wording could be replaced with gauge's without failing.
+        handler = MagicMock()
+        handler.source = "octopus"
+        handler.MCP_DESCRIPTION = "Octopus"
+        handler.MCP_FIELD_METADATA = {"consumption_kwh": {"unit": "kWh", "kind": "interval"}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
+        handler.session = MagicMock()
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            doc = build_documentation({"sources": ["octopus"]}, None)
+        bullet = next(line for line in doc.splitlines() if line.startswith("- `consumption_kwh`"))
+        assert "interval total" in bullet
+        assert "sum it" in bullet
+        # And its own line must not call it an instantaneous reading, which is what it was
+        # wrongly declared as before this kind existed. Scoped to the bullet on purpose:
+        # the document's header paragraph explains all four kinds, so "instantaneous"
+        # appears there legitimately.
+        assert "instantaneous" not in bullet
+
+    def test_a_coded_field_is_described_as_a_state_without_declaring_one(self):
+        handler = MagicMock()
+        handler.source = "nuki"
+        handler.MCP_DESCRIPTION = "Nuki desc"
+        handler.MCP_FIELD_METADATA = {"stateValue": {"codes": {1: "locked"}}}
+        handler.mcp_field_metadata.return_value = handler.MCP_FIELD_METADATA
+        handler.session = MagicMock()
+        with patch("toinflux.mcp_common.get_class", return_value=handler):
+            doc = build_documentation({"sources": ["nuki"]}, None)
+        assert "state (discrete code or label)" in doc
 
 
 class TestSourceMcpMetadata:
@@ -1122,7 +1442,7 @@ class TestMultiBridgeReads:
         handler.session = MagicMock()
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value={"Kitchen"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"Kitchen"})),
             patch("toinflux.mcp_read.discover_tag_values", return_value={"a.example.com"}),
         ):
             _, schema = resolve_schema("hue", settings, None)
@@ -1152,7 +1472,7 @@ class TestMultiBridgeReads:
         handler.session = MagicMock()
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value={"Kitchen"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"Kitchen"})),
             patch(
                 "toinflux.mcp_read.discover_tag_values",
                 return_value={"configured-and-recording.example.com", "decommissioned.example.com"},
@@ -1434,7 +1754,7 @@ class TestSharedMeasurementInstances:
         handler.session = MagicMock()
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value={"frq"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"frq"})),
             # Every device in the measurement, whichever type wrote it - which is exactly
             # what SHOW TAG VALUES returns and why it cannot be trusted here.
             patch(
@@ -1519,7 +1839,7 @@ class TestSharedMeasurementInstances:
         handler.session = MagicMock()
         with (
             patch("toinflux.mcp_common.get_class", return_value=handler),
-            patch("toinflux.mcp_read.discover_fields", return_value={"ping"}),
+            patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"ping"})),
             patch("toinflux.mcp_read.discover_tag_values", return_value={"pi4", "nas"}) as discover,
         ):
             _, schema = resolve_schema("speedtest", settings, None)

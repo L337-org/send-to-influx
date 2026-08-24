@@ -430,7 +430,7 @@ CONFFILES
 # /run/systemd/system (systemd running, not merely installed - the guard a
 # hard dependency couldn't replace anyway, e.g. in a chroot/container), and
 # systemd-creds availability is checked at runtime with its own specific
-# error message (see CLAUDE.md's "Credential storage" section).
+# error message (see architecture/packaging.md's "Credential storage" section).
 #
 # rsyslog/logrotate are Recommends:, not Depends:, for the same reason: the
 # service logs to stdout/journald regardless, so the rsyslog+logrotate config

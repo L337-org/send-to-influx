@@ -496,6 +496,7 @@ def build_mcp_server(settings, settings_file=None):
     # registered. The control_device prompt and the device-write tools are only
     # registered when a source is opted in via <source>.mcp_read_write - when none
     # is, neither appears on the server at all (least privilege).
+    from toinflux.mcp_dashboards import register_dashboard_tools
     from toinflux.mcp_prompts import register_prompts
     from toinflux.mcp_read import register_read_tools
     from toinflux.mcp_resources import register_resources
@@ -507,6 +508,7 @@ def build_mcp_server(settings, settings_file=None):
     enabled_sources = writable_enabled_sources(settings, settings_file)
 
     register_read_tools(server, settings, settings_file)
+    register_dashboard_tools(server, settings, settings_file)
     register_resources(server, settings, settings_file)
     register_prompts(server, settings, settings_file, enabled_sources=enabled_sources)
     register_write_tools(server, settings, settings_file, enabled_sources=enabled_sources)

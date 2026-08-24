@@ -11,7 +11,7 @@ via :mod:`toinflux.mcp_read`.
 Three kinds:
 
 * ``docs://reference`` - the units/coded-value documentation (Markdown).
-* ``schema://<source>`` - one per source: its fields, units and code meanings.
+* ``schema://<source>`` - one per source: the ``list_fields`` payload for it.
 * ``state://<source>`` - one per source: its current/live state.
 
 The per-source resources are registered concretely (one per configured source),
@@ -22,8 +22,8 @@ Each carries a ``title`` and a ``description`` as well as its URI, name and MIME
 type: the description is the only thing telling a client enumerating
 ``resources/list`` what a URI holds, whether reading it costs an InfluxDB round
 trip, and which tool covers the same data. Both fields are optional in the MCP
-schema and were absent until 5.4, so a client saw a URI and a name and nothing
-else. ``tests/test_mcp_surface.py`` is the guard.
+schema and were absent until the surface pass that added them, so a client saw a
+URI and a name and nothing else. ``tests/test_mcp_surface.py`` is the guard.
 """
 
 __author__ = "Gavin Lucas"
@@ -79,11 +79,11 @@ def _register_source_resources(server, anyio, source, settings, settings_file):
         name=f"{source}-schema",
         title=f"{source} schema",
         description=(
-            f"The field keys recorded for {source}, each with any unit and the meaning of a "
-            f"coded value, plus its measurement and - where several producers write to it - "
-            f"the tag that tells them apart and the values it accepts. Discovered live from "
-            f"InfluxDB, which must be reachable; the same payload the `list_fields` tool "
-            f"returns for {source}."
+            f"Everything needed to query {source}: database, measurement, the tag keys to group "
+            f"by, and each field's type, unit, coded-value meanings and aggregation - each omitted "
+            f"where unknown, `type` included. Where several producers write to it, also the tag "
+            f"telling them apart and the values it accepts. Discovered live from InfluxDB, which "
+            f"must be reachable; the `list_fields` payload, `detail` false."
         ),
         mime_type="application/json",
     )

@@ -24,8 +24,15 @@ class CarbonIntensity(DataHandler):
     # go un-annotated rather than special-casing prefix matching for one source;
     # UNITS.md documents them.
     MCP_FIELD_METADATA = {
-        "intensity_actual": {"unit": "gCO2/kWh"},
-        "intensity_forecast": {"unit": "gCO2/kWh"},
+        "intensity_actual": {"unit": "gCO2/kWh", "kind": "gauge"},
+        # The one thing the name does not carry: this is the forecast for the same
+        # half-hour the actual describes, so plotting the two together compares a
+        # prediction with its outcome rather than showing two periods.
+        "intensity_forecast": {
+            "unit": "gCO2/kWh",
+            "kind": "gauge",
+            "description": "Forecast for the same settlement period as intensity_actual, not a future one.",
+        },
     }
 
     def _get(self, path):

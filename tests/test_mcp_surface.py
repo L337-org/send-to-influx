@@ -32,17 +32,71 @@ What is checked, and why each is a guard rather than a preference:
   every session that loads the surface, so growth is a deliberate act with a reason
   in the commit message, not a drift nobody measured.
 
-Measured surface (this module's fixture: two sources, both write-enabled, so all
-nine tools, three prompts and five resources register):
+Measured surface (this module's fixture: two sources, both write-enabled, so all ten
+tools, three prompts and five resources register):
 
-===========  =============  ============
-category     before (5.3)   after (5.4)
-===========  =============  ============
-tools                9,937        11,252
-prompts                225           523
-resources                0         1,521
-**total**       **10,162**    **13,296**
-===========  =============  ============
+===========  ==============  ===============  ================  ==============  ==============
+category     5.3 (released)  after the prose  after the schema  after the      after the
+                             pass             pass              panel tool     field work
+===========  ==============  ===============  ================  ==============  ==============
+tools                 9,937           11,252            11,809          13,119          13,330
+prompts                 225              523               523             523             523
+resources                 0            1,521             1,651           1,651           1,651
+**total**        **10,162**       **13,296**        **13,983**      **15,293**      **15,504**
+===========  ==============  ===============  ================  ==============  ==============
+
+The panel tool is a whole new registration, so its 1,310 bytes are the cost of the
+capability existing rather than a description growing. It was chosen over a prompt for
+exactly the reason that makes it cost this: a prompt is not in the model's tool list,
+so nothing would tell a model the data can be charted - and not every client surfaces
+prompts at all. See ``toinflux/mcp_dashboards.py`` for the rest of that reasoning.
+
+A later 205 bytes (15,293 -> 15,498) added the fourth field kind, ``interval``, to the
+three descriptions that enumerate the vocabulary. That is the price of the vocabulary
+being usable at all: a kind a caller has not been told about is a kind it cannot act on,
+and the two facts bought here - never sum a gauge, do sum an interval total - are each
+the difference between a correct panel and a plausible wrong one.
+
+The columns are named after the change that produced each measurement rather than after a
+release, because 5.3 is the last released version and every later column is unreleased -
+naming a release here would invent one. The "prose pass" is the change that gave every
+registration a description and a title; the "schema pass" is the one that made
+``list_fields`` sufficient to build a query from; the "panel tool" is
+``suggest_dashboard_panels``.
+
+The schema pass adds 687 bytes, and all of it is contract rather than commentary - a
+caller cannot use a payload key it has not been told about, nor rely on one it was told
+about unconditionally:
+
+* ``list_fields`` +464 (1,165 -> 1,629): four keys that were not in the payload before
+  (``database``, ``tag_keys``, and each field's ``type`` and ``kind``), a new ``detail``
+  parameter, and the three-word vocabulary ``kind`` uses. ``kind`` in particular is
+  unusable without knowing that 'counter' forbids a mean - which is the failure the
+  payload exists to prevent - so it is stated here rather than left to
+  ``get_documentation``, because the decision it informs is made while reading this
+  tool's result. The same edit *removed* two things to hold the raise down: an example of
+  which bridges appear in ``instances`` (the sentence before it already states the rule),
+  and a note that ``detail`` saves a round trip (a justification for the design, not
+  something a caller acts on). A later +154 states the rule that *every* per-field key is
+  absent rather than null when there is nothing to say - written once as a rule rather than
+  as a caveat on each key, which is both shorter and more complete. ``type`` is the key
+  where that surprises a reader, since InfluxDB does not report one for every field, and
+  three separate descriptions had promised it unconditionally.
+The total later *fell* to 15,504 despite three further additions - Hue's per-install
+metadata, the custom unit suffixes and a fourth field kind - because
+``suggest_dashboard_panels`` had been advertising 112 bytes of leading whitespace since the
+commit that added it. Its docstring body sat at 16 spaces and a later-edited paragraph at 8,
+so ``cleandoc`` stripped only the common 8 and left the rest on fourteen lines. The byte
+budget could not catch that: leaked whitespace looks exactly like the content it is paying
+for. ``test_no_description_advertises_leaked_source_indentation`` does.
+
+* ``get_documentation`` +93 and ``schema://<source>`` +130 between the two of them: both
+  had stopped describing what they return. The generated reference now carries how each
+  field may be aggregated and a per-field description, and the schema resource now
+  carries the database, the tag keys and each field's type and kind - and both still
+  advertised only "units and coded values". This is the same defect the prose pass was for,
+  reappearing on the same day the payload grew, which is the argument for finding it in a
+  review of the diff rather than trusting that a description follows its behaviour.
 
 Identical on every supported Python since ``register_tool()`` dedents each docstring:
 before it, 3.10-3.12 advertised 14,569 bytes where 3.13+ advertised 13,297, the
@@ -65,6 +119,7 @@ from mcp.server.mcpserver import MCPServer
 import anyio
 import pytest
 
+from toinflux.mcp_dashboards import register_dashboard_tools
 from toinflux.mcp_prompts import register_prompts
 from toinflux.mcp_read import register_read_tools
 from toinflux.mcp_resources import register_resources
@@ -76,6 +131,9 @@ from toinflux.mcp_write import register_write_tools
 SIBLINGS = {
     "list_sources": {"list_fields", "query_history", "get_current_state", "get_documentation"},
     "list_fields": {"list_sources", "query_history", "get_documentation"},
+    # The dashboard tool's neighbours are the two a caller would otherwise reach for:
+    # the raw schema, and running a query rather than being handed one.
+    "suggest_dashboard_panels": {"list_fields", "query_history"},
     "query_history": {"list_sources", "list_fields", "get_current_state", "get_data_range"},
     # The pair a caller most often confuses: now versus recorded history.
     "get_current_state": {"query_history", "get_data_range", "list_sources"},
@@ -103,6 +161,10 @@ NON_TOOL_IDENTIFIERS = {
     "points_present",
     "retention.known",
     "span_seconds",
+    "tag_keys",
+    "panel_type",
+    "value_mappings",
+    "avoid_aggregations",
 }
 
 # Words that describe how a call fails. A description mentioning none of them is
@@ -130,11 +192,11 @@ WRITE_EFFECT_PHRASES = {
 # Recorded ceilings, not predictions - see the table in this module's docstring for
 # what is actually measured. Raising one is a deliberate decision that belongs in the
 # commit message with its reason.
-MAX_TOOL_BYTES = 11_500
+MAX_TOOL_BYTES = 13_550
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 13_500
+MAX_TOTAL_BYTES = 15_750
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],
@@ -154,6 +216,7 @@ def _server():
     """
     server = MCPServer(name="surface")
     register_read_tools(server, SETTINGS, None)
+    register_dashboard_tools(server, SETTINGS, None)
     register_write_tools(server, SETTINGS, None, enabled_sources=["hue", "speedtest"])
     register_prompts(server, SETTINGS, None, enabled_sources=["hue", "speedtest"])
     register_resources(server, SETTINGS, None)
@@ -336,6 +399,31 @@ class TestTheSurfaceIsVersionIndependent:
 
 class TestSurfaceBudget:
     """The total is tracked as a metric, so an addition is judged against a figure."""
+
+    def test_no_description_advertises_leaked_source_indentation(self, surface):
+        """A description must not carry its docstring's own indentation.
+
+        `register_tool()` runs `cleandoc`, which strips the indent *common* to every line
+        after the first - so a docstring whose paragraphs are indented inconsistently has
+        only the smallest prefix removed, and the rest is advertised as leading
+        whitespace. That is the same waste `register_tool` exists to prevent, arriving by
+        a different route, and neither the byte budget nor the prose guards notice it: it
+        looks like ordinary bytes.
+
+        Found in `suggest_dashboard_panels`, which advertised 112 bytes of it from the
+        commit that added it - its body was at 16 spaces and one later-edited paragraph at
+        8, so `cleandoc` removed 8 and left 8 on fourteen lines.
+
+        Two spaces is deliberate continuation - `query_history` indents its parameter list
+        that way - so the threshold is four, which no hand-written continuation uses.
+        """
+        offenders = []
+        for kind in ("tools", "prompts", "resources"):
+            for item in surface[kind]:
+                for line in (item.description or "").splitlines():
+                    if line.strip() and (len(line) - len(line.lstrip())) >= 4:
+                        offenders.append(f"{getattr(item, 'name', item)}: {line[:60]!r}")
+        assert not offenders, "advertised description(s) carrying leaked indentation: " + "; ".join(offenders)
 
     def test_tool_descriptions_stay_within_budget(self, surface):
         sizes = {tool.name: _blen(tool.description) for tool in surface["tools"]}

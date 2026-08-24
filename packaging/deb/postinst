@@ -133,7 +133,7 @@ chown root:root /etc/send-to-influx/credstore.encrypted
 # send-to-influx-set-credential - the only place any of this touches the
 # filesystem (config itself is side-effect-free, a hard Debian packaging
 # convention: dpkg-reconfigure/backing out of an install must never leave
-# partial changes). See CLAUDE.md's "Credential storage (systemd-creds)" >
+# partial changes). See architecture/packaging.md's "Credential storage" >
 # "debconf-driven install" section for the design.
 #
 # Only applied on a genuinely fresh install or an explicit dpkg-reconfigure -

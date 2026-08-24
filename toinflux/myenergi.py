@@ -23,6 +23,25 @@ DEVICE_SOURCES = ("zappi", "eddi", "harvi")
 # with chr() rather than escapes so it cannot be mangled by a shell or an editor.
 NEWLINES = (chr(10), chr(13))
 
+# Field descriptions that Zappi and Eddi both need, written once so the two cannot end up
+# saying different things about the same MyEnergi field.
+#
+# `vol` deliberately carries no unit: MyEnergi's own documentation disagrees with itself
+# about the scale (some of it says deciVolts), this project does not rescale, and declaring
+# "V" would put a number on a chart's axis that may be ten times the real voltage. Saying so
+# is the honest answer; guessing is not.
+_VOL_DESCRIPTION = (
+    "Supply voltage exactly as the API returns it, never rescaled - some MyEnergi "
+    "documentation calls this deciVolts, so check it against the device before trusting the scale."
+)
+
+# `sta` is a code MyEnergi publishes no authoritative table for, so no `codes` map is
+# declared: an invented one would decode a state to a confident, wrong label.
+_STA_DESCRIPTION = "Raw MyEnergi status code; MyEnergi documents no value table, so it is passed through undecoded."
+
+# The four day/hour energy fields, which are per-hour buckets rather than daily totals.
+_HOURLY_DESCRIPTION = "Energy {} during the current hour; resets on the hour, so read its last value, not a mean."
+
 
 @dataclass(frozen=True)
 class MyEnergiDevice:
@@ -537,6 +556,24 @@ class MyEnergi(DataHandler):
             f"the account reports these {device_key} serials: {found}"
         )
 
+    @staticmethod
+    def _entry_hour(item):
+        """Return which hour a day/hour entry describes.
+
+        A missing ``hr`` is read as hour 0, not as "unknown". The MyEnergi API omits keys
+        whose value is zero - which is why every reader here is a ``.get(key, 0)`` - so
+        the midnight entry arrives without one. The previous ``-1`` default meant hour 0
+        could never be matched, and asking for it fell through to summing the whole day.
+
+        Harmless under the other reading, too: if the API does always send ``hr``, this
+        default never fires. It can only turn a miss into a hit.
+
+        :param item: one entry from the day/hour response
+        :return: the hour the entry describes
+        :rtype: int
+        """
+        return item.get("hr", 0)
+
     def dayhour_results(self, year, month, day, hour=None):
         """
         Get the data for a specific day
@@ -562,19 +599,26 @@ class MyEnergi(DataHandler):
         export_amount = 0
         genera_amount = 0
 
-        # Tot up the data for the day/hour
-        if response_data.get("U" + serial, False):
-            for item in response_data["U" + serial]:
-                if hour is not None and item.get("hr", -1) == hour:
-                    charge_amount = item.get("h1d", 0)
-                    import_amount = item.get("imp", 0)
-                    export_amount = item.get("exp", 0)
-                    genera_amount = item.get("gep", 0)
-                    break
-                charge_amount += item.get("h1d", 0)
-                import_amount += item.get("imp", 0)
-                export_amount += item.get("exp", 0)
-                genera_amount += item.get("gep", 0)
+        # Select, then total. The two modes were entangled - accumulate every entry, and
+        # overwrite with one of them on a match - which is what let a *failure* to match
+        # fall through and return the day so far under a field meaning "this hour".
+        # Demonstrated on a day importing 1 kWh per hour: asking for hour 13 with that
+        # hour's entry missing returned 13 kWh. Midnight was the only harmless case, the
+        # day so far and hour 0 being the same thing, so the error grew through the day.
+        entries = response_data.get("U" + serial) or []
+        if hour is not None:
+            # An absent hour means no energy recorded in it yet, which is zero - not the
+            # accumulated day. There is deliberately no fallback: a wrong value under the
+            # right name is worse than a zero, because nothing downstream can tell.
+            matched = next((item for item in entries if self._entry_hour(item) == hour), None)
+            entries = [matched] if matched is not None else []
+
+        # Tot up the data: one entry for a specific hour, every entry for the whole day.
+        for item in entries:
+            charge_amount += item.get("h1d", 0)
+            import_amount += item.get("imp", 0)
+            export_amount += item.get("exp", 0)
+            genera_amount += item.get("gep", 0)
 
         # Convert and round the data to 4 decimal places
         data = {
@@ -597,14 +641,33 @@ class Zappi(MyEnergi):
     # and the tag filter, or a query for one device would return all three.
     MCP_MEASUREMENT = "myenergi"
     MCP_FIELD_METADATA = {
-        "frq": {"unit": "Hz"},
-        "gen": {"unit": "W"},
-        "grd": {"unit": "W"},
-        "che": {"unit": "kWh"},
-        "Charge": {"unit": "kWh"},
-        "Import": {"unit": "kWh"},
-        "Export": {"unit": "kWh"},
-        "Genera": {"unit": "kWh"},
+        "frq": {"unit": "Hz", "kind": "gauge"},
+        "vol": {"kind": "gauge", "description": _VOL_DESCRIPTION},
+        "gen": {"unit": "W", "kind": "gauge", "description": "Power being generated locally, e.g. by solar."},
+        "grd": {"unit": "W", "kind": "gauge", "description": "Power flowing to or from the grid."},
+        "che": {
+            "unit": "kWh",
+            "kind": "counter",
+            "description": "Energy delivered so far in the current charging session; resets when it ends.",
+        },
+        "sta": {"kind": "state", "description": _STA_DESCRIPTION},
+        # These four are per-hour buckets from the day/hour endpoint, not day totals: the
+        # collector asks for the current hour, so each one grows through the hour and drops
+        # back at the top of the next. A mean across a day is therefore meaningless, and the
+        # useful reading is the last value within each hour.
+        #
+        # An hour the API has no entry for reads 0 - nothing recorded in it yet. That used
+        # to fall through to the day so far under this same field name; see
+        # dayhour_results for what that cost and why it is now a selection rather than an
+        # accumulation.
+        "Charge": {"unit": "kWh", "kind": "counter", "description": _HOURLY_DESCRIPTION.format("delivered to the car")},
+        "Import": {"unit": "kWh", "kind": "counter", "description": _HOURLY_DESCRIPTION.format("imported")},
+        "Export": {"unit": "kWh", "kind": "counter", "description": _HOURLY_DESCRIPTION.format("exported")},
+        "Genera": {"unit": "kWh", "kind": "counter", "description": _HOURLY_DESCRIPTION.format("generated")},
+        "wifiLink": {"kind": "state", "description": "Wi-Fi link status as MyEnergi reports it."},
+        "ethernetLink": {"kind": "state", "description": "Ethernet link status as MyEnergi reports it."},
+        "newAppAvailable": {"kind": "state", "description": "Flag: a newer MyEnergi app version exists."},
+        "newBootloaderAvailable": {"kind": "state", "description": "Flag: a newer bootloader exists."},
     }
 
     def get_data(self):
@@ -652,11 +715,18 @@ class Eddi(MyEnergi):
     MCP_DESCRIPTION = "MyEnergi Eddi hot-water diverter: diversion power, tank temperatures, and status."
     MCP_MEASUREMENT = "myenergi"
     MCP_FIELD_METADATA = {
-        "frq": {"unit": "Hz"},
-        "div": {"unit": "W"},
-        "che": {"unit": "kWh"},
-        "tp1": {"unit": "°C"},
-        "tp2": {"unit": "°C"},
+        "frq": {"unit": "Hz", "kind": "gauge"},
+        "vol": {"kind": "gauge", "description": _VOL_DESCRIPTION},
+        "div": {"unit": "W", "kind": "gauge", "description": "Power being diverted into the immersion heater."},
+        "che": {
+            "unit": "kWh",
+            "kind": "counter",
+            "description": "Energy diverted so far today; resets at midnight.",
+        },
+        "sta": {"kind": "state", "description": _STA_DESCRIPTION},
+        "hno": {"kind": "state", "description": "Which heater output is active, 1 or 2."},
+        "tp1": {"unit": "°C", "kind": "gauge", "description": "Hot-water tank probe 1."},
+        "tp2": {"unit": "°C", "kind": "gauge", "description": "Hot-water tank probe 2."},
     }
 
     def get_data(self):
@@ -690,9 +760,14 @@ class Harvi(MyEnergi):
     MCP_DESCRIPTION = "MyEnergi Harvi energy monitor: CT-clamp power readings per channel."
     MCP_MEASUREMENT = "myenergi"
     MCP_FIELD_METADATA = {
-        "ectp1": {"unit": "W"},
-        "ectp2": {"unit": "W"},
-        "ectp3": {"unit": "W"},
+        "ectp1": {"unit": "W", "kind": "gauge", "description": "Power measured by CT clamp channel 1."},
+        "ectp2": {"unit": "W", "kind": "gauge", "description": "Power measured by CT clamp channel 2."},
+        "ectp3": {"unit": "W", "kind": "gauge", "description": "Power measured by CT clamp channel 3."},
+        # Text, so a query returns the channel's name rather than a number - which is what
+        # makes ectp1..3 interpretable at all ("Grid", "Solar", ...).
+        "ectt1": {"kind": "state", "description": 'Name given to CT clamp channel 1, e.g. "Grid".'},
+        "ectt2": {"kind": "state", "description": "Name given to CT clamp channel 2."},
+        "ectt3": {"kind": "state", "description": "Name given to CT clamp channel 3."},
     }
 
     def get_data(self):

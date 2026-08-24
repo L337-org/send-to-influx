@@ -5,10 +5,20 @@ It reflects what the API returns; `send-to-influx` does not convert or rescale a
 unless explicitly noted below.
 
 The optional MCP server's read tools surface these units and coded-value meanings to Claude
-(see each source class's `MCP_FIELD_METADATA` in `toinflux/`); keep the two in step when adding
-a source or field. The server's `get_documentation` tool / `docs://reference` resource generate
-a machine-readable version of this from `MCP_FIELD_METADATA` plus each source's `MCP_DESCRIPTION`,
-so those class attributes - not this file - are what the model actually reads.
+(see each source class's `MCP_FIELD_METADATA` in `toinflux/`). The two are kept in step by
+`tests/test_field_metadata.py` rather than by anyone remembering: it fails if a declared field is
+missing from this file, or if the unit or a coded value here disagrees with the metadata. The check
+is one-way, since this file legitimately documents things that are not field keys - Hue's rows are
+by device class, because its field keys are your own device names, and `gen_<fuel>` is a pattern.
+
+Alongside a unit and coded values, the metadata carries two things this file does not tabulate: how
+each field may be aggregated (`gauge`, `interval`, `counter` or `state` - see `list_fields` in the
+README), and
+a short description where a field's name does not say what it is. Those are prose for a model to
+read, where the Notes column below is prose for you; neither is generated from the other, and no
+test compares them. The server's `get_documentation` tool / `docs://reference` resource generate the
+model-facing view from `MCP_FIELD_METADATA` plus each source's `MCP_DESCRIPTION`, so those class
+attributes - not this file - are what the model actually reads.
 
 ## Hue Bridge (`hue`)
 
@@ -26,6 +36,19 @@ field names are unchanged and unprefixed, so two bridges with a light of the sam
 the same field key under different `host` tags. Filter or group by `host` to separate them,
 and note that replacing a bridge with one at a different address starts a new series - see
 the README's "Multiple Hue bridges" section.
+
+Hue also writes a second measurement, **`hue_devices`**, saying which class each device is:
+one point per device, tagged `host` and `device`, with a single string field `class` holding the
+bridge's own type (`ZLLTemperature`, `On/Off plug-in unit` and so on). It exists because Hue's field
+keys are your device names, so no static table can say that `Conservatory_Temperature_Sensor` is a
+temperature in °C - the bridge knows, and this records it. The MCP server reads it to give those
+fields a unit; `HUE_DEVICE_CLASSES` in `toinflux/philipshue.py` maps a class to the rows above, and
+a test holds the two in step.
+
+It is a separate measurement, so nothing that queries `hue` sees it and no existing dashboard is
+affected. It is rewritten every collection, so a renamed or removed device corrects itself, and it
+expires under the same retention as everything else - by which point there is no data left to
+describe either.
 
 The `collector_status` heartbeat for `hue` also carries a `host` tag, so each bridge's
 `ok`/`consecutive_failures` are recorded separately. Grouping by `source` alone aggregates
@@ -57,7 +80,18 @@ in an untagged series.
 | `sta` | numeric status code | Not a physical unit |
 | `wifiLink`, `ethernetLink` | N/A | Diagnostic/status fields, not documented as physical units |
 | `newAppAvailable`, `newBootloaderAvailable` | boolean (0/1) | Update-available flags |
-| `Charge`, `Import`, `Export`, `Genera` | kWh | Daily totals computed by this project from the day/hour endpoint's raw values (divided by 3,600,000 and rounded to 4 dp); always collected regardless of `fields` |
+| `Charge`, `Import`, `Export`, `Genera` | kWh | Energy for the **current hour**, not a daily total - always collected regardless of `fields`; see below |
+
+Those four are computed by this project from the day/hour endpoint's raw values (divided by
+3,600,000 and rounded to 4 dp), and they are **hourly, not daily** despite coming from an endpoint
+named for the day. Each accumulates through the hour and drops back at the top of the next, so read
+the last value within an hour rather than a mean across several - a mean spans a reset and means
+nothing. An hour the API has no entry for reads as 0, meaning nothing has been recorded in it yet.
+
+Releases before 6.0 got this wrong in two ways: they described these fields as daily totals, and
+where the current hour had no entry the value silently became the day so far - so at 13:00 on a day
+importing 1 kWh an hour, "this hour" read 13 kWh. Both are fixed, and both are now covered by
+tests.
 
 ## MyEnergi Eddi (`eddi`)
 
@@ -172,7 +206,7 @@ identifies nothing, and moving to a different broker should not start a new seri
 
 | Field | Unit | Notes |
 |---|---|---|
-| `download`, `upload` | bits per second | From `speedtest-cli` |
+| `download`, `upload` | bits/s | Bits per second, from `speedtest-cli` |
 | `ping` | ms | Round-trip time to the test server |
 
 Other fields available from `speedtest-cli`'s results (e.g. `bytes_sent`, `bytes_received`, `server.*`) can also

@@ -803,3 +803,278 @@ class TestHostNewlineRejected:
         bridges, errors, _ = enumerate_bridges({"host": "a.example.com", "user": "tok"})
         assert errors == []
         assert [bridge.host for bridge in bridges] == ["a.example.com"]
+
+
+# A bridge payload covering every class the collector writes, plus the two sensor types
+# it deliberately ignores. Shaped from a real bridge's response, so the type strings are
+# the ones a bridge actually sends rather than ones invented to suit the code.
+_BRIDGE_PAYLOAD = {
+    "sensors": {
+        "1": {"name": "Study Temp", "type": "ZLLTemperature", "state": {"temperature": 2150}},
+        "2": {"name": "Study Light", "type": "ZLLLightLevel", "state": {"lightlevel": 30000}},
+        "3": {"name": "Study Motion", "type": "ZLLPresence", "state": {"presence": True}},
+        "4": {"name": "Daylight", "type": "Daylight", "state": {"daylight": True}},
+        "5": {"name": "Study Switch", "type": "ZLLSwitch", "state": {"buttonevent": 1000}},
+    },
+    "lights": {
+        "1": {"name": "Study Lamp", "type": "Dimmable light", "state": {"on": True, "bri": 254}},
+        "2": {"name": "Study Plug", "type": "On/Off plug-in unit", "state": {"on": True}},
+    },
+}
+
+
+def _hue(sample_settings, **hue_overrides):
+    """A Hue handler on mocked settings, with the bridge response stubbed."""
+    sample_settings["hue"].update(hue_overrides)
+    with patch("toinflux.influx.load_settings", return_value=sample_settings):
+        return Hue(source="hue")
+
+
+class TestHueDeviceClassCapture:
+    """The collector already learns every device's class each poll; it now keeps it."""
+
+    def test_parse_records_the_class_of_every_field_it_writes(self, sample_settings):
+        hue = _hue(sample_settings)
+        with patch.object(hue, "get_data_from_hue_bridge", return_value=_BRIDGE_PAYLOAD):
+            data = hue.parse_hue_data()
+        assert set(hue._device_classes) == set(data), "every written field must be described"
+        assert hue._device_classes["Study_Temp"] == "ZLLTemperature"
+        assert hue._device_classes["Study_Plug"] == "On/Off plug-in unit"
+
+    def test_ignored_sensor_types_are_not_described(self, sample_settings):
+        # Daylight and ZLLSwitch produce no field, so describing them would advertise a
+        # field that is never written.
+        hue = _hue(sample_settings)
+        with patch.object(hue, "get_data_from_hue_bridge", return_value=_BRIDGE_PAYLOAD):
+            hue.parse_hue_data()
+        assert "Daylight" not in hue._device_classes
+        assert "Study_Switch" not in hue._device_classes
+
+    def test_a_device_removed_from_the_bridge_stops_being_described(self, sample_settings):
+        # The map is rebuilt per parse, so a stale entry cannot outlive its device.
+        hue = _hue(sample_settings)
+        with patch.object(hue, "get_data_from_hue_bridge", return_value=_BRIDGE_PAYLOAD):
+            hue.parse_hue_data()
+        smaller = {"sensors": {}, "lights": {"2": _BRIDGE_PAYLOAD["lights"]["2"]}}
+        with patch.object(hue, "get_data_from_hue_bridge", return_value=smaller):
+            hue.parse_hue_data()
+        assert set(hue._device_classes) == {"Study_Plug"}
+
+
+class TestHueWritesDeviceClasses:
+    """Written to InfluxDB rather than cached, so the description survives a restart and
+    is visible to everything else reading the database."""
+
+    def _collected(self, sample_settings):
+        hue = _hue(sample_settings)
+        with patch.object(hue, "get_data_from_hue_bridge", return_value=_BRIDGE_PAYLOAD):
+            hue.get_data()
+        return hue
+
+    def test_a_point_per_device_goes_to_its_own_measurement(self, sample_settings):
+        hue = self._collected(sample_settings)
+        with patch("toinflux.influx.DataHandler.send_data") as base:
+            hue.send_data()
+        headers = [c.kwargs.get("data") for c in base.call_args_list]
+        classes = [d["class"] for d in headers if isinstance(d, dict) and "class" in d]
+        assert sorted(classes) == sorted(hue._device_classes.values())
+
+    def test_the_data_write_happens_first_and_keeps_its_contract(self, sample_settings):
+        # The readings must be written by the base implementation exactly as before; the
+        # description is an addition, never a replacement.
+        hue = self._collected(sample_settings)
+        with patch("toinflux.influx.DataHandler.send_data") as base:
+            hue.send_data()
+        first = base.call_args_list[0]
+        assert first.kwargs.get("data") is None, "the data write is the base's default path"
+
+    def test_a_failed_description_never_fails_the_collection(self, sample_settings, caplog):
+        # A schema annotation that cannot be written is not a reason to declare a
+        # successful collection failed, and the worker must not back off for it.
+        from toinflux.influx import InfluxWriteError
+
+        hue = self._collected(sample_settings)
+        calls = []
+
+        def _fail_after_data(*args, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("data") is not None:
+                raise InfluxWriteError("nope")
+
+        with patch("toinflux.influx.DataHandler.send_data", side_effect=_fail_after_data):
+            with caplog.at_level("WARNING"):
+                hue.send_data()
+        assert "Could not record Hue device classes" in caplog.text
+
+    def test_a_failed_data_write_still_raises(self, sample_settings):
+        # The other direction: the contract the worker relies on is untouched.
+        from toinflux.influx import InfluxWriteError
+
+        hue = self._collected(sample_settings)
+        with patch("toinflux.influx.DataHandler.send_data", side_effect=InfluxWriteError("down")):
+            with pytest.raises(InfluxWriteError):
+                hue.send_data()
+
+    def test_a_heartbeat_does_not_re_emit_the_device_classes(self, sample_settings):
+        # send_heartbeat() borrows send_data() with the header swapped to
+        # collector_status, so without a guard every heartbeat wrote the classes again -
+        # doubling the write volume for no new information.
+        hue = self._collected(sample_settings)
+        written = []
+
+        def _record(self, data=None, timestamp=None, use_buffer=True, flush=True):
+            written.append(self.influx_header.split(",")[0])
+
+        with patch("toinflux.influx.DataHandler.send_data", _record):
+            hue.send_data()
+            original = hue.influx_header
+            hue.influx_header = "collector_status,source=hue,host=x "
+            hue.send_data(data={"ok": 1, "consecutive_failures": 0}, use_buffer=False)
+            hue.influx_header = original
+        # One hue_devices point per described device - that is the design - and the
+        # heartbeat must add none of its own, so the last write is the heartbeat itself.
+        expected = len(hue._device_classes)
+        assert written.count("hue_devices") == expected, f"expected {expected} per collection, got {written}"
+        assert written[0] == "hue"
+        assert written[-1] == "collector_status", f"the heartbeat re-emitted device classes: {written}"
+
+    def test_a_failed_cycle_does_not_rewrite_stale_classes(self, sample_settings):
+        # The worse half of the same bug. A failed collection still heartbeats, and the
+        # class map still holds the last successful parse - so an unguarded heartbeat would
+        # stamp a removed device's class with a fresh timestamp and keep it described for
+        # as long as the collector kept failing.
+        hue = self._collected(sample_settings)
+        written = []
+
+        def _record(self, data=None, timestamp=None, use_buffer=True, flush=True):
+            written.append(self.influx_header.split(",")[0])
+
+        with patch("toinflux.influx.DataHandler.send_data", _record):
+            hue.influx_header = "collector_status,source=hue,host=x "
+            hue.send_data(data={"ok": 0, "consecutive_failures": 3}, use_buffer=False)
+        assert "hue_devices" not in written
+
+    def test_a_bridge_with_nothing_describable_writes_no_description(self, sample_settings):
+        # Reachable: a bridge whose only sensors are Daylight and ZLLSwitch (neither of
+        # which the collector writes) and which has no lights. The readings still go, and
+        # the header must be left alone rather than a description point written with an
+        # empty device tag.
+        hue = _hue(sample_settings)
+        empty = {"sensors": {"9": {"name": "Daylight", "type": "Daylight", "state": {"daylight": True}}}, "lights": {}}
+        with patch.object(hue, "get_data_from_hue_bridge", return_value=empty):
+            hue.get_data()
+        assert hue._device_classes == {}
+        written = []
+        with patch("toinflux.influx.DataHandler.send_data", lambda self, **kw: written.append(self.influx_header)):
+            hue.send_data()
+        assert written == ["hue,host=hue.example.com "], written
+
+    def test_the_original_header_is_restored(self, sample_settings):
+        hue = self._collected(sample_settings)
+        before = hue.influx_header
+        with patch("toinflux.influx.DataHandler.send_data"):
+            hue.send_data()
+        assert hue.influx_header == before
+
+
+class TestHueFieldMetadata:
+    """Reading the description back, which is what gives a per-install field a unit."""
+
+    def _series(self, pairs):
+        from toinflux.mcp_read import QuerySeries
+
+        # One series per (device, host), which is how the grouped query answers.
+        return [
+            QuerySeries(tags={"device": n, "host": f"bridge{i}"}, columns=["time", "last"], values=[[0, c]])
+            for i, (n, c) in enumerate(pairs)
+        ]
+
+    def _metadata(self, sample_settings, pairs, **overrides):
+        hue = _hue(sample_settings, **overrides)
+        with patch("toinflux.mcp_read.run_query", return_value=self._series(pairs)):
+            return hue.mcp_field_metadata()
+
+    def test_each_class_becomes_a_unit_and_a_kind(self, sample_settings):
+        meta = self._metadata(
+            sample_settings,
+            [
+                ("Study_Temp", "ZLLTemperature"),
+                ("Study_Light", "ZLLLightLevel"),
+                ("Study_Motion", "ZLLPresence"),
+                ("Study_Plug", "On/Off plug-in unit"),
+                ("Study_Lamp", "Dimmable light"),
+            ],
+        )
+        assert meta["Study_Temp"] == {"kind": "gauge", "unit": "°C"}
+        assert meta["Study_Light"] == {"kind": "gauge", "unit": "lux"}
+        assert meta["Study_Lamp"] == {"kind": "gauge", "unit": "%"}
+        # A flag declares no unit: 0/1 is a representation, not a unit.
+        assert meta["Study_Motion"] == {"kind": "state"}
+        assert meta["Study_Plug"] == {"kind": "state"}
+
+    @pytest.mark.parametrize("configured,expected", [("C", "°C"), ("F", "°F"), ("K", "K"), (None, "°C")])
+    def test_the_temperature_unit_follows_the_setting(self, sample_settings, configured, expected):
+        # The one unit that is an operator setting rather than a constant. It must match
+        # what parse_hue_data actually converts to, or the label contradicts the value.
+        overrides = {} if configured is None else {"temperature_units": configured}
+        meta = self._metadata(sample_settings, [("Study_Temp", "ZLLTemperature")], **overrides)
+        assert meta["Study_Temp"]["unit"] == expected
+
+    def test_the_query_groups_by_host_as_well_as_device(self, sample_settings):
+        # Not a style assertion: the grouping is what makes a cross-bridge disagreement
+        # visible at all. Grouped by device alone, InfluxDB merges the bridges into one
+        # series and last() silently picks a winner, so the ambiguity check below could
+        # never fire. The query text is the contract with InfluxDB here.
+        hue = _hue(sample_settings)
+        with patch("toinflux.mcp_read.run_query", return_value=[]) as query:
+            hue.mcp_field_metadata()
+        assert query.call_args.args[-1] == ('SELECT last("class") FROM "hue_devices" GROUP BY "device", "host"')
+
+    def test_two_bridges_agreeing_describe_the_field_once(self, sample_settings):
+        # The normal multi-bridge case: the same device name on both bridges, same class.
+        meta = self._metadata(sample_settings, [("Hall_Light", "Dimmable light"), ("Hall_Light", "Dimmable light")])
+        assert meta["Hall_Light"] == {"kind": "gauge", "unit": "%"}
+
+    def test_two_bridges_disagreeing_leave_the_field_undescribed(self, sample_settings):
+        # A field key is not unique across bridges - two bridges with a device of the same
+        # name write the *same* field key under different host tags. If they are different
+        # classes, no unit is correct for that key and the data cannot separate them
+        # either, so it gets none rather than whichever bridge wrote last.
+        meta = self._metadata(
+            sample_settings, [("Hall_Light", "Dimmable light"), ("Hall_Light", "On/Off plug-in unit")]
+        )
+        assert "Hall_Light" not in meta
+
+    def test_an_unrecognised_class_is_left_undescribed(self, sample_settings):
+        # A Hue device type we have never seen should appear with no unit, not with
+        # someone else's.
+        meta = self._metadata(sample_settings, [("Mystery", "Some Future Type")])
+        assert "Mystery" not in meta
+
+    def test_an_unreachable_influxdb_degrades_instead_of_raising(self, sample_settings):
+        # Metadata is an annotation. A live current-state read must not fail because the
+        # annotation could not be resolved.
+        hue = _hue(sample_settings)
+        with patch("toinflux.mcp_read.run_query", side_effect=SourceConnectionError("down")):
+            assert hue.mcp_field_metadata() == {}
+
+    def test_a_series_with_no_device_tag_is_skipped_not_guessed(self, sample_settings):
+        # The same reasoning as discover_tag_values' own guard: a malformed series must
+        # not become a field description, because a wrong unit on a real field is worse
+        # than none. Reachable only if the grouped query ever answers without its tag.
+        from toinflux.mcp_read import QuerySeries
+
+        hue = _hue(sample_settings)
+        series = [
+            QuerySeries(tags={}, columns=["time", "last"], values=[[0, "ZLLTemperature"]]),
+            QuerySeries(tags={"device": "Study_Temp"}, columns=["time", "last"], values=[]),
+            QuerySeries(tags={"device": "Study_Light"}, columns=["time", "last"], values=[[0, "ZLLLightLevel"]]),
+        ]
+        with patch("toinflux.mcp_read.run_query", return_value=series):
+            meta = hue.mcp_field_metadata()
+        assert set(meta) == {"Study_Light"}, "only the well-formed series should describe a field"
+
+    def test_nothing_recorded_yet_is_not_an_error(self, sample_settings):
+        hue = _hue(sample_settings)
+        with patch("toinflux.mcp_read.run_query", return_value=[]):
+            assert hue.mcp_field_metadata() == {}
