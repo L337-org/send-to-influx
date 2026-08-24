@@ -46,16 +46,34 @@ from toinflux.mcp_read import build_panel_query, field_kind, resolve_schema
 
 # This source's display unit -> Grafana's own unit identifier. Every id here was read
 # out of the running Grafana's bundled frontend, because Grafana accepts any string
-# server-side: a wrong id is stored happily and only shows up as an unformatted axis.
+# server-side: a wrong id is stored happily, and what it then renders is *not* nothing -
+# see below, which is the correction to an earlier belief recorded here.
 #
-# A unit with no entry is *omitted* from the result rather than guessed at or passed
-# through raw. W/m2, gCO2/kWh, pence/kWh and "kWh or m3" have no Grafana equivalent,
-# and inventing one would put a wrong label on an axis - where an absent unit merely
-# leaves the number bare, which is honest and obvious.
+# What an unrecognised id actually does, from `getValueFormat()` in grafana-data's
+# valueFormats.ts: an id containing no recognised `key:` prefix falls through to
+# `toFixedUnit(id)`, which returns `{text, suffix: " " + id}`. So a bare unknown string
+# renders as a literal suffix - `123 W/m²` - rather than being dropped. Grafana's own
+# test pins the equivalent explicit form: `suffix:d` on 1532.82 gives `1533 d`.
+#
+# The consequence for a typo: it does not vanish, it appears on the axis. That is more
+# visible than the "unformatted axis" this comment used to claim, not less.
+#
+# A unit with no entry is currently *omitted* rather than passed through. W/m2, gCO2/kWh,
+# pence/kWh and "kWh or m3" have no Grafana equivalent, and the omission dates from
+# believing a passed-through string would render as nothing. It would in fact render
+# correctly, so whether to emit them as `suffix:` forms is an open decision rather than a
+# settled one - `suffix:` being preferable to a bare string, since a bare one would
+# silently adopt Grafana's own formatter (possibly one that rescales the value) if a real
+# id of that name were ever added.
 GRAFANA_UNITS = {
     "W": "watt",
     "kWh": "kwatth",
+    # All three of Hue's temperature settings, not just the default: an install with
+    # hue.temperature_units: F emits °F, and leaving it unmapped meant a bare axis on a
+    # temperature panel of all things. Grafana has ids for each (categories.ts).
     "°C": "celsius",
+    "°F": "fahrenheit",
+    "K": "kelvin",
     "%": "percent",
     "bits/s": "bps",
     "ms": "ms",

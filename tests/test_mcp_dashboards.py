@@ -215,9 +215,51 @@ class TestGrafanaMapping:
         )
         assert "unit" not in panel_spec(schema, "direct_radiation", [])
 
+    def test_every_unit_a_source_can_emit_is_mapped_or_knowingly_unmapped(self):
+        """No unit reaches a panel by accident, in either direction.
+
+        The gap this closes: Hue's temperature unit follows an operator setting, so an
+        install using Fahrenheit emitted `°F`, which was absent from GRAFANA_UNITS - a
+        bare axis on a temperature panel, and invisible from any install using Celsius.
+        A unit is now either mapped or listed below as knowingly unmappable, so adding
+        one without deciding fails here rather than being noticed on someone's dashboard.
+        """
+        from toinflux.general import known_sources, source_class
+        from toinflux.philipshue import (
+            HUE_DEFAULT_TEMPERATURE_UNIT,
+            HUE_DEVICE_CLASSES,
+            HUE_TEMPERATURE_UNITS,
+        )
+
+        # Grafana has no identifier for these, confirmed against its categories.ts. They
+        # render as a literal suffix if passed through, so emitting them is a decision
+        # that could be taken - it just has not been.
+        NO_GRAFANA_EQUIVALENT = {"W/m²", "gCO2/kWh", "pence/kWh (inc. VAT)", "kWh or m³"}
+
+        emitted = set()
+        for source in known_sources():
+            for meta in source_class(source).MCP_FIELD_METADATA.values():
+                if meta.get("unit"):
+                    emitted.add(meta["unit"])
+        # Hue declares its units by device class rather than by field key, and its
+        # temperature unit is whichever the operator configured.
+        for declared in HUE_DEVICE_CLASSES.values():
+            if declared.get("unit"):
+                emitted.add(declared["unit"])
+        emitted.add(HUE_DEFAULT_TEMPERATURE_UNIT)
+        emitted.update(HUE_TEMPERATURE_UNITS.values())
+
+        unaccounted = emitted - set(GRAFANA_UNITS) - NO_GRAFANA_EQUIVALENT
+        assert not unaccounted, (
+            f"unit(s) {sorted(unaccounted)} are emitted but neither mapped to a Grafana "
+            f"identifier nor listed as having none - a panel using one gets a bare axis"
+        )
+
     def test_every_mapped_identifier_is_one_grafana_actually_defines(self):
         # Read out of a running Grafana 13.2's bundled frontend. Grafana accepts any
-        # string server-side, so a typo here would only show up as an unformatted axis.
+        # string server-side, and an unrecognised one renders as a literal suffix rather
+        # than being dropped (`toFixedUnit(id)` in valueFormats.ts), so a typo here shows
+        # up *on the axis* - which is why the ids are pinned against a real Grafana.
         verified = {
             "watt",
             "watth",
@@ -231,6 +273,8 @@ class TestGrafanaMapping:
             "velocitykmh",
             "humidity",
             "lux",
+            "fahrenheit",
+            "kelvin",
             "volt",
             "amp",
             "joule",

@@ -496,10 +496,21 @@ value mappings decoding a coded field, and a series alias.
   grouped panel gets `$tag_<key>` and an ungrouped one the bare field name (a literal alias, verified
   to pass through unchanged). Two or more tags is the space-joined form and is **untested**: no source
   ships more than one unpinned tag, so it is documented as such rather than left looking verified.
-- **An unmappable unit is omitted, not passed through.** Grafana accepts any string as a unit id
-  server-side and silently renders an unknown one as no unit, so a raw `W/m²` would look configured
-  and do nothing. `GRAFANA_UNITS` covers only ids read out of a running Grafana's own bundle; W/m²,
-  gCO2/kWh, pence/kWh and "kWh or m³" have no equivalent and get no `unit` key.
+- **An unmappable unit is omitted, not passed through** - though the reason first recorded here was
+  wrong, so the decision is open rather than settled. Grafana accepts any string as a unit id
+  server-side, and `getValueFormat()` in grafana-data's `valueFormats.ts` falls through to
+  `toFixedUnit(id)` for an id with no recognised `key:` prefix, which returns
+  `{text, suffix: " " + id}`. So a bare `W/m²` renders as `123 W/m²` - correctly - rather than as
+  nothing. Their own test pins the explicit form: `suffix:d` on 1532.82 gives `1533 d`. Emitting the
+  four unmapped units as `suffix:` forms would therefore work; `suffix:` rather than a bare string,
+  because a bare one would silently adopt Grafana's formatter (possibly one that rescales) if a real
+  id of that name were ever added.
+  - The belief this replaces was that an unknown id renders as *no* unit, so a raw `W/m²` would look
+    configured and do nothing. That was never checked against Grafana's source, only against a
+    grep of its minified bundle that came back inconclusive - and inconclusive was recorded as
+    settled. `GRAFANA_UNITS` still covers only ids read out of a running Grafana's own bundle, and
+    W/m², gCO2/kWh, pence/kWh and "kWh or m³" still get no `unit` key, but now because nobody has
+    decided to add them rather than because it would not work.
 - **Everything Grafana-side was established by execution**, against Grafana 13.2.0 and InfluxDB 1.8:
   the target field names (`query`/`rawQuery`/`resultFormat`/`alias`), that `$timeFilter` and
   `$__interval` both resolve and return data, the value-mapping shape, and every unit id. The panels
