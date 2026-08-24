@@ -954,6 +954,21 @@ class TestHueWritesDeviceClasses:
             hue.send_data(data={"ok": 0, "consecutive_failures": 3}, use_buffer=False)
         assert "hue_devices" not in written
 
+    def test_a_bridge_with_nothing_describable_writes_no_description(self, sample_settings):
+        # Reachable: a bridge whose only sensors are Daylight and ZLLSwitch (neither of
+        # which the collector writes) and which has no lights. The readings still go, and
+        # the header must be left alone rather than a description point written with an
+        # empty device tag.
+        hue = _hue(sample_settings)
+        empty = {"sensors": {"9": {"name": "Daylight", "type": "Daylight", "state": {"daylight": True}}}, "lights": {}}
+        with patch.object(hue, "get_data_from_hue_bridge", return_value=empty):
+            hue.get_data()
+        assert hue._device_classes == {}
+        written = []
+        with patch("toinflux.influx.DataHandler.send_data", lambda self, **kw: written.append(self.influx_header)):
+            hue.send_data()
+        assert written == ["hue,host=hue.example.com "], written
+
     def test_the_original_header_is_restored(self, sample_settings):
         hue = self._collected(sample_settings)
         before = hue.influx_header
@@ -1042,6 +1057,22 @@ class TestHueFieldMetadata:
         hue = _hue(sample_settings)
         with patch("toinflux.mcp_read.run_query", side_effect=SourceConnectionError("down")):
             assert hue.mcp_field_metadata() == {}
+
+    def test_a_series_with_no_device_tag_is_skipped_not_guessed(self, sample_settings):
+        # The same reasoning as discover_tag_values' own guard: a malformed series must
+        # not become a field description, because a wrong unit on a real field is worse
+        # than none. Reachable only if the grouped query ever answers without its tag.
+        from toinflux.mcp_read import QuerySeries
+
+        hue = _hue(sample_settings)
+        series = [
+            QuerySeries(tags={}, columns=["time", "last"], values=[[0, "ZLLTemperature"]]),
+            QuerySeries(tags={"device": "Study_Temp"}, columns=["time", "last"], values=[]),
+            QuerySeries(tags={"device": "Study_Light"}, columns=["time", "last"], values=[[0, "ZLLLightLevel"]]),
+        ]
+        with patch("toinflux.mcp_read.run_query", return_value=series):
+            meta = hue.mcp_field_metadata()
+        assert set(meta) == {"Study_Light"}, "only the well-formed series should describe a field"
 
     def test_nothing_recorded_yet_is_not_an_error(self, sample_settings):
         hue = _hue(sample_settings)

@@ -35,15 +35,15 @@ What is checked, and why each is a guard rather than a preference:
 Measured surface (this module's fixture: two sources, both write-enabled, so all ten
 tools, three prompts and five resources register):
 
-===========  ==============  ===============  ================  ================
-category     5.3 (released)  after the prose  after the schema  after the panel
-                             pass             pass              tool
-===========  ==============  ===============  ================  ================
-tools                 9,937           11,252            11,809           13,119
-prompts                 225              523               523              523
-resources                 0            1,521             1,651            1,651
-**total**        **10,162**       **13,296**        **13,983**       **15,293**
-===========  ==============  ===============  ================  ================
+===========  ==============  ===============  ================  ==============  ==============
+category     5.3 (released)  after the prose  after the schema  after the      after the
+                             pass             pass              panel tool     field work
+===========  ==============  ===============  ================  ==============  ==============
+tools                 9,937           11,252            11,809          13,119          13,330
+prompts                 225              523               523             523             523
+resources                 0            1,521             1,651           1,651           1,651
+**total**        **10,162**       **13,296**        **13,983**      **15,293**      **15,504**
+===========  ==============  ===============  ================  ==============  ==============
 
 The panel tool is a whole new registration, so its 1,310 bytes are the cost of the
 capability existing rather than a description growing. It was chosen over a prompt for

@@ -658,7 +658,10 @@ class Hue(DataHandler):
         classes = getattr(self, "_device_classes", None)
         if not classes:
             return
-        original_header, original_data = self.influx_header, self.data
+        # Only the header: the base reads self.data solely when `data` is None, and every
+        # call below passes it explicitly, so self.data cannot change here. Saving it
+        # would imply otherwise.
+        original_header = self.influx_header
         host = escape_key_or_tag_value(self.bridge().host)
         try:
             for name, device_class in sorted(classes.items()):
@@ -669,7 +672,7 @@ class Hue(DataHandler):
             # failure to write one should turn a successful collection into a failed one.
             logging.warning("Could not record Hue device classes: %s", self._redact(str(exc)))
         finally:
-            self.influx_header, self.data = original_header, original_data
+            self.influx_header = original_header
 
     def get_data(self):
         """
