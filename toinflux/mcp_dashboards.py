@@ -81,6 +81,28 @@ GRAFANA_UNITS = {
     "mm": "lengthmm",
     "km/h": "velocitykmh",
     "lux": "lux",
+    # Units Grafana has no identifier for, emitted as its explicit custom-suffix form so
+    # the axis reads "123 W/m²" rather than a bare number.
+    #
+    # `suffix:<text>` rather than the bare string, though both render identically today:
+    # an unrecognised id falls through to `toFixedUnit(id)`, which is the same formatter
+    # `suffix:` selects. The difference is what happens later - a bare `W/m²` would
+    # silently start using Grafana's own formatter, possibly one that rescales the value,
+    # if an identifier of that name were ever added. `suffix:` cannot be captured that way.
+    #
+    # Not a theoretical rescale: run against @grafana/data 13.2.0's own getValueFormat(),
+    # `watt` turns 3200 into "3.20 kW", where `suffix:W/m²` gives "812.40 W/m²" and a bare
+    # `W/m²` gives the same - today. An id nobody defines shows its own text ("42.00
+    # not-a-real-unit"), which is how a typo here surfaces.
+    "W/m²": "suffix:W/m²",
+    "gCO2/kWh": "suffix:gCO2/kWh",
+    # Shortened on purpose: the suffix repeats on every tick and in every tooltip, so
+    # "12.5 pence/kWh (inc. VAT)" would be unreadable on an axis. The full string, VAT
+    # qualifier and all, is what list_fields and get_documentation report - which is where
+    # a caller reads what a field means, rather than off a chart.
+    "pence/kWh (inc. VAT)": "suffix:p/kWh",
+    # "kWh or m³" is deliberately absent and stays that way: it is two units, not one, so
+    # no single suffix is honest. Octopus reports gas in whichever the meter uses.
 }
 
 # How each field kind is charted, and how it must not be aggregated.

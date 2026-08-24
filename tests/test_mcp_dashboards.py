@@ -205,15 +205,16 @@ class TestGrafanaMapping:
         schema = _schema(field_metadata={"che": {"unit": "kWh", "kind": "counter"}}, allowed_fields={"che"})
         assert panel_spec(schema, "che", [])["unit"] == "kwatth"
 
-    def test_an_unmappable_unit_is_omitted_rather_than_passed_through(self):
-        # W/m2 has no Grafana identifier. Emitting it raw would put a string Grafana
-        # does not understand into the panel, which renders as no unit at all but looks
-        # configured; omitting it is the same answer, honestly labelled.
+    def test_solar_radiation_gets_its_unit_as_a_custom_suffix(self):
+        # This test used to assert the opposite - that W/m² was omitted - on the belief
+        # that a string Grafana does not recognise "renders as no unit at all but looks
+        # configured". That belief was wrong: an unrecognised id renders as a literal
+        # suffix, so the honest outcome is to emit it, not to withhold it.
         schema = _schema(
             field_metadata={"direct_radiation": {"unit": "W/m²", "kind": "gauge"}},
             allowed_fields={"direct_radiation"},
         )
-        assert "unit" not in panel_spec(schema, "direct_radiation", [])
+        assert panel_spec(schema, "direct_radiation", [])["unit"] == "suffix:W/m²"
 
     def test_every_unit_a_source_can_emit_is_mapped_or_knowingly_unmapped(self):
         """No unit reaches a panel by accident, in either direction.
@@ -234,7 +235,9 @@ class TestGrafanaMapping:
         # Grafana has no identifier for these, confirmed against its categories.ts. They
         # render as a literal suffix if passed through, so emitting them is a decision
         # that could be taken - it just has not been.
-        NO_GRAFANA_EQUIVALENT = {"W/m²", "gCO2/kWh", "pence/kWh (inc. VAT)", "kWh or m³"}
+        # Only one left: "kWh or m³" is two units rather than one, so no single suffix is
+        # honest. The other three are emitted as Grafana's custom-suffix form.
+        NO_GRAFANA_EQUIVALENT = {"kWh or m³"}
 
         emitted = set()
         for source in known_sources():
@@ -254,6 +257,43 @@ class TestGrafanaMapping:
             f"unit(s) {sorted(unaccounted)} are emitted but neither mapped to a Grafana "
             f"identifier nor listed as having none - a panel using one gets a bare axis"
         )
+
+    def test_a_unit_grafana_has_no_identifier_for_is_emitted_as_a_custom_suffix(self):
+        # Grafana renders an unrecognised id as a literal suffix rather than dropping it
+        # (`toFixedUnit(id)` in valueFormats.ts; their own test: `suffix:d` on 1532.82
+        # gives "1533 d"). So these read correctly on an axis instead of appearing bare.
+        assert GRAFANA_UNITS["W/m²"] == "suffix:W/m²"
+        assert GRAFANA_UNITS["gCO2/kWh"] == "suffix:gCO2/kWh"
+
+    def test_the_tariff_suffix_is_short_enough_for_an_axis(self):
+        # It repeats on every tick and in every tooltip, so the VAT qualifier stays in
+        # list_fields and get_documentation rather than going on the chart.
+        assert GRAFANA_UNITS["pence/kWh (inc. VAT)"] == "suffix:p/kWh"
+
+    def test_a_unit_that_is_really_two_units_gets_none(self):
+        # Octopus reports gas in whichever unit the meter uses, so no single suffix is
+        # honest - and a wrong label on an axis is worse than a bare number.
+        assert "kWh or m³" not in GRAFANA_UNITS
+        schema = _schema(
+            source="octopus",
+            measurement="octopus",
+            field_metadata={"gas_consumption": {"unit": "kWh or m³", "kind": "interval"}},
+            allowed_fields={"gas_consumption"},
+            field_types={"gas_consumption": "float"},
+        )
+        assert "unit" not in panel_spec(schema, "gas_consumption", [])
+
+    def test_a_custom_suffix_uses_a_prefix_grafana_actually_parses(self):
+        # A mapped value is either a real identifier or one of Grafana's documented
+        # `key:` forms. Anything else would be neither - it would render as a literal
+        # suffix of whatever we wrote, including the prefix.
+        parsed_prefixes = {"prefix", "suffix", "time", "si", "count", "currency", "bool"}
+        for our_unit, grafana in GRAFANA_UNITS.items():
+            if ":" not in grafana:
+                continue
+            key, _, text = grafana.partition(":")
+            assert key in parsed_prefixes, f"{our_unit} -> {grafana!r} uses a prefix Grafana does not parse"
+            assert text, f"{our_unit} -> {grafana!r} has an empty suffix"
 
     def test_every_mapped_identifier_is_one_grafana_actually_defines(self):
         # Read out of a running Grafana 13.2's bundled frontend. Grafana accepts any
@@ -279,7 +319,10 @@ class TestGrafanaMapping:
             "amp",
             "joule",
         }
-        assert set(GRAFANA_UNITS.values()) <= verified
+        # Only the bare identifiers: a `key:` form is deliberately not an identifier, and
+        # is checked by test_a_custom_suffix_uses_a_prefix_grafana_actually_parses.
+        bare = {value for value in GRAFANA_UNITS.values() if ":" not in value}
+        assert bare <= verified
 
 
 class TestSeriesTags:
