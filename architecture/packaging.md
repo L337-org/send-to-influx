@@ -106,10 +106,10 @@ the source-checkout/screen-session path, where `systemd-creds` doesn't apply at 
   every pre-existing `settings.yaml` keeps working with just a warning; `example_settings.yaml` ships
   `true` explicitly, so new installs enforce by default) - `true` additionally raises `ConfigError`
   instead of just warning.
-- **Slot credentials.** `hue-user2`, `hue-user3`, … are credentials exactly like the static eight, and
+- **Slot credentials.** `hue-user2`, `hue-user3`, ... are credentials exactly like the static eight, and
   are **uncapped**. Every consumer asks one shared predicate in `credentials.py` rather than testing membership
-  of `CREDENTIAL_FIELDS` itself: `credential_field(name)` → `(section, field)`, `credential_name_for(section,
-  field)` → the inverse, `is_credential_field()`, `placeholder_for(name)` (a slot shares slot 1's placeholder),
+  of `CREDENTIAL_FIELDS` itself: `credential_field(name)` -> `(section, field)`, `credential_name_for(section,
+  field)` -> the inverse, `is_credential_field()`, `placeholder_for(name)` (a slot shares slot 1's placeholder),
   and `slot_credential_names(settings)` which *discovers* slots from the config rather than enumerating them -
   that discovery is what removes the cap. `CANONICAL_SLOT_SUFFIX_RE` lives there too, not in `philipshue.py`,
   because the settings side (which slot fields exist) and the credential side (which credential names exist)

@@ -46,7 +46,7 @@ decisions:
 - **Login page** (`/login`, via `MCPServer.custom_route`): resource-owner step gated on
   `mcp.user`/`mcp.password` (constant-time comparison), single-use unguessable transaction ids
   minted by `authorize()`. Failed attempts are throttled per client address
-  (`LoginThrottle`: 5 failures → 300 s lockout, WARNING-logged) - behind a reverse proxy every
+  (`LoginThrottle`: 5 failures -> 300 s lockout, WARNING-logged) - behind a reverse proxy every
   request carries the proxy's address, so the lockout is effectively global, which is the intended
   behaviour for a single-user login page, not a limitation.
 - **Transport options are per-run, not per-server** (`app_options()`/`run_options()` in
@@ -196,7 +196,7 @@ required strings that persist and pre-fill on reconfigure (like `mqtt-broker-hos
 the *secret* `mcp-password` is cleared after use, so password-only rotation works: leave the
 pre-filled url/user and type just the new password). Because the service is only (re)started at the
 very end of `postinst`, only the final settings state matters, so on a failed password store: if no
-credential existed yet (a fresh enable) the username is reverted (enable-then-revert → coherent
+credential existed yet (a fresh enable) the username is reverted (enable-then-revert -> coherent
 disabled block); if one already existed (a reconfigure) the previously-stored password is kept and
 the working install is left enabled - never disabled out from under a running server.
 `hue.mcp_read_write` stays hand-edited (a tuning toggle, never prompted). The MCP server also made
@@ -300,14 +300,14 @@ field set. Design points:
   - **Measurements aren't always the source name**: `openmeteo` writes to `weather`, and the three
     MyEnergi devices share the `myenergi` measurement distinguished by a `device` tag - so their
     classes set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS`, or a query for one device would return all
-    three. Every other source owns its measurement (`MCP_MEASUREMENT` stays `None` → source name).
+    three. Every other source owns its measurement (`MCP_MEASUREMENT` stays `None` -> source name).
   - **Injection defence, layered** (InfluxQL has no identifier parameter binding): the measurement
     and tags come from the source class's static schema, never model input; a requested field must
     exactly match a key discovered live via `SHOW FIELD KEYS` (the field set *is* the allowlist,
     and it handles collectors with dynamic field names - Hue sensors, per-lock Nuki prefixes);
     every identifier is additionally charset-validated and double-quoted with escaping; time bounds
     are parsed in Python and re-emitted as RFC3339 (the model's raw string never reaches the query);
-    aggregation is a fixed name→InfluxQL-function map and any GROUP BY interval matches a duration
+    aggregation is a fixed name->InfluxQL-function map and any GROUP BY interval matches a duration
     grammar. Result size is capped (`MAX_RESULT_POINTS`).
   - **A single query path serves v1 and v2**, mirroring `_build_write_request()`'s branch: `GET
     /query` with a `Token` header (v2) or HTTP basic auth (v1), `epoch=s`. v2's v1-compatibility
@@ -464,7 +464,7 @@ them, rather than reaching into privates.
 invokes from the client - they add no capability, only orient the model on how to combine the tools
 for the tasks this server is for. Three, kept generic (a free-text focus/question/request, never
 hard-coded devices): `home_status` (summarise current state, optional focus area), `usage_trends`
-(historical analysis/cross-source comparison), and `control_device` (the check-state→act flow).
+(historical analysis/cross-source comparison), and `control_device` (the check-state->act flow).
 `control_device` is registered *only* when a source has writes enabled (`writable_enabled_sources`,
 the same gate as the write tools) - a read-only install offers no control prompt, so nothing
 advertises a capability that isn't there. `home_status`/`usage_trends` are always registered.
