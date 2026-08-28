@@ -3,7 +3,7 @@
 
 # Runtime: entry point, settings and validation
 
-Deep detail behind the entry-point and settings summaries in [../CLAUDE.md](../CLAUDE.md).
+Deep detail behind the entry-point and settings summaries in [../AGENTS.md](../AGENTS.md).
 Read this before changing `sendtoinflux.py` or `toinflux/general.py`.
 
 ## Entry point (`sendtoinflux.py`)

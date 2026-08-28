@@ -3,7 +3,7 @@
 
 # Collector internals
 
-Deep detail behind the class hierarchy in [../CLAUDE.md](../CLAUDE.md): the write buffer,
+Deep detail behind the class hierarchy in [../AGENTS.md](../AGENTS.md): the write buffer,
 Hue bridge slots, the Nuki device-tag migration, MQTT streaming, and MyEnergi device
 selection. Read this before changing anything under `toinflux/` other than the MCP modules.
 

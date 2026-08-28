@@ -13,7 +13,7 @@ module per source.
 
 The `architecture/` directory is the deep implementation reference, one file per area. This file
 (`CONTRIBUTING.md`) covers the practical day-to-day: project layout, the checklist for adding a new
-source, testing, and submitting changes. `CLAUDE.md` and `.github/copilot-instructions.md` brief
+source, testing, and submitting changes. `AGENTS.md` briefs
 Claude Code and Copilot respectively and carry the same rules in condensed form. If something isn't
 covered here, look in `architecture/`.
 
@@ -199,7 +199,7 @@ Mechanical, not a judgment call: every rule below is an existing tested conventi
 
 23. Update **README.md** (a short section on the source and any setup steps such as getting an API
     key) and **UNITS.md** (the fields it collects and their units).
-24. Update **CLAUDE.md**, **`.github/copilot-instructions.md`**, and the relevant file under
+24. Update **AGENTS.md** and the relevant file under
     **`architecture/`**. The two instruction files are mirrors and must change together.
 
 If you are only adding a field or fixing a bug in an *existing* source, steps 2, 3 and 16-22 do not
@@ -245,8 +245,8 @@ merging:
 
 Run all three locally before pushing (see "Local development" above) to avoid CI failures.
 
-Per repo convention, update `README.md`, the relevant file under `architecture/`, `CLAUDE.md`, and
-`.github/copilot-instructions.md` alongside any behaviour change, before committing - see the "Checklist when adding a new data
+Per repo convention, update `README.md`, the relevant file under `architecture/` and `AGENTS.md`
+alongside any behaviour change, before committing - see the "Checklist when adding a new data
 source" above for the common case, but the same applies to any change to CLI flags, settings
 keys, or exit-code/retry behaviour.
 

@@ -3,7 +3,7 @@
 
 # MCP server internals
 
-Deep detail behind the MCP server summary in [../CLAUDE.md](../CLAUDE.md). Read this before
+Deep detail behind the MCP server summary in [../AGENTS.md](../AGENTS.md). Read this before
 changing anything under `toinflux/mcp*.py` or `toinflux/mcpserver.py`.
 
 ## MCP server (`toinflux/mcpserver.py`)

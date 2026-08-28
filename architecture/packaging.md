@@ -3,7 +3,7 @@
 
 # Packaging, credentials and the debconf install flow
 
-Deep detail behind the packaging summary in [../CLAUDE.md](../CLAUDE.md). Read this before
+Deep detail behind the packaging summary in [../AGENTS.md](../AGENTS.md). Read this before
 changing anything under `packaging/`, `toinflux/credentials.py` or
 `toinflux/credential_cli.py`, or before adding a settings section or a credential.
 
