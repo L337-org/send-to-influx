@@ -236,6 +236,17 @@ def test_the_shared_instruction_file_and_its_pointers_exist():
         )
         assert sum(1 for ln in outside if ln.startswith("# ")) == 1, f"{pointer.name} should have exactly one title"
 
+        # A clean outside is not enough on its own: content added inside the
+        # block would satisfy it while still breaking "a pointer and nothing
+        # else". A pointer file holds exactly one line, so assert that, and
+        # drift is caught wherever it is put.
+        inside = [ln.strip() for ln in rest.split("<!-- END GENERATED -->")[0].splitlines() if ln.strip()]
+        assert len(inside) == 1, (
+            f"{pointer.name} has {len(inside)} lines inside its generated block; "
+            f"a pointer file holds exactly one: {inside}"
+        )
+        assert "AGENTS.md" in inside[0], f"{pointer.name} pointer does not name AGENTS.md"
+
 
 def _workflow_jobs():
     """Every CI job, as ``(workflow path, job name, job body)``.

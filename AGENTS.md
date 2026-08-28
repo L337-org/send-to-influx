@@ -231,7 +231,7 @@ a worker that can never succeed, the other retries forever. Both directions are 
 
 ## Rejected designs
 
-Do not re-propose these. Reasoning is in the Confluence decision records.
+Do not re-propose these. The reasoning is recorded with the decision.
 
 - **Environment-variable secrets** (`INFLUX_TOKEN` etc. via an `EnvironmentFile=`). Removed: it was an
   organisational boundary, not a security one, and added `/proc/<pid>/environ` exposure without

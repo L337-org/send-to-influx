@@ -1,6 +1,6 @@
 # Review context
 
-- **CR.9.1** Review output MUST open with the context canary marker [ctx:CR@14], where the generator replaces that placeholder with this page version at the moment the review instructions are written.
+- **CR.9.1** Review output MUST open with the context canary marker [ctx:CR@15].
 
 ## Core
 
@@ -198,6 +198,5 @@ _when reviewing, or responding to a review_
 - **CR.8.5** Where the issue and the plan disagree, you MUST treat that as a finding for the owner rather than settling it by taking whichever is more convenient.
 - **CR.8.6** Any no, partial, deviated or dropped row MUST go to the owner before the feature-to-main pull request is opened, while there is still a decision to take rather than a release to explain.
 - **CR.9.2** Where the canary marker is absent you MUST treat the review as unbriefed rather than clean, because a review that loaded no instructions looks exactly like a review that found nothing.
-- **CR.9.3** Where the marker's version is behind this page's, you MUST regenerate the repository's review instructions before relying on the review, because it was briefed against superseded rules.
-- **CR.9.4** The marker's version MUST be the page_version already stamped in this page's block, so that there is no second thing to maintain and nothing that can drift from the content it describes.
+- **CR.9.3** Where the marker's version is behind the current one, you MUST NOT rely on the review until the repository's review instructions are brought up to date, because it was briefed against superseded rules.
 
