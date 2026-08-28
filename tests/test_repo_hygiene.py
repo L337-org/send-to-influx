@@ -234,9 +234,7 @@ def test_the_shared_instruction_file_and_its_pointers_exist():
             f"{pointer.name} carries content outside its generated block: {stray}. "
             "It should hold a title and a pointer, with every rule in AGENTS.md"
         )
-        assert sum(1 for ln in outside if ln.startswith("# ")) == 1, (
-            f"{pointer.name} should have exactly one title"
-        )
+        assert sum(1 for ln in outside if ln.startswith("# ")) == 1, f"{pointer.name} should have exactly one title"
 
 
 def _workflow_jobs():
