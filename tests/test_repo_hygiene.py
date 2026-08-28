@@ -209,7 +209,13 @@ def test_the_shared_instruction_file_and_its_pointers_exist():
         "<!-- END GENERATED -->",
     ):
         assert sentinel in shared, f"AGENTS.md is missing {sentinel!r}"
-    assert "- Read `.agents/policy/" in shared, "AGENTS.md routes to no policy file"
+    # Scope the routing check to the generated block rather than the whole file,
+    # so it means "the router routes" rather than "the path is mentioned
+    # somewhere", and match on the path alone: bullet style and backticks are
+    # presentation, and a test that pins them fails on a change that breaks
+    # nothing.
+    routed = shared.partition("<!-- BEGIN GENERATED -->")[2].partition("<!-- END GENERATED -->")[0]
+    assert ".agents/policy/" in routed, "AGENTS.md routes to no policy file"
 
     for pointer in pointers:
         assert pointer.is_file()
