@@ -1,6 +1,6 @@
 """Repo-wide conventions that are cheaper to enforce than to remember.
 
-Everything here is mechanical: a rule that could otherwise only live as prose in CLAUDE.md and
+Everything here is mechanical: a rule that could otherwise only live as prose in AGENTS.md and
 be re-broken by whoever did not read it. The project's standing preference is a failing test
 over a note asking someone to be careful.
 """
@@ -189,6 +189,26 @@ def test_no_wiki_links_in_a_public_repo():
                 if host in line:
                     offenders.append(f"{path.relative_to(REPO_ROOT)}:{number}: {host}")
     assert not offenders, "internal wiki links must not appear in a public repo:\n  " + "\n  ".join(offenders)
+
+
+def test_shipped_files_do_not_send_readers_to_the_pointer_file():
+    """`CLAUDE.md` is a generated pointer, so nothing may cite it as the home of content.
+
+    The exit-code table moved into `AGENTS.md`, but two shipped files still told readers to
+    look for it in `CLAUDE.md` - a reference that reads as authoritative and leads nowhere.
+    Documentation may name `CLAUDE.md` when describing the pointer arrangement itself; shipped
+    source and packaging have no reason to name it at all.
+    """
+    offenders = []
+    for path in (REPO_ROOT / "sendtoinflux.py", *(REPO_ROOT / "packaging").glob("*")):
+        if not path.is_file():
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "CLAUDE.md" in line:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{number}: {line.strip()}")
+    assert not offenders, "shipped files must point at AGENTS.md, not the generated pointer:\n  " + "\n  ".join(
+        offenders
+    )
 
 
 def test_the_shared_instruction_file_and_its_pointers_exist():
