@@ -199,21 +199,32 @@ def test_the_shared_instruction_file_and_its_pointers_exist():
     pointers = (REPO_ROOT / "CLAUDE.md", REPO_ROOT / ".github" / "copilot-instructions.md")
 
     assert agents.is_file()
-    # The rules live here, so an AGENTS.md that has shrunk to a stub means the
-    # content went somewhere else and the pointers now lead nowhere useful.
-    assert len(agents.read_text(encoding="utf-8")) > 2000
+    shared = agents.read_text(encoding="utf-8")
+    # Assert what makes this a real AGENTS.md rather than a size that a
+    # legitimate condensation would trip: it routes to the detail layer, and it
+    # carries a generated section that routes to the on-demand policy files.
+    for sentinel in (
+        "## Read these before changing the matching area",
+        "<!-- BEGIN GENERATED -->",
+        "<!-- END GENERATED -->",
+    ):
+        assert sentinel in shared, f"AGENTS.md is missing {sentinel!r}"
+    assert "- Read `.agents/policy/" in shared, "AGENTS.md routes to no policy file"
 
     for pointer in pointers:
         assert pointer.is_file()
         body = pointer.read_text(encoding="utf-8")
         # Catches a pointer that stops pointing - renamed target, dropped line.
         assert "AGENTS.md" in body, f"{pointer.name} no longer references AGENTS.md"
-        # Catches the regression this whole change exists to prevent: a pointer
-        # file quietly regaining rules of its own, which is how the two files
-        # drifted apart before there was a shared one.
-        assert len(body) < 1000, (
-            f"{pointer.name} is {len(body)} bytes; it should carry a pointer and "
-            "nothing else, with every rule in AGENTS.md"
+        # Catches the regression this change exists to prevent: a pointer file
+        # quietly regaining rules of its own, which is how the two drifted apart
+        # before there was a shared file. A rule arrives under a heading, so the
+        # absence of any section heading is the structural form of "points and
+        # says nothing else" - which is the promise, rather than a byte count.
+        headings = [ln for ln in body.splitlines() if ln.startswith("## ")]
+        assert not headings, (
+            f"{pointer.name} has section headings {headings}; it should carry a "
+            "pointer and nothing else, with every rule in AGENTS.md"
         )
 
 
