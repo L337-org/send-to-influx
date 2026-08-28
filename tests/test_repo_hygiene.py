@@ -195,9 +195,26 @@ def test_the_shared_instruction_file_and_its_pointers_exist():
     """AGENTS.md carries the rules; CLAUDE.md and copilot-instructions.md only point at it.
     None is inheritable org-wide, so a per-repo copy is the only way any of them takes effect,
     and deleting the shared file would leave every assistant unbriefed with nothing failing."""
-    assert (REPO_ROOT / "AGENTS.md").is_file()
-    assert (REPO_ROOT / "CLAUDE.md").is_file()
-    assert (REPO_ROOT / ".github" / "copilot-instructions.md").is_file()
+    agents = REPO_ROOT / "AGENTS.md"
+    pointers = (REPO_ROOT / "CLAUDE.md", REPO_ROOT / ".github" / "copilot-instructions.md")
+
+    assert agents.is_file()
+    # The rules live here, so an AGENTS.md that has shrunk to a stub means the
+    # content went somewhere else and the pointers now lead nowhere useful.
+    assert len(agents.read_text(encoding="utf-8")) > 2000
+
+    for pointer in pointers:
+        assert pointer.is_file()
+        body = pointer.read_text(encoding="utf-8")
+        # Catches a pointer that stops pointing - renamed target, dropped line.
+        assert "AGENTS.md" in body, f"{pointer.name} no longer references AGENTS.md"
+        # Catches the regression this whole change exists to prevent: a pointer
+        # file quietly regaining rules of its own, which is how the two files
+        # drifted apart before there was a shared one.
+        assert len(body) < 1000, (
+            f"{pointer.name} is {len(body)} bytes; it should carry a pointer and "
+            "nothing else, with every rule in AGENTS.md"
+        )
 
 
 def _workflow_jobs():
