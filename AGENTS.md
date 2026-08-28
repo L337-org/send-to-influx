@@ -262,4 +262,10 @@ Each has been raised before and declined with reasons recorded.
   stored caller to break.
 
 <!-- BEGIN GENERATED -->
+## Read these when they apply
+
+- Read `.agents/policy/review-context.md` always - these apply to every activity.
+- Read `.agents/policy/testing.md` when writing or running tests, or adding behaviour that needs them.
+- Read `.agents/policy/architecture.md` when changing module structure, public surface, docstrings, generated files, deprecation, or log levels.
+
 <!-- END GENERATED -->
