@@ -191,9 +191,10 @@ def test_no_wiki_links_in_a_public_repo():
     assert not offenders, "internal wiki links must not appear in a public repo:\n  " + "\n  ".join(offenders)
 
 
-def test_the_assistant_instruction_files_both_exist():
-    """Neither is inheritable org-wide, so a per-repo copy of each is the only way either
-    takes effect - and they are meant to move together, which is the most-forgotten step."""
+def test_the_shared_instruction_file_and_its_pointers_exist():
+    """AGENTS.md carries the rules; CLAUDE.md and copilot-instructions.md only point at it.
+    None is inheritable org-wide, so a per-repo copy is the only way any of them takes effect,
+    and deleting the shared file would leave every assistant unbriefed with nothing failing."""
     assert (REPO_ROOT / "AGENTS.md").is_file()
     assert (REPO_ROOT / "CLAUDE.md").is_file()
     assert (REPO_ROOT / ".github" / "copilot-instructions.md").is_file()
