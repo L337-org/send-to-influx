@@ -200,9 +200,9 @@ def test_the_shared_instruction_file_and_its_pointers_exist():
 
     assert agents.is_file()
     shared = agents.read_text(encoding="utf-8")
-    # Assert what makes this a real AGENTS.md rather than a size that a
-    # legitimate condensation would trip: it routes to the detail layer, and it
-    # carries a generated section that routes to the on-demand policy files.
+    # Assert what makes this a real AGENTS.md, rather than a size threshold that
+    # a legitimate condensation would trip: it routes to the detail layer, and
+    # it carries a generated section routing to the on-demand policy files.
     for sentinel in (
         "## Read these before changing the matching area",
         "<!-- BEGIN GENERATED -->",
