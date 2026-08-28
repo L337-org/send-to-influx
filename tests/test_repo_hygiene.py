@@ -1,6 +1,6 @@
 """Repo-wide conventions that are cheaper to enforce than to remember.
 
-Everything here is mechanical: a rule that could otherwise only live as prose in CLAUDE.md and
+Everything here is mechanical: a rule that could otherwise only live as prose in AGENTS.md and
 be re-broken by whoever did not read it. The project's standing preference is a failing test
 over a note asking someone to be careful.
 """
@@ -191,11 +191,101 @@ def test_no_wiki_links_in_a_public_repo():
     assert not offenders, "internal wiki links must not appear in a public repo:\n  " + "\n  ".join(offenders)
 
 
-def test_the_assistant_instruction_files_both_exist():
-    """Neither is inheritable org-wide, so a per-repo copy of each is the only way either
-    takes effect - and they are meant to move together, which is the most-forgotten step."""
-    assert (REPO_ROOT / "CLAUDE.md").is_file()
-    assert (REPO_ROOT / ".github" / "copilot-instructions.md").is_file()
+def test_shipped_files_do_not_send_readers_to_the_pointer_file():
+    """`CLAUDE.md` is a generated pointer, so nothing may cite it as the home of content.
+
+    The exit-code table moved into `AGENTS.md`, but two shipped files still told readers to
+    look for it in `CLAUDE.md` - a reference that reads as authoritative and leads nowhere.
+    Documentation may name `CLAUDE.md` when describing the pointer arrangement itself; shipped
+    source and packaging have no reason to name it at all.
+    """
+    offenders = []
+    for path in (REPO_ROOT / "sendtoinflux.py", *(REPO_ROOT / "packaging").rglob("*")):
+        if not path.is_file():
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "CLAUDE.md" in line:
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{number}: {line.strip()}")
+    assert not offenders, "shipped files must point at AGENTS.md, not the generated pointer:\n  " + "\n  ".join(
+        offenders
+    )
+
+
+def test_the_shared_instruction_file_and_its_pointers_exist():
+    """AGENTS.md carries the rules; CLAUDE.md and copilot-instructions.md only point at it.
+    None is inheritable org-wide, so a per-repo copy is the only way any of them takes effect,
+    and deleting the shared file would leave every assistant unbriefed with nothing failing."""
+    agents = REPO_ROOT / "AGENTS.md"
+    pointers = (REPO_ROOT / "CLAUDE.md", REPO_ROOT / ".github" / "copilot-instructions.md")
+
+    assert agents.is_file()
+    shared = agents.read_text(encoding="utf-8")
+    # Assert what makes this a real AGENTS.md, rather than a size threshold that
+    # a legitimate condensation would trip: it routes to the detail layer, and
+    # it carries a generated section routing to the on-demand policy files.
+    for sentinel in (
+        "## Read these before changing the matching area",
+        "<!-- BEGIN GENERATED -->",
+        "<!-- END GENERATED -->",
+    ):
+        assert sentinel in shared, f"AGENTS.md is missing {sentinel!r}"
+    # Scope the routing check to the generated block rather than the whole file,
+    # so it means "the router routes" rather than "the path is mentioned
+    # somewhere", and match on the path alone: bullet style and backticks are
+    # presentation, and a test that pins them fails on a change that breaks
+    # nothing.
+    routed = shared.partition("<!-- BEGIN GENERATED -->")[2].partition("<!-- END GENERATED -->")[0]
+    targets = set(re.findall(r"\.agents/policy/[A-Za-z0-9_-]+\.md", routed))
+    assert targets, "AGENTS.md routes to no policy file"
+
+    # A pointer at a file that is not there is worse than no pointer: it reads
+    # as authoritative and resolves to nothing, and the reader has no way to
+    # tell the difference from the routing table alone.
+    for target in sorted(targets):
+        assert (REPO_ROOT / target).is_file(), f"AGENTS.md routes to {target}, which does not exist"
+
+    # The other direction, so a policy file cannot be added and left unreachable.
+    on_disk = {f".agents/policy/{f.name}" for f in (REPO_ROOT / ".agents" / "policy").glob("*.md")}
+    assert on_disk == targets, (
+        f"the policy files on disk and the ones AGENTS.md routes to disagree: "
+        f"unrouted={sorted(on_disk - targets)} missing={sorted(targets - on_disk)}"
+    )
+
+    for pointer in pointers:
+        assert pointer.is_file()
+        body = pointer.read_text(encoding="utf-8")
+        # Catches a pointer that stops pointing - renamed target, dropped line.
+        assert "AGENTS.md" in body, f"{pointer.name} no longer references AGENTS.md"
+        # Catches the regression this change exists to prevent: a pointer file
+        # quietly regaining rules of its own, which is how the two drifted apart
+        # before there was a shared file. Forbidding headings was too narrow -
+        # markdown allows up to three spaces before a "##", and prose needs no
+        # heading at all. The promise is "a pointer and nothing else", so assert
+        # exactly that: outside the generated block, the only content is the H1.
+        before, marker, rest = body.partition("<!-- BEGIN GENERATED -->")
+        assert marker, f"{pointer.name} has no generated block"
+        _, end_marker, after = rest.partition("<!-- END GENERATED -->")
+        assert end_marker, f"{pointer.name} has no closing marker"
+
+        outside = [ln.strip() for ln in before.splitlines() if ln.strip()]
+        outside += [ln.strip() for ln in after.splitlines() if ln.strip()]
+        stray = [ln for ln in outside if not ln.startswith("# ")]
+        assert not stray, (
+            f"{pointer.name} carries content outside its generated block: {stray}. "
+            "It should hold a title and a pointer, with every rule in AGENTS.md"
+        )
+        assert sum(1 for ln in outside if ln.startswith("# ")) == 1, f"{pointer.name} should have exactly one title"
+
+        # A clean outside is not enough on its own: content added inside the
+        # block would satisfy it while still breaking "a pointer and nothing
+        # else". A pointer file holds exactly one line, so assert that, and
+        # drift is caught wherever it is put.
+        inside = [ln.strip() for ln in rest.split("<!-- END GENERATED -->")[0].splitlines() if ln.strip()]
+        assert len(inside) == 1, (
+            f"{pointer.name} has {len(inside)} lines inside its generated block; "
+            f"a pointer file holds exactly one: {inside}"
+        )
+        assert "AGENTS.md" in inside[0], f"{pointer.name} pointer does not name AGENTS.md"
 
 
 def _workflow_jobs():

@@ -19,7 +19,7 @@ RestartSec=5
 # so the unit still reports Active: failed (Result: exit-code) rather than a
 # clean inactive/dead: an admin (or a monitoring tool alerting on
 # systemctl is-failed) should still be told the service stopped and needs
-# attention, just without the pointless crash-loop. See CLAUDE.md/README.md's
+# attention, just without the pointless crash-loop. See AGENTS.md/README.md's
 # exit-code table.
 RestartPreventExitStatus=1
 

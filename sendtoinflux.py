@@ -523,7 +523,7 @@ def _exit_if_nothing_to_collect(units, requested, settings, args):
     supervisor over an empty list would look healthy while collecting nothing, which is the
     worst of the available outcomes - and neither cause resolves itself by waiting, so this
     exits (code 1, the same as a fatal ``ConfigError`` - see the exit-codes table in
-    CLAUDE.md/README.md) rather than retrying. ``packaging/send-to-influx.service`` marks
+    AGENTS.md/README.md) rather than retrying. ``packaging/send-to-influx.service`` marks
     that code ``RestartPreventExitStatus``, so the packaged service is not respawned for
     either cause.
 
