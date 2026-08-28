@@ -218,13 +218,24 @@ def test_the_shared_instruction_file_and_its_pointers_exist():
         assert "AGENTS.md" in body, f"{pointer.name} no longer references AGENTS.md"
         # Catches the regression this change exists to prevent: a pointer file
         # quietly regaining rules of its own, which is how the two drifted apart
-        # before there was a shared file. A rule arrives under a heading, so the
-        # absence of any section heading is the structural form of "points and
-        # says nothing else" - which is the promise, rather than a byte count.
-        headings = [ln for ln in body.splitlines() if ln.startswith("## ")]
-        assert not headings, (
-            f"{pointer.name} has section headings {headings}; it should carry a "
-            "pointer and nothing else, with every rule in AGENTS.md"
+        # before there was a shared file. Forbidding headings was too narrow -
+        # markdown allows up to three spaces before a "##", and prose needs no
+        # heading at all. The promise is "a pointer and nothing else", so assert
+        # exactly that: outside the generated block, the only content is the H1.
+        before, marker, rest = body.partition("<!-- BEGIN GENERATED -->")
+        assert marker, f"{pointer.name} has no generated block"
+        _, end_marker, after = rest.partition("<!-- END GENERATED -->")
+        assert end_marker, f"{pointer.name} has no closing marker"
+
+        outside = [ln.strip() for ln in before.splitlines() if ln.strip()]
+        outside += [ln.strip() for ln in after.splitlines() if ln.strip()]
+        stray = [ln for ln in outside if not ln.startswith("# ")]
+        assert not stray, (
+            f"{pointer.name} carries content outside its generated block: {stray}. "
+            "It should hold a title and a pointer, with every rule in AGENTS.md"
+        )
+        assert sum(1 for ln in outside if ln.startswith("# ")) == 1, (
+            f"{pointer.name} should have exactly one title"
         )
 
 
