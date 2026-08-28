@@ -200,7 +200,7 @@ def test_shipped_files_do_not_send_readers_to_the_pointer_file():
     source and packaging have no reason to name it at all.
     """
     offenders = []
-    for path in (REPO_ROOT / "sendtoinflux.py", *(REPO_ROOT / "packaging").glob("*")):
+    for path in (REPO_ROOT / "sendtoinflux.py", *(REPO_ROOT / "packaging").rglob("*")):
         if not path.is_file():
             continue
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
