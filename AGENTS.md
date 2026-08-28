@@ -28,7 +28,7 @@ background.
 | `toinflux/mcp*.py`, `toinflux/mcpserver.py` | [architecture/mcp-server.md](architecture/mcp-server.md) |
 | any collector under `toinflux/` (not the MCP modules) | [architecture/collectors.md](architecture/collectors.md) |
 | `sendtoinflux.py`, `toinflux/general.py` | [architecture/runtime.md](architecture/runtime.md) |
-| `packaging/`, `credentials.py`, `credential_cli.py`, or adding a settings section | [architecture/packaging.md](architecture/packaging.md) |
+| `packaging/`, `toinflux/credentials.py`, `toinflux/credential_cli.py`, or adding a settings section | [architecture/packaging.md](architecture/packaging.md) |
 | adding a data source | the checklist in [CONTRIBUTING.md](CONTRIBUTING.md) |
 
 ## Commands
