@@ -215,7 +215,21 @@ def test_the_shared_instruction_file_and_its_pointers_exist():
     # presentation, and a test that pins them fails on a change that breaks
     # nothing.
     routed = shared.partition("<!-- BEGIN GENERATED -->")[2].partition("<!-- END GENERATED -->")[0]
-    assert ".agents/policy/" in routed, "AGENTS.md routes to no policy file"
+    targets = set(re.findall(r"\.agents/policy/[A-Za-z0-9_-]+\.md", routed))
+    assert targets, "AGENTS.md routes to no policy file"
+
+    # A pointer at a file that is not there is worse than no pointer: it reads
+    # as authoritative and resolves to nothing, and the reader has no way to
+    # tell the difference from the routing table alone.
+    for target in sorted(targets):
+        assert (REPO_ROOT / target).is_file(), f"AGENTS.md routes to {target}, which does not exist"
+
+    # The other direction, so a policy file cannot be added and left unreachable.
+    on_disk = {f".agents/policy/{f.name}" for f in (REPO_ROOT / ".agents" / "policy").glob("*.md")}
+    assert on_disk == targets, (
+        f"the policy files on disk and the ones AGENTS.md routes to disagree: "
+        f"unrouted={sorted(on_disk - targets)} missing={sorted(targets - on_disk)}"
+    )
 
     for pointer in pointers:
         assert pointer.is_file()
