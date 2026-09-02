@@ -1255,6 +1255,12 @@ def resolve_schema(source, settings, settings_file, instance=None):
                     discover_tag_values(handler.session, influx_settings, db, measurement, handler.MCP_INSTANCE_TAG)
                     | configured
                 )
+        # Inside the try on purpose. build_schema() resolves the handler's own device
+        # (MyEnergi's mcp_tag_filters() calls device()), so it can raise ConfigError - and when it
+        # did, from the return line outside this block, the caller never received the handler and
+        # nothing ever closed its session. One leaked connection pool per call, on the path a
+        # misconfigured source retries.
+        schema = build_schema(handler, keys, db, instance_values)
     except Exception:
         # A fresh requests.Session is created per handler (per tool call); close
         # it if discovery fails, or a long-running server accumulates open
@@ -1262,7 +1268,7 @@ def resolve_schema(source, settings, settings_file, instance=None):
         # the returned handler and closes its session when done.
         close_session(handler.session)
         raise
-    return handler, build_schema(handler, keys, db, instance_values)
+    return handler, schema
 
 
 def _list_sources_result(settings, settings_file):

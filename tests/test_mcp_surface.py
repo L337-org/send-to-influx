@@ -499,14 +499,17 @@ class TestEveryAdvertisedThingExplainsItsFailures:
         )
 
     def test_every_registered_resource_translates_anticipated_failures(self, registered):
-        unwrapped = sorted(
-            str(resource.uri)
-            for resource in registered._resource_manager.list_resources()
-            if not getattr(resource.fn, TRANSLATES_FAILURES, False)
-        )
+        # Templates as well as static resources. `list_resources()` returns only `_resources`;
+        # a templated URI (`state://{source}`, the alternative this module's docstring records
+        # considering) lands in the separate `_templates` dict, so reading one list alone would leave
+        # a whole registration kind unchecked while still reporting "no bad entries found".
+        registry = registered._resource_manager
+        entries = [(str(r.uri), getattr(r, "fn", None)) for r in registry.list_resources()]
+        entries += [(t.uri_template, getattr(t, "fn", None)) for t in registry.list_templates()]
+        unwrapped = sorted(uri for uri, fn in entries if not getattr(fn, TRANSLATES_FAILURES, False))
         assert not unwrapped, (
-            f"resources {unwrapped} do not translate ToolParamError/SourceConnectionError - "
-            f"register through _register_resource() so a failed read says why instead of a bare "
+            f"resources {unwrapped} do not translate ToInfluxError - register through "
+            f"_register_resource() so a failed read says why instead of a bare "
             f"'Error reading resource <uri>'"
         )
 
@@ -521,8 +524,12 @@ class TestEveryAdvertisedThingExplainsItsFailures:
         """
         tools = registered._tool_manager.list_tools()
         resources = registered._resource_manager.list_resources()
+        templates = registered._resource_manager.list_templates()
         assert {tool.name for tool in tools} == set(SIBLINGS), "not every tool reached the tool manager"
         assert len(resources) == 5, f"enumerated {len(resources)} resources, expected the fixture's 5"
+        # No templated URIs today. Asserted rather than assumed: the moment one is added, this fails
+        # and points at the guard above, which has to keep covering both kinds.
+        assert not templates, f"a resource template appeared ({[t.uri_template for t in templates]}) - see above"
         assert all(callable(getattr(tool, "fn", None)) for tool in tools), "Tool.fn is no longer the callable"
         assert all(
             callable(getattr(resource, "fn", None)) for resource in resources

@@ -12,11 +12,12 @@ from collections import deque
 from itertools import islice
 import urllib3
 import requests
+from toinflux.exceptions import ToInfluxError
 from toinflux.general import load_settings
 from toinflux.exceptions import ConfigError
 
 
-class InfluxWriteError(Exception):
+class InfluxWriteError(ToInfluxError):
     """
     Raised when a write to InfluxDB fails.
 

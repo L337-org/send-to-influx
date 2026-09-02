@@ -605,8 +605,10 @@ this server raises is withheld, and every ordinary caller mistake is logged as a
 registrars share one `translate_failures()`, so which failures count as anticipated is decided
 once.
 
-**The translation is a listed pair (`ANTICIPATED_FAILURES`) and must never become a bare `except
-Exception`.** Dressing a bug up as a deliberate failure loses exactly what the SDK's rule protects:
+**The translation catches one base class (`ToInfluxError`) and must never become a bare `except
+Exception`.** The base is what makes a new project exception covered by inheriting; it was a listed
+pair of subclasses, and the list went stale - `ConfigError` was never added, so every
+unconfigured-device failure reached the model with its message withheld. Dressing a bug up as a deliberate failure loses exactly what the SDK's rule protects:
 the bare `AttributeError` `build_query` used to raise on a schema with no axis would reach the
 model as though it were an instruction to the caller, with no traceback logged. The wrapper also
 matches the tool's own sync/async-ness, because the SDK decides whether to await by asking

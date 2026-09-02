@@ -2319,3 +2319,31 @@ class TestDataRangeResult:
 
         query = build_edge_time_query("myenergi", {"device": "zappi"}, "ASC")
         assert "\"device\" = 'zappi'" in query
+
+
+def test_resolve_schema_closes_the_session_when_schema_building_fails():
+    """Schema building resolves the handler's own device, so it can fail after discovery succeeded.
+
+    It used to sit on the `return` line outside the try that closes the session, so this path leaked
+    one connection pool per call - and it is the path a misconfigured source retries.
+    """
+    from toinflux.exceptions import ConfigError
+    from toinflux.mcp_read import resolve_schema
+
+    handler = MagicMock()
+    handler.source = "zappi"
+    handler.MCP_MEASUREMENT = "myenergi"
+    handler.MCP_INSTANCE_TAG = None
+    handler.source_settings = {"db": "zappi_db"}
+    handler.settings = {"influx": {"url": "http://x", "user": "u", "password": "p"}}
+    handler.session = MagicMock()
+    handler.mcp_tag_filters.side_effect = ConfigError("no zappi device is configured")
+
+    settings = {"sources": ["zappi"], "influx": {"url": "http://x", "user": "u", "password": "p"}}
+    with (
+        patch("toinflux.mcp_common.get_class", return_value=handler),
+        patch("toinflux.mcp_read.discover_measurement_keys", return_value=_keys({"gen"})),
+    ):
+        with pytest.raises(ConfigError):
+            resolve_schema("zappi", settings, None)
+    handler.session.close.assert_called_once()
