@@ -595,67 +595,38 @@ Verified by simulation as well as by CI - re-indenting each 3.14 description the
 exactly the 2,209 bytes CI reported, and returns all nine to byte-identical.
 
 **`register_tool()` also translates the two anticipated failures into the SDK's `ToolError`,
-and without it the mcp 2.1.0 upgrade silently emptied every tool error message.** Up to
-2.0.0 the SDK re-raised whatever a tool raised as `ToolError(f"Error executing tool {name}:
-{e}")`, so a `ToolParamError` reading "unknown field 'evil' for source 'zappi'; choose one
-of: ..." travelled with it, which is the entire reason for raising one. 2.1.0 changed the
-rule to keep crash details off the wire: only `ToolError` and `ResourceError` keep their
-text, and everything else becomes `UnexpectedToolError("Error executing tool <name>")`,
-logged at ERROR with a traceback. `ToolParamError` is a `ValueError` and
-`SourceConnectionError` a plain `Exception`, so all 46 `raise ToolParamError` sites and
-every `SourceConnectionError` a read surfaces were reclassified as server crashes at once: the model was told that a call failed and
-never what to send instead, and ordinary caller mistakes filled the log as crashes. Two
-tests in `tests/test_mcp_read.py` caught it because they assert on the message; nothing
-else did, which is why `tests/test_mcp_common.py` now asserts the *type* on both sides -
-an anticipated failure arrives as a plain `ToolError`, and a bug still arrives as an
-`UnexpectedToolError` with its text withheld.
+and `_register_resource()` in `toinflux/mcp_resources.py` does the same with `ResourceError`.**
+Since 2.1.0 the SDK decides what a failure tells the caller purely by its type: a `ToolError` or
+`ResourceError` keeps its message and is logged at INFO, and anything else is treated as a crash -
+the caller gets `Error executing tool <name>` or `Error reading resource <uri>` and nothing more,
+and the server logs a traceback at ERROR. `ToolParamError` is a `ValueError` and
+`SourceConnectionError` a plain `Exception`, so without the translation every deliberate message
+this server raises is withheld, and every ordinary caller mistake is logged as a crash. Both
+registrars share one `translate_failures()`, so which failures count as anticipated is decided
+once.
 
-The translation is a listed pair (`ANTICIPATED_FAILURES`) and not a bare `except
-Exception` on purpose. Dressing a bug up as a deliberate tool error would lose exactly what
-the SDK change was written to protect: the bare `AttributeError` `build_query` used to raise
-on a schema with no axis would have been handed to the model as though it were an
-instruction to the caller, and logged without its traceback. The wrapper matches the tool's
-own sync/async-ness for the same class of reason - the SDK decides whether to await by
-asking `is_async_callable(fn)`, so an async wrapper around a sync tool would run its body on
-the event loop, which is the stall `anyio.to_thread.run_sync` exists to avoid, and it would
-still return the right answer while doing it.
+**The translation is a listed pair (`ANTICIPATED_FAILURES`) and must never become a bare `except
+Exception`.** Dressing a bug up as a deliberate failure loses exactly what the SDK's rule protects:
+the bare `AttributeError` `build_query` used to raise on a schema with no axis would reach the
+model as though it were an instruction to the caller, with no traceback logged. The wrapper also
+matches the tool's own sync/async-ness, because the SDK decides whether to await by asking
+`is_async_callable(fn)` - an async wrapper around a sync tool would run its body on the event loop,
+the stall `anyio.to_thread.run_sync` exists to avoid, and would still return the right answer while
+doing it.
 
-**Resources are registered through `_register_resource()` in `toinflux/mcp_resources.py`
-for the second half of the same rule, and that one was never a regression - it was a gap
-2.1.0 made fixable.** The SDK decides what a failed read says to the client from the
-exception's type exactly as it does for tools: `read_resource()` re-raises a `ResourceError`
-as it is, logs it at INFO and sends the message on, while anything else becomes
-`UnexpectedResourceError("Error reading resource <uri>")`, logged at ERROR with a traceback.
-Since `ToolParamError` is a `ValueError` and `SourceConnectionError` a plain `Exception`, the
-three outcomes a read has - the source is unusable, InfluxDB is unreachable, this server has
-a bug - were indistinguishable to a client, which is a poor answer for `state://zappi` given
-that the middle one is the common one and the only one worth retrying. 2.0.0 could not have
-done better: it flattened even a deliberately raised `ResourceError` to the same generic
-string, commented "we should not leak the exception to the client", so there was nothing to
-keep. The upgrade to 2.1.0 is what created the option, which is why the change arrives with
-it.
+**The resource half is why the floor is 2.1: mcp 2.0.0 flattened even a deliberately raised
+`ResourceError`** to the same generic string ("we should not leak the exception to the client"), so
+a resource could not explain itself at all. Lowering the pin again silently reverts every resource
+to answering an unusable source, an unreachable InfluxDB and a bug in this server identically.
 
-This was found by reading rather than by a test: `tests/test_mcp_resources.py` covered three
-happy-path reads and no failure at all, so nothing in CI had an opinion about what a broken
-read said. It now asserts the message and the type on both sides, and carries the source
-guard (`@server.resource(` appears nowhere in the module) that the tool registrar already
-had - the necessary one, because a resource registered directly still returns the right
-payload and passes every behaviour test, and only stops explaining itself when something
-breaks.
-
-**The real defect was the coverage hole, so that is what was fixed.** The tool half was
-caught by CI only because two tests happened to assert on an error message; the resource
-half was caught by nothing, and was found by reading the SDK, which is not a process. More
-per-item tests would not close that, because they cover what someone remembered to write one
-for and what went missing is precisely what nobody remembered. `tests/test_mcp_surface.py`
-therefore asks the built server: every tool and every resource it advertises must carry a
-wrapper from `translate_failures()`, which is marked with `TRANSLATES_FAILURES` for the
-purpose. That reaches a registration in a module that does not exist yet, which the source
-greps in the two registrar modules cannot. Both bypasses were planted to confirm it bites,
-and it named `get_data_range` and the two `state://` resources exactly. A third assertion
-checks the guard is enumerating a full surface at all, because "no bad entries found" is
-also what an empty list says, and a check that silently stopped looking is indistinguishable
-from one that passed.
+**The guard is mechanical and reads the built server**, not the source of the modules that happen to
+register things today: `tests/test_mcp_surface.py` walks every registered tool and resource and
+fails on any whose callable lacks the `TRANSLATES_FAILURES` mark, which reaches a registration in a
+module that does not exist yet. It has to be mechanical because a directly-registered tool or
+resource returns the right payload and passes every behaviour test, going quiet only when something
+breaks - so no payload assertion can see the mistake. A third assertion checks the guard is
+enumerating a full surface, since "no bad entries found" is also what an empty list says, and a
+check that has silently stopped looking is indistinguishable from one that passed.
 
 **Two things deliberately left out**, both being context that buys nothing. A *registration*
 precondition ("requires `hue.mcp_read_write: true`") is guaranteed true whenever the model can see
