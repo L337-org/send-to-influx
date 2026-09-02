@@ -610,7 +610,7 @@ else did, which is why `tests/test_mcp_common.py` now asserts the *type* on both
 an anticipated failure arrives as a plain `ToolError`, and a bug still arrives as an
 `UnexpectedToolError` with its text withheld.
 
-The translation is a listed pair (`ANTICIPATED_TOOL_FAILURES`) and not a bare `except
+The translation is a listed pair (`ANTICIPATED_FAILURES`) and not a bare `except
 Exception` on purpose. Dressing a bug up as a deliberate tool error would lose exactly what
 the SDK change was written to protect: the bare `AttributeError` `build_query` used to raise
 on a schema with no axis would have been handed to the model as though it were an
