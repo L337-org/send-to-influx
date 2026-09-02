@@ -19,15 +19,14 @@ import logging
 
 from mcp.server.mcpserver.exceptions import ToolError
 
-from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
+from toinflux.exceptions import ConfigError, ToInfluxError, ToolParamError
 from toinflux.general import INSTANCED_SOURCES, expand_sources, get_class
 
-# The two failures the read surface raises deliberately, and the only two whose
-# message is meant for the model: a caller/model mistake it can correct, and a
-# transport failure it can retry or report. Anything else escaping a tool or a
-# resource is a bug in this server, and its text stays here - see
-# translate_failures().
-ANTICIPATED_FAILURES = (ToolParamError, SourceConnectionError)
+# Every failure this project raises deliberately inherits ToInfluxError, and that base is what the
+# translation catches. It was a tuple of two types, and a tuple is a list that goes stale: ConfigError
+# was never in it, so an unconfigured device answered "Error executing tool list_fields" and nothing
+# else - exactly the failure the translation exists to prevent, left live by the enumeration.
+# Anything that is not a ToInfluxError is a bug in this server, and its text stays in the log.
 
 # Set on every wrapper translate_failures() builds, so the surface guard in
 # tests/test_mcp_surface.py can ask the built server - rather than the source of the
@@ -90,9 +89,11 @@ def translate_failures(fn, error_cls):
     implementation for both halves so the marker, and the decision about which
     failures are anticipated, exist once.
 
-    Only ``ANTICIPATED_FAILURES`` are translated. Anything else *is* a crash -
-    the bare ``AttributeError`` that ``build_query`` used to raise, say - and the SDK
-    withholding its text from the client is right, so it is deliberately left alone.
+    Only ``ToInfluxError`` is translated. Anything else *is* a crash - the bare
+    ``AttributeError`` that ``build_query`` used to raise, say - and the SDK withholding its text
+    from the client is right, so it is deliberately left alone. Catching the base rather than a list
+    of subclasses is deliberate: a new project exception is covered by inheriting, where a list has
+    to be remembered, and the one time it was not, a whole class of failures went silent.
 
     :param fn: the tool or resource function, sync or async
     :param error_cls: the SDK error to re-raise as - ``ToolError`` for a tool,
@@ -108,7 +109,7 @@ def translate_failures(fn, error_cls):
         async def async_wrapper(*args, **kwargs):
             try:
                 return await fn(*args, **kwargs)
-            except ANTICIPATED_FAILURES as exc:
+            except ToInfluxError as exc:
                 raise error_cls(str(exc)) from exc
 
         # After functools.wraps, which copies the wrapped function's __dict__ over the
@@ -120,7 +121,7 @@ def translate_failures(fn, error_cls):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except ANTICIPATED_FAILURES as exc:
+        except ToInfluxError as exc:
             raise error_cls(str(exc)) from exc
 
     setattr(wrapper, TRANSLATES_FAILURES, True)

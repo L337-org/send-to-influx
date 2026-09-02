@@ -53,7 +53,7 @@ def _register_resource(server, *args, **kwargs):
     exception to the client"), so there was nothing to keep. 2.1.0 is what made a
     resource able to say why it failed, which is why this arrives with that upgrade.
 
-    Only ``ANTICIPATED_FAILURES`` are translated, for the reason spelled out in
+    Only ``ToInfluxError`` is translated, for the reason spelled out in
     ``translate_failures()``: a bug must stay a crash, logged with its traceback and
     its text kept off the wire.
 

@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 import anyio
 import pytest
 
-from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToInfluxError, ToolParamError
+from toinflux.influx import InfluxWriteError
 from toinflux.mcp_common import close_session, configured_sources, register_tool, resolve_handler
 
 
@@ -242,3 +243,74 @@ class TestRegisterToolErrorTranslation:
         assert tool.input_schema["required"] == ["source"]
         # And the dedent register_tool exists for still happens.
         assert tool.description == "First line.\n\nIndented continuation."
+
+
+class TestEveryDeliberateFailureIsTranslated:
+    """The classes the translation covers, and why it covers a base rather than a list.
+
+    `ANTICIPATED_FAILURES` used to name two types. `ConfigError` was not one of them, so an
+    unconfigured device answered `Error executing tool list_fields` and nothing else, while the
+    server logged it at ERROR as though the server were broken - the exact failure the translation
+    was written to prevent, left live by the enumeration itself.
+
+    Parameterised over the project's exception classes rather than over a hand-written list of the
+    ones that happen to be reachable today: a new one is covered by inheriting, and if someone adds
+    a project exception outside the hierarchy, `test_every_project_exception_is_a_toinflux_error`
+    below fails rather than this quietly missing it.
+    """
+
+    @staticmethod
+    def _server():
+        from mcp.server.mcpserver import MCPServer
+
+        return MCPServer(name="test")
+
+    @pytest.mark.parametrize(
+        "exception",
+        [ConfigError, SourceConnectionError, ToolParamError, InfluxWriteError],
+        ids=lambda cls: cls.__name__,
+    )
+    def test_its_message_reaches_the_caller(self, exception):
+        from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+
+        server = self._server()
+
+        @register_tool(server, title="T")
+        async def boom() -> dict:
+            """Doc."""
+            raise exception("the operator can act on this")
+
+        with pytest.raises(ToolError) as excinfo:
+            anyio.run(server.call_tool, "boom", {})
+        assert not isinstance(excinfo.value, UnexpectedToolError), f"{exception.__name__} is reported as a crash"
+        assert "the operator can act on this" in str(excinfo.value)
+
+    def test_every_project_exception_is_a_toinflux_error(self):
+        """The hierarchy is what the translation relies on, so a stray sibling must fail here.
+
+        `CredentialCliError` is deliberately excluded: it lives in the credential CLI, is raised
+        before any tool is registered, and never reaches a client.
+        """
+        import inspect
+        import pkgutil
+        import importlib
+
+        import toinflux
+
+        outside = []
+        for module in pkgutil.iter_modules(toinflux.__path__):
+            if module.name == "credential_cli":
+                continue
+            loaded = importlib.import_module(f"toinflux.{module.name}")
+            for name, obj in vars(loaded).items():
+                if (
+                    inspect.isclass(obj)
+                    and issubclass(obj, Exception)
+                    and obj.__module__.startswith("toinflux.")
+                    and not issubclass(obj, ToInfluxError)
+                ):
+                    outside.append(f"{obj.__module__}.{name}")
+        assert not outside, (
+            f"project exceptions outside the ToInfluxError hierarchy: {sorted(set(outside))} - they "
+            f"will reach a client as a bare crash with their message withheld"
+        )

@@ -144,13 +144,18 @@ writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_re
   that errors. Read [architecture/mcp-server.md](architecture/mcp-server.md) before changing it.
 - **Register every tool through `register_tool()`** (`toinflux/mcp_common.py`) and every resource
   through `_register_resource()` (`toinflux/mcp_resources.py`), never `@server.tool()`/
-  `@server.resource()` directly. They dedent the docstring - 3.13+ strips indentation at compile
-  time and 3.10-3.12 do not, so a direct registration advertises ~1.2 KB of leading whitespace on
-  the older half of the supported range - and they re-raise `ToolParamError`/`SourceConnectionError`
-  as the SDK's `ToolError`/`ResourceError`. Without that the SDK treats them as crashes and the
-  caller is told only `Error executing tool <name>` or `Error reading resource <uri>`.
-- **A new anticipated failure goes in `ANTICIPATED_FAILURES`; never widen the catch to
-  `Exception`** - a real bug must stay a crash, logged with its traceback and its text withheld.
+  `@server.resource()` directly. Both re-raise a `ToInfluxError` as the SDK's
+  `ToolError`/`ResourceError`; without that the SDK treats it as a crash and the caller is told only
+  `Error executing tool <name>` or `Error reading resource <uri>`. `register_tool()` additionally
+  dedents the docstring - 3.13+ strips indentation at compile time and 3.10-3.12 do not, so a direct
+  registration advertises ~1.2 KB of leading whitespace on the older half of the supported range.
+  `_register_resource()` does not dedent, because every resource passes `description=` explicitly;
+  a resource that ever relies on its docstring instead needs the same `cleandoc` treatment.
+- **A new deliberate failure inherits `ToInfluxError`; never widen the catch to `Exception`** - a
+  real bug must stay a crash, logged with its traceback and its text withheld. The translation
+  catches the base rather than a list of subclasses precisely so that inheriting is enough: when it
+  was a list, `ConfigError` was missing from it and every unconfigured-device failure reached the
+  model saying nothing.
 - **A new tool or resource needs a test for what it says when it fails**, not only for what it
   returns when it works. `tests/test_mcp_surface.py` fails any registration that bypasses the
   registrars, because a bypass returns the right payload and passes every behaviour test.
