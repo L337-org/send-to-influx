@@ -150,8 +150,14 @@ writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_re
   `SourceConnectionError` as the SDK's `ToolError`, which is the only thing keeping their messages
   on the wire: since mcp 2.1.0 any other exception is treated as a crash, so the model is told
   `Error executing tool <name>` and nothing else. Adding a third anticipated exception type means
-  adding it to `ANTICIPATED_TOOL_FAILURES`, and never widening the catch to `Exception` - a real bug
+  adding it to `ANTICIPATED_FAILURES`, and never widening the catch to `Exception` - a real bug
   must stay a crash, logged with its traceback and its text withheld.
+- **Every resource registers through `_register_resource()`** in `toinflux/mcp_resources.py`, never
+  `@server.resource()` directly, and for the second of those reasons: the SDK applies the same
+  type rule to a resource read, so without it an unreachable InfluxDB, an unusable source and a bug
+  in this server are all reported to the client as `Error reading resource <uri>` and nothing else.
+  A resource registered directly still works and still passes every payload test, which is why the
+  guard is on the source.
 - **Grafana vocabulary stays in `toinflux/mcp_dashboards.py`.** `mcp_read` does not import it, so the
   leak is structurally impossible rather than merely avoided.
 - **Injection defence:** measurement and tags come from the static schema, a field must match a

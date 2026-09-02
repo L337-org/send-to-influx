@@ -30,8 +30,52 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT License"
 
-from toinflux.mcp_common import configured_sources
+import functools
+
+from mcp.server.mcpserver.exceptions import ResourceError
+
+from toinflux.mcp_common import ANTICIPATED_FAILURES, configured_sources
 from toinflux.mcp_read import build_documentation, current_state_result, list_fields_result
+
+
+def _register_resource(server, *args, **kwargs):
+    """Register a resource whose anticipated failures keep their own message.
+
+    The resource-side counterpart of ``register_tool()``, and the same argument for
+    the same reason: the SDK decides what a failure says to the client purely by its
+    type. ``read_resource()`` re-raises ``ResourceError`` as it is, logs it at INFO,
+    and sends the message on; anything else becomes
+    ``UnexpectedResourceError("Error reading resource <uri>")``, logged at ERROR with
+    a traceback and its text withheld. So a resource read that failed because
+    InfluxDB was unreachable said only that it could not be read, and a client had no
+    way to tell that from an unknown source or a bad schema.
+
+    Unlike the tool half this was never a regression - mcp 2.0.0 flattened even a
+    deliberate ``ResourceError`` to the generic message ("we should not leak the
+    exception to the client"), so there was nothing to keep. 2.1.0 is what made a
+    resource able to say why it failed, which is why this arrives with that upgrade.
+
+    Only ``ANTICIPATED_FAILURES`` are translated, for the reason spelled out in
+    ``_as_tool_error()``: a bug must stay a crash, logged with its traceback and its
+    text kept off the wire.
+
+    :param server: the MCPServer instance
+    :param args: passed to ``server.resource()`` (the URI)
+    :param kwargs: passed to ``server.resource()`` (name, title, description, ...)
+    :return: a decorator registering the function as a resource
+    """
+
+    def decorator(fn):
+        @functools.wraps(fn)
+        async def wrapper():
+            try:
+                return await fn()
+            except ANTICIPATED_FAILURES as exc:
+                raise ResourceError(str(exc)) from exc
+
+        return server.resource(*args, **kwargs)(wrapper)
+
+    return decorator
 
 
 def register_resources(server, settings, settings_file=None):
@@ -46,7 +90,8 @@ def register_resources(server, settings, settings_file=None):
     """
     import anyio
 
-    @server.resource(
+    @_register_resource(
+        server,
         "docs://reference",
         name="data-reference",
         title="Data Reference",
@@ -74,7 +119,8 @@ def _register_source_resources(server, anyio, source, settings, settings_file):
     the last source.
     """
 
-    @server.resource(
+    @_register_resource(
+        server,
         f"schema://{source}",
         name=f"{source}-schema",
         title=f"{source} schema",
@@ -90,7 +136,8 @@ def _register_source_resources(server, anyio, source, settings, settings_file):
     async def _schema_resource() -> dict:
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file)
 
-    @server.resource(
+    @_register_resource(
+        server,
         f"state://{source}",
         name=f"{source}-state",
         title=f"{source} current state",

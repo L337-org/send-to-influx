@@ -620,6 +620,29 @@ asking `is_async_callable(fn)`, so an async wrapper around a sync tool would run
 the event loop, which is the stall `anyio.to_thread.run_sync` exists to avoid, and it would
 still return the right answer while doing it.
 
+**Resources are registered through `_register_resource()` in `toinflux/mcp_resources.py`
+for the second half of the same rule, and that one was never a regression - it was a gap
+2.1.0 made fixable.** The SDK decides what a failed read says to the client from the
+exception's type exactly as it does for tools: `read_resource()` re-raises a `ResourceError`
+as it is, logs it at INFO and sends the message on, while anything else becomes
+`UnexpectedResourceError("Error reading resource <uri>")`, logged at ERROR with a traceback.
+Since `ToolParamError` is a `ValueError` and `SourceConnectionError` a plain `Exception`, the
+three outcomes a read has - the source is unusable, InfluxDB is unreachable, this server has
+a bug - were indistinguishable to a client, which is a poor answer for `state://zappi` given
+that the middle one is the common one and the only one worth retrying. 2.0.0 could not have
+done better: it flattened even a deliberately raised `ResourceError` to the same generic
+string, commented "we should not leak the exception to the client", so there was nothing to
+keep. The upgrade to 2.1.0 is what created the option, which is why the change arrives with
+it.
+
+This was found by reading rather than by a test: `tests/test_mcp_resources.py` covered three
+happy-path reads and no failure at all, so nothing in CI had an opinion about what a broken
+read said. It now asserts the message and the type on both sides, and carries the source
+guard (`@server.resource(` appears nowhere in the module) that the tool registrar already
+had - the necessary one, because a resource registered directly still returns the right
+payload and passes every behaviour test, and only stops explaining itself when something
+breaks.
+
 **Two things deliberately left out**, both being context that buys nothing. A *registration*
 precondition ("requires `hue.mcp_read_write: true`") is guaranteed true whenever the model can see
 the tool at all, since a disabled capability is not registered - it was drafted into all three write

@@ -22,11 +22,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.general import INSTANCED_SOURCES, expand_sources, get_class
 
-# The two failures a tool raises deliberately, and the only two whose message is
-# meant for the model: a caller/model mistake it can correct, and a transport
-# failure it can retry or report. Anything else escaping a tool is a bug in this
-# server, and its text stays here - see _as_tool_error().
-ANTICIPATED_TOOL_FAILURES = (ToolParamError, SourceConnectionError)
+# The two failures the read surface raises deliberately, and the only two whose
+# message is meant for the model: a caller/model mistake it can correct, and a
+# transport failure it can retry or report. Anything else escaping a tool or a
+# resource is a bug in this server, and its text stays here - see _as_tool_error()
+# and, for the resource half, _register_resource() in toinflux/mcp_resources.py.
+ANTICIPATED_FAILURES = (ToolParamError, SourceConnectionError)
 
 
 def register_tool(server, **kwargs):
@@ -76,7 +77,7 @@ def _as_tool_error(fn):
     Translating here rather than per tool is the same argument as the dedent above: a
     new tool cannot forget it, because nothing registers a tool any other way.
 
-    Only ``ANTICIPATED_TOOL_FAILURES`` are translated. Anything else *is* a crash -
+    Only ``ANTICIPATED_FAILURES`` are translated. Anything else *is* a crash -
     the bare ``AttributeError`` that ``build_query`` used to raise, say - and the SDK
     withholding its text from the client is right, so it is deliberately left alone.
 
@@ -90,7 +91,7 @@ def _as_tool_error(fn):
         async def async_wrapper(*args, **kwargs):
             try:
                 return await fn(*args, **kwargs)
-            except ANTICIPATED_TOOL_FAILURES as exc:
+            except ANTICIPATED_FAILURES as exc:
                 raise ToolError(str(exc)) from exc
 
         return async_wrapper
@@ -99,7 +100,7 @@ def _as_tool_error(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except ANTICIPATED_TOOL_FAILURES as exc:
+        except ANTICIPATED_FAILURES as exc:
             raise ToolError(str(exc)) from exc
 
     return wrapper
