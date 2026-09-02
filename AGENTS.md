@@ -142,30 +142,18 @@ writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_re
   `hue_devices` measurement and the hook reads it back. An override must be best-effort and never
   raise - metadata is an annotation, and a field with none is a smaller failure than a schema call
   that errors. Read [architecture/mcp-server.md](architecture/mcp-server.md) before changing it.
-- **Every tool registers through `register_tool()`** in `toinflux/mcp_common.py`, never
-  `@server.tool()` directly. It does two things a tool cannot be trusted to remember. It dedents the
-  docstring: CPython 3.13+ strips docstring indentation at compile time and 3.10-3.12 do not, so a
-  direct registration advertises ~1.2 KB of leading whitespace on the older half of the supported
-  range, invisible to anyone developing on 3.13+. And it re-raises `ToolParamError` and
-  `SourceConnectionError` as the SDK's `ToolError`, which is the only thing keeping their messages
-  on the wire: since mcp 2.1.0 any other exception is treated as a crash, so the model is told
-  `Error executing tool <name>` and nothing else. Adding a third anticipated exception type means
-  adding it to `ANTICIPATED_FAILURES`, and never widening the catch to `Exception` - a real bug
-  must stay a crash, logged with its traceback and its text withheld.
-- **Every resource registers through `_register_resource()`** in `toinflux/mcp_resources.py`, never
-  `@server.resource()` directly, and for the second of those reasons: the SDK applies the same
-  type rule to a resource read, so without it an unreachable InfluxDB, an unusable source and a bug
-  in this server are all reported to the client as `Error reading resource <uri>` and nothing else.
-  Both registrars share one `translate_failures()`, so which failures are anticipated is decided
-  once.
-- **The guard on both is mechanical, and asks the built server rather than the source.**
-  `tests/test_mcp_surface.py` walks every registered tool and resource and fails on any whose
-  callable does not carry the translation, so a new one - in a module that does not exist yet
-  included - cannot ship without it. That guard exists because the resource half was missed for
-  exactly one reason: nothing tested a failing read, and a resource registered directly returns the
-  right payload and passes every behaviour test, going quiet only when something breaks. **A new
-  piece of advertised surface needs a test for what it says when it fails, not only for what it
-  returns when it works.**
+- **Register every tool through `register_tool()`** (`toinflux/mcp_common.py`) and every resource
+  through `_register_resource()` (`toinflux/mcp_resources.py`), never `@server.tool()`/
+  `@server.resource()` directly. They dedent the docstring - 3.13+ strips indentation at compile
+  time and 3.10-3.12 do not, so a direct registration advertises ~1.2 KB of leading whitespace on
+  the older half of the supported range - and they re-raise `ToolParamError`/`SourceConnectionError`
+  as the SDK's `ToolError`/`ResourceError`. Without that the SDK treats them as crashes and the
+  caller is told only `Error executing tool <name>` or `Error reading resource <uri>`.
+- **A new anticipated failure goes in `ANTICIPATED_FAILURES`; never widen the catch to
+  `Exception`** - a real bug must stay a crash, logged with its traceback and its text withheld.
+- **A new tool or resource needs a test for what it says when it fails**, not only for what it
+  returns when it works. `tests/test_mcp_surface.py` fails any registration that bypasses the
+  registrars, because a bypass returns the right payload and passes every behaviour test.
 - **Grafana vocabulary stays in `toinflux/mcp_dashboards.py`.** `mcp_read` does not import it, so the
   leak is structurally impossible rather than merely avoided.
 - **Injection defence:** measurement and tags come from the static schema, a field must match a
@@ -276,10 +264,6 @@ Each has been raised before and declined with reasons recorded.
   `limit_per_instance`.
 - The write buffer is not persisted across a restart, and flushes to whatever destination current
   settings resolve to.
-- Environment-variable secrets were removed deliberately. Do not propose an `EnvironmentFile=` for
-  secrets; `systemd-creds` is the supported mechanism.
-- MCP tool parameters get no deprecation window: clients fetch the schema each session, so there is no
-  stored caller to break.
 
 <!-- BEGIN GENERATED -->
 ## Read these when they apply
