@@ -643,6 +643,20 @@ had - the necessary one, because a resource registered directly still returns th
 payload and passes every behaviour test, and only stops explaining itself when something
 breaks.
 
+**The real defect was the coverage hole, so that is what was fixed.** The tool half was
+caught by CI only because two tests happened to assert on an error message; the resource
+half was caught by nothing, and was found by reading the SDK, which is not a process. More
+per-item tests would not close that, because they cover what someone remembered to write one
+for and what went missing is precisely what nobody remembered. `tests/test_mcp_surface.py`
+therefore asks the built server: every tool and every resource it advertises must carry a
+wrapper from `translate_failures()`, which is marked with `TRANSLATES_FAILURES` for the
+purpose. That reaches a registration in a module that does not exist yet, which the source
+greps in the two registrar modules cannot. Both bypasses were planted to confirm it bites,
+and it named `get_data_range` and the two `state://` resources exactly. A third assertion
+checks the guard is enumerating a full surface at all, because "no bad entries found" is
+also what an empty list says, and a check that silently stopped looking is indistinguishable
+from one that passed.
+
 **Two things deliberately left out**, both being context that buys nothing. A *registration*
 precondition ("requires `hue.mcp_read_write: true`") is guaranteed true whenever the model can see
 the tool at all, since a disabled capability is not registered - it was drafted into all three write

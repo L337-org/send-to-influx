@@ -119,6 +119,7 @@ from mcp.server.mcpserver import MCPServer
 import anyio
 import pytest
 
+from toinflux.mcp_common import TRANSLATES_FAILURES
 from toinflux.mcp_dashboards import register_dashboard_tools
 from toinflux.mcp_prompts import register_prompts
 from toinflux.mcp_read import register_read_tools
@@ -249,6 +250,16 @@ def surface():
         "prompts": anyio.run(server.list_prompts),
         "resources": anyio.run(server.list_resources),
     }
+
+
+@pytest.fixture(scope="module")
+def registered():
+    """The server itself, for the checks that need the registered callables.
+
+    The ``surface`` fixture holds what a client is *told*; this holds what would
+    actually run, which is where the failure-translation guard has to look.
+    """
+    return _server()
 
 
 class TestEverythingAdvertisedIsDescribed:
@@ -455,3 +466,64 @@ class TestSurfaceBudget:
             f"{MAX_TOTAL_BYTES}-byte budget - raising it is a deliberate decision that "
             f"belongs in the commit message with its reason"
         )
+
+
+class TestEveryAdvertisedThingExplainsItsFailures:
+    """The guard for the hole that let a whole half of the surface go unchecked.
+
+    The tool half of this was caught by CI, but only because two tests in
+    test_mcp_read.py happened to assert on an error message. The resource half was
+    caught by nothing: test_mcp_resources.py covered three happy-path reads and no
+    failure at all, so `state://hue` answering "Error reading resource state://hue" to
+    an unreachable InfluxDB, an unusable source and a genuine bug alike was invisible
+    to the entire suite. It was found by reading the SDK, which is not a process.
+
+    Per-item tests could not have closed that: they cover what someone remembered to
+    write one for, which is exactly what went missing. So this asks the built server
+    instead. Every tool and every resource it advertises must carry a wrapper from
+    `translate_failures()`, whichever module registered it and whenever it was added -
+    including a module that does not exist yet, which is the case the source greps in
+    the two registrar modules cannot reach.
+    """
+
+    def test_every_registered_tool_translates_anticipated_failures(self, registered):
+        unwrapped = sorted(
+            tool.name
+            for tool in registered._tool_manager.list_tools()
+            if not getattr(tool.fn, TRANSLATES_FAILURES, False)
+        )
+        assert not unwrapped, (
+            f"tools {unwrapped} do not translate ToolParamError/SourceConnectionError - register "
+            f"through register_tool() so a caller mistake reaches the model with its message "
+            f"instead of a bare 'Error executing tool <name>'"
+        )
+
+    def test_every_registered_resource_translates_anticipated_failures(self, registered):
+        unwrapped = sorted(
+            str(resource.uri)
+            for resource in registered._resource_manager.list_resources()
+            if not getattr(resource.fn, TRANSLATES_FAILURES, False)
+        )
+        assert not unwrapped, (
+            f"resources {unwrapped} do not translate ToolParamError/SourceConnectionError - "
+            f"register through _register_resource() so a failed read says why instead of a bare "
+            f"'Error reading resource <uri>'"
+        )
+
+    def test_the_guard_is_actually_reading_the_surface(self, registered):
+        """A guard that silently enumerated nothing would pass forever.
+
+        Both assertions above are "no bad entries found", which an empty list satisfies -
+        so if a future SDK renames `_tool_manager`, stops holding the callable on `.fn`,
+        or registers through some other path, they would go green while checking nothing
+        at all. This fails instead, which is the difference between a check that skipped
+        and a check that passed.
+        """
+        tools = registered._tool_manager.list_tools()
+        resources = registered._resource_manager.list_resources()
+        assert {tool.name for tool in tools} == set(SIBLINGS), "not every tool reached the tool manager"
+        assert len(resources) == 5, f"enumerated {len(resources)} resources, expected the fixture's 5"
+        assert all(callable(getattr(tool, "fn", None)) for tool in tools), "Tool.fn is no longer the callable"
+        assert all(
+            callable(getattr(resource, "fn", None)) for resource in resources
+        ), "Resource.fn is no longer the callable"

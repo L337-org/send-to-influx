@@ -156,8 +156,16 @@ writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_re
   `@server.resource()` directly, and for the second of those reasons: the SDK applies the same
   type rule to a resource read, so without it an unreachable InfluxDB, an unusable source and a bug
   in this server are all reported to the client as `Error reading resource <uri>` and nothing else.
-  A resource registered directly still works and still passes every payload test, which is why the
-  guard is on the source.
+  Both registrars share one `translate_failures()`, so which failures are anticipated is decided
+  once.
+- **The guard on both is mechanical, and asks the built server rather than the source.**
+  `tests/test_mcp_surface.py` walks every registered tool and resource and fails on any whose
+  callable does not carry the translation, so a new one - in a module that does not exist yet
+  included - cannot ship without it. That guard exists because the resource half was missed for
+  exactly one reason: nothing tested a failing read, and a resource registered directly returns the
+  right payload and passes every behaviour test, going quiet only when something breaks. **A new
+  piece of advertised surface needs a test for what it says when it fails, not only for what it
+  returns when it works.**
 - **Grafana vocabulary stays in `toinflux/mcp_dashboards.py`.** `mcp_read` does not import it, so the
   leak is structurally impossible rather than merely avoided.
 - **Injection defence:** measurement and tags come from the static schema, a field must match a

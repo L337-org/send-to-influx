@@ -30,11 +30,9 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT License"
 
-import functools
-
 from mcp.server.mcpserver.exceptions import ResourceError
 
-from toinflux.mcp_common import ANTICIPATED_FAILURES, configured_sources
+from toinflux.mcp_common import configured_sources, translate_failures
 from toinflux.mcp_read import build_documentation, current_state_result, list_fields_result
 
 
@@ -56,8 +54,8 @@ def _register_resource(server, *args, **kwargs):
     resource able to say why it failed, which is why this arrives with that upgrade.
 
     Only ``ANTICIPATED_FAILURES`` are translated, for the reason spelled out in
-    ``_as_tool_error()``: a bug must stay a crash, logged with its traceback and its
-    text kept off the wire.
+    ``translate_failures()``: a bug must stay a crash, logged with its traceback and
+    its text kept off the wire.
 
     :param server: the MCPServer instance
     :param args: passed to ``server.resource()`` (the URI)
@@ -66,14 +64,7 @@ def _register_resource(server, *args, **kwargs):
     """
 
     def decorator(fn):
-        @functools.wraps(fn)
-        async def wrapper():
-            try:
-                return await fn()
-            except ANTICIPATED_FAILURES as exc:
-                raise ResourceError(str(exc)) from exc
-
-        return server.resource(*args, **kwargs)(wrapper)
+        return server.resource(*args, **kwargs)(translate_failures(fn, ResourceError))
 
     return decorator
 
