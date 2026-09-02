@@ -594,6 +594,32 @@ Verified by simulation as well as by CI - re-indenting each 3.14 description the
 3.10-3.12 present it and pushing it back through `cleandoc` reproduces `query_history` at
 exactly the 2,209 bytes CI reported, and returns all nine to byte-identical.
 
+**`register_tool()` also translates the two anticipated failures into the SDK's `ToolError`,
+and without it the mcp 2.1.0 upgrade silently emptied every tool error message.** Up to
+2.0.0 the SDK re-raised whatever a tool raised as `ToolError(f"Error executing tool {name}:
+{e}")`, so a `ToolParamError` reading "unknown field 'evil' for source 'zappi'; choose one
+of: ..." travelled with it, which is the entire reason for raising one. 2.1.0 changed the
+rule to keep crash details off the wire: only `ToolError` and `ResourceError` keep their
+text, and everything else becomes `UnexpectedToolError("Error executing tool <name>")`,
+logged at ERROR with a traceback. `ToolParamError` is a `ValueError` and
+`SourceConnectionError` a plain `Exception`, so all 46 `raise ToolParamError` sites and
+every `SourceConnectionError` a read surfaces were reclassified as server crashes at once: the model was told that a call failed and
+never what to send instead, and ordinary caller mistakes filled the log as crashes. Two
+tests in `tests/test_mcp_read.py` caught it because they assert on the message; nothing
+else did, which is why `tests/test_mcp_common.py` now asserts the *type* on both sides -
+an anticipated failure arrives as a plain `ToolError`, and a bug still arrives as an
+`UnexpectedToolError` with its text withheld.
+
+The translation is a listed pair (`ANTICIPATED_TOOL_FAILURES`) and not a bare `except
+Exception` on purpose. Dressing a bug up as a deliberate tool error would lose exactly what
+the SDK change was written to protect: the bare `AttributeError` `build_query` used to raise
+on a schema with no axis would have been handed to the model as though it were an
+instruction to the caller, and logged without its traceback. The wrapper matches the tool's
+own sync/async-ness for the same class of reason - the SDK decides whether to await by
+asking `is_async_callable(fn)`, so an async wrapper around a sync tool would run its body on
+the event loop, which is the stall `anyio.to_thread.run_sync` exists to avoid, and it would
+still return the right answer while doing it.
+
 **Two things deliberately left out**, both being context that buys nothing. A *registration*
 precondition ("requires `hue.mcp_read_write: true`") is guaranteed true whenever the model can see
 the tool at all, since a disabled capability is not registered - it was drafted into all three write

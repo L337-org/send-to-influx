@@ -13,11 +13,20 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT License"
 
+import functools
 import inspect
 import logging
 
-from toinflux.exceptions import ConfigError, ToolParamError
+from mcp.server.mcpserver.exceptions import ToolError
+
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.general import INSTANCED_SOURCES, expand_sources, get_class
+
+# The two failures a tool raises deliberately, and the only two whose message is
+# meant for the model: a caller/model mistake it can correct, and a transport
+# failure it can retry or report. Anything else escaping a tool is a bug in this
+# server, and its text stays here - see _as_tool_error().
+ANTICIPATED_TOOL_FAILURES = (ToolParamError, SourceConnectionError)
 
 
 def register_tool(server, **kwargs):
@@ -45,9 +54,55 @@ def register_tool(server, **kwargs):
 
     def decorator(fn):
         kwargs.setdefault("description", inspect.cleandoc(fn.__doc__ or ""))
-        return server.tool(**kwargs)(fn)
+        return server.tool(**kwargs)(_as_tool_error(fn))
 
     return decorator
+
+
+def _as_tool_error(fn):
+    """Wrap a tool so an anticipated failure reaches the model as its own message.
+
+    mcp 2.1.0 stopped putting a non-``ToolError`` exception's text on the wire: the
+    SDK now treats anything else a tool raises as a crash, so the model receives only
+    ``Error executing tool <name>`` and the server logs a traceback at ERROR
+    (``mcp/server/mcpserver/tools/base.py``, whose docstring puts it as "a crash does
+    not, so nothing from an unexpected exception reaches the client"). Under 2.0.0
+    every exception was re-raised as ``ToolError(f"Error executing tool {name}: {e}")``,
+    so ``ToolParamError``'s "unknown field 'evil' for source 'zappi'; choose one of..."
+    - the entire point of raising it - travelled with it. Without this wrapper the
+    upgrade silently emptied every one of those messages, and logged 46 raise sites'
+    worth of ordinary caller mistakes as server crashes.
+
+    Translating here rather than per tool is the same argument as the dedent above: a
+    new tool cannot forget it, because nothing registers a tool any other way.
+
+    Only ``ANTICIPATED_TOOL_FAILURES`` are translated. Anything else *is* a crash -
+    the bare ``AttributeError`` that ``build_query`` used to raise, say - and the SDK
+    withholding its text from the client is right, so it is deliberately left alone.
+
+    :param fn: the tool function, sync or async
+    :return: a wrapper of the same sync/async-ness and signature, which the SDK needs
+        to build the tool's schema and to decide whether to await it
+    """
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def async_wrapper(*args, **kwargs):
+            try:
+                return await fn(*args, **kwargs)
+            except ANTICIPATED_TOOL_FAILURES as exc:
+                raise ToolError(str(exc)) from exc
+
+        return async_wrapper
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ANTICIPATED_TOOL_FAILURES as exc:
+            raise ToolError(str(exc)) from exc
+
+    return wrapper
 
 
 def configured_sources(settings):

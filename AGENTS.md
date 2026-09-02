@@ -143,9 +143,15 @@ writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_re
   raise - metadata is an annotation, and a field with none is a smaller failure than a schema call
   that errors. Read [architecture/mcp-server.md](architecture/mcp-server.md) before changing it.
 - **Every tool registers through `register_tool()`** in `toinflux/mcp_common.py`, never
-  `@server.tool()` directly: CPython 3.13+ strips docstring indentation at compile time and 3.10-3.12
-  do not, so a direct registration advertises ~1.2 KB of leading whitespace on the older half of the
-  supported range, invisible to anyone developing on 3.13+.
+  `@server.tool()` directly. It does two things a tool cannot be trusted to remember. It dedents the
+  docstring: CPython 3.13+ strips docstring indentation at compile time and 3.10-3.12 do not, so a
+  direct registration advertises ~1.2 KB of leading whitespace on the older half of the supported
+  range, invisible to anyone developing on 3.13+. And it re-raises `ToolParamError` and
+  `SourceConnectionError` as the SDK's `ToolError`, which is the only thing keeping their messages
+  on the wire: since mcp 2.1.0 any other exception is treated as a crash, so the model is told
+  `Error executing tool <name>` and nothing else. Adding a third anticipated exception type means
+  adding it to `ANTICIPATED_TOOL_FAILURES`, and never widening the catch to `Exception` - a real bug
+  must stay a crash, logged with its traceback and its text withheld.
 - **Grafana vocabulary stays in `toinflux/mcp_dashboards.py`.** `mcp_read` does not import it, so the
   leak is structurally impossible rather than merely avoided.
 - **Injection defence:** measurement and tags come from the static schema, a field must match a
