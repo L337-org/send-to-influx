@@ -1,12 +1,14 @@
 """Unit tests for toinflux.mcp_common (the shared MCP handler-lifecycle plumbing:
 source resolution, handler construction, and best-effort session close)."""
 
+import json
 from unittest.mock import MagicMock, patch
 
+import anyio
 import pytest
 
-from toinflux.exceptions import ConfigError, ToolParamError
-from toinflux.mcp_common import close_session, configured_sources, resolve_handler
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
+from toinflux.mcp_common import close_session, configured_sources, register_tool, resolve_handler
 
 
 class TestConfiguredSources:
@@ -120,3 +122,123 @@ class TestCloseSession:
         session.close.side_effect = RuntimeError("nope")
         close_session(session)  # must not raise
         session.close.assert_called_once_with()
+
+
+class TestRegisterToolErrorTranslation:
+    """What a tool's failure message says to the model, which the SDK decides by type.
+
+    mcp 2.1.0 stopped putting a non-``ToolError`` exception's text on the wire, so a
+    ``ToolParamError`` reading "unknown field 'evil' for source 'zappi'; choose one of:
+    ..." arrived as ``Error executing tool query_history`` and nothing else - the model
+    told only that it failed, and never what to send instead. It was logged as a server
+    crash with a traceback too. ``register_tool()`` translates the two anticipated
+    failures into the SDK's ``ToolError`` to restore both; these tests are what catches
+    the next SDK release moving that line again, since nothing else asserts on the type.
+    """
+
+    @staticmethod
+    def _server():
+        from mcp.server.mcpserver import MCPServer
+
+        return MCPServer(name="test")
+
+    def test_tool_param_error_keeps_its_message(self):
+        server = self._server()
+
+        @register_tool(server, title="T")
+        async def boom(field: str) -> dict:
+            """Doc."""
+            raise ToolParamError(f"unknown field {field!r}; choose one of: gen, imp")
+
+        with pytest.raises(Exception) as excinfo:
+            anyio.run(server.call_tool, "boom", {"field": "evil"})
+        assert "unknown field 'evil'; choose one of: gen, imp" in str(excinfo.value)
+
+    def test_source_connection_error_keeps_its_message(self):
+        server = self._server()
+
+        @register_tool(server, title="T")
+        async def boom() -> dict:
+            """Doc."""
+            raise SourceConnectionError("InfluxDB read failed (field history): timed out")
+
+        with pytest.raises(Exception) as excinfo:
+            anyio.run(server.call_tool, "boom", {})
+        assert "InfluxDB read failed (field history): timed out" in str(excinfo.value)
+
+    def test_an_anticipated_failure_is_not_classed_as_a_crash(self):
+        # The type is the whole mechanism: the SDK logs an UnexpectedToolError at ERROR
+        # with a traceback and withholds its text, and a plain ToolError at INFO with the
+        # message kept. Asserting only on the message would still pass if a later SDK
+        # started reporting crashes verbosely, and the log level would silently be wrong.
+        from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+
+        server = self._server()
+
+        @register_tool(server, title="T")
+        async def boom() -> dict:
+            """Doc."""
+            raise ToolParamError("bad field")
+
+        with pytest.raises(ToolError) as excinfo:
+            anyio.run(server.call_tool, "boom", {})
+        assert not isinstance(excinfo.value, UnexpectedToolError)
+
+    def test_an_unanticipated_failure_stays_a_crash_with_its_text_withheld(self):
+        # The other half of the contract, and the reason the translation is a listed pair
+        # rather than a bare `except Exception`: a bug in this server must not be dressed
+        # up as a deliberate tool error, because then it is neither logged with its
+        # traceback nor kept off the wire.
+        from mcp.server.mcpserver.exceptions import UnexpectedToolError
+
+        server = self._server()
+
+        @register_tool(server, title="T")
+        async def boom() -> dict:
+            """Doc."""
+            raise AttributeError("'NoneType' object has no attribute 'lower'")
+
+        with pytest.raises(UnexpectedToolError) as excinfo:
+            anyio.run(server.call_tool, "boom", {})
+        assert "NoneType" not in str(excinfo.value)
+
+    def test_a_sync_tool_is_not_turned_into_a_coroutine_function(self):
+        """The wrapper must match the tool's own sync/async-ness.
+
+        The SDK asks ``is_async_callable(fn)`` and awaits accordingly, so an async
+        wrapper around a sync tool would be awaited and its body would run on the event
+        loop - exactly the stall the read tools use ``anyio.to_thread.run_sync`` to
+        avoid, and silent, since the call would still return the right answer.
+        """
+        import inspect
+
+        server = self._server()
+
+        @register_tool(server, title="T")
+        def sync_tool() -> dict:
+            """Doc."""
+            return {"ok": True}
+
+        assert not inspect.iscoroutinefunction(sync_tool)
+        # And it still runs: the SDK calls a sync tool without awaiting it.
+        result = anyio.run(server.call_tool, "sync_tool", {})
+        assert json.loads(result.content[0].text) == {"ok": True}
+
+    def test_the_advertised_schema_still_comes_from_the_tool_signature(self):
+        # functools.wraps is what keeps this true (inspect.signature follows __wrapped__,
+        # and the SDK builds the input schema from it) - a hand-rolled wrapper would
+        # advertise (*args, **kwargs) and every tool would take no arguments.
+        server = self._server()
+
+        @register_tool(server, title="T")
+        async def documented(source: str, detail: bool = False) -> dict:
+            """First line.
+
+            Indented continuation."""
+            return {}
+
+        tool = anyio.run(server.list_tools)[0]
+        assert sorted(tool.input_schema["properties"]) == ["detail", "source"]
+        assert tool.input_schema["required"] == ["source"]
+        # And the dedent register_tool exists for still happens.
+        assert tool.description == "First line.\n\nIndented continuation."

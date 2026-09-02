@@ -13,11 +13,27 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT License"
 
+import functools
 import inspect
 import logging
 
-from toinflux.exceptions import ConfigError, ToolParamError
+from mcp.server.mcpserver.exceptions import ToolError
+
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.general import INSTANCED_SOURCES, expand_sources, get_class
+
+# The two failures the read surface raises deliberately, and the only two whose
+# message is meant for the model: a caller/model mistake it can correct, and a
+# transport failure it can retry or report. Anything else escaping a tool or a
+# resource is a bug in this server, and its text stays here - see
+# translate_failures().
+ANTICIPATED_FAILURES = (ToolParamError, SourceConnectionError)
+
+# Set on every wrapper translate_failures() builds, so the surface guard in
+# tests/test_mcp_surface.py can ask the built server - rather than the source of the
+# two modules that happen to register things today - whether every advertised tool and
+# resource actually carries the translation.
+TRANSLATES_FAILURES = "toinflux_translates_failures"
 
 
 def register_tool(server, **kwargs):
@@ -45,9 +61,70 @@ def register_tool(server, **kwargs):
 
     def decorator(fn):
         kwargs.setdefault("description", inspect.cleandoc(fn.__doc__ or ""))
-        return server.tool(**kwargs)(fn)
+        return server.tool(**kwargs)(translate_failures(fn, ToolError))
 
     return decorator
+
+
+def translate_failures(fn, error_cls):
+    """Wrap a tool or resource so an anticipated failure keeps its own message.
+
+    mcp 2.1.0 stopped putting a non-``ToolError`` exception's text on the wire: the
+    SDK now treats anything else a tool raises as a crash, so the model receives only
+    ``Error executing tool <name>`` and the server logs a traceback at ERROR
+    (``mcp/server/mcpserver/tools/base.py``, whose docstring puts it as "a crash does
+    not, so nothing from an unexpected exception reaches the client"). Under 2.0.0
+    every exception was re-raised as ``ToolError(f"Error executing tool {name}: {e}")``,
+    so ``ToolParamError``'s "unknown field 'evil' for source 'zappi'; choose one of..."
+    - the entire point of raising it - travelled with it. Without this wrapper the
+    upgrade silently emptied every one of those messages, and logged 46 raise sites'
+    worth of ordinary caller mistakes as server crashes.
+
+    The resource half of the rule is the same shape with ``ResourceError``, and was
+    never a regression but a gap: 2.0.0 flattened even a deliberately raised
+    ``ResourceError`` to ``Error reading resource <uri>``, so a resource could not
+    explain itself at all until 2.1.0 made it possible.
+
+    Translating here rather than per tool is the same argument as the dedent above: a
+    new tool cannot forget it, because nothing registers a tool any other way. One
+    implementation for both halves so the marker, and the decision about which
+    failures are anticipated, exist once.
+
+    Only ``ANTICIPATED_FAILURES`` are translated. Anything else *is* a crash -
+    the bare ``AttributeError`` that ``build_query`` used to raise, say - and the SDK
+    withholding its text from the client is right, so it is deliberately left alone.
+
+    :param fn: the tool or resource function, sync or async
+    :param error_cls: the SDK error to re-raise as - ``ToolError`` for a tool,
+        ``ResourceError`` for a resource; these are the only two types the SDK reads
+        as deliberate rather than as a crash
+    :return: a wrapper of the same sync/async-ness and signature, which the SDK needs
+        to build the tool's schema and to decide whether to await it, carrying
+        ``TRANSLATES_FAILURES`` so the surface guard can see it
+    """
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def async_wrapper(*args, **kwargs):
+            try:
+                return await fn(*args, **kwargs)
+            except ANTICIPATED_FAILURES as exc:
+                raise error_cls(str(exc)) from exc
+
+        # After functools.wraps, which copies the wrapped function's __dict__ over the
+        # wrapper's and would otherwise drop this.
+        setattr(async_wrapper, TRANSLATES_FAILURES, True)
+        return async_wrapper
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ANTICIPATED_FAILURES as exc:
+            raise error_cls(str(exc)) from exc
+
+    setattr(wrapper, TRANSLATES_FAILURES, True)
+    return wrapper
 
 
 def configured_sources(settings):

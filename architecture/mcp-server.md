@@ -594,6 +594,40 @@ Verified by simulation as well as by CI - re-indenting each 3.14 description the
 3.10-3.12 present it and pushing it back through `cleandoc` reproduces `query_history` at
 exactly the 2,209 bytes CI reported, and returns all nine to byte-identical.
 
+**`register_tool()` also translates the two anticipated failures into the SDK's `ToolError`,
+and `_register_resource()` in `toinflux/mcp_resources.py` does the same with `ResourceError`.**
+Since 2.1.0 the SDK decides what a failure tells the caller purely by its type: a `ToolError` or
+`ResourceError` keeps its message and is logged at INFO, and anything else is treated as a crash -
+the caller gets `Error executing tool <name>` or `Error reading resource <uri>` and nothing more,
+and the server logs a traceback at ERROR. `ToolParamError` is a `ValueError` and
+`SourceConnectionError` a plain `Exception`, so without the translation every deliberate message
+this server raises is withheld, and every ordinary caller mistake is logged as a crash. Both
+registrars share one `translate_failures()`, so which failures count as anticipated is decided
+once.
+
+**The translation is a listed pair (`ANTICIPATED_FAILURES`) and must never become a bare `except
+Exception`.** Dressing a bug up as a deliberate failure loses exactly what the SDK's rule protects:
+the bare `AttributeError` `build_query` used to raise on a schema with no axis would reach the
+model as though it were an instruction to the caller, with no traceback logged. The wrapper also
+matches the tool's own sync/async-ness, because the SDK decides whether to await by asking
+`is_async_callable(fn)` - an async wrapper around a sync tool would run its body on the event loop,
+the stall `anyio.to_thread.run_sync` exists to avoid, and would still return the right answer while
+doing it.
+
+**The resource half is why the floor is 2.1: mcp 2.0.0 flattened even a deliberately raised
+`ResourceError`** to the same generic string ("we should not leak the exception to the client"), so
+a resource could not explain itself at all. Lowering the pin again silently reverts every resource
+to answering an unusable source, an unreachable InfluxDB and a bug in this server identically.
+
+**The guard is mechanical and reads the built server**, not the source of the modules that happen to
+register things today: `tests/test_mcp_surface.py` walks every registered tool and resource and
+fails on any whose callable lacks the `TRANSLATES_FAILURES` mark, which reaches a registration in a
+module that does not exist yet. It has to be mechanical because a directly-registered tool or
+resource returns the right payload and passes every behaviour test, going quiet only when something
+breaks - so no payload assertion can see the mistake. A third assertion checks the guard is
+enumerating a full surface, since "no bad entries found" is also what an empty list says, and a
+check that has silently stopped looking is indistinguishable from one that passed.
+
 **Two things deliberately left out**, both being context that buys nothing. A *registration*
 precondition ("requires `hue.mcp_read_write: true`") is guaranteed true whenever the model can see
 the tool at all, since a disabled capability is not registered - it was drafted into all three write
