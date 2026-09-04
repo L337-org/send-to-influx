@@ -590,6 +590,41 @@ def test_every_module_carries_the_licence_header():
     assert not missing, f"{len(missing)} module(s) break the licence-header convention:\n  " + "\n  ".join(missing)
 
 
+def test_the_declared_licence_agrees_across_the_project():
+    """pyproject.toml and every module header must name the same SPDX licence.
+
+    There are exactly two homes for this - the packaging metadata and the header block - and
+    nothing previously compared them. They had in fact diverged in form for as long as both
+    existed: the modules said "MIT License" while pyproject pointed at a file, so neither
+    stated a machine-readable identifier and no single value was authoritative.
+
+    Read with a regex rather than ``tomllib`` for the same reason as the Python floor above:
+    ``tomllib`` is stdlib only from 3.11 and the suite runs on 3.10 in CI.
+
+    A relicence now has to touch both places or fail here, which is the whole point - the
+    licence a package advertises and the licence its source claims disagreeing is the one
+    outcome worth a test.
+    """
+    from packaging.licenses import canonicalize_license_expression
+
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    declared = re.search(r'^license\s*=\s*"([^"]*)"', pyproject, re.M)
+    assert declared, (
+        "could not find a string `license` in pyproject.toml. PEP 639 deprecated the table "
+        "forms, so a `license = { file = ... }` here is the thing to fix rather than this test"
+    )
+    packaged = canonicalize_license_expression(declared.group(1))
+
+    disagreeing = {}
+    for path in _modules_that_carry_a_header():
+        header = _header_assignments(path.read_text(encoding="utf-8"))
+        if header.get("__license__") != packaged:
+            disagreeing[str(path.relative_to(REPO_ROOT))] = header.get("__license__")
+    assert not disagreeing, f"pyproject.toml declares {packaged!r} but these modules disagree:\n  " + "\n  ".join(
+        f"{where}: {what!r}" for where, what in sorted(disagreeing.items())
+    )
+
+
 def _module_constant(relative, name):
     """The value of a module-level constant, read without importing the module.
 
