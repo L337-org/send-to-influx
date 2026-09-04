@@ -500,7 +500,7 @@ def _modules_that_carry_a_header():
     finds at the top of a module, and a test file is neither. Derived from what git tracks
     rather than from a list, so a module added later is covered without anyone remembering.
 
-    :return: paths relative to the repository root
+    :return: absolute paths, as ``_tracked_files()`` yields them
     :rtype: list
     """
     return [path for path in _tracked_files() if path.suffix == ".py" and "tests" not in path.parts]
