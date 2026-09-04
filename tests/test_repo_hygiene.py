@@ -370,9 +370,10 @@ def test_ci_job_timeouts_are_sane():
     fires on a healthy run gets raised until it is the former. These are sized at roughly ten
     times the observed maximum, so the bound is meaningful without being flaky.
 
-    Values must be literal, for the same reason: a `${{ }}` expression is legal in Actions but
-    its value is unknowable here, so it would satisfy the check while leaving the job
-    effectively unbounded.
+    What is required is that the bound be *knowable at review time*, which is not the same as
+    requiring a YAML number - a quoted digit string is accepted and coerced, for the reason
+    given at the check below. A `${{ }}` expression is refused, because one resolving to 600 at
+    run time would satisfy a static bound while leaving the job effectively unbounded.
     """
     for path, name, job in _workflow_jobs():
         minutes = job.get("timeout-minutes")
@@ -391,9 +392,10 @@ def test_ci_job_timeouts_are_sane():
             # unbounded. Nothing here needs one, so the bound stays real; if a job ever does,
             # change this deliberately rather than working around it.
             assert minutes.strip().isdigit(), (
-                f"{path}:{name} has timeout-minutes={minutes!r}, which is not a literal number. "
-                f"An expression is valid Actions, but its value cannot be checked here, so the "
-                f"bound would stop meaning anything"
+                f"{path}:{name} has timeout-minutes={minutes!r}, whose value cannot be known at "
+                f"review time. An expression is valid Actions, but one resolving to 600 at run "
+                f"time would satisfy this bound while leaving the job unbounded. A quoted number "
+                f"is accepted; this is not"
             )
             minutes = int(minutes)
         assert isinstance(minutes, int) and not isinstance(
@@ -531,7 +533,10 @@ def _header_assignments(text):
             continue
         try:
             value = ast.literal_eval(node.value)
-        except ValueError:
+        except (ValueError, TypeError):
+            # A header dunder built from an expression is not a literal we can read. Skipped
+            # rather than fatal: the caller then reports it as a missing field, which is what
+            # it effectively is, and names the module.
             continue
         for target in node.targets:
             if isinstance(target, ast.Name):
@@ -643,7 +648,19 @@ def _module_constant(relative, name):
         if isinstance(node, ast.Assign) and any(
             isinstance(target, ast.Name) and target.id == name for target in node.targets
         ):
-            return ast.literal_eval(node.value)
+            try:
+                return ast.literal_eval(node.value)
+            except (ValueError, TypeError) as exc:
+                # Turning a constant into a computed expression is a legitimate change.
+                # Failing here with a raw traceback would report that Python could not
+                # evaluate something, rather than which constant this check can no longer
+                # read and what to do instead.
+                raise AssertionError(
+                    f"{relative} declares {name} as a computed expression rather than a "
+                    f"literal ({exc}), so it cannot be read without importing the module. "
+                    f"Keep it literal, or drop it from DOCUMENTED_CONSTANTS and guard the "
+                    f"documented figure another way"
+                ) from exc
     raise AssertionError(f"{relative} declares no module-level {name}")
 
 
