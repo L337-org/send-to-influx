@@ -17,6 +17,27 @@ concurrency:
 # Jobs
 jobs:
 
+  repo-hygiene:
+    # Conventions every repository in this organisation shares, checked by a script that is
+    # byte-identical in each of them and verifies itself against a recorded digest. Editing one
+    # copy fails this job; divergence between copies is watched separately, on a schedule,
+    # because nothing inside one repository could ever see the others.
+    #
+    # Needs no project install: the script carries its own PEP 723 dependency header.
+    runs-on: [ubuntu-latest]
+    name: Repository hygiene
+    # 3s observed - a git listing, a YAML parse of the workflows, and some regexes.
+    timeout-minutes: 5
+    steps:
+      - name: Check out source repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Repository conventions hold
+        run: uv run scripts/check-repo-hygiene.py
+
   action-pins:
     # Ported from L337-org/apt's job of the same name, which is the org's reference
     # implementation of this check - one copy of the logic per repo, but deliberately
