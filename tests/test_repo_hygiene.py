@@ -445,18 +445,19 @@ def _declared_minimum_pythons():
     # a copy that only fails when it happens to sit on one line is worse than no check. Each
     # occurrence is keyed separately: a document stating the floor twice must have both right,
     # and a dict keyed by filename alone would let the second overwrite the first unchecked.
-    documented = 0
+    # Asserted per file rather than on the total. An aggregate count lets one document go
+    # silent as long as another happens to state the floor twice, which is the same guard
+    # quietly checking less than it appears to.
     for relative in DOC_COPIES_OF_THE_DEB_PYTHON_FLOOR:
         text = re.sub(r"\s+", " ", (REPO_ROOT / relative).read_text(encoding="utf-8"))
-        for index, match in enumerate(re.finditer(r"python3 \(>= 3\.(\d+)\)", text), 1):
+        matches = list(re.finditer(r"python3 \(>= 3\.(\d+)\)", text))
+        assert matches, (
+            f"{relative} no longer states the .deb's python3 floor, so it has removed itself "
+            f"from this check - restore the `Depends: python3 (>= 3.X)` mention, or drop the "
+            f"file from DOC_COPIES_OF_THE_DEB_PYTHON_FLOOR deliberately"
+        )
+        for index, match in enumerate(matches, 1):
             found[f"{relative} `Depends:` prose #{index}"] = int(match.group(1))
-            documented += 1
-    assert documented >= len(DOC_COPIES_OF_THE_DEB_PYTHON_FLOOR), (
-        "expected each of "
-        f"{list(DOC_COPIES_OF_THE_DEB_PYTHON_FLOOR)} to state the .deb's python3 floor, "
-        f"found {documented} statement(s) - a document that stopped mentioning it has "
-        "removed itself from this check"
-    )
 
     return found
 
@@ -505,8 +506,35 @@ def _modules_that_carry_a_header():
     return [path for path in _tracked_files() if path.suffix == ".py" and "tests" not in path.parts]
 
 
+def _header_names(text):
+    """The dunder names assigned above a module's first import or definition.
+
+    Position is asserted rather than mere presence, because the convention is a header block:
+    the same three assignments buried between two functions would satisfy a substring search
+    while being no header at all. "Above the first import or definition" is what "at the top"
+    means here in practice - comments and the module docstring do not count as statements.
+
+    :param str text: the module's source
+    :return: names assigned in the header region
+    :rtype: set
+    """
+    import ast
+
+    names = set()
+    for node in ast.parse(text).body:
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            break
+        if isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    return names
+
+
 def test_every_module_carries_the_licence_header():
     """Author, copyright and licence appear at the top of every non-test module.
+
+    "At the top" is enforced, not just "somewhere in the file": the three assignments must sit
+    above the module's first import or definition, which is what makes them a header rather
+    than three statements that happen to exist.
 
     Collected into one report rather than failing on the first offender, so adding several
     modules at once shows every miss instead of one at a time across as many CI runs.
@@ -522,7 +550,7 @@ def test_every_module_carries_the_licence_header():
     missing = []
     for path in modules:
         text = path.read_text(encoding="utf-8")
-        absent = [field for field in LICENCE_HEADER_FIELDS if f"{field} = " not in text]
+        absent = [field for field in LICENCE_HEADER_FIELDS if field not in _header_names(text)]
         if absent:
             missing.append(f"{path.relative_to(REPO_ROOT)} declares no {', '.join(absent)}")
         elif COPYRIGHT_HOLDER not in re.search(r'__copyright__ = "([^"]*)"', text).group(1):
