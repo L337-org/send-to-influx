@@ -63,6 +63,28 @@ NOT_A_TRACKER_KEY = re.compile(
 
 WIKI_HOSTS = ("atlassian.net", "/wiki/spaces/")
 
+# Documents that restate the .deb's `Depends:` python3 floor. Folded into the floor check
+# below rather than left as prose: each copy is correct today, and nothing else would notice
+# the day the floor rises and a document keeps the old number - at which point the stale copy
+# reads as authoritative to whoever finds it first.
+DOC_COPIES_OF_THE_DEB_PYTHON_FLOOR = (
+    "README.md",
+    "architecture/packaging.md",
+    "architecture/mcp-server.md",
+)
+
+# Figures a document states that a named constant actually owns. Same argument as the floor
+# copies: correct today, unpinned, and a false finding the day one drifts. The rendering is a
+# function rather than a format string because a document states a duration in whichever unit
+# reads well, not the unit the constant happens to hold.
+DOCUMENTED_CONSTANTS = (
+    ("architecture/mcp-server.md", "toinflux/mcpserver.py", "LOGIN_FAILURE_LIMIT", lambda v: f"{v} failures"),
+    ("architecture/mcp-server.md", "toinflux/mcpserver.py", "LOGIN_LOCKOUT_SECONDS", lambda v: f"{v} s lockout"),
+    ("architecture/mcp-server.md", "toinflux/mcpserver.py", "ACCESS_TOKEN_TTL_SECONDS", lambda v: f"{v // 3600} h TTL"),
+    ("architecture/mcp-server.md", "toinflux/general.py", "MCP_DEFAULT_BIND_ADDRESS", lambda v: f"`{v}`"),
+    ("AGENTS.md", "toinflux/speedtest.py", "MAX_PLAUSIBLE_PING_MS", lambda v: f"{v} ms"),
+)
+
 
 def _tracked_files():
     """Every source file git tracks that the conventions below apply to."""
@@ -419,6 +441,23 @@ def _declared_minimum_pythons():
         if matrix:
             found[f"{path}:{name} matrix"] = min(int(str(v).split(".")[1]) for v in matrix)
 
+    # Whitespace is normalised before matching because one copy wraps across a line break, and
+    # a copy that only fails when it happens to sit on one line is worse than no check. Each
+    # occurrence is keyed separately: a document stating the floor twice must have both right,
+    # and a dict keyed by filename alone would let the second overwrite the first unchecked.
+    documented = 0
+    for relative in DOC_COPIES_OF_THE_DEB_PYTHON_FLOOR:
+        text = re.sub(r"\s+", " ", (REPO_ROOT / relative).read_text(encoding="utf-8"))
+        for index, match in enumerate(re.finditer(r"python3 \(>= 3\.(\d+)\)", text), 1):
+            found[f"{relative} `Depends:` prose #{index}"] = int(match.group(1))
+            documented += 1
+    assert documented >= len(DOC_COPIES_OF_THE_DEB_PYTHON_FLOOR), (
+        "expected each of "
+        f"{list(DOC_COPIES_OF_THE_DEB_PYTHON_FLOOR)} to state the .deb's python3 floor, "
+        f"found {documented} statement(s) - a document that stopped mentioning it has "
+        "removed itself from this check"
+    )
+
     return found
 
 
@@ -439,6 +478,117 @@ def test_the_supported_python_floor_is_declared_consistently():
     assert len(set(declared.values())) == 1, "the supported Python floor is declared inconsistently:\n  " + "\n  ".join(
         f"{source}: 3.{minor}" for source, minor in sorted(declared.items())
     )
+
+
+# The header block every non-test module carries. CS.9.5 makes this a test rather than a habit:
+# the MCP modules arrived later than the collectors and could as easily have landed without it,
+# and a convention only review enforces is one that drifts between reviewers.
+#
+# The year is deliberately not asserted. It records when a file was written, and both 2025 and
+# 2026 appear legitimately across the tree; pinning it would turn every new module into a
+# failing test for no benefit. The holder is asserted, because CS.9.4 wants the stable owner
+# rather than whoever happened to write the file.
+LICENCE_HEADER_FIELDS = ("__author__", "__copyright__", "__license__")
+COPYRIGHT_HOLDER = "Gavin Lucas"
+
+
+def _modules_that_carry_a_header():
+    """Every tracked Python module the header convention applies to.
+
+    Tests are excluded: the convention is about what ships and what a reader of the source
+    finds at the top of a module, and a test file is neither. Derived from what git tracks
+    rather than from a list, so a module added later is covered without anyone remembering.
+
+    :return: paths relative to the repository root
+    :rtype: list
+    """
+    return [path for path in _tracked_files() if path.suffix == ".py" and "tests" not in path.parts]
+
+
+def test_every_module_carries_the_licence_header():
+    """Author, copyright and licence appear at the top of every non-test module.
+
+    Collected into one report rather than failing on the first offender, so adding several
+    modules at once shows every miss instead of one at a time across as many CI runs.
+    """
+    modules = _modules_that_carry_a_header()
+    # A guard that searched nothing reports the same green as one that found nothing wrong,
+    # which is the failure VE.2.4 names. The floor is well below the current count so an
+    # ordinary addition or removal does not trip it, but a broken discovery does.
+    assert len(modules) >= 20, (
+        f"only found {len(modules)} module(s) to check, so discovery is broken rather than " "the tree being clean"
+    )
+
+    missing = []
+    for path in modules:
+        text = path.read_text(encoding="utf-8")
+        absent = [field for field in LICENCE_HEADER_FIELDS if f"{field} = " not in text]
+        if absent:
+            missing.append(f"{path.relative_to(REPO_ROOT)} declares no {', '.join(absent)}")
+        elif COPYRIGHT_HOLDER not in re.search(r'__copyright__ = "([^"]*)"', text).group(1):
+            missing.append(
+                f"{path.relative_to(REPO_ROOT)} does not name {COPYRIGHT_HOLDER!r} " "as the copyright holder"
+            )
+    assert not missing, f"{len(missing)} module(s) break the licence-header convention:\n  " + "\n  ".join(missing)
+
+
+def _module_constant(relative, name):
+    """The value of a module-level constant, read without importing the module.
+
+    Parsed rather than imported: importing a collector runs its module body and pulls in its
+    dependencies, which a hygiene check has no business doing, and the MCP modules are
+    optional at runtime so importing them here would make this test depend on an extra.
+
+    :param str relative: module path relative to the repository root
+    :param str name: the constant's name
+    :return: the constant's literal value
+    """
+    import ast
+
+    tree = ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{relative} declares no module-level {name}")
+
+
+def test_every_documented_constant_matches_its_source():
+    """A figure stated in a document must still match the constant that owns it.
+
+    These copies are all correct at the time of writing, which is the argument for the test
+    rather than against it: the failure mode is not a wrong number today but a right one that
+    silently stops being right, leaving two documents describing the same behaviour
+    differently and no way for a reader to tell which is current.
+
+    Reported as a collected list rather than one assertion per row, so a floor change that
+    invalidates four copies shows all four instead of hiding three behind the first.
+    """
+    stale = []
+    for doc, module, name, render in DOCUMENTED_CONSTANTS:
+        expected = render(_module_constant(module, name))
+        text = re.sub(r"\s+", " ", (REPO_ROOT / doc).read_text(encoding="utf-8"))
+        if expected not in text:
+            stale.append(f"{doc} no longer states {expected!r}, which {module} sets in {name}")
+    assert not stale, "documented figures no longer match their source:\n  " + "\n  ".join(stale)
+
+
+def test_the_documented_rpds_py_hold_matches_requirements():
+    """Two documents restate the `rpds-py` hold; `requirements.txt` owns it.
+
+    The hold exists so a wheel version cannot drop a Python minor the .deb supports, so a
+    document naming the wrong one misleads a reader about which minors can still be built -
+    the one question the hold exists to answer.
+    """
+    requirements = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
+    pin = re.search(r"^rpds-py(~=[\d.]+)", requirements, re.M)
+    assert pin, "could not find the rpds-py pin in requirements.txt"
+    for relative in ("architecture/mcp-server.md", "architecture/packaging.md"):
+        text = re.sub(r"\s+", " ", (REPO_ROOT / relative).read_text(encoding="utf-8"))
+        assert (
+            pin.group(1) in text
+        ), f"{relative} does not state the rpds-py hold {pin.group(1)!r} from requirements.txt"
 
 
 def test_every_dynamic_tag_value_in_a_header_is_escaped():

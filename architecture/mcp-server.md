@@ -213,7 +213,7 @@ actually binds `127.0.0.1:8420` under the full hardened sandbox (the real test t
 `LoadCredentialEncrypted` don't break the network-facing server).
 
 **Read tools** (`toinflux/mcp_read.py`, registered onto the server by `register_read_tools()`):
-six read-only tools - `list_sources`, `list_fields`, `query_history`, `get_current_state`,
+the read-only tools - `list_sources`, `list_fields`, `query_history`, `get_current_state`,
 `get_data_range`, and `get_documentation` - exposing each configured collector's live and historical
 state, domain-aware
 rather than a raw passthrough. The read mechanics live in `mcp_read.py`; the per-source domain
@@ -554,8 +554,8 @@ pointer to nothing); that every tool says how it fails and whether it changes an
 recorded byte budget. Line wrapping is normalised away before matching - a docstring keeps its
 newlines, so `changes nothing` split across a break would fail a guard the description satisfies.
 
-Measured with that module's fixture (two sources, both write-enabled: nine tools, three prompts,
-five resources), the surface went from **10,162 bytes to 13,296** in the prose pass - tools 9,937 -> 11,252,
+Measured with that module's fixture (two sources, both write-enabled, so every tool, prompt and
+per-source resource registers), the surface went from **10,162 bytes to 13,296** in the prose pass - tools 9,937 -> 11,252,
 prompts 225 -> 523, resources 0 -> 1,521. The growth is where the surface was *silent* rather than
 merely terse:
 
@@ -592,7 +592,7 @@ description carries an indented line), which is real on 3.10-3.12 and trivially 
 module), which is the only check that fails on the machine where the mistake is made.
 Verified by simulation as well as by CI - re-indenting each 3.14 description the way
 3.10-3.12 present it and pushing it back through `cleandoc` reproduces `query_history` at
-exactly the 2,209 bytes CI reported, and returns all nine to byte-identical.
+exactly the 2,209 bytes CI reported, and returns every tool description to byte-identical.
 
 **`register_tool()` also translates the two anticipated failures into the SDK's `ToolError`,
 and `_register_resource()` in `toinflux/mcp_resources.py` does the same with `ResourceError`.**

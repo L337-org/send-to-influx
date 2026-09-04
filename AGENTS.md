@@ -129,7 +129,7 @@ Break one of these and the failure is silent or data-destroying.
 
 Optional, off unless both `mcp.user` and `mcp.password` are set (or forced off by `mcp.disabled:
 true`). A Streamable-HTTP server on the `mcp` SDK with built-in OAuth 2.1, in its own daemon thread.
-Read-only by default: six read tools, one dashboard tool, resources and prompts. A source becomes
+Read-only by default: the read tools, the dashboard tool, resources and prompts. A source becomes
 writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_read_write: true`.
 
 - **A disabled capability is not registered at all**, never registered-and-refusing.

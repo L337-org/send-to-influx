@@ -3,7 +3,6 @@
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT License"
-__version__ = "1.0"
 
 import logging
 import queue
