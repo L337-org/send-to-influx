@@ -170,6 +170,12 @@ class Nuki(MqttDataHandler):
     STREAM_TOPIC_FILTER = "nuki/+/+"
 
     def __init__(self, *args, **kwargs):
+        """Build the handler, adding the per-device name memory the stream path needs.
+
+        Args:
+            *args: Passed to the base handler.
+            **kwargs: Passed to the base handler.
+        """
         super().__init__(*args, **kwargs)
         # Per-device name memory for the streaming path. Retained `name` topics arrive as
         # their own messages, so decode_stream_message remembers each device's name to

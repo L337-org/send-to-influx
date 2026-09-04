@@ -270,6 +270,28 @@ Each has been raised before and declined with reasons recorded.
 - The write buffer is not persisted across a restart, and flushes to whatever destination current
   settings resolve to.
 
+## Docstrings
+
+**Google style** - `Args:` and `Returns:` sections, capitalised, with the type in the entry
+because this code carries no annotations. `flake8-docstrings` enforces it; the convention, the
+backlog and the exemptions all live in `tox.ini`.
+
+**Most of this repository is not there yet**, and that is deliberate rather than overlooked.
+The `extend-ignore` list in `tox.ini` holds exactly the rules that still fail - D415, D212,
+D205 and D209, largest first. Everything else is enforced today, so no passing rule can
+regress while the backlog is worked through. Take one entry off that list at a time and fix
+what it names in the same change; do not add to it.
+
+**The MCP surface is exempt, and must stay exempt.** A tool, prompt or resource docstring is
+the advertised interface a client loads and a model reads, so CS.6.14 hands it to the
+AI-consumer rules instead: it wants what the schema cannot already carry, and a structured
+parameter block duplicates what the schema has - paid for on every session that loads it.
+`ignore-decorators` in `tox.ini` does that, and
+`tests/test_repo_hygiene.py::test_the_docstring_exemption_matches_the_decorators_in_use`
+fails if a rename ever makes the pattern stop matching.
+
+Tests are exempt too: a test's name is its documentation.
+
 <!-- BEGIN GENERATED -->
 ## Read these when they apply
 

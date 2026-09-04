@@ -4,6 +4,10 @@ black~=26.5.1
 flake8~=7.3.0
 flake8-bugbear~=25.11.29
 flake8-black~=0.4.0
+# Docstring rules (pydocstyle). Installing this turns D on by default, which is why the
+# convention, the decorator exemption and the backlog ignore-list all land in tox.ini in
+# the same change - without them this pin alone would fail CI on 390 findings.
+flake8-docstrings~=1.7.0
 pytest~=9.1.1
 pytest-cov~=7.1.0
 mypy~=2.3.1

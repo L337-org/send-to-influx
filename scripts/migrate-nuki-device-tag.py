@@ -251,6 +251,15 @@ class Influx:
     """
 
     def __init__(self, url, database, credential, verify=True, timeout=60):
+        """Build a client for one InfluxDB database.
+
+        Args:
+            url (str): Base URL of the InfluxDB server.
+            database (str): Database to read from and write to.
+            credential (tuple): (username, password) for basic authentication.
+            verify (bool): Whether to verify the server's TLS certificate.
+            timeout (int): Per-request timeout in seconds.
+        """
         self.url = url.rstrip("/")
         self.database = database
         self.session = requests.Session()

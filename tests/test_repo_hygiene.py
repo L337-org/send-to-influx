@@ -446,6 +446,52 @@ def test_the_declared_licence_agrees_across_the_project():
     )
 
 
+def test_the_docstring_exemption_matches_the_decorators_in_use():
+    """The docstring rules must keep skipping every advertised MCP registration.
+
+    A tool, prompt or resource docstring is the advertised interface a client loads and a model
+    reads, so CS.6.14 hands it to the AI-consumer rules rather than to CS.6's. tox.ini exempts
+    them by matching the decorator, which is a regex over decorator source - and a regex goes
+    stale silently. Rename `register_tool` and the sixteen advertised descriptions quietly fall
+    under rules that are wrong for them: D417 would start demanding an `Args:` block duplicating
+    what the schema already carries, on every session that loads the surface.
+
+    Asserts in both directions. Every registration decorator actually in use is matched, so a
+    rename fails here; and the count is floored, so a scan that found nothing cannot pass.
+    """
+    import ast
+    import configparser
+
+    config = configparser.ConfigParser()
+    config.read(REPO_ROOT / "tox.ini")
+    pattern = config["flake8"]["ignore-decorators"]
+    exempt = re.compile(pattern)
+
+    # Decorator expressions applied to functions in the registration modules. Matched by
+    # source text rather than by name, because flake8-docstrings sees the whole call for a
+    # decorator that takes arguments.
+    found = []
+    for module in ("mcp_read.py", "mcp_write.py", "mcp_dashboards.py", "mcp_prompts.py", "mcp_resources.py"):
+        tree = ast.parse((REPO_ROOT / "toinflux" / module).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                source = ast.unparse(decorator)
+                if "register" in source or "prompt" in source:
+                    found.append(f"{module}:{node.name}: {source.splitlines()[0]}")
+
+    assert len(found) >= 12, (
+        f"only found {len(found)} registration decorator(s), so this check is not seeing the "
+        f"surface it is meant to protect"
+    )
+    unmatched = [f for f in found if not exempt.search(f.split(": ", 1)[1])]
+    assert not unmatched, (
+        f"tox.ini's ignore-decorators pattern {pattern!r} no longer matches these registration "
+        f"decorators, so their advertised docstrings would fall under the CS.6 rules:\n  " + "\n  ".join(unmatched)
+    )
+
+
 def _module_constant(relative, name):
     """The value of a module-level constant, read without importing the module.
 
