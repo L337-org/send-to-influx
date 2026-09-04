@@ -36,7 +36,7 @@ literal through unchanged (and that without one the series is named
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
-__license__ = "MIT License"
+__license__ = "MIT"
 
 from mcp.types import ToolAnnotations
 

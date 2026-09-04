@@ -2,8 +2,7 @@
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
-__license__ = "MIT License"
-__version__ = "1.0"
+__license__ = "MIT"
 
 from .carbonintensity import CarbonIntensity
 from .general import (

@@ -63,6 +63,28 @@ NOT_A_TRACKER_KEY = re.compile(
 
 WIKI_HOSTS = ("atlassian.net", "/wiki/spaces/")
 
+# Documents that restate the .deb's `Depends:` python3 floor. Folded into the floor check
+# below rather than left as prose: each copy is correct today, and nothing else would notice
+# the day the floor rises and a document keeps the old number - at which point the stale copy
+# reads as authoritative to whoever finds it first.
+DOC_COPIES_OF_THE_DEB_PYTHON_FLOOR = (
+    "README.md",
+    "architecture/packaging.md",
+    "architecture/mcp-server.md",
+)
+
+# Figures a document states that a named constant actually owns. Same argument as the floor
+# copies: correct today, unpinned, and a false finding the day one drifts. The rendering is a
+# function rather than a format string because a document states a duration in whichever unit
+# reads well, not the unit the constant happens to hold.
+DOCUMENTED_CONSTANTS = (
+    ("architecture/mcp-server.md", "toinflux/mcpserver.py", "LOGIN_FAILURE_LIMIT", lambda v: f"{v} failures"),
+    ("architecture/mcp-server.md", "toinflux/mcpserver.py", "LOGIN_LOCKOUT_SECONDS", lambda v: f"{v} s lockout"),
+    ("architecture/mcp-server.md", "toinflux/mcpserver.py", "ACCESS_TOKEN_TTL_SECONDS", lambda v: f"{v // 3600} h TTL"),
+    ("architecture/mcp-server.md", "toinflux/general.py", "MCP_DEFAULT_BIND_ADDRESS", lambda v: f"`{v}`"),
+    ("AGENTS.md", "toinflux/speedtest.py", "MAX_PLAUSIBLE_PING_MS", lambda v: f"{v} ms"),
+)
+
 
 def _tracked_files():
     """Every source file git tracks that the conventions below apply to."""
@@ -348,9 +370,10 @@ def test_ci_job_timeouts_are_sane():
     fires on a healthy run gets raised until it is the former. These are sized at roughly ten
     times the observed maximum, so the bound is meaningful without being flaky.
 
-    Values must be literal, for the same reason: a `${{ }}` expression is legal in Actions but
-    its value is unknowable here, so it would satisfy the check while leaving the job
-    effectively unbounded.
+    What is required is that the bound be *knowable at review time*, which is not the same as
+    requiring a YAML number - a quoted digit string is accepted and coerced, for the reason
+    given at the check below. A `${{ }}` expression is refused, because one resolving to 600 at
+    run time would satisfy a static bound while leaving the job effectively unbounded.
     """
     for path, name, job in _workflow_jobs():
         minutes = job.get("timeout-minutes")
@@ -369,9 +392,10 @@ def test_ci_job_timeouts_are_sane():
             # unbounded. Nothing here needs one, so the bound stays real; if a job ever does,
             # change this deliberately rather than working around it.
             assert minutes.strip().isdigit(), (
-                f"{path}:{name} has timeout-minutes={minutes!r}, which is not a literal number. "
-                f"An expression is valid Actions, but its value cannot be checked here, so the "
-                f"bound would stop meaning anything"
+                f"{path}:{name} has timeout-minutes={minutes!r}, whose value cannot be known at "
+                f"review time. An expression is valid Actions, but one resolving to 600 at run "
+                f"time would satisfy this bound while leaving the job unbounded. A quoted number "
+                f"is accepted; this is not"
             )
             minutes = int(minutes)
         assert isinstance(minutes, int) and not isinstance(
@@ -419,6 +443,24 @@ def _declared_minimum_pythons():
         if matrix:
             found[f"{path}:{name} matrix"] = min(int(str(v).split(".")[1]) for v in matrix)
 
+    # Whitespace is normalised before matching because one copy wraps across a line break, and
+    # a copy that only fails when it happens to sit on one line is worse than no check. Each
+    # occurrence is keyed separately: a document stating the floor twice must have both right,
+    # and a dict keyed by filename alone would let the second overwrite the first unchecked.
+    # Asserted per file rather than on the total. An aggregate count lets one document go
+    # silent as long as another happens to state the floor twice, which is the same guard
+    # quietly checking less than it appears to.
+    for relative in DOC_COPIES_OF_THE_DEB_PYTHON_FLOOR:
+        text = re.sub(r"\s+", " ", (REPO_ROOT / relative).read_text(encoding="utf-8"))
+        matches = list(re.finditer(r"python3 \(>= 3\.(\d+)\)", text))
+        assert matches, (
+            f"{relative} no longer states the .deb's python3 floor, so it has removed itself "
+            f"from this check - restore the `Depends: python3 (>= 3.X)` mention, or drop the "
+            f"file from DOC_COPIES_OF_THE_DEB_PYTHON_FLOOR deliberately"
+        )
+        for index, match in enumerate(matches, 1):
+            found[f"{relative} `Depends:` prose #{index}"] = int(match.group(1))
+
     return found
 
 
@@ -439,6 +481,224 @@ def test_the_supported_python_floor_is_declared_consistently():
     assert len(set(declared.values())) == 1, "the supported Python floor is declared inconsistently:\n  " + "\n  ".join(
         f"{source}: 3.{minor}" for source, minor in sorted(declared.items())
     )
+
+
+# The header block every non-test module carries. CS.9.5 makes this a test rather than a habit:
+# the MCP modules arrived later than the collectors and could as easily have landed without it,
+# and a convention only review enforces is one that drifts between reviewers.
+#
+# The year is deliberately not asserted. It records when a file was written, and both 2025 and
+# 2026 appear legitimately across the tree; pinning it would turn every new module into a
+# failing test for no benefit. The holder is asserted, because CS.9.4 wants the stable owner
+# rather than whoever happened to write the file.
+LICENCE_HEADER_FIELDS = ("__author__", "__copyright__", "__license__")
+COPYRIGHT_HOLDER = "Gavin Lucas"
+
+
+def _modules_that_carry_a_header():
+    """Every tracked Python module the header convention applies to.
+
+    Tests are excluded: the convention is about what ships and what a reader of the source
+    finds at the top of a module, and a test file is neither. Derived from what git tracks
+    rather than from a list, so a module added later is covered without anyone remembering.
+
+    :return: absolute paths, as ``_tracked_files()`` yields them
+    :rtype: list
+    """
+    return [path for path in _tracked_files() if path.suffix == ".py" and "tests" not in path.parts]
+
+
+def _header_assignments(text):
+    """The dunders assigned above a module's first import or definition, with their values.
+
+    Position is asserted rather than mere presence, because the convention is a header block:
+    the same three assignments buried between two functions would satisfy a substring search
+    while being no header at all. "Above the first import or definition" is what "at the top"
+    means here in practice - comments and the module docstring do not count as statements.
+
+    :param str text: the module's source
+    :return: ``{name: value}`` for every literal assignment in the header region
+    :rtype: dict
+    """
+    import ast
+
+    found = {}
+    for node in ast.parse(text).body:
+        if isinstance(
+            node,
+            (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+        ):
+            break
+        if not isinstance(node, ast.Assign):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except (ValueError, TypeError):
+            # A header dunder built from an expression is not a literal we can read. Skipped
+            # rather than fatal: the caller then reports it as a missing field, which is what
+            # it effectively is, and names the module.
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                found[target.id] = value
+    return found
+
+
+def test_every_module_carries_the_licence_header():
+    """Author, copyright and licence appear at the top of every non-test module.
+
+    "At the top" is enforced, not just "somewhere in the file": the three assignments must sit
+    above the module's first import or definition, which is what makes them a header rather
+    than three statements that happen to exist.
+
+    ``__license__`` is validated against the SPDX licence list rather than compared to a string
+    literal here, because CS.9.2 asks for a *machine-readable* identifier and the only way to
+    know a value is one is to ask the standard. This is not pedantry about a synonym: SPDX has
+    no entry for "MIT License", so it is rejected outright as an invalid expression while "MIT"
+    is accepted, and the same applies to "MPL 2.0" against "MPL-2.0". Validating rather than
+    matching also means a relicence needs no edit here, while a typo in one module still fails.
+
+    Collected into one report rather than failing on the first offender, so adding several
+    modules at once shows every miss instead of one at a time across as many CI runs.
+    """
+    from packaging.licenses import InvalidLicenseExpression, canonicalize_license_expression
+
+    modules = _modules_that_carry_a_header()
+    # A guard that searched nothing reports the same green as one that found nothing wrong,
+    # which is the failure VE.2.4 names. The floor is well below the current count so an
+    # ordinary addition or removal does not trip it, but a broken discovery does.
+    assert len(modules) >= 20, (
+        f"only found {len(modules)} module(s) to check, so discovery is broken rather than " f"the tree being clean"
+    )
+
+    missing = []
+    for path in modules:
+        header = _header_assignments(path.read_text(encoding="utf-8"))
+        relative = path.relative_to(REPO_ROOT)
+        absent = [field for field in LICENCE_HEADER_FIELDS if field not in header]
+        if absent:
+            missing.append(f"{relative} declares no {', '.join(absent)}")
+            continue
+        if COPYRIGHT_HOLDER not in str(header["__copyright__"]):
+            missing.append(f"{relative} does not name {COPYRIGHT_HOLDER!r} as the copyright holder")
+        declared = header["__license__"]
+        try:
+            canonical = canonicalize_license_expression(str(declared))
+        except InvalidLicenseExpression as exc:
+            missing.append(f"{relative} has __license__ = {declared!r}: {exc}")
+        else:
+            if canonical != declared:
+                missing.append(
+                    f"{relative} has __license__ = {declared!r}, which SPDX canonicalises to "
+                    f"{canonical!r} - declare the canonical form"
+                )
+    assert not missing, f"{len(missing)} module(s) break the licence-header convention:\n  " + "\n  ".join(missing)
+
+
+def test_the_declared_licence_agrees_across_the_project():
+    """pyproject.toml and every module header must name the same SPDX licence.
+
+    There are exactly two homes for this - the packaging metadata and the header block - and
+    nothing previously compared them. They had in fact diverged in form for as long as both
+    existed: the modules said "MIT License" while pyproject pointed at a file, so neither
+    stated a machine-readable identifier and no single value was authoritative.
+
+    Read with a regex rather than ``tomllib`` for the same reason as the Python floor above:
+    ``tomllib`` is stdlib only from 3.11 and the suite runs on 3.10 in CI.
+
+    A relicence now has to touch both places or fail here, which is the whole point - the
+    licence a package advertises and the licence its source claims disagreeing is the one
+    outcome worth a test.
+    """
+    from packaging.licenses import canonicalize_license_expression
+
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    declared = re.search(r'^license\s*=\s*"([^"]*)"', pyproject, re.M)
+    assert declared, (
+        "could not find a string `license` in pyproject.toml. PEP 639 deprecated the table "
+        "forms, so a `license = { file = ... }` here is the thing to fix rather than this test"
+    )
+    packaged = canonicalize_license_expression(declared.group(1))
+
+    disagreeing = {}
+    for path in _modules_that_carry_a_header():
+        header = _header_assignments(path.read_text(encoding="utf-8"))
+        if header.get("__license__") != packaged:
+            disagreeing[str(path.relative_to(REPO_ROOT))] = header.get("__license__")
+    assert not disagreeing, f"pyproject.toml declares {packaged!r} but these modules disagree:\n  " + "\n  ".join(
+        f"{where}: {what!r}" for where, what in sorted(disagreeing.items())
+    )
+
+
+def _module_constant(relative, name):
+    """The value of a module-level constant, read without importing the module.
+
+    Parsed rather than imported: importing a collector runs its module body and pulls in its
+    dependencies, which a hygiene check has no business doing, and the MCP modules are
+    optional at runtime so importing them here would make this test depend on an extra.
+
+    :param str relative: module path relative to the repository root
+    :param str name: the constant's name
+    :return: the constant's literal value
+    """
+    import ast
+
+    tree = ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            try:
+                return ast.literal_eval(node.value)
+            except (ValueError, TypeError) as exc:
+                # Turning a constant into a computed expression is a legitimate change.
+                # Failing here with a raw traceback would report that Python could not
+                # evaluate something, rather than which constant this check can no longer
+                # read and what to do instead.
+                raise AssertionError(
+                    f"{relative} declares {name} as a computed expression rather than a "
+                    f"literal ({exc}), so it cannot be read without importing the module. "
+                    f"Keep it literal, or drop it from DOCUMENTED_CONSTANTS and guard the "
+                    f"documented figure another way"
+                ) from exc
+    raise AssertionError(f"{relative} declares no module-level {name}")
+
+
+def test_every_documented_constant_matches_its_source():
+    """A figure stated in a document must still match the constant that owns it.
+
+    These copies are all correct at the time of writing, which is the argument for the test
+    rather than against it: the failure mode is not a wrong number today but a right one that
+    silently stops being right, leaving two documents describing the same behaviour
+    differently and no way for a reader to tell which is current.
+
+    Reported as a collected list rather than one assertion per row, so a floor change that
+    invalidates four copies shows all four instead of hiding three behind the first.
+    """
+    stale = []
+    for doc, module, name, render in DOCUMENTED_CONSTANTS:
+        expected = render(_module_constant(module, name))
+        text = re.sub(r"\s+", " ", (REPO_ROOT / doc).read_text(encoding="utf-8"))
+        if expected not in text:
+            stale.append(f"{doc} no longer states {expected!r}, which {module} sets in {name}")
+    assert not stale, "documented figures no longer match their source:\n  " + "\n  ".join(stale)
+
+
+def test_the_documented_rpds_py_hold_matches_requirements():
+    """Two documents restate the `rpds-py` hold; `requirements.txt` owns it.
+
+    The hold exists so a wheel version cannot drop a Python minor the .deb supports, so a
+    document naming the wrong one misleads a reader about which minors can still be built -
+    the one question the hold exists to answer.
+    """
+    requirements = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
+    pin = re.search(r"^rpds-py(~=[\d.]+)", requirements, re.M)
+    assert pin, "could not find the rpds-py pin in requirements.txt"
+    for relative in ("architecture/mcp-server.md", "architecture/packaging.md"):
+        text = re.sub(r"\s+", " ", (REPO_ROOT / relative).read_text(encoding="utf-8"))
+        assert (
+            pin.group(1) in text
+        ), f"{relative} does not state the rpds-py hold {pin.group(1)!r} from requirements.txt"
 
 
 def test_every_dynamic_tag_value_in_a_header_is_escaped():

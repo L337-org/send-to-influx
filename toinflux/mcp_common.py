@@ -11,7 +11,7 @@ from each other.
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
-__license__ = "MIT License"
+__license__ = "MIT"
 
 import functools
 import inspect

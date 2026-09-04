@@ -23,7 +23,7 @@ model follows live in the returned message rather than in the advertised surface
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
-__license__ = "MIT License"
+__license__ = "MIT"
 
 from toinflux.mcp_write import writable_enabled_sources
 

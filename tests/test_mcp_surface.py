@@ -11,11 +11,11 @@ theirs.
 What is checked, and why each is a guard rather than a preference:
 
 * Every tool, prompt and resource carries a description, and a title distinct from
-  its name. Both fields are optional in the MCP schema (verified against the
-  2026-07-28 specification's Tool/Prompt/Resource data types), so nothing but a
-  test stops a new registration shipping without them - which is exactly how the
-  three resources shipped from 5.0 to 5.3 advertising a URI, a name and nothing
-  else.
+  its name. Both fields are optional in the MCP schema - verified against revision
+  2026-07-28 of the specification, whose Tool/Prompt/Resource data types make them
+  so - and nothing but a test therefore stops a new registration shipping without
+  them, which is exactly how the resources shipped from 5.0 to 5.3 advertising a
+  URI, a name and nothing else.
 * Every tool description names the sibling tools a caller might otherwise reach
   for, from the ``SIBLINGS`` table below. The table must list every registered tool,
   so a *new* tool fails this module until someone has decided which of its
@@ -32,86 +32,10 @@ What is checked, and why each is a guard rather than a preference:
   every session that loads the surface, so growth is a deliberate act with a reason
   in the commit message, not a drift nobody measured.
 
-Measured surface (this module's fixture: two sources, both write-enabled, so all ten
-tools, three prompts and five resources register):
-
-===========  ==============  ===============  ================  ==============  ==============
-category     5.3 (released)  after the prose  after the schema  after the      after the
-                             pass             pass              panel tool     field work
-===========  ==============  ===============  ================  ==============  ==============
-tools                 9,937           11,252            11,809          13,119          13,330
-prompts                 225              523               523             523             523
-resources                 0            1,521             1,651           1,651           1,651
-**total**        **10,162**       **13,296**        **13,983**      **15,293**      **15,504**
-===========  ==============  ===============  ================  ==============  ==============
-
-The panel tool is a whole new registration, so its 1,310 bytes are the cost of the
-capability existing rather than a description growing. It was chosen over a prompt for
-exactly the reason that makes it cost this: a prompt is not in the model's tool list,
-so nothing would tell a model the data can be charted - and not every client surfaces
-prompts at all. See ``toinflux/mcp_dashboards.py`` for the rest of that reasoning.
-
-A later 205 bytes (15,293 -> 15,498) added the fourth field kind, ``interval``, to the
-three descriptions that enumerate the vocabulary. That is the price of the vocabulary
-being usable at all: a kind a caller has not been told about is a kind it cannot act on,
-and the two facts bought here - never sum a gauge, do sum an interval total - are each
-the difference between a correct panel and a plausible wrong one.
-
-The columns are named after the change that produced each measurement rather than after a
-release, because 5.3 is the last released version and every later column is unreleased -
-naming a release here would invent one. The "prose pass" is the change that gave every
-registration a description and a title; the "schema pass" is the one that made
-``list_fields`` sufficient to build a query from; the "panel tool" is
-``suggest_dashboard_panels``.
-
-The schema pass adds 687 bytes, and all of it is contract rather than commentary - a
-caller cannot use a payload key it has not been told about, nor rely on one it was told
-about unconditionally:
-
-* ``list_fields`` +464 (1,165 -> 1,629): four keys that were not in the payload before
-  (``database``, ``tag_keys``, and each field's ``type`` and ``kind``), a new ``detail``
-  parameter, and the three-word vocabulary ``kind`` uses. ``kind`` in particular is
-  unusable without knowing that 'counter' forbids a mean - which is the failure the
-  payload exists to prevent - so it is stated here rather than left to
-  ``get_documentation``, because the decision it informs is made while reading this
-  tool's result. The same edit *removed* two things to hold the raise down: an example of
-  which bridges appear in ``instances`` (the sentence before it already states the rule),
-  and a note that ``detail`` saves a round trip (a justification for the design, not
-  something a caller acts on). A later +154 states the rule that *every* per-field key is
-  absent rather than null when there is nothing to say - written once as a rule rather than
-  as a caveat on each key, which is both shorter and more complete. ``type`` is the key
-  where that surprises a reader, since InfluxDB does not report one for every field, and
-  three separate descriptions had promised it unconditionally.
-The total later *fell* to 15,504 despite three further additions - Hue's per-install
-metadata, the custom unit suffixes and a fourth field kind - because
-``suggest_dashboard_panels`` had been advertising 112 bytes of leading whitespace since the
-commit that added it. Its docstring body sat at 16 spaces and a later-edited paragraph at 8,
-so ``cleandoc`` stripped only the common 8 and left the rest on fourteen lines. The byte
-budget could not catch that: leaked whitespace looks exactly like the content it is paying
-for. ``test_no_description_advertises_leaked_source_indentation`` does.
-
-* ``get_documentation`` +93 and ``schema://<source>`` +130 between the two of them: both
-  had stopped describing what they return. The generated reference now carries how each
-  field may be aggregated and a per-field description, and the schema resource now
-  carries the database, the tag keys and each field's type and kind - and both still
-  advertised only "units and coded values". This is the same defect the prose pass was for,
-  reappearing on the same day the payload grew, which is the argument for finding it in a
-  review of the diff rather than trusting that a description follows its behaviour.
-
-Identical on every supported Python since ``register_tool()`` dedents each docstring:
-before it, 3.10-3.12 advertised 14,569 bytes where 3.13+ advertised 13,297, the
-difference being pure leading whitespace. The budget assertions below are what found
-that, on their first CI run.
-
-The growth is concentrated where the surface was previously silent rather than
-merely terse: the resources advertised nothing at all; three tools stated no
-failure behaviour; ``get_data_range`` and ``get_current_state`` documented neither
-the per-producer ``instances`` grouping they return nor the partial-failure
-reporting; and ``list_sources`` claimed to be "the only one needing no arguments",
-which ``get_documentation`` disproves. ``query_history``, the largest single
-description, *shrank* by 301 bytes - its behaviour kept, the justifications for
-that behaviour dropped, since a caller needs to know what a tool does and not why
-it was designed that way.
+The recorded budget is the constants below rather than a figure repeated here: a
+measurement written into prose is a second copy of a number the assertions already
+hold, and only the assertions are what CI reads. ``architecture/mcp-server.md``
+carries the reasoning for the surface's shape and the history of how it grew.
 """
 
 from mcp.server.mcpserver import MCPServer
@@ -127,8 +51,8 @@ from toinflux.mcp_resources import register_resources
 from toinflux.mcp_write import register_write_tools
 
 # Which siblings each tool must name, so a caller can tell why to pick it rather than
-# them. Nearest neighbour, not every tool: naming all nine in all nine would pay for
-# the whole surface nine times over and discriminate nothing.
+# them. Nearest neighbour, not every tool: naming every tool in every description would
+# pay for the whole surface once per tool and discriminate nothing.
 SIBLINGS = {
     "list_sources": {"list_fields", "query_history", "get_current_state", "get_documentation"},
     "list_fields": {"list_sources", "query_history", "get_documentation"},
@@ -209,7 +133,7 @@ SETTINGS = {
 
 def _server():
     """Build the whole advertised surface: every read tool, both write-enabled
-    sources' tools, all three prompts, and the per-source resources.
+    sources' tools, every prompt, and the per-source resources.
 
     Needs no mocking - registration reads settings and class metadata only, and
     ``enabled_sources`` is passed so the write/prompt gate does not construct
