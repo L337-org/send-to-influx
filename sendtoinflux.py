@@ -358,7 +358,6 @@ def create_source_worker(unit, source_start_delay, args, stopped_sources, last_a
         in isolation).
     :type last_activity: dict or None
     """
-
     source, instance = unit
     label = worker_label(source, instance)
 
@@ -424,9 +423,7 @@ def spawn_source_thread(worker):
 
 
 def signal_handler(sig, _frame):
-    """
-    Signal handler to exit gracefully
-    """
+    """Signal handler to exit gracefully."""
     logging.info("Exiting on signal %s", sig)
     # Ask any streaming source to break out of its network loop and disconnect. In
     # single-source mode the loop runs on this (the main) thread, so the SystemExit
@@ -640,9 +637,7 @@ def _check_config_and_exit(settings, args):
 
 
 def main():
-    """
-    The main function
-    """
+    """Run the collector until it is asked to stop."""
     # register the signal handler for ctrl-c and termination
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -873,7 +868,6 @@ def run_workers(units, args, stagger_seconds, settings=None):
         falls back to STALL_WARNING_SECONDS for every worker
     :type settings: dict or None
     """
-
     try:
         stagger_value = int(stagger_seconds)
     except (TypeError, ValueError):

@@ -89,7 +89,7 @@ def _format_field_value(value):
 
 
 def escape_key_or_tag_value(value):
-    """
+    r"""
     Escape a value for use as an InfluxDB line protocol key or tag value.
 
     Per the line protocol spec, commas, equals signs and spaces must be
@@ -338,6 +338,14 @@ class DataHandler:
     _write_buffers: dict = {}
 
     def __init__(self, source=None, settings_file=None, instance=None):
+        """Build a handler for one source, and optionally one instance of it.
+
+        Args:
+            source (str): The source name, or None for the base handler.
+            settings_file (str): Path to settings.yaml, or None for the default location.
+            instance (str): Which instance of the source this serves, where a source can have
+                more than one - a Hue bridge host, say. None for a single-target source.
+        """
         self.settings = load_settings(settings_file)
         self.source = source
         # Which instance of the source this handler serves, for a source that can have

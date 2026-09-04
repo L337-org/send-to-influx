@@ -236,6 +236,12 @@ class LoginThrottle:
     the intended behaviour, not a limitation."""
 
     def __init__(self, limit=LOGIN_FAILURE_LIMIT, lockout_seconds=LOGIN_LOCKOUT_SECONDS):
+        """Build a throttle over consecutive login failures per client address.
+
+        Args:
+            limit (int): Consecutive failures from one address before it is refused.
+            lockout_seconds (int): How long a refused address stays refused.
+        """
         self.limit = limit
         self.lockout_seconds = lockout_seconds
         self._failures = {}

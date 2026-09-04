@@ -61,7 +61,7 @@ class CredentialCliError(Exception):
 
 
 def _parse_systemd_creds_version(version_output):
-    """Parse the leading version number out of `systemd-creds --version` output
+    r"""Parse the leading version number out of `systemd-creds --version` output
     (e.g. "systemd 255 (255.4-1ubuntu8.4)\\n+PAM +AUDIT ...").
 
     :param version_output: raw stdout from `systemd-creds --version`
@@ -343,7 +343,7 @@ def _find_mapping_value(node, key):
 
 
 def _yaml_double_quoted_escape(value):
-    """Escape value for safe embedding inside a YAML double-quoted scalar.
+    r"""Escape value for safe embedding inside a YAML double-quoted scalar.
 
     Order matters: backslashes must be doubled first, so the backslashes this
     function itself introduces for the quote/CR/LF escapes below aren't
@@ -524,7 +524,7 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
 
 
 def _compose_settings_mapping(settings_path):
-    """Read settings_path and parse it into a yaml.compose() MappingNode.
+    r"""Read settings_path and parse it into a yaml.compose() MappingNode.
 
     Split out of _load_sources_sequence() so that function stays within the
     complexity limit, and because the empty-file/non-mapping guard belongs with
@@ -994,7 +994,7 @@ def _extract_section(text, name):
 
 
 def _require_mapping_document(root, settings_path):
-    """
+    r"""
     Refuse a settings file whose top-level YAML document isn't a mapping.
 
     An empty file (``root is None``) is fine to append to - the appended section
@@ -1114,7 +1114,7 @@ def _cmd_enable_source(name, settings_path):
 
 
 def _credential_name_arg(value):
-    """argparse type for the credential-name positional.
+    """An argparse type for the credential-name positional.
 
     Replaces a fixed ``choices=`` list, which cannot express unbounded slot credentials.
     Rejection is just as firm - a typo is refused, not silently accepted as a new credential -
@@ -1167,6 +1167,14 @@ def _require_root():
 
 
 def main(argv=None):
+    """Run the credential CLI.
+
+    Args:
+        argv (list): Argument vector to parse, or None to read sys.argv.
+
+    Returns:
+        int: A process exit status.
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
 
