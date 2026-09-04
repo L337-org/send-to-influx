@@ -10,7 +10,7 @@ the organisation: tracker keys and wiki links in a public repository, every CI j
 timeout, those timeouts being real bounds, and the instruction file and its pointers existing.
 They were not dropped - they are now enforced in four repositories instead of one, by the
 ``Repository hygiene`` job. Reimplementing them here as well would be divergence by
-construction, which is the thing that convergence experiment exists to measure.
+construction, which is the thing the convergence experiment is meant to measure.
 
 What stays is what would mean nothing in a repository that had never heard of this product: the
 supported-Python floor, the licence-header convention, the documented constants, the
