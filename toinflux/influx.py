@@ -2,7 +2,7 @@
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
-__license__ = "MIT License"
+__license__ = "MIT"
 
 import time
 import logging

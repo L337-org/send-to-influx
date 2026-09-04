@@ -506,8 +506,8 @@ def _modules_that_carry_a_header():
     return [path for path in _tracked_files() if path.suffix == ".py" and "tests" not in path.parts]
 
 
-def _header_names(text):
-    """The dunder names assigned above a module's first import or definition.
+def _header_assignments(text):
+    """The dunders assigned above a module's first import or definition, with their values.
 
     Position is asserted rather than mere presence, because the convention is a header block:
     the same three assignments buried between two functions would satisfy a substring search
@@ -515,18 +515,28 @@ def _header_names(text):
     means here in practice - comments and the module docstring do not count as statements.
 
     :param str text: the module's source
-    :return: names assigned in the header region
-    :rtype: set
+    :return: ``{name: value}`` for every literal assignment in the header region
+    :rtype: dict
     """
     import ast
 
-    names = set()
+    found = {}
     for node in ast.parse(text).body:
-        if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if isinstance(
+            node,
+            (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+        ):
             break
-        if isinstance(node, ast.Assign):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-    return names
+        if not isinstance(node, ast.Assign):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except ValueError:
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                found[target.id] = value
+    return found
 
 
 def test_every_module_carries_the_licence_header():
@@ -536,27 +546,47 @@ def test_every_module_carries_the_licence_header():
     above the module's first import or definition, which is what makes them a header rather
     than three statements that happen to exist.
 
+    ``__license__`` is validated against the SPDX licence list rather than compared to a string
+    literal here, because CS.9.2 asks for a *machine-readable* identifier and the only way to
+    know a value is one is to ask the standard. This is not pedantry about a synonym: SPDX has
+    no entry for "MIT License", so it is rejected outright as an invalid expression while "MIT"
+    is accepted, and the same applies to "MPL 2.0" against "MPL-2.0". Validating rather than
+    matching also means a relicence needs no edit here, while a typo in one module still fails.
+
     Collected into one report rather than failing on the first offender, so adding several
     modules at once shows every miss instead of one at a time across as many CI runs.
     """
+    from packaging.licenses import InvalidLicenseExpression, canonicalize_license_expression
+
     modules = _modules_that_carry_a_header()
     # A guard that searched nothing reports the same green as one that found nothing wrong,
     # which is the failure VE.2.4 names. The floor is well below the current count so an
     # ordinary addition or removal does not trip it, but a broken discovery does.
     assert len(modules) >= 20, (
-        f"only found {len(modules)} module(s) to check, so discovery is broken rather than " "the tree being clean"
+        f"only found {len(modules)} module(s) to check, so discovery is broken rather than " f"the tree being clean"
     )
 
     missing = []
     for path in modules:
-        text = path.read_text(encoding="utf-8")
-        absent = [field for field in LICENCE_HEADER_FIELDS if field not in _header_names(text)]
+        header = _header_assignments(path.read_text(encoding="utf-8"))
+        relative = path.relative_to(REPO_ROOT)
+        absent = [field for field in LICENCE_HEADER_FIELDS if field not in header]
         if absent:
-            missing.append(f"{path.relative_to(REPO_ROOT)} declares no {', '.join(absent)}")
-        elif COPYRIGHT_HOLDER not in re.search(r'__copyright__ = "([^"]*)"', text).group(1):
-            missing.append(
-                f"{path.relative_to(REPO_ROOT)} does not name {COPYRIGHT_HOLDER!r} " "as the copyright holder"
-            )
+            missing.append(f"{relative} declares no {', '.join(absent)}")
+            continue
+        if COPYRIGHT_HOLDER not in str(header["__copyright__"]):
+            missing.append(f"{relative} does not name {COPYRIGHT_HOLDER!r} as the copyright holder")
+        declared = header["__license__"]
+        try:
+            canonical = canonicalize_license_expression(str(declared))
+        except InvalidLicenseExpression as exc:
+            missing.append(f"{relative} has __license__ = {declared!r}: {exc}")
+        else:
+            if canonical != declared:
+                missing.append(
+                    f"{relative} has __license__ = {declared!r}, which SPDX canonicalises to "
+                    f"{canonical!r} - declare the canonical form"
+                )
     assert not missing, f"{len(missing)} module(s) break the licence-header convention:\n  " + "\n  ".join(missing)
 
 
