@@ -3,6 +3,21 @@
 Everything here is mechanical: a rule that could otherwise only live as prose in AGENTS.md and
 be re-broken by whoever did not read it. The project's standing preference is a failing test
 over a note asking someone to be careful.
+
+**What is no longer here, and where it went.** Five checks moved to
+``scripts/check-repo-hygiene.py``, which is vendored byte-identically into every repository in
+the organisation: tracker keys and wiki links in a public repository, every CI job declaring a
+timeout, those timeouts being real bounds, and the instruction file and its pointers existing.
+They were not dropped - they are now enforced in four repositories instead of one, by the
+``Repository hygiene`` job. Reimplementing them here as well would be divergence by
+construction, which is the thing the convergence experiment is meant to measure.
+
+What stays is what would mean nothing in a repository that had never heard of this product: the
+supported-Python floor, the licence-header convention, the documented constants, the
+``influx_header`` escaping rule, and the two checks whose generic form is genuinely weaker than
+their specific one - ``test_at_least_one_file_is_searched`` names files only this repository has,
+and ``test_shipped_files_do_not_send_readers_to_the_pointer_file`` depends on knowing which paths
+here are shipped.
 """
 
 import os
@@ -27,41 +42,6 @@ BINARY_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".gz", ".zip
 
 # This file necessarily contains the patterns it searches for, so it cannot check itself.
 SELF = Path(__file__).name
-
-# This repo is public; the tracker and the wiki are not. The issue carries the link to the PR,
-# never the reverse - that is the only surviving connection, and it lives on the private side.
-# Matched by the tracker's key shape rather than one project's prefix, so a second project's
-# keys are caught too.
-#
-# The prefix is letters only, and at least two. Allowing digits in it (as Jira technically does)
-# made this match `Z0-9` inside the regex character class `[a-zA-Z0-9]` in pylintrc - a false
-# positive, and the kind that gets a guard switched off wholesale, which costs more than it ever
-# caught. A project key with a digit in it would slip past; that is the right side to err on,
-# since the cost of a miss is a human noticing, while the cost of a false alarm is the check
-# being disabled.
-TRACKER_KEY = re.compile(r"\b[A-Z]{2,10}-\d+\b")
-
-# Strings with the same shape that are not tracker keys. An over-broad guard is one someone
-# eventually switches off wholesale, which costs more than it ever caught - so each of these is
-# a real external standard or identifier, evidenced, not a way to quiet a genuine hit.
-NOT_A_TRACKER_KEY = re.compile(
-    r"\b(?:"
-    r"ISO-\d+"  # ISO 8601, ISO 3166
-    r"|RFC-\d+"  # RFC 3339
-    r"|SHA-\d+"  # SHA-256
-    r"|UTF-\d+"
-    r"|AES-\d+"
-    r"|PEP-\d+"
-    r"|CVE-\d+"
-    r"|SMETS-\d+"  # UK smart meter generations
-    # Octopus Energy tariff codes, which genuinely look like this: FLEX-22-11-25,
-    # SILVER-FLEX-22-11-25, AGILE-FLEX-22-11-25. They appear in example_settings.yaml and the
-    # Octopus tests as real configuration values.
-    r"|FLEX-\d+"
-    r")\b"
-)
-
-WIKI_HOSTS = ("atlassian.net", "/wiki/spaces/")
 
 # Documents that restate the .deb's `Depends:` python3 floor. Folded into the floor check
 # below rather than left as prose: each copy is correct today, and nothing else would notice
@@ -183,36 +163,6 @@ def test_at_least_one_file_is_searched():
         assert expected in names, f"{expected} is tracked but not being checked"
 
 
-def test_no_tracker_keys_in_a_public_repo():
-    """A tracker key in a public repo leaks the internal board's structure and is a dead
-    reference to anyone reading the repo, including generated release notes.
-
-    Describe the work instead - the same rule a TODO follows here.
-    """
-    offenders = []
-    for path in _tracked_files():
-        text = path.read_text(encoding="utf-8", errors="replace")
-        for number, line in enumerate(text.splitlines(), start=1):
-            for match in TRACKER_KEY.finditer(line):
-                span = match.group(0)
-                if NOT_A_TRACKER_KEY.search(span):
-                    continue
-                offenders.append(f"{path.relative_to(REPO_ROOT)}:{number}: {span}")
-    assert not offenders, "tracker keys must not appear in a public repo:\n  " + "\n  ".join(offenders)
-
-
-def test_no_wiki_links_in_a_public_repo():
-    """Same reasoning as the tracker keys: an internal wiki URL is a leak and a dead link."""
-    offenders = []
-    for path in _tracked_files():
-        text = path.read_text(encoding="utf-8", errors="replace")
-        for number, line in enumerate(text.splitlines(), start=1):
-            for host in WIKI_HOSTS:
-                if host in line:
-                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{number}: {host}")
-    assert not offenders, "internal wiki links must not appear in a public repo:\n  " + "\n  ".join(offenders)
-
-
 def test_shipped_files_do_not_send_readers_to_the_pointer_file():
     """`CLAUDE.md` is a generated pointer, so nothing may cite it as the home of content.
 
@@ -231,83 +181,6 @@ def test_shipped_files_do_not_send_readers_to_the_pointer_file():
     assert not offenders, "shipped files must point at AGENTS.md, not the generated pointer:\n  " + "\n  ".join(
         offenders
     )
-
-
-def test_the_shared_instruction_file_and_its_pointers_exist():
-    """AGENTS.md carries the rules; CLAUDE.md and copilot-instructions.md only point at it.
-    None is inheritable org-wide, so a per-repo copy is the only way any of them takes effect,
-    and deleting the shared file would leave every assistant unbriefed with nothing failing."""
-    agents = REPO_ROOT / "AGENTS.md"
-    pointers = (REPO_ROOT / "CLAUDE.md", REPO_ROOT / ".github" / "copilot-instructions.md")
-
-    assert agents.is_file()
-    shared = agents.read_text(encoding="utf-8")
-    # Assert what makes this a real AGENTS.md, rather than a size threshold that
-    # a legitimate condensation would trip: it routes to the detail layer, and
-    # it carries a generated section routing to the on-demand policy files.
-    for sentinel in (
-        "## Read these before changing the matching area",
-        "<!-- BEGIN GENERATED -->",
-        "<!-- END GENERATED -->",
-    ):
-        assert sentinel in shared, f"AGENTS.md is missing {sentinel!r}"
-    # Scope the routing check to the generated block rather than the whole file,
-    # so it means "the router routes" rather than "the path is mentioned
-    # somewhere", and match on the path alone: bullet style and backticks are
-    # presentation, and a test that pins them fails on a change that breaks
-    # nothing.
-    routed = shared.partition("<!-- BEGIN GENERATED -->")[2].partition("<!-- END GENERATED -->")[0]
-    targets = set(re.findall(r"\.agents/policy/[A-Za-z0-9_-]+\.md", routed))
-    assert targets, "AGENTS.md routes to no policy file"
-
-    # A pointer at a file that is not there is worse than no pointer: it reads
-    # as authoritative and resolves to nothing, and the reader has no way to
-    # tell the difference from the routing table alone.
-    for target in sorted(targets):
-        assert (REPO_ROOT / target).is_file(), f"AGENTS.md routes to {target}, which does not exist"
-
-    # The other direction, so a policy file cannot be added and left unreachable.
-    on_disk = {f".agents/policy/{f.name}" for f in (REPO_ROOT / ".agents" / "policy").glob("*.md")}
-    assert on_disk == targets, (
-        f"the policy files on disk and the ones AGENTS.md routes to disagree: "
-        f"unrouted={sorted(on_disk - targets)} missing={sorted(targets - on_disk)}"
-    )
-
-    for pointer in pointers:
-        assert pointer.is_file()
-        body = pointer.read_text(encoding="utf-8")
-        # Catches a pointer that stops pointing - renamed target, dropped line.
-        assert "AGENTS.md" in body, f"{pointer.name} no longer references AGENTS.md"
-        # Catches the regression this change exists to prevent: a pointer file
-        # quietly regaining rules of its own, which is how the two drifted apart
-        # before there was a shared file. Forbidding headings was too narrow -
-        # markdown allows up to three spaces before a "##", and prose needs no
-        # heading at all. The promise is "a pointer and nothing else", so assert
-        # exactly that: outside the generated block, the only content is the H1.
-        before, marker, rest = body.partition("<!-- BEGIN GENERATED -->")
-        assert marker, f"{pointer.name} has no generated block"
-        _, end_marker, after = rest.partition("<!-- END GENERATED -->")
-        assert end_marker, f"{pointer.name} has no closing marker"
-
-        outside = [ln.strip() for ln in before.splitlines() if ln.strip()]
-        outside += [ln.strip() for ln in after.splitlines() if ln.strip()]
-        stray = [ln for ln in outside if not ln.startswith("# ")]
-        assert not stray, (
-            f"{pointer.name} carries content outside its generated block: {stray}. "
-            "It should hold a title and a pointer, with every rule in AGENTS.md"
-        )
-        assert sum(1 for ln in outside if ln.startswith("# ")) == 1, f"{pointer.name} should have exactly one title"
-
-        # A clean outside is not enough on its own: content added inside the
-        # block would satisfy it while still breaking "a pointer and nothing
-        # else". A pointer file holds exactly one line, so assert that, and
-        # drift is caught wherever it is put.
-        inside = [ln.strip() for ln in rest.split("<!-- END GENERATED -->")[0].splitlines() if ln.strip()]
-        assert len(inside) == 1, (
-            f"{pointer.name} has {len(inside)} lines inside its generated block; "
-            f"a pointer file holds exactly one: {inside}"
-        )
-        assert "AGENTS.md" in inside[0], f"{pointer.name} pointer does not name AGENTS.md"
 
 
 def _workflow_jobs():
@@ -345,63 +218,6 @@ def _workflow_jobs():
         for name, job in jobs.items():
             assert isinstance(job, dict), f"{relative}:{name} has no body, or a body that is not a mapping"
             yield relative, name, job
-
-
-def test_every_ci_job_has_a_timeout():
-    """An unbounded job can block a PR for six hours on an infrastructure problem.
-
-    GitHub's default job timeout is 360 minutes, and nothing here needs more than a few. That
-    is not hypothetical: the integration job once wedged on `apt-get update` against an
-    unresponsive mirror and sat there until it was cancelled by hand, with the merge blocked
-    throughout and no signal about what was wrong.
-
-    A timeout converts that into a failure in minutes, naming the step it died in. Enforced
-    here rather than written down, because the failure mode of forgetting is invisible until
-    the day something hangs.
-    """
-    unbounded = [f"{path}:{name}" for path, name, job in _workflow_jobs() if job.get("timeout-minutes") is None]
-    assert (
-        not unbounded
-    ), "these CI jobs have no timeout-minutes and would run to GitHub's 6-hour default:\n  " + "\n  ".join(unbounded)
-
-
-def test_ci_job_timeouts_are_sane():
-    """A timeout so large it never fires is the same as not having one, and one so small it
-    fires on a healthy run gets raised until it is the former. These are sized at roughly ten
-    times the observed maximum, so the bound is meaningful without being flaky.
-
-    What is required is that the bound be *knowable at review time*, which is not the same as
-    requiring a YAML number - a quoted digit string is accepted and coerced, for the reason
-    given at the check below. A `${{ }}` expression is refused, because one resolving to 600 at
-    run time would satisfy a static bound while leaving the job effectively unbounded.
-    """
-    for path, name, job in _workflow_jobs():
-        minutes = job.get("timeout-minutes")
-        if minutes is None:
-            continue  # reported by the test above
-        if isinstance(minutes, str):
-            # YAML keeps a quoted value a string and Actions accepts that, so a digit string is
-            # a valid timeout and is coerced.
-            #
-            # A `${{ }}` expression is refused, and NOT because Actions rejects it - it does
-            # not. GitHub's context-availability table lists jobs.<job_id>.timeout-minutes as
-            # accepting the github, needs, strategy, matrix, vars and inputs contexts, so an
-            # expression is perfectly legal there. It is refused because its value is unknowable
-            # at review time, which is precisely what this test checks: a timeout resolving to
-            # 600 at run time would satisfy a static bound while leaving the job effectively
-            # unbounded. Nothing here needs one, so the bound stays real; if a job ever does,
-            # change this deliberately rather than working around it.
-            assert minutes.strip().isdigit(), (
-                f"{path}:{name} has timeout-minutes={minutes!r}, whose value cannot be known at "
-                f"review time. An expression is valid Actions, but one resolving to 600 at run "
-                f"time would satisfy this bound while leaving the job unbounded. A quoted number "
-                f"is accepted; this is not"
-            )
-            minutes = int(minutes)
-        assert isinstance(minutes, int) and not isinstance(
-            minutes, bool
-        ), f"{path}:{name} has timeout-minutes={minutes!r} of type {type(minutes).__name__}, expected a number"
-        assert 1 <= minutes <= 60, f"{path}:{name} has timeout-minutes={minutes}, outside 1-60"
 
 
 def _declared_minimum_pythons():
