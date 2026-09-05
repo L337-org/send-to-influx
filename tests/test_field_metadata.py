@@ -66,7 +66,8 @@ _SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 def _sections():
     """Split UNITS.md into ``{source name: [lines]}`` by its ``## `` headings.
 
-    :return: dict of source name to the lines under its heading
+    Returns:
+        dict of source name to the lines under its heading
     """
     sections = {}
     current = None
@@ -87,8 +88,11 @@ def _rows(lines):
     a content row by shape alone and matching "Field"/"Unit" as a key would simply never
     happen.
 
-    :param lines: the section's lines
-    :return: iterator of cell lists
+    Args:
+        lines: the section's lines
+
+    Returns:
+        iterator of cell lists
     """
     for line in lines:
         stripped = line.strip()
@@ -103,8 +107,11 @@ def _unit_cells(lines):
     A row may name several keys sharing one unit (``` `ectp1`, `ectp2`, `ectp3` ```), and
     a key may appear in more than one row, so the value is a list.
 
-    :param lines: the section's lines
-    :return: {field key: [unit cell text]}
+    Args:
+        lines: the section's lines
+
+    Returns:
+        {field key: [unit cell text]}
     """
     out = {}
     for cells in _rows(lines):
@@ -128,9 +135,12 @@ def _code_table(lines, field):
     1 came back as the door sensor's "deactivated" and every shared code was reported as
     a disagreement that did not exist.
 
-    :param lines: the section's lines
-    :param field: the field key whose codes are wanted
-    :return: {code: label}, empty when no such table is documented
+    Args:
+        lines: the section's lines
+        field: the field key whose codes are wanted
+
+    Returns:
+        {code: label}, empty when no such table is documented
     """
     marker = f"`{field}` codes"
     start = next((i for i, line in enumerate(lines) if marker in line), None)
@@ -153,7 +163,8 @@ def _code_table(lines, field):
 def _declared():
     """Every declared field metadata entry, as ``(source, field, meta)`` triples.
 
-    :return: list of triples, sorted for a stable failure order
+    Returns:
+        list of triples, sorted for a stable failure order
     """
     out = []
     for source in known_sources():

@@ -275,22 +275,43 @@ Each has been raised before and declined with reasons recorded.
 ## Docstrings
 
 **Google style** - `Args:` and `Returns:` sections, capitalised, with the type in the entry
-because this code carries no annotations. `flake8-docstrings` enforces it; the convention, the
-backlog and the exemptions all live in `tox.ini`.
+because this code carries no annotations. `flake8-docstrings` enforces it, and the convention
+and the exemptions live in `tox.ini`. There is no second dialect: the Sphinx `:param:` /
+`:return:` form this code used to carry is gone.
 
-**Most of this repository is not there yet**, and that is deliberate rather than overlooked.
-The `extend-ignore` list in `tox.ini` holds exactly the rules that still fail - D415, D212,
-D205 and D209, largest first. Everything else is enforced today, so no passing rule can
-regress while the backlog is worked through. Take one entry off that list at a time and fix
-what it names in the same change; do not add to it.
+**No pydocstyle rule is ignored**, so nothing is parked there. Two things are exempt by name
+rather than by rule, both covered below: tool docstrings, and tests.
 
-**The MCP surface is exempt, and must stay exempt.** A tool, prompt or resource docstring is
-the advertised interface a client loads and a model reads, so CS.6.14 hands it to the
-AI-consumer rules instead: it wants what the schema cannot already carry, and a structured
-parameter block duplicates what the schema has - paid for on every session that loads it.
-`ignore-decorators` in `tox.ini` does that, and
-`tests/test_repo_hygiene.py::test_the_docstring_exemption_matches_the_decorators_in_use`
+**`pydoclint` answers the question pydocstyle cannot**: does the docstring agree with the
+signature? D417 only checks the parameters of a section a docstring already has, so a function
+documenting none of its parameters passes it, silently, in every dialect this repository has
+used. `pydoclint` runs as a flake8 plugin in the same job. Its
+backlog is the `DOC` entries in `tox.ini`: an entry comes off with the change that fixes
+everything it names, nothing is added to it, and every code absent from the list is enforced.
+
+One of its judgements is worth knowing before it surprises you: a bare `return` counts as
+returning something, so a function that exits early without a value still wants a `Returns:`
+section by DOC201 - even though writing `Returns: None` is DOC202. Both are in the backlog.
+
+Two of its judgements are worth knowing before they surprise you, because they are finer than
+"document what you return":
+
+* A function with **no `return` statement at all** omits `Returns:` - writing `Returns: None`
+  there is DOC202.
+* A function with a **bare `return`** as an early exit must *have* a `Returns:` section -
+  omitting it is DOC201 - even though it returns nothing either. Say what the caller gets;
+  `check-return-types = False` is what stops the absent annotation making that a type mismatch.
+
+**Tool docstrings are exempt, and must stay exempt.** A tool's docstring *is* its advertised
+description, and the schema beside it already carries every parameter's type - so CS.6.14 hands
+it to the AI-consumer rules instead, where D417 would otherwise demand an `Args:` block
+duplicating the schema on every session that loads the surface. `ignore-decorators` in `tox.ini`
+does that, and `tests/test_repo_hygiene.py::test_the_docstring_exemption_matches_the_decorators_in_use`
 fails if a rename ever makes the pattern stop matching.
+
+**Prompts and resources are not exempt.** Both pass `description=` explicitly at registration,
+so their docstrings reach no client at all and there is nothing to trade off. They follow the
+ordinary convention, and the same guard fails if either is added back to the pattern.
 
 Tests are exempt too: a test's name is its documentation.
 

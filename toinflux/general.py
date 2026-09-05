@@ -1,4 +1,4 @@
-"""General functions for sending data to InfluxDB"""
+"""General functions for sending data to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -37,14 +37,14 @@ def configure_logging(
     (``--dump``/``--print`` JSON, ``--check-config``'s verdict), so a caller can parse it
     while failures are still reported. Every level goes to stderr, not just errors.
 
-    :param logfile: path to log file; if None, logs to stderr only
-    :type logfile: str or None
-    :param loglevel: logging level name (e.g. "INFO", "DEBUG"); falls back to INFO if invalid
-    :type loglevel: str
-    :param log_max_bytes: max size in bytes before the log file is rotated
-    :type log_max_bytes: int
-    :param log_backup_count: number of rotated log files to keep
-    :type log_backup_count: int
+    Args:
+        logfile (str or None): path to log file; if None, logs to stderr only
+        loglevel (str): logging level name (e.g. "INFO", "DEBUG"); falls back to INFO if invalid
+        log_max_bytes (int): max size in bytes before the log file is rotated
+        log_backup_count (int): number of rotated log files to keep
+
+    Raises:
+        ConfigError: the logfile path cannot be opened for writing
     """
     fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     root = logging.getLogger()
@@ -95,14 +95,13 @@ def flatten_dict(data, parent_key="", sep="_"):
     Nested keys are joined with ``sep``. Non-dictionary values are copied
     directly to the flattened output.
 
-    :param data: dictionary to flatten
-    :type data: dict
-    :param parent_key: prefix used during recursion
-    :type parent_key: str
-    :param sep: separator for nested keys
-    :type sep: str
-    :return: flattened dictionary
-    :rtype: dict
+    Args:
+        data (dict): dictionary to flatten
+        parent_key (str): prefix used during recursion
+        sep (str): separator for nested keys
+
+    Returns:
+        dict: flattened dictionary
     """
     flattened = {}
 
@@ -129,20 +128,20 @@ def get_class(source, settings_file=None, instance=None):
 
     A new data source is registered in ``_source_classes()``, not here.
 
-    :param source: data source name
-    :type source: str
-    :param settings_file: path to the settings file (default: settings.yaml in the project root)
-    :type settings_file: str or None
-    :param instance: which instance of the source this handler serves, for a source that
-        can have several targets behind one settings block - Hue, whose instance is a
-        bridge host, and each MyEnergi type, whose instance is a device label. ``None`` -
-        the default, and what every caller that does not care about instances passes -
-        means the source's single target, or the first configured bridge or device, which
-        is what keeps single-target installs and the MCP tools behaving exactly as they
-        did before instances existed.
-    :return: a constructed handler for the source
-    :rtype: DataHandler
-    :raises ConfigError: the name is not a known source
+    Args:
+        source (str): data source name
+        settings_file (str or None): path to the settings file (default: settings.yaml in the project root)
+        instance: which instance of the source this handler serves, for a source that can have several targets behind
+            one settings block - Hue, whose instance is a bridge host, and each MyEnergi type, whose instance is a
+            device label. ``None`` - the default, and what every caller that does not care about instances passes -
+            means the source's single target, or the first configured bridge or device, which is what keeps
+            single-target installs and the MCP tools behaving exactly as they did before instances existed.
+
+    Returns:
+        DataHandler: a constructed handler for the source
+
+    Raises:
+        ConfigError: the name is not a known source
     """
     return source_class(source)(source.lower(), settings_file=settings_file, instance=instance)
 
@@ -158,11 +157,14 @@ def source_class(source):
     Imports live inside the function for the same reason they do in ``get_class()``: these
     modules import ``influx``, which imports this one, so a module-level import is circular.
 
-    :param source: data source name, any case
-    :type source: str
-    :return: the DataHandler subclass
-    :rtype: type
-    :raises ConfigError: the name is not a known source
+    Args:
+        source (str): data source name, any case
+
+    Returns:
+        type: the DataHandler subclass
+
+    Raises:
+        ConfigError: the name is not a known source
     """
     classes = _source_classes()
     class_name = next((k for k in classes if k.lower() == source.lower()), source)
@@ -183,8 +185,8 @@ def _source_classes():
     Imports live inside the function because these modules import ``influx``, which imports
     this one, so a module-level import is circular.
 
-    :return: class name to class
-    :rtype: dict
+    Returns:
+        dict: class name to class
     """
     from toinflux.carbonintensity import CarbonIntensity
     from toinflux.myenergi import Zappi, Eddi, Harvi
@@ -221,11 +223,14 @@ def measurement_for(source):
     ``MCP_MEASUREMENT`` when the class overrides it, else the source name - the same rule
     ``build_schema()`` applies, kept here so a caller that has no handler can ask.
 
-    :param source: data source name, any case
-    :type source: str
-    :return: the measurement name
-    :rtype: str
-    :raises ConfigError: the name is not a known source
+    Args:
+        source (str): data source name, any case
+
+    Returns:
+        str: the measurement name
+
+    Raises:
+        ConfigError: the name is not a known source
     """
     return source_class(source).MCP_MEASUREMENT or source.lower()
 
@@ -235,8 +240,8 @@ def known_sources():
 
     Read from the one class mapping, so it cannot drift from what ``get_class()`` accepts.
 
-    :return: sorted source names
-    :rtype: list
+    Returns:
+        list: sorted source names
     """
     # Read from the one mapping, never a second list - see _source_classes(). No filtering
     # here any more: the mapping holds only collectable sources, so anything it accepts is
@@ -260,10 +265,11 @@ def shares_measurement(source):
     have said the same thing but could fall out of step; this covers a future shared
     measurement without anyone remembering to mark it.
 
-    :param source: the source in question
-    :type source: str
-    :return: True when the measurement is shared with another known source
-    :rtype: bool
+    Args:
+        source (str): the source in question
+
+    Returns:
+        bool: True when the measurement is shared with another known source
     """
     try:
         measurement = measurement_for(source)
@@ -298,10 +304,11 @@ def _hue_bridge_hosts(settings):
     say what will actually run. A bridge whose token is missing yields no host, so it is
     simply not collected - which is exactly the warning validation already emitted.
 
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :return: bridge hosts, empty when none is usable
-    :rtype: list
+    Args:
+        settings (dict): parsed settings dictionary
+
+    Returns:
+        list: bridge hosts, empty when none is usable
     """
     from toinflux.philipshue import enumerate_bridges
 
@@ -329,10 +336,11 @@ def _myenergi_device_labels(source):
     ``validate_settings()`` has already reported them fatally, and this function's only job
     is to say what will actually run.
 
-    :param source: the source name this enumerator serves
-    :type source: str
-    :return: a function taking settings and returning device labels
-    :rtype: callable
+    Args:
+        source (str): the source name this enumerator serves
+
+    Returns:
+        callable: a function taking settings and returning device labels
     """
 
     def enumerate_labels(settings):
@@ -362,12 +370,12 @@ def _source_instances(source, settings):
     configured target - and an **empty** list when it has none, which means the source is
     simply not collected rather than collected against a broken target.
 
-    :param source: source name, already lowercased
-    :type source: str
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :return: instance values for this source
-    :rtype: list
+    Args:
+        source (str): source name, already lowercased
+        settings (dict): parsed settings dictionary
+
+    Returns:
+        list: instance values for this source
     """
     enumerator = _INSTANCE_ENUMERATORS.get(source)
     return enumerator(settings) if enumerator is not None else [None]
@@ -391,12 +399,12 @@ def expand_sources(sources, settings):
     source is unaffected. An empty ``sources`` list expands to no work units at all -
     a valid "nothing configured" state, not an error.
 
-    :param sources: configured source names, already lowercased
-    :type sources: list
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :return: ``[(source, instance), ...]``, one entry per worker
-    :rtype: list
+    Args:
+        sources (list): configured source names, already lowercased
+        settings (dict): parsed settings dictionary
+
+    Returns:
+        list: ``[(source, instance), ...]``, one entry per worker
     """
     units = []
     for source in sources:
@@ -420,13 +428,13 @@ def mqtt_block_errors(settings, context=""):
     in ``sources:`` reaches the transport without this block ever having been checked.
     Keeping one copy of the rules means the two can't drift.
 
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :param context: optional suffix for the broker_host message (e.g. which sources
-        required the block), used by validate_settings()
-    :type context: str
-    :return: error strings, empty when the block is usable
-    :rtype: list
+    Args:
+        settings (dict): parsed settings dictionary
+        context (str): optional suffix for the broker_host message (e.g. which sources required the block), used by
+            validate_settings()
+
+    Returns:
+        list: error strings, empty when the block is usable
     """
     mqtt = settings.get("mqtt")
     if mqtt is None:
@@ -533,9 +541,11 @@ def mcp_enabled(settings):
     since the credential still gets substituted in at load time, so a plain
     kill switch that doesn't depend on credential state is needed too.
 
-    :param settings: parsed settings dictionary (after credential substitution)
-    :type settings: dict
-    :rtype: bool
+    Args:
+        settings (dict): parsed settings dictionary (after credential substitution)
+
+    Returns:
+        bool
     """
     mcp = settings.get("mcp")
     if not isinstance(mcp, dict):
@@ -552,7 +562,8 @@ def _split_bind_address(value, original):
 
     Handles both ``host:port`` and bracketed IPv6 ``[addr]:port``.
 
-    :raises ConfigError: if the shape is not one of those two forms
+    Raises:
+        ConfigError: if the shape is not one of those two forms
     """
     if value.startswith("["):
         closing = value.find("]")
@@ -579,11 +590,14 @@ def parse_mcp_bind_address(bind_address):
     (config-check time) and the server startup path (runtime), so the two cannot
     disagree about what parses.
 
-    :param bind_address: the configured value, or None/"" for the default
-    :type bind_address: str or None
-    :return: (host, port) tuple
-    :rtype: tuple
-    :raises ConfigError: if the value is not a usable host:port pair
+    Args:
+        bind_address (str or None): the configured value, or None/"" for the default
+
+    Returns:
+        tuple: (host, port) tuple
+
+    Raises:
+        ConfigError: if the value is not a usable host:port pair
     """
     if bind_address is None or (isinstance(bind_address, str) and not bind_address.strip()):
         bind_address = MCP_DEFAULT_BIND_ADDRESS
@@ -612,7 +626,8 @@ def _reject_public_bind_host(host, bind_address):
     can't be classified without a DNS lookup (fragile, and it may resolve
     differently at bind time), so it is allowed with a warning.
 
-    :raises ConfigError: for an any-interface or globally-routable bind host
+    Raises:
+        ConfigError: for an any-interface or globally-routable bind host
     """
     if host in MCP_DISALLOWED_BIND_HOSTS:
         raise ConfigError(
@@ -653,10 +668,11 @@ def mcp_block_errors(settings):
     without also removing the stored credential. This also doubles as a quick
     kill switch during troubleshooting, independent of credential state.
 
-    :param settings: parsed settings dictionary (after credential substitution)
-    :type settings: dict
-    :return: error strings, empty when the block is valid
-    :rtype: list
+    Args:
+        settings (dict): parsed settings dictionary (after credential substitution)
+
+    Returns:
+        list: error strings, empty when the block is valid
     """
     mcp = settings.get("mcp")
     if mcp is None:
@@ -756,12 +772,12 @@ def _unusable_source_block(source, settings):
     them anyway would bury the real cause under "interval is required" for a section that
     has no fields.
 
-    :param source: source name, already lowercased
-    :type source: str
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :return: the error message, or None when the section can be validated
-    :rtype: str or None
+    Args:
+        source (str): source name, already lowercased
+        settings (dict): parsed settings dictionary
+
+    Returns:
+        str or None: the error message, or None when the section can be validated
     """
     # The name first: a source nothing can collect is the primary fault, and reporting a
     # missing section for it would send the reader off to write configuration for something
@@ -794,11 +810,13 @@ def _unusable_source_block(source, settings):
 def _validate_source_block(source, settings, is_v2):
     """Return a list of error strings for a single source configuration section.
 
-    :param is_v2: whether the influx block is configured for v2 (token) auth - v2's
-        send_data() accepts either db or bucket (falling back from bucket to db), but
-        v1's send_data() reads source_settings["db"] directly with no fallback, so a
-        v1 config needs db specifically, not just "db or bucket"
-    :type is_v2: bool
+    Args:
+        source (str): the source name whose section is being validated.
+        settings (dict): the whole parsed settings document, for the section and any shared blocks
+            it depends on.
+        is_v2 (bool): whether the influx block is configured for v2 (token) auth - v2's send_data() accepts either db or
+            bucket (falling back from bucket to db), but v1's send_data() reads source_settings["db"] directly with no
+            fallback, so a v1 config needs db specifically, not just "db or bucket"
     """
     if not source:
         return []
@@ -832,12 +850,10 @@ def _log_config_warnings(warnings_found, settings_path, warn):
     reporting on the configuration is its entire job; at collection time the effective
     bridge list is reported once by the worker spawner instead.
 
-    :param warnings_found: warning messages collected during validation
-    :type warnings_found: list
-    :param settings_path: settings file path, used to label the message
-    :type settings_path: str
-    :param warn: whether to emit them at all
-    :type warn: bool
+    Args:
+        warnings_found (list): warning messages collected during validation
+        settings_path (str): settings file path, used to label the message
+        warn (bool): whether to emit them at all
     """
     if not warn or not warnings_found:
         return
@@ -858,12 +874,12 @@ def _validate_myenergi_devices(settings, sources):
     one would merge into a single series carrying both devices' fields. Checking it per block
     would miss precisely the collision that matters.
 
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :param sources: the configured (lowercased) source names
-    :type sources: list
-    :return: (errors, warnings)
-    :rtype: tuple
+    Args:
+        settings (dict): parsed settings dictionary
+        sources (list): the configured (lowercased) source names
+
+    Returns:
+        tuple: (errors, warnings)
     """
     from toinflux.myenergi import DEVICE_SOURCES, duplicate_label_errors, enumerate_devices
 
@@ -882,24 +898,21 @@ def _validate_myenergi_devices(settings, sources):
 def validate_settings(settings, source=None, settings_path="settings.yaml", warn=False):
     """Validate required keys in a parsed settings dictionary.
 
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :param source: an additional specific source to validate (e.g. the --source CLI
-        argument), even if it isn't in the configured sources list - without
-        this, --check-config --source <x> could report success while <x>'s own block
-        is broken, if <x> isn't part of sources:
-    :type source: str or None
-    :param settings_path: path to the settings file, used only to label log messages -
-        settings can come from a location other than settings.yaml (--settings, or the
-        .yml fallback), so this shouldn't be hard-coded in the log output
-    :type settings_path: str
-    :param warn: whether to log non-fatal configuration warnings (e.g. a Hue bridge whose
-        token isn't set, so it won't be collected). Off by default because this function
-        runs inside ``load_settings()``, which every ``DataHandler`` construction calls -
-        only ``--check-config`` opts in, so the same line isn't repeated per source and
-        per retry
-    :type warn: bool
-    :raises ConfigError: if any required settings are missing or invalid
+    Args:
+        settings (dict): parsed settings dictionary
+        source (str or None): an additional specific source to validate (e.g. the --source CLI argument), even if it
+            isn't in the configured sources list - without this, --check-config --source <x> could report success while
+            <x>'s own block is broken, if <x> isn't part of sources:
+        settings_path (str): path to the settings file, used only to label log messages - settings can come from a
+            location other than settings.yaml (--settings, or the .yml fallback), so this shouldn't be hard-coded in the
+            log output
+        warn (bool): whether to log non-fatal configuration warnings (e.g. a Hue bridge whose token isn't set, so it
+            won't be collected). Off by default because this function runs inside ``load_settings()``, which every
+            ``DataHandler`` construction calls - only ``--check-config`` opts in, so the same line isn't repeated per
+            source and per retry
+
+    Raises:
+        ConfigError: if any required settings are missing or invalid
     """
     influx = settings.get("influx", {})
     errors = _validate_influx_block(influx)
@@ -968,9 +981,11 @@ def _contains_real_secret(settings):
 
     That means not empty, not a placeholder, and not a systemd-creds sentinel.
 
-    :param settings: settings dictionary to inspect
-    :type settings: dict
-    :rtype: bool
+    Args:
+        settings (dict): settings dictionary to inspect
+
+    Returns:
+        bool
     """
     # Slot credentials are included, not just the static table: a real token hand-written
     # into hue.user2 must count, or the group/other-readable check below would pass a file
@@ -1014,12 +1029,12 @@ def _enforce_settings_file_permissions(settings_path, raw_settings):
     substituted value would make a file that's actually clean (sentinel only) look
     like it contains a real secret, if this were ever run against the mutated dict.
 
-    :param settings_path: path to the settings file, used only for the log/error message
-    :type settings_path: str
-    :param raw_settings: settings dict as parsed from YAML, before any substitution
-    :type raw_settings: dict
-    :raises ConfigError: if the file is group/other readable, contains a real
-        credential, and enforce_permissions is true
+    Args:
+        settings_path (str): path to the settings file, used only for the log/error message
+        raw_settings (dict): settings dict as parsed from YAML, before any substitution
+
+    Raises:
+        ConfigError: if the file is group/other readable, contains a real credential, and enforce_permissions is true
     """
     try:
         mode = os.stat(settings_path).st_mode
@@ -1060,12 +1075,15 @@ def _clear_unsubstituted_credential_sentinels(settings):
     validate_settings()'s existing required-field logic for free, for every
     credential field except influx-token (raised directly instead - see below).
 
-    :param settings: settings dict, mutated in place and returned
-    :type settings: dict
-    :return: the same dict
-    :rtype: dict
-    :raises ConfigError: if influx-token specifically is still a sentinel - see the
-        note below on why this one field can't just be blanked like the others
+    Args:
+        settings (dict): settings dict, mutated in place and returned
+
+    Returns:
+        dict: the same dict
+
+    Raises:
+        ConfigError: if influx-token specifically is still a sentinel - see the note below on why this one field can't
+            just be blanked like the others
     """
     # Slot credentials included for the same reason as the static ones: a hue.user3 left
     # holding sentinel text with no credential behind it would otherwise pass validation's
@@ -1104,11 +1122,15 @@ def load_settings(settings_file=None):
     When the resolved path does not exist and ends with ``.yaml``, the function
     falls back to the ``.yml`` equivalent for backwards compatibility.
 
-    :param settings_file: path to the settings file (absolute, or relative to the project
-        root); defaults to ``settings.yaml`` in the project root when omitted
-    :type settings_file: str or None
-    :return: parsed settings dictionary
-    :rtype: dict
+    Args:
+        settings_file (str or None): path to the settings file (absolute, or relative to the project root); defaults to
+            ``settings.yaml`` in the project root when omitted
+
+    Returns:
+        dict: parsed settings dictionary
+
+    Raises:
+        ConfigError: the file is missing, unparseable, or does not hold a non-empty mapping
     """
     if not settings_file:
         settings_file = "settings.yaml"

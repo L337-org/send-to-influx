@@ -108,10 +108,11 @@ def _is_text(path):
     byte is the usual binary marker, and anything that is not valid UTF-8 is not text we can
     meaningfully search either.
 
-    :param path: the file to check
-    :type path: pathlib.Path
-    :return: True if the file should be scanned
-    :rtype: bool
+    Args:
+        path (pathlib.Path): the file to check
+
+    Returns:
+        bool: True if the file should be scanned
     """
     if path.suffix.lower() in BINARY_SUFFIXES:
         return False
@@ -227,8 +228,8 @@ def _declared_minimum_pythons():
     3.11, and the suite runs on 3.10 in CI. Each pattern asserts it matched, so a file
     reshuffled beyond their reach fails loudly instead of quietly checking nothing.
 
-    :return: ``{source description: minor version}``
-    :rtype: dict
+    Returns:
+        dict: ``{source description: minor version}``
     """
     found = {}
 
@@ -318,8 +319,8 @@ def _modules_that_carry_a_header():
     finds at the top of a module, and a test file is neither. Derived from what git tracks
     rather than from a list, so a module added later is covered without anyone remembering.
 
-    :return: absolute paths, as ``_tracked_files()`` yields them
-    :rtype: list
+    Returns:
+        list: absolute paths, as ``_tracked_files()`` yields them
     """
     return [path for path in _tracked_files() if path.suffix == ".py" and "tests" not in path.parts]
 
@@ -332,9 +333,11 @@ def _header_assignments(text):
     while being no header at all. "Above the first import or definition" is what "at the top"
     means here in practice - comments and the module docstring do not count as statements.
 
-    :param str text: the module's source
-    :return: ``{name: value}`` for every literal assignment in the header region
-    :rtype: dict
+    Args:
+        text (str): the module's source
+
+    Returns:
+        dict: ``{name: value}`` for every literal assignment in the header region
     """
     import ast
 
@@ -447,17 +450,23 @@ def test_the_declared_licence_agrees_across_the_project():
 
 
 def test_the_docstring_exemption_matches_the_decorators_in_use():
-    """The docstring rules must keep skipping every advertised MCP registration.
+    """The docstring rules must keep skipping the tool docstrings, and only those.
 
-    A tool, prompt or resource docstring is the advertised interface a client loads and a model
-    reads, so CS.6.14 hands it to the AI-consumer rules rather than to CS.6's. tox.ini exempts
-    them by matching the decorator, which is a regex over decorator source - and a regex goes
-    stale silently. Rename `register_tool` and the sixteen advertised descriptions quietly fall
-    under rules that are wrong for them: D417 would start demanding an `Args:` block duplicating
-    what the schema already carries, on every session that loads the surface.
+    A tool's docstring *is* its advertised description, and the schema alongside it already
+    carries every parameter's type - so CS.6.14 hands it to the AI-consumer rules rather than to
+    CS.6's, where D417 would demand an `Args:` block duplicating the schema on every session that
+    loads the surface. tox.ini exempts them by matching the decorator, which is a regex over
+    decorator source, and a regex goes stale silently: rename `register_tool` and the advertised
+    descriptions quietly fall under rules that are wrong for them.
 
-    Asserts in both directions. Every registration decorator actually in use is matched, so a
-    rename fails here; and the count is floored, so a scan that found nothing cannot pass.
+    Prompts and resources are **not** exempt, and are asserted absent below. Both pass
+    `description=` explicitly at registration, so their docstrings reach no client at all and
+    there is nothing to trade off - they follow the ordinary convention like any other code.
+    They were exempt once on the assumption that "registered" meant "advertised".
+
+    Asserts in every direction. Every tool decorator in use is matched, so a rename fails here;
+    the count is floored, so a scan that found nothing cannot pass; and the two dead entries
+    cannot come back.
     """
     import ast
     import configparser
@@ -478,17 +487,146 @@ def test_the_docstring_exemption_matches_the_decorators_in_use():
                 continue
             for decorator in node.decorator_list:
                 source = ast.unparse(decorator)
-                if "register" in source or "prompt" in source:
+                if "register_tool" in source:
                     found.append(f"{module}:{node.name}: {source.splitlines()[0]}")
 
-    assert len(found) >= 12, (
-        f"only found {len(found)} registration decorator(s), so this check is not seeing the "
-        f"surface it is meant to protect"
-    )
+    # One, not a count. The floor exists so a scan that matched nothing cannot pass vacuously;
+    # anything higher is the number of tools in disguise, and would fail the day one is removed
+    # for reasons that have nothing to do with the exemption this checks.
+    assert found, "found no tool registrations at all, so this check is not seeing the surface it protects"
+    for dead in ("prompt", "_register_resource"):
+        assert dead not in pattern, (
+            f"tox.ini's ignore-decorators names {dead!r}, but that registration passes "
+            f"`description=` explicitly, so its docstring reaches no client and the exemption "
+            f"buys nothing. It follows the ordinary convention."
+        )
     unmatched = [f for f in found if not exempt.search(f.split(": ", 1)[1])]
     assert not unmatched, (
         f"tox.ini's ignore-decorators pattern {pattern!r} no longer matches these registration "
         f"decorators, so their advertised docstrings would fall under the CS.6 rules:\n  " + "\n  ".join(unmatched)
+    )
+
+
+def test_every_tool_with_signature_hints_is_exempted_from_doc108():
+    """Each @register_tool function carries `# noqa: DOC108` exactly when it needs one.
+
+    tox.ini's `ignore-decorators` covers the D codes and stops there: it is a
+    flake8-docstrings option, and pydoclint 0.9.1 has no decorator-based exemption at all.
+    So the DOC half of the same exemption is per function, and nothing in the config would
+    notice a new tool missing it.
+
+    A tool's signature type hints are load-bearing rather than decorative - the MCP SDK builds
+    the advertised inputSchema from them, and a `bool` parameter with the hint removed is
+    published to the model as a string - so the marker is the right answer and removing the
+    hints is not.
+
+    Asserted in both directions, because a marker on a tool that needs none is the same kind of
+    inert configuration this test exists to catch.
+    """
+    import ast
+
+    marker = "# noqa: DOC108"
+    wrong = []
+    for module in ("mcp_read.py", "mcp_write.py", "mcp_dashboards.py"):
+        path = REPO_ROOT / "toinflux" / module
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not any("register_tool" in ast.unparse(d) for d in node.decorator_list):
+                continue
+            args = node.args
+            hinted = any(a.annotation for a in args.args + args.posonlyargs + args.kwonlyargs)
+            marked = marker in lines[node.lineno - 1]
+            if hinted and not marked:
+                wrong.append(f"{module}:{node.lineno} {node.name}: has signature type hints but no {marker!r}")
+            if marked and not hinted:
+                wrong.append(f"{module}:{node.lineno} {node.name}: carries {marker!r} but has no signature type hints")
+
+    assert not wrong, "the per-tool half of the CS.6.14 exemption is out of step:\n  " + "\n  ".join(wrong)
+
+
+def _every_python_file():
+    """Every Python file whose docstrings this project's conventions govern.
+
+    Derived from `_tracked_files()` rather than walking the filesystem, for the reason given
+    there: a scratch .py left under `tests/` on someone's machine is not a fact about this
+    repository, and failing on one would report the wrong thing.
+
+    This file is added back explicitly. `_tracked_files()` drops it because the checks that
+    scan for a forbidden pattern would otherwise match the pattern's own definition here - but
+    a docstring convention applies to this file exactly as it does to any other, and its own
+    docstrings were part of the conversion these guards protect.
+
+    Returns:
+        sorted list of tracked .py paths under toinflux/, scripts/ and tests/
+    """
+    roots = ("toinflux", "scripts", "tests")
+    tracked = {
+        path for path in _tracked_files() if path.suffix == ".py" and path.relative_to(REPO_ROOT).parts[0] in roots
+    }
+    return sorted(tracked | {Path(__file__)})
+
+
+def test_no_docstring_uses_the_reStructuredText_field_syntax():
+    """Every docstring uses Google sections, not reST field lists.
+
+    CS.6.3 is one format per project, and the linter cannot enforce it here: tests/ is exempt
+    from D and DOC in tox.ini, so a `:param x:` under tests/ passes CI in silence. That is not
+    hypothetical - three files under tests/ kept 43 reST fields through a conversion that was
+    reported as covering the repository, and nothing failed.
+
+    Checked against the docstrings themselves rather than the file text, so a string that
+    merely contains a colon-prefixed word is not a false positive.
+    """
+    import ast
+
+    fields = re.compile(r"^\s*:(param|type|returns?|rtype|raises|ivar|vartype)\b", re.MULTILINE)
+    found = []
+    for path in _every_python_file():
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            docstring = ast.get_docstring(node) or ""
+            if fields.search(docstring):
+                name = getattr(node, "name", "<module>")
+                found.append(f"{path.relative_to(REPO_ROOT)}:{getattr(node, 'lineno', 0)} {name}")
+
+    assert (
+        not found
+    ), "these docstrings still use reST field lists; the project convention is Google sections:\n  " + "\n  ".join(
+        found
+    )
+
+
+def test_no_docstring_repeats_a_section_header():
+    """No docstring carries the same Google section header twice.
+
+    A second ``Raises:`` is not a style nit: pydocstyle and pydoclint both read the first
+    section and stop, so the duplicate is invisible to every check while a human reader sees
+    two contradictory lists. Both instances this catches were introduced by a script that
+    appended a section without noticing the docstring already had one, and were found in
+    review rather than by CI - which is what this test is here to change.
+    """
+    import ast
+
+    duplicated = []
+    for path in _every_python_file():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            docstring = ast.get_docstring(node) or ""
+            for section in ("Args", "Returns", "Raises", "Yields", "Attributes"):
+                count = len(re.findall(rf"^\s*{section}:\s*$", docstring, re.MULTILINE))
+                if count > 1:
+                    name = getattr(node, "name", "<module>")
+                    duplicated.append(f"{path.name}:{getattr(node, 'lineno', 0)} {name}: {count}x '{section}:'")
+
+    assert (
+        not duplicated
+    ), "these docstrings repeat a section header, so everything after the first is ignored:\n  " + "\n  ".join(
+        duplicated
     )
 
 
@@ -499,9 +637,12 @@ def _module_constant(relative, name):
     dependencies, which a hygiene check has no business doing, and the MCP modules are
     optional at runtime so importing them here would make this test depend on an extra.
 
-    :param str relative: module path relative to the repository root
-    :param str name: the constant's name
-    :return: the constant's literal value
+    Args:
+        relative (str): module path relative to the repository root
+        name (str): the constant's name
+
+    Returns:
+        the constant's literal value
     """
     import ast
 
@@ -633,7 +774,8 @@ def _test_index():
     pytest collects - `pytest tests/test_mqtt.py::_FakeReasonCode` is an error, so accepting a
     reference to a helper class would be this check certifying something it cannot run.
 
-    :return: tuple of (bare test names, complete nodeids, {nodeid missing its class: class})
+    Returns:
+        tuple of (bare test names, complete nodeids, {nodeid missing its class: class})
     """
     import ast
 
@@ -665,9 +807,12 @@ def _recovered_nodeid(token, nodeids):
     the two deserve opposite messages: one is a path to correct, the other an invariant left
     guarded by nothing.
 
-    :param str token: the reference as written in the document
-    :param set nodeids: every complete nodeid, relative to `tests/`
-    :return: str the correct nodeid, or None where no single file carries that test
+    Args:
+        token (str): the reference as written in the document
+        nodeids (set): every complete nodeid, relative to `tests/`
+
+    Returns:
+        str the correct nodeid, or None where no single file carries that test
     """
     filename, _, rest = token.partition("::")
     tail = f"{filename.split('/')[-1]}::{rest}"
@@ -685,10 +830,13 @@ def _suggested_nodeid(token, nodeids, owner):
     would answer an unresolvable reference with a suggestion less likely to run than what they
     had.
 
-    :param str token: the reference as written in the document
-    :param set nodeids: every complete nodeid, relative to `tests/`
-    :param dict owner: class owning each nodeid written without one
-    :return: str, the nodeid to suggest
+    Args:
+        token (str): the reference as written in the document
+        nodeids (set): every complete nodeid, relative to `tests/`
+        owner (dict): class owning each nodeid written without one
+
+    Returns:
+        str, the nodeid to suggest
     """
     recovered = _recovered_nodeid(token, nodeids)
     if recovered:
@@ -708,12 +856,15 @@ def _classify(token, where, bare, nodeids, owner):
     which is a correction to the document and nothing more. Reporting the second as the first
     would tell a reader an invariant had lost its guard when it had not.
 
-    :param str token: the reference as written
-    :param str where: the document or documents carrying it, already rendered
-    :param set bare: every test name
-    :param set nodeids: every complete nodeid, relative to `tests/`
-    :param dict owner: class owning each nodeid written without one
-    :return: tuple of (None|"missing"|"unrunnable", message)
+    Args:
+        token (str): the reference as written
+        where (str): the document or documents carrying it, already rendered
+        bare (set): every test name
+        nodeids (set): every complete nodeid, relative to `tests/`
+        owner (dict): class owning each nodeid written without one
+
+    Returns:
+        tuple of (None|"missing"|"unrunnable", message)
     """
     if "::" not in token:
         # A bare name claims only that the test exists, so there is no path to get wrong.

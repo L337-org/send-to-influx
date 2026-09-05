@@ -52,10 +52,13 @@ def register_tool(server, **kwargs):
     Dedenting here rather than per tool means a new tool cannot forget it, and
     ``tests/test_mcp_surface.py`` asserts that nothing bypasses this function.
 
-    :param server: the MCPServer instance
-    :param kwargs: passed to ``server.tool()`` (title, annotations, ...); a
-        ``description`` given explicitly wins, as it does in the SDK
-    :return: a decorator registering the function as a tool
+    Args:
+        server: the MCPServer instance
+        kwargs: passed to ``server.tool()`` (title, annotations, ...); a ``description`` given explicitly wins, as it
+            does in the SDK
+
+    Returns:
+        a decorator registering the function as a tool
     """
 
     def decorator(fn):
@@ -95,13 +98,14 @@ def translate_failures(fn, error_cls):
     of subclasses is deliberate: a new project exception is covered by inheriting, where a list has
     to be remembered, and the one time it was not, a whole class of failures went silent.
 
-    :param fn: the tool or resource function, sync or async
-    :param error_cls: the SDK error to re-raise as - ``ToolError`` for a tool,
-        ``ResourceError`` for a resource; these are the only two types the SDK reads
-        as deliberate rather than as a crash
-    :return: a wrapper of the same sync/async-ness and signature, which the SDK needs
-        to build the tool's schema and to decide whether to await it, carrying
-        ``TRANSLATES_FAILURES`` so the surface guard can see it
+    Args:
+        fn: the tool or resource function, sync or async
+        error_cls: the SDK error to re-raise as - ``ToolError`` for a tool, ``ResourceError`` for a resource; these are
+            the only two types the SDK reads as deliberate rather than as a crash
+
+    Returns:
+        a wrapper of the same sync/async-ness and signature, which the SDK needs to build the tool's schema and to
+            decide whether to await it, carrying ``TRANSLATES_FAILURES`` so the surface guard can see it
     """
     if inspect.iscoroutinefunction(fn):
 
@@ -134,8 +138,11 @@ def configured_sources(settings):
     The same ``sources:`` list the collectors run, so the two cannot drift. Empty when
     nothing is configured.
 
-    :param settings: parsed settings dict
-    :return: list of lowercased source names
+    Args:
+        settings: parsed settings dict
+
+    Returns:
+        list of lowercased source names
     """
     raw = settings.get("sources")
     if isinstance(raw, list):
@@ -158,14 +165,18 @@ def resolve_handlers(source, settings, settings_file):
     :func:`close_session`) - typically in a ``finally``, since a partial failure part-way
     through the list still leaves earlier sessions open.
 
-    :param source: source name from a tool argument
-    :param settings: parsed settings dict
-    :param settings_file: settings path, threaded to each handler's own load
-    :return: list of ``(instance, handler)``, instance None for a single-target source
-    :raises ToolParamError: source is missing/non-string, unknown, unusable, or - for an
-        instanced source - has no usable target at all (a Hue install whose bridges have no
-        tokens), which would otherwise return an empty result that looks like "no devices"
-        rather than "not configured"
+    Args:
+        source: source name from a tool argument
+        settings: parsed settings dict
+        settings_file: settings path, threaded to each handler's own load
+
+    Returns:
+        list of ``(instance, handler)``, instance None for a single-target source
+
+    Raises:
+        ToolParamError: source is missing/non-string, unknown, unusable, or - for an instanced source - has no usable
+            target at all (a Hue install whose bridges have no tokens), which would otherwise return an empty result
+            that looks like "no devices" rather than "not configured"
     """
     if not isinstance(source, str) or not source.strip():
         raise ToolParamError(f"source must be a non-empty string (got {source!r})")
@@ -198,14 +209,18 @@ def resolve_handler(source, settings, settings_file, instance=None):
     Case-insensitive, matching the collector factory. The caller owns the returned
     handler's session and must close it (see :func:`close_session`).
 
-    :param source: source name from a tool argument
-    :param settings: parsed settings dict
-    :param settings_file: settings path, threaded to the handler's own load
-    :param instance: which instance of the source to construct for - a Hue bridge host, or
-        None for a single-target source (and, for Hue, the first configured bridge)
-    :return: a constructed DataHandler subclass instance
-    :raises ToolParamError: source is missing/non-string, unknown, unusable, or named an
-        instance that is not configured
+    Args:
+        source: source name from a tool argument
+        settings: parsed settings dict
+        settings_file: settings path, threaded to the handler's own load
+        instance: which instance of the source to construct for - a Hue bridge host, or None for a single-target source
+            (and, for Hue, the first configured bridge)
+
+    Returns:
+        a constructed DataHandler subclass instance
+
+    Raises:
+        ToolParamError: source is missing/non-string, unknown, unusable, or named an instance that is not configured
     """
     if not isinstance(source, str) or not source.strip():
         raise ToolParamError(f"source must be a non-empty string (got {source!r})")
@@ -251,7 +266,8 @@ def close_session(session):
 
     This runs in cleanup paths and must never mask the real result or exception.
 
-    :param session: the handler's requests.Session
+    Args:
+        session: the handler's requests.Session
     """
     try:
         session.close()

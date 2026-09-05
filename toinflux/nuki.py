@@ -1,4 +1,4 @@
-"""Functions to get data from Nuki smart locks via MQTT and format it for InfluxDB"""
+"""Functions to get data from Nuki smart locks via MQTT and format it for InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
@@ -90,9 +90,11 @@ def _is_per_device(payload):
     to the base implementation, which is the conservative direction (it honours the header the
     caller set instead of overwriting it with a lock's).
 
-    :param payload: the data handed to ``send_data()``
-    :return: True if it should be written as one point per lock
-    :rtype: bool
+    Args:
+        payload: the data handed to ``send_data()``
+
+    Returns:
+        bool: True if it should be written as one point per lock
     """
     if not payload or not isinstance(payload, dict):
         return False
@@ -189,8 +191,8 @@ class Nuki(MqttDataHandler):
         Returns ``{device: {field: value}}`` - one entry per lock - rather than the single
         flattened dict this used to return. ``send_data()`` writes one point per entry.
 
-        :return: per-device state
-        :rtype: dict
+        Returns:
+            dict: per-device state
         """
         self.data = self.parse_nuki_data()
         # No header set here: there is one per device now, built by send_data(). The broker
@@ -226,21 +228,18 @@ class Nuki(MqttDataHandler):
         then skipped as non-dicts: Nuki wrote no heartbeat at all, silently, which is precisely
         the "silent gap" the heartbeat exists to prevent.
 
-        :param data: per-device ``{device: {field: value}}`` data, or a flat
-            ``{field: value}`` point for the caller's own header; defaults to ``self.data``
-        :type data: dict or None
-        :param timestamp: unix epoch seconds for every point in this snapshot
-        :type timestamp: int or None
-        :param use_buffer: as the base implementation
-        :type use_buffer: bool
-        :param flush: as the base implementation. Accepted and honoured rather than merely
-            tolerated: the signature has to stay call-compatible with the base, or a generic
-            caller doing ``handler.send_data(..., flush=...)`` - valid for every other source -
-            raises TypeError on this one alone. False means no flush at all; True means once
-            for the whole snapshot rather than once per lock (see the loop below).
-        :type flush: bool
-        :return: None
-        :raises InfluxWriteError: if any lock's write failed
+        Args:
+            data (dict or None): per-device ``{device: {field: value}}`` data, or a flat ``{field: value}`` point for
+                the caller's own header; defaults to ``self.data``
+            timestamp (int or None): unix epoch seconds for every point in this snapshot
+            use_buffer (bool): as the base implementation
+            flush (bool): as the base implementation. Accepted and honoured rather than merely tolerated: the signature
+                has to stay call-compatible with the base, or a generic caller doing ``handler.send_data(...,
+                flush=...)`` - valid for every other source - raises TypeError on this one alone. False means no flush
+                at all; True means once for the whole snapshot rather than once per lock (see the loop below).
+
+        Raises:
+            InfluxWriteError: if any lock's write failed
         """
         per_device = self.data if data is None else data
         if not _is_per_device(per_device):
@@ -300,8 +299,8 @@ class Nuki(MqttDataHandler):
         own, and its remaining fields become that lock's own entry. ``send_data()`` writes
         one point per entry, tagged with the label.
 
-        :return: per-device state, ``{device: {field: value}}``
-        :rtype: dict
+        Returns:
+            dict: per-device state, ``{device: {field: value}}``
         """
         timeout = self.settings["nuki"].get("timeout", 3)
         devices = {}
@@ -355,14 +354,13 @@ class Nuki(MqttDataHandler):
         ``name`` retained, it is redelivered on every (re)subscribe ahead of the state topics,
         so in practice the fallback is only ever hit for a device with no name set at all.
 
-        :param topic: the message's MQTT topic (e.g. ``nuki/2BB28570/state``)
-        :type topic: str
-        :param payload: the payload as received (UTF-8 decoded)
-        :type payload: str
-        :return: ``{device: {field: value}}`` for the one field this message carries, or None
-            to ignore the message (a control/event/malformed topic, or a ``name`` update
-            consumed as a label)
-        :rtype: dict or None
+        Args:
+            topic (str): the message's MQTT topic (e.g. ``nuki/2BB28570/state``)
+            payload (str): the payload as received (UTF-8 decoded)
+
+        Returns:
+            dict or None: ``{device: {field: value}}`` for the one field this message carries, or None to ignore the
+                message (a control/event/malformed topic, or a ``name`` update consumed as a label)
         """
         parts = topic.split("/")
         if len(parts) != 3 or parts[2] not in KNOWN_STATE_FIELDS:
@@ -393,12 +391,12 @@ class Nuki(MqttDataHandler):
         A blank or whitespace name falls back to the device ID, as an empty label would make
         every unnamed lock the same series.
 
-        :param name: the device's Nuki-app name (may be blank/whitespace)
-        :type name: str
-        :param device_id: the device's ID, used as the fallback
-        :type device_id: str
-        :return: the tag value identifying this lock
-        :rtype: str
+        Args:
+            name (str): the device's Nuki-app name (may be blank/whitespace)
+            device_id (str): the device's ID, used as the fallback
+
+        Returns:
+            str: the tag value identifying this lock
         """
         return (name.strip() or device_id).replace(" ", "_")
 
@@ -412,11 +410,9 @@ class Nuki(MqttDataHandler):
         streaming path too, when the name is set, rather than silently. A device re-sending
         its own retained name (e.g. on reconnect) is not a collision.
 
-        :param device_id: the device the name belongs to
-        :type device_id: str
-        :param name: the name payload as received (UTF-8 decoded)
-        :type name: str
-        :return: None
+        Args:
+            device_id (str): the device the name belongs to
+            name (str): the name payload as received (UTF-8 decoded)
         """
         label = self._device_label(name, device_id)
         for other_id, other_name in self._device_names.items():
@@ -442,12 +438,12 @@ class Nuki(MqttDataHandler):
         Everything else is cast by shape: true/false to bool, numeric strings to
         int/float, anything else left as a string.
 
-        :param field: the topic's field name (last topic segment)
-        :type field: str
-        :param raw: the payload as received (UTF-8 decoded)
-        :type raw: str
-        :return: (field key, decoded value)
-        :rtype: tuple
+        Args:
+            field (str): the topic's field name (last topic segment)
+            raw (str): the payload as received (UTF-8 decoded)
+
+        Returns:
+            tuple: (field key, decoded value)
         """
         if field in STRING_FIELDS:
             return field, raw
@@ -465,9 +461,11 @@ class Nuki(MqttDataHandler):
     def _decode_scalar(raw):
         """Cast a bare MQTT payload string to the most specific Python type it matches.
 
-        :param raw: the payload as received (UTF-8 decoded)
-        :type raw: str
-        :return: bool, int, float, or the original string
+        Args:
+            raw (str): the payload as received (UTF-8 decoded)
+
+        Returns:
+            bool, int, float, or the original string
         """
         if raw in ("true", "false"):
             return raw == "true"

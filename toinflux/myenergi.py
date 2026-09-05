@@ -1,4 +1,4 @@
-"""Functions to get MyEnergi data ready to send to InfluxDB"""
+"""Functions to get MyEnergi data ready to send to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -77,12 +77,12 @@ def enumerate_devices(source, source_settings):
     two instanced sources report configuration problems the same way, and validation can
     treat them alike.
 
-    :param source: the source name, used as the legacy device's default label
-    :type source: str
-    :param source_settings: that source's settings block
-    :type source_settings: dict or None
-    :return: (devices, errors, warnings)
-    :rtype: tuple
+    Args:
+        source (str): the source name, used as the legacy device's default label
+        source_settings (dict or None): that source's settings block
+
+    Returns:
+        tuple: (devices, errors, warnings)
     """
     if not isinstance(source_settings, dict):
         return [], [f"{source} settings must be a mapping"], []
@@ -136,13 +136,13 @@ def _checked_label(position, label, what="label"):
     key at fault; ``escape_key_or_tag_value()`` refuses one too, as the backstop that makes
     it unreachable by any route.
 
-    :param position: what to name in the message
-    :type position: str
-    :param label: the configured value
-    :param what: the key name, for the message
-    :type what: str
-    :return: (label, errors); label is None when there are errors
-    :rtype: tuple
+    Args:
+        position (str): what to name in the message
+        label: the configured value
+        what (str): the key name, for the message
+
+    Returns:
+        tuple: (label, errors); label is None when there are errors
     """
     if not isinstance(label, str):
         return None, [f"{position}.{what} must be a name (got {type(label).__name__})"]
@@ -170,12 +170,12 @@ def _checked_legacy_label(source, source_settings):
     show the wrong thing with nothing saying why - and it would treat the same mistake more
     leniently than a ``devices:`` entry does, where a blank label is refused.
 
-    :param source: the source name, used as the default and in messages
-    :type source: str
-    :param source_settings: that source's settings block
-    :type source_settings: dict
-    :return: (label, errors); label is None when there are errors
-    :rtype: tuple
+    Args:
+        source (str): the source name, used as the default and in messages
+        source_settings (dict): that source's settings block
+
+    Returns:
+        tuple: (label, errors); label is None when there are errors
     """
     if "label" not in source_settings or source_settings["label"] is None:
         return source, []
@@ -196,12 +196,13 @@ def _device_from_entry(position, entry, block_fields):
     Extracted from ``enumerate_devices`` to keep it inside the project's complexity limit
     once each field gained validation.
 
-    :param position: what to name in messages, e.g. "zappi.devices[0]"
-    :type position: str
-    :param entry: the list entry as parsed from YAML
-    :param block_fields: the block-level fields list, used when the entry names none
-    :return: (device, errors); device is None when there are errors
-    :rtype: tuple
+    Args:
+        position (str): what to name in messages, e.g. "zappi.devices[0]"
+        entry: the list entry as parsed from YAML
+        block_fields: the block-level fields list, used when the entry names none
+
+    Returns:
+        tuple: (device, errors); device is None when there are errors
     """
     if not isinstance(entry, dict):
         return None, [f"{position} must be a mapping (got {type(entry).__name__})"]
@@ -231,11 +232,12 @@ def _checked_serial(position, value):
     at device selection, reported as "no device has serial ''" rather than as the
     configuration mistake it is.
 
-    :param position: what to name in the message, e.g. "zappi" or "zappi.devices[0]"
-    :type position: str
-    :param value: the configured value
-    :return: (serial, errors); serial is None when there are errors
-    :rtype: tuple
+    Args:
+        position (str): what to name in the message, e.g. "zappi" or "zappi.devices[0]"
+        value: the configured value
+
+    Returns:
+        tuple: (serial, errors); serial is None when there are errors
     """
     serial = str(value).strip()
     if not serial:
@@ -252,12 +254,13 @@ def _checked_fields(position, value):
     It applied to the block-level list before devices existed, so this closes a latent bug as
     well as guarding the new path.
 
-    :param position: what to name in the message
-    :type position: str
-    :param value: the configured value, or None
-    :return: (fields, errors); fields is None both on error and when nothing was configured,
-        the latter meaning collect every field the API returns
-    :rtype: tuple
+    Args:
+        position (str): what to name in the message
+        value: the configured value, or None
+
+    Returns:
+        tuple: (fields, errors); fields is None both on error and when nothing was configured, the latter meaning
+            collect every field the API returns
     """
     if value is None:
         return None, []
@@ -284,12 +287,12 @@ def _duplicate_errors(source, devices):
     overwriting each other at second precision. Both are self-contradictory config rather
     than something to warn about and continue past.
 
-    :param source: source name, for the messages
-    :type source: str
-    :param devices: the devices enumerated so far
-    :type devices: list
-    :return: error strings, empty when there are none
-    :rtype: list
+    Args:
+        source (str): source name, for the messages
+        devices (list): the devices enumerated so far
+
+    Returns:
+        list: error strings, empty when there are none
     """
     errors = []
     for attribute, description in (("label", "label"), ("serial", "serial")):
@@ -314,10 +317,11 @@ def duplicate_label_errors(settings):
     measurement and the label is the ``device`` tag value, so a zappi and an eddi both
     labelled "Garage" would merge into a single series carrying both devices' fields.
 
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :return: error strings, empty when there are none
-    :rtype: list
+    Args:
+        settings (dict): parsed settings dictionary
+
+    Returns:
+        list: error strings, empty when there are none
     """
     owners = {}
     for source in DEVICE_SOURCES:
@@ -335,7 +339,7 @@ def duplicate_label_errors(settings):
 
 
 class MyEnergi(DataHandler):
-    """Child class of DataHandler to get data from MyEnergi"""
+    """Child class of DataHandler to get data from MyEnergi."""
 
     # All three types share the `myenergi` measurement, and `device` is the tag that tells
     # them apart - now carrying the operator's label rather than the type name. Naming it as
@@ -352,11 +356,12 @@ class MyEnergi(DataHandler):
         is what keeps a single-device install - and every caller that builds a handler without
         an instance - behaving exactly as it did before this existed.
 
-        :return: the device
-        :rtype: MyEnergiDevice
-        :raises ConfigError: nothing is configured, or the named label is not configured.
-            Fatal rather than transient, so a worker whose device has been removed stops
-            instead of retrying a doomed lookup forever
+        Returns:
+            MyEnergiDevice: the device
+
+        Raises:
+            ConfigError: nothing is configured, or the named label is not configured. Fatal rather than transient, so a
+                worker whose device has been removed stops instead of retrying a doomed lookup forever
         """
         devices, errors, _ = enumerate_devices(self.source, self.source_settings)
         if errors:
@@ -380,8 +385,8 @@ class MyEnergi(DataHandler):
         measurement, so without a device filter a read of "the myenergi measurement" would
         return all three types' devices.
 
-        :return: tag filters for this handler's reads
-        :rtype: dict
+        Returns:
+            dict: tag filters for this handler's reads
         """
         return {"device": self.device().label}
 
@@ -398,8 +403,8 @@ class MyEnergi(DataHandler):
         none. A deliberate emitted-data change on a liveness signal, noted in UNITS.md: old
         heartbeat points sit in an untagged series.
 
-        :return: ``{"device": <this device's label>}``
-        :rtype: dict
+        Returns:
+            dict: ``{"device": <this device's label>}``
         """
         return {"device": self.device().label}
 
@@ -416,8 +421,8 @@ class MyEnergi(DataHandler):
         second device's own serial turns out not to authenticate, this is already here and no
         one needs a config change to work around it.
 
-        :return: the serial to authenticate with
-        :rtype: str
+        Returns:
+            str: the serial to authenticate with
         """
         # Stripped, and ignored when that leaves nothing: `auth_serial: "   "` is truthy, so
         # it was sent as the Digest username and authentication simply failed, with nothing
@@ -430,12 +435,16 @@ class MyEnergi(DataHandler):
         return self.device().serial
 
     def get_data_from_myenergi(self, url):
-        """Get the data from the myenergi API
+        """Get the data from the myenergi API.
 
-        :param url: full API endpoint URL
-        :type url: str
-        :return: parsed JSON response
-        :rtype: dict
+        Args:
+            url (str): full API endpoint URL
+
+        Returns:
+            dict: parsed JSON response
+
+        Raises:
+            SourceConnectionError: the API could not be reached, or answered with an error
         """
         # Get the data for the given serial from the MyEnergi API
         auth = HTTPDigestAuth(self.auth_serial(), self.settings["myenergi"]["apikey"])
@@ -470,19 +479,20 @@ class MyEnergi(DataHandler):
         broad handler caught, logged as "list index out of range", and retried forever
         without ever naming the cause.
 
-        :param device_key: settings/response key for the device, e.g. "eddi", "harvi", "zappi"
-        :type device_key: str
-        :param url_key: settings key (under "myenergi") for the device's API URL, e.g. "eddi_url"
-        :type url_key: str
-        :return: device data, filtered to the configured "fields" list if present
-        :rtype: dict
-        :raises SourceConnectionError: the account has no device of this type. Transient
-            rather than fatal because a device can legitimately be mid-provisioning, and
-            because an absent key is not distinguishable here from a temporary API oddity
-        :raises ConfigError: devices of this type came back but none has the configured
-            serial. The account is reachable and the type exists, so the serial is simply
-            wrong, and no amount of waiting fixes that - this stops the worker instead of
-            backing off forever
+        Args:
+            device_key (str): settings/response key for the device, e.g. "eddi", "harvi", "zappi"
+            url_key (str): settings key (under "myenergi") for the device's API URL, e.g. "eddi_url"
+
+        Returns:
+            dict: device data, filtered to the configured "fields" list if present
+
+        Raises:
+            SourceConnectionError: the account has no device of this type. Transient rather than fatal because a device
+                can legitimately be mid-provisioning, and because an absent key is not distinguishable here from a
+                temporary API oddity
+            ConfigError: devices of this type came back but none has the configured serial. The account is reachable and
+                the type exists, so the serial is simply wrong, and no amount of waiting fixes that - this stops the
+                worker instead of backing off forever
         """
         device = self.device()
         myenergi_data = self.get_data_from_myenergi(self.settings["myenergi"][url_key])
@@ -503,14 +513,16 @@ class MyEnergi(DataHandler):
         unless quoted, so a raw comparison would never match and would look exactly like a
         wrong serial rather than a type mismatch.
 
-        :param myenergi_data: the parsed API response
-        :type myenergi_data: dict
-        :param device_key: the response key for this device type, e.g. "zappi"
-        :type device_key: str
-        :return: the matching device's data
-        :rtype: dict
-        :raises SourceConnectionError: no device of this type in the response
-        :raises ConfigError: devices present, but none with the configured serial
+        Args:
+            myenergi_data (dict): the parsed API response
+            device_key (str): the response key for this device type, e.g. "zappi"
+
+        Returns:
+            dict: the matching device's data
+
+        Raises:
+            SourceConnectionError: no device of this type in the response
+            ConfigError: devices present, but none with the configured serial
         """
         # A missing key is treated as an empty list rather than allowed to raise KeyError:
         # the response shape is the vendor's to change, and a KeyError would escape the
@@ -553,25 +565,25 @@ class MyEnergi(DataHandler):
         Harmless under the other reading, too: if the API does always send ``hr``, this
         default never fires. It can only turn a miss into a hit.
 
-        :param item: one entry from the day/hour response
-        :return: the hour the entry describes
-        :rtype: int
+        Args:
+            item: one entry from the day/hour response
+
+        Returns:
+            int: the hour the entry describes
         """
         return item.get("hr", 0)
 
     def dayhour_results(self, year, month, day, hour=None):
-        """Get the data for a specific day
+        """Get the data for a specific day.
 
-        :param year: four-digit year, e.g. "2026"
-        :type year: str
-        :param month: zero-padded month, e.g. "06"
-        :type month: str
-        :param day: zero-padded day, e.g. "29"
-        :type day: str
-        :param hour: hour of the day (0-23); if None, results for the whole day are returned
-        :type hour: int
-        :return: Charge, Import, Export and Genera values in kWh
-        :rtype: dict
+        Args:
+            year (str): four-digit year, e.g. "2026"
+            month (str): zero-padded month, e.g. "06"
+            day (str): zero-padded day, e.g. "29"
+            hour (int or None): hour of the day (0-23); if None, results for the whole day are returned
+
+        Returns:
+            dict: Charge, Import, Export and Genera values in kWh
         """
         # Get the Day/Hour data from the MyEnergi API - this handler's own device, so a
         # second zappi's day totals are its own rather than the first one's.
@@ -616,7 +628,7 @@ class MyEnergi(DataHandler):
 
 
 class Zappi(MyEnergi):
-    """Child class of MyEnergi (which is in turn a child of DataHandler) to get data from a Zappi"""
+    """Child class of MyEnergi (which is in turn a child of DataHandler) to get data from a Zappi."""
 
     MCP_DESCRIPTION = "MyEnergi Zappi EV charger: charge and session energy, grid/generation power, and status."
 
@@ -655,10 +667,10 @@ class Zappi(MyEnergi):
     }
 
     def get_data(self):
-        """Get the data from the Zappi
+        """Get the data from the Zappi.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         # The label, escaped: send_data() takes the header verbatim, so a label
         # containing a comma, space or equals would end the tag set early and
@@ -669,10 +681,10 @@ class Zappi(MyEnergi):
         return self.data
 
     def parse_zappi_data(self):
-        """Parse the data from the myenergi to get the values we want
+        """Parse the data from the myenergi to get the values we want.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         # Get the data for the Zappi from the MyEnergi API
         zappi_data = self._parse_device_data("zappi", "zappi_url")
@@ -692,7 +704,7 @@ class Zappi(MyEnergi):
 
 
 class Eddi(MyEnergi):
-    """Child class of MyEnergi to get data from an Eddi hot water diverter"""
+    """Child class of MyEnergi to get data from an Eddi hot water diverter."""
 
     MCP_DESCRIPTION = "MyEnergi Eddi hot-water diverter: diversion power, tank temperatures, and status."
     MCP_MEASUREMENT = "myenergi"
@@ -712,10 +724,10 @@ class Eddi(MyEnergi):
     }
 
     def get_data(self):
-        """Get the data from the Eddi
+        """Get the data from the Eddi.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         # The label, escaped: send_data() takes the header verbatim, so a label
         # containing a comma, space or equals would end the tag set early and
@@ -726,16 +738,16 @@ class Eddi(MyEnergi):
         return self.data
 
     def parse_eddi_data(self):
-        """Parse the data from the MyEnergi API for the Eddi device
+        """Parse the data from the MyEnergi API for the Eddi device.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         return self._parse_device_data("eddi", "eddi_url")
 
 
 class Harvi(MyEnergi):
-    """Child class of MyEnergi to get data from a Harvi CT clamp energy monitor"""
+    """Child class of MyEnergi to get data from a Harvi CT clamp energy monitor."""
 
     MCP_DESCRIPTION = "MyEnergi Harvi energy monitor: CT-clamp power readings per channel."
     MCP_MEASUREMENT = "myenergi"
@@ -751,10 +763,10 @@ class Harvi(MyEnergi):
     }
 
     def get_data(self):
-        """Get the data from the Harvi
+        """Get the data from the Harvi.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         # The label, escaped: send_data() takes the header verbatim, so a label
         # containing a comma, space or equals would end the tag set early and
@@ -765,9 +777,9 @@ class Harvi(MyEnergi):
         return self.data
 
     def parse_harvi_data(self):
-        """Parse the data from the MyEnergi API for the Harvi device
+        """Parse the data from the MyEnergi API for the Harvi device.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         return self._parse_device_data("harvi", "harvi_url")

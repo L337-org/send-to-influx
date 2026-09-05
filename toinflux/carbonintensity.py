@@ -1,4 +1,4 @@
-"""Functions to get National Grid Carbon Intensity data ready to send to InfluxDB"""
+"""Functions to get National Grid Carbon Intensity data ready to send to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -14,7 +14,7 @@ ACCEPT_JSON = {"Accept": "application/json"}
 
 
 class CarbonIntensity(DataHandler):
-    """Child class of DataHandler to get National Grid carbon intensity data"""
+    """Child class of DataHandler to get National Grid carbon intensity data."""
 
     MCP_DESCRIPTION = "UK carbon intensity (actual/forecast gCO2/kWh) and the generation fuel mix."
     # Only the two intensity fields carry a unit here. The gen_<fuel>
@@ -37,10 +37,14 @@ class CarbonIntensity(DataHandler):
     def _get(self, path):
         """Make a GET request to the Carbon Intensity API.
 
-        :param path: API path relative to the base URL (without leading slash)
-        :type path: str
-        :return: parsed JSON response
-        :rtype: dict
+        Args:
+            path (str): API path relative to the base URL (without leading slash)
+
+        Returns:
+            dict: parsed JSON response
+
+        Raises:
+            SourceConnectionError: the API could not be reached, or answered with an error
         """
         url = f"{CARBON_INTENSITY_BASE_URL}/{path}"
         try:
@@ -64,8 +68,8 @@ class CarbonIntensity(DataHandler):
         If ``include_generation`` is set in settings, generation fuel mix percentages
         are also collected from the ``/generation`` endpoint.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         self.influx_header = "carbonintensity,source=national_grid "
         self.data = {}

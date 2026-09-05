@@ -126,12 +126,15 @@ def split_field_key(key):
     ``doorsensorStateValue`` does not end with ``_stateValue``, so a case-insensitive
     comparison would break the split.
 
-    :param key: the old field key
-    :type key: str
-    :return: (label, field)
-    :rtype: tuple
-    :raises MigrationError: the key ends with no known field name. Halting is the point: a
-        skipped key is data silently left behind, and it would look like success
+    Args:
+        key (str): the old field key
+
+    Returns:
+        tuple: (label, field)
+
+    Raises:
+        MigrationError: the key ends with no known field name. Halting is the point: a skipped key is data silently left
+            behind, and it would look like success
     """
     best = None
     for field in KNOWN_FIELDS:
@@ -172,11 +175,12 @@ def line_protocol_value(field, value):
     next write would fail with the 400 type conflict described above. The stricter answer is
     the safe one, and it is why ``field`` is a parameter at all.
 
-    :param field: the bare field name, to decide whether it must stay text
-    :type field: str
-    :param value: the value as InfluxDB returned it
-    :return: the line protocol representation
-    :rtype: str
+    Args:
+        field (str): the bare field name, to decide whether it must stay text
+        value: the value as InfluxDB returned it
+
+    Returns:
+        str: the line protocol representation
     """
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -187,7 +191,11 @@ def line_protocol_value(field, value):
 
 
 def escape_tag(value):
-    """Escape a tag value for line protocol, refusing what cannot be escaped."""
+    """Escape a tag value for line protocol, refusing what cannot be escaped.
+
+    Raises:
+        MigrationError: the value contains a newline, which separates points and so cannot appear in a tag
+    """
     if any(char in value for char in (chr(10), chr(13))):
         raise MigrationError(
             f"lock name {value!r} contains a newline, which cannot appear in a tag value - "
@@ -212,10 +220,11 @@ def escape_influxql_string(value):
     to fail closed is not a property worth depending on for an irreversible delete, and the
     manifest is a file an operator can hand-edit.
 
-    :param value: the literal's contents
-    :type value: str
-    :return: the escaped contents, without the surrounding quotes
-    :rtype: str
+    Args:
+        value (str): the literal's contents
+
+    Returns:
+        str: the escaped contents, without the surrounding quotes
     """
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
@@ -234,10 +243,11 @@ def escape_influxql_identifier(value):
     Found by sweeping for the pattern after the string-literal case was raised, rather than
     waiting for the second instance to be reported separately.
 
-    :param value: the identifier
-    :type value: str
-    :return: the escaped identifier, without the surrounding quotes
-    :rtype: str
+    Args:
+        value (str): the identifier
+
+    Returns:
+        str: the escaped identifier, without the surrounding quotes
     """
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -284,12 +294,14 @@ class Influx:
         report success. Columns must match across series - for these statements they always do,
         and a mismatch halts rather than being stitched together on a guess.
 
-        :param statement: the InfluxQL statement
-        :type statement: str
-        :return: (columns, rows) with the rows of every series concatenated
-        :rtype: tuple
-        :raises MigrationError: InfluxDB rejected the statement, or its series disagree on
-            columns
+        Args:
+            statement (str): the InfluxQL statement
+
+        Returns:
+            tuple: (columns, rows) with the rows of every series concatenated
+
+        Raises:
+            MigrationError: InfluxDB rejected the statement, or its series disagree on columns
         """
         # POST with the statement in a form-encoded body, never GET with it in the query
         # string. The rewrite phase names every old field key in one SELECT, and there is one
@@ -331,7 +343,11 @@ class Influx:
         return columns, rows
 
     def write(self, lines):
-        """Write a batch of line protocol points at nanosecond precision."""
+        """Write a batch of line protocol points at nanosecond precision.
+
+        Raises:
+            MigrationError: InfluxDB rejected the write, or could not be reached
+        """
         if not lines:
             return
         response = self.session.post(
@@ -397,7 +413,7 @@ def read_old_points(influx, keys):
     return points
 
 
-def iter_rewritten_lines(points, counts, keys_by_label):
+def iter_rewritten_lines(points, counts, keys_by_label):  # noqa: DOC403 - a generator, but unannotated
     """Yield new-format line protocol for each old point, one line per lock per timestamp.
 
     A generator rather than a list because the list was the migration's largest allocation:
@@ -419,15 +435,16 @@ def iter_rewritten_lines(points, counts, keys_by_label):
     ``counts`` and ``keys_by_label`` are accumulated into rather than returned, since a generator
     cannot return them and the caller needs the totals only once it is exhausted.
 
-    :param points: ``{timestamp: {old_key: value}}`` from read_old_points
-    :type points: dict
-    :param counts: per-lock point counter, mutated in place
-    :type counts: collections.Counter
-    :param keys_by_label: per-lock set of old field keys, mutated in place
-    :type keys_by_label: dict
-    :return: an iterator of line protocol strings
-    :rtype: collections.abc.Iterator
-    :raises MigrationError: a field key could not be split, or a lock name cannot be a tag
+    Args:
+        points (dict): ``{timestamp: {old_key: value}}`` from read_old_points
+        counts (collections.Counter): per-lock point counter, mutated in place
+        keys_by_label (dict): per-lock set of old field keys, mutated in place
+
+    Yields:
+        str: one line-protocol line per rewritten point
+
+    Raises:
+        MigrationError: a field key could not be split, or a lock name cannot be a tag
     """
     for stamp in sorted(points):
         by_label = {}
@@ -448,10 +465,11 @@ def rewritten_lines(points):
 
     Used by the tests, which assert over the complete output, and nowhere in the write path.
 
-    :param points: ``{timestamp: {old_key: value}}`` from read_old_points
-    :type points: dict
-    :return: (lines, per-lock point counts, per-lock old field-key sets)
-    :rtype: tuple
+    Args:
+        points (dict): ``{timestamp: {old_key: value}}`` from read_old_points
+
+    Returns:
+        tuple: (lines, per-lock point counts, per-lock old field-key sets)
     """
     counts = Counter()
     keys_by_label = {}
@@ -465,14 +483,13 @@ def _dry_run(points, counts, keys_by_label):
     Walks every point rather than sampling, because that is what proves every field key splits -
     the halt it can report is the whole reason to dry-run first.
 
-    :param points: the old points that were read
-    :type points: dict
-    :param counts: per-lock point counter, mutated in place
-    :type counts: collections.Counter
-    :param keys_by_label: per-lock old field keys, mutated in place
-    :type keys_by_label: dict
-    :return: None
-    :raises MigrationError: a field key could not be split, or a lock name cannot be a tag
+    Args:
+        points (dict): the old points that were read
+        counts (collections.Counter): per-lock point counter, mutated in place
+        keys_by_label (dict): per-lock old field keys, mutated in place
+
+    Raises:
+        MigrationError: a field key could not be split, or a lock name cannot be a tag
     """
     sample = []
     written = 0
@@ -495,17 +512,17 @@ def _write_all(influx, points, counts, keys_by_label):
     is safe: phase 1 writes to different series from the ones it reads, so nothing is lost, no
     manifest is produced, and phase 2 refuses to run without one.
 
-    :param influx: the connection to write through
-    :param points: the old points that were read
-    :type points: dict
-    :param counts: per-lock point counter, mutated in place
-    :type counts: collections.Counter
-    :param keys_by_label: per-lock old field keys, mutated in place
-    :type keys_by_label: dict
-    :return: how many points were written
-    :rtype: int
-    :raises MigrationError: a write failed, a field key could not be split, or a lock name
-        cannot be a tag
+    Args:
+        influx: the connection to write through
+        points (dict): the old points that were read
+        counts (collections.Counter): per-lock point counter, mutated in place
+        keys_by_label (dict): per-lock old field keys, mutated in place
+
+    Returns:
+        int: how many points were written
+
+    Raises:
+        MigrationError: a write failed, a field key could not be split, or a lock name cannot be a tag
     """
     written = 0
     chunk = []
@@ -528,15 +545,11 @@ def _report_totals(points, written, counts, keys_by_label):
     Shared by the dry run and the real run so the two can never describe the same database
     differently - the dry run's whole job is to tell you what the real run will do.
 
-    :param points: the old points that were read
-    :type points: dict
-    :param written: how many new points were produced
-    :type written: int
-    :param counts: per-lock point counts
-    :type counts: collections.Counter
-    :param keys_by_label: per-lock old field keys
-    :type keys_by_label: dict
-    :return: None
+    Args:
+        points (dict): the old points that were read
+        written (int): how many new points were produced
+        counts (collections.Counter): per-lock point counts
+        keys_by_label (dict): per-lock old field keys
     """
     print(f"Read {len(points)} old point(s), producing {written} new point(s):")
     for label in sorted(counts):
@@ -555,10 +568,11 @@ def check_manifest_writable(path):
     is the only way to be right about a read-only mount, a missing parent directory, a directory
     in the way, or an ACL.
 
-    :param path: the manifest path phase 1 will write
-    :type path: str
-    :return: None
-    :raises MigrationError: the path cannot be opened for writing
+    Args:
+        path (str): the manifest path phase 1 will write
+
+    Raises:
+        MigrationError: the path cannot be opened for writing
     """
     try:
         with open(path, "a", encoding="utf-8"):
@@ -578,6 +592,10 @@ def phase_rewrite(influx, args):
     run, inspected in Grafana for as long as wanted, and only then followed by phase 2.
     Re-running it rewrites identical points over themselves, which InfluxDB treats as an
     overwrite, so it is idempotent.
+
+    Raises:
+        MigrationError: the points migrated but the manifest could not be written, leaving the delete phase with nothing
+            to drive it
     """
     keys = old_field_keys(influx)
     if not keys:
@@ -643,11 +661,12 @@ def _v2_delete_help(hosts, args):
     Phase 1 works fully on v2 - reads, writes and the manifest, all verified - so only this last
     step needs doing by hand.
 
-    :param hosts: the old host tag values recorded in the manifest
-    :type hosts: list
-    :param args: the parsed arguments, for the url and database
-    :return: the message body
-    :rtype: str
+    Args:
+        hosts (list): the old host tag values recorded in the manifest
+        args: the parsed arguments, for the url and database
+
+    Returns:
+        str: the message body
     """
     lines = [
         "this InfluxDB is v2, and v2 has no DROP SERIES - the v1-compatibility endpoint "
@@ -694,13 +713,14 @@ def _drop_old_series(influx, hosts, args):
     the same measurement, so an unscoped drop would destroy this migration's own output along
     with the history it was preserving.
 
-    :param influx: the connection to delete through
-    :param hosts: the old host tag values recorded in the manifest
-    :type hosts: list
-    :param args: the parsed arguments, for the remedy text on v2
-    :return: None
-    :raises MigrationError: the delete failed, or the target is v2 - in which case the message
-        is the request that does work, since v2 has no DROP SERIES
+    Args:
+        influx: the connection to delete through
+        hosts (list): the old host tag values recorded in the manifest
+        args: the parsed arguments, for the remedy text on v2
+
+    Raises:
+        MigrationError: the delete failed, or the target is v2 - in which case the message is the request that does
+            work, since v2 has no DROP SERIES
     """
     for host in hosts:
         try:
@@ -721,6 +741,9 @@ def phase_delete(influx, args):
     what phase 1 confirmed it had carried across. Never a blanket ``DROP MEASUREMENT``: the
     new points live in the same measurement, and dropping it would destroy the migration's
     own output along with the history.
+
+    Raises:
+        MigrationError: the manifest is unreadable, names a different database, or lists no series to drop
     """
     try:
         with open(args.manifest, encoding="utf-8") as handle:

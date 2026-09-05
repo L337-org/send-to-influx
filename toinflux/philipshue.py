@@ -1,4 +1,4 @@
-"""Functions to get data from a Hue Bridge and format ready for InfluxDB"""
+"""Functions to get data from a Hue Bridge and format ready for InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -43,10 +43,11 @@ def bridge_field_names(slot):
     Slot 1 is the unnumbered pair, so this is the single place that knows the
     numbering convention - callers never build ``f"host{n}"`` themselves.
 
-    :param slot: slot number (1 for the original unnumbered pair)
-    :type slot: int
-    :return: (host field name, user field name)
-    :rtype: tuple
+    Args:
+        slot (int): slot number (1 for the original unnumbered pair)
+
+    Returns:
+        tuple: (host field name, user field name)
     """
     suffix = "" if slot == 1 else str(slot)
     return (f"host{suffix}", f"user{suffix}")
@@ -65,10 +66,11 @@ def _comparable_host(host):
     Never used for the request URL or the InfluxDB tag: those keep the configured
     value verbatim (see ``_url_host`` and ``get_data``).
 
-    :param host: host as configured
-    :type host: str
-    :return: a value equal for any two spellings of the same host
-    :rtype: str
+    Args:
+        host (str): host as configured
+
+    Returns:
+        str: a value equal for any two spellings of the same host
     """
     text = str(host).strip()
     if text.startswith("[") and text.endswith("]"):
@@ -91,9 +93,11 @@ def _usable_token(value):
     reach the bridge as a doomed authentication attempt, retried with backoff forever,
     instead of failing fast as the configuration error it is.
 
-    :param value: the configured ``user``/``userN`` value
-    :return: True if it looks like a real token
-    :rtype: bool
+    Args:
+        value: the configured ``user``/``userN`` value
+
+    Returns:
+        bool: True if it looks like a real token
     """
     if not isinstance(value, str):
         return False
@@ -106,10 +110,12 @@ def _usable_token(value):
 def _parse_slot_field(field):
     """Interpret a settings field name as a bridge slot.
 
-    :param field: a key from the ``hue`` block
-    :return: ``(slot, error)`` - ``(None, None)`` when the field doesn't name a slot at
-        all, ``(None, message)`` when it looks like one but isn't canonical
-    :rtype: tuple
+    Args:
+        field: a key from the ``hue`` block
+
+    Returns:
+        tuple: ``(slot, error)`` - ``(None, None)`` when the field doesn't name a slot at all, ``(None, message)`` when
+            it looks like one but isn't canonical
     """
     match = _SLOT_FIELD_RE.match(str(field))
     if not match:
@@ -136,13 +142,12 @@ def _bridge_for_slot(hue_settings, slot):
     Duplicate-host detection needs it in that case too - two slots naming one bridge is a
     mistake whether or not both have tokens yet (see ``_duplicate_host_errors``).
 
-    :param hue_settings: the ``hue`` settings block
-    :type hue_settings: dict
-    :param slot: slot number to resolve
-    :type slot: int
-    :return: ``(bridge, error, warning, host)`` - ``host`` is None only when the slot has
-        no usable host at all
-    :rtype: tuple
+    Args:
+        hue_settings (dict): the ``hue`` settings block
+        slot (int): slot number to resolve
+
+    Returns:
+        tuple: ``(bridge, error, warning, host)`` - ``host`` is None only when the slot has no usable host at all
     """
     host_field, user_field = bridge_field_names(slot)
     host = hue_settings.get(host_field)
@@ -211,8 +216,8 @@ def _credstore_caveat():
     in use - a source checkout never migrated anything - so the wording stays conditional
     rather than asserting that the value is stored there.
 
-    :return: the caveat, prefixed with a separator, or an empty string
-    :rtype: str
+    Returns:
+        str: the caveat, prefixed with a separator, or an empty string
     """
     if os.environ.get("CREDENTIALS_DIRECTORY"):
         return ""
@@ -234,10 +239,11 @@ def _duplicate_host_errors(configured):
     token is filled in would surface it at the least expected moment, long after the
     copy-paste that caused it. Two slots naming one bridge cannot be intended either way.
 
-    :param configured: ``(slot, host)`` for every slot with a non-blank string host
-    :type configured: list
-    :return: error strings, empty when every host is distinct
-    :rtype: list
+    Args:
+        configured (list): ``(slot, host)`` for every slot with a non-blank string host
+
+    Returns:
+        list: error strings, empty when every host is distinct
     """
     errors, seen = [], {}
     for slot, host in configured:
@@ -265,10 +271,11 @@ def _slot_numbers(hue_settings):
     and - most confusingly - the "same bridge as hue.hostN" message name an arbitrary slot
     as the earlier one. Deterministic either way, but only one of the two reads correctly.
 
-    :param hue_settings: the ``hue`` settings block
-    :type hue_settings: dict
-    :return: (slot numbers in numeric order, errors for malformed slot fields)
-    :rtype: tuple
+    Args:
+        hue_settings (dict): the ``hue`` settings block
+
+    Returns:
+        tuple: (slot numbers in numeric order, errors for malformed slot fields)
     """
     slots, errors = set(), []
     # key=str because YAML permits non-string mapping keys (`1: x`, `true: y`), and a
@@ -318,12 +325,12 @@ def enumerate_bridges(hue_settings):
     first, clearing the host is a separate step), so treating it as a fault would report
     the removal procedure as an error mid-way through. Reported at DEBUG only.
 
-    :param hue_settings: the ``hue`` settings block
-    :type hue_settings: dict
-    :return: (bridges found, error strings, warning strings) - bridges are returned even
-        when there are errors, so a caller can report every problem at once rather than
-        one per run
-    :rtype: tuple
+    Args:
+        hue_settings (dict): the ``hue`` settings block
+
+    Returns:
+        tuple: (bridges found, error strings, warning strings) - bridges are returned even when there are errors, so a
+            caller can report every problem at once rather than one per run
     """
     if not isinstance(hue_settings, dict):
         return ([], [f"hue must be a mapping of settings (got {type(hue_settings).__name__})"], [])
@@ -360,11 +367,12 @@ def _url_host(host):
     ``host`` tag is deliberately left exactly as configured (see ``get_data``) -
     normalising it there would change the tag value for existing installs.
 
-    :param host: host as configured in settings.yaml - a hostname, an IPv4
-        literal, or an IPv6 literal with or without brackets
-    :type host: str
-    :return: the host, bracketed if it is a bare IPv6 literal
-    :rtype: str
+    Args:
+        host (str): host as configured in settings.yaml - a hostname, an IPv4 literal, or an IPv6 literal with or
+            without brackets
+
+    Returns:
+        str: the host, bracketed if it is a bare IPv6 literal
     """
     text = str(host).strip()
     if text.startswith("[") and text.endswith("]"):
@@ -430,7 +438,7 @@ HUE_DEFAULT_TEMPERATURE_UNIT = "°C"
 
 
 class Hue(DataHandler):
-    """Child class of DataHandler to get data from a Hue Bridge"""
+    """Child class of DataHandler to get data from a Hue Bridge."""
 
     MCP_DESCRIPTION = "Philips Hue: lights and smart plugs (on/off, brightness) and motion/temperature/light sensors."
 
@@ -485,12 +493,13 @@ class Hue(DataHandler):
         construction, so the answer cannot change during the handler's life, and
         enumeration is pure dictionary work with no I/O.
 
-        :return: the resolved bridge
-        :rtype: Bridge
-        :raises ConfigError: the block is malformed, configures no usable bridge, or does
-            not contain the bridge this handler was created for (a worker outliving a
-            configuration change). Not retryable - the worker should stop rather than loop
-            forever against a bridge that is not there.
+        Returns:
+            Bridge: the resolved bridge
+
+        Raises:
+            ConfigError: the block is malformed, configures no usable bridge, or does not contain the bridge this
+                handler was created for (a worker outliving a configuration change). Not retryable - the worker should
+                stop rather than loop forever against a bridge that is not there.
         """
         bridges, errors, unusable = enumerate_bridges(self.settings.get("hue"))
         if errors:
@@ -528,8 +537,8 @@ class Hue(DataHandler):
         units, which is what happens today; it must not turn a schema call - or a live
         current-state read - into an error.
 
-        :return: {field key: {"unit", "kind"}}, empty when nothing has been recorded
-        :rtype: dict
+        Returns:
+            dict: {field key: {"unit", "kind"}}, empty when nothing has been recorded
         """
         # Imported here, not at module scope: mcp_read reaches the source classes through
         # toinflux.general, so a module-level import would be circular.
@@ -581,8 +590,11 @@ class Hue(DataHandler):
     def _metadata_for_class(self, device_class):
         """Turn a bridge class string into a field metadata entry.
 
-        :param device_class: the bridge's own type string, e.g. "ZLLTemperature"
-        :return: {"unit", "kind"} for a known class, else None
+        Args:
+            device_class: the bridge's own type string, e.g. "ZLLTemperature"
+
+        Returns:
+            {"unit", "kind"} for a known class, else None
         """
         declared = HUE_DEVICE_CLASSES.get(device_class)
         if not declared:
@@ -612,11 +624,14 @@ class Hue(DataHandler):
         failure is logged and swallowed, because a schema annotation that cannot be written
         is not a reason to declare a successful collection failed.
 
-        :param data: readings to write, defaulting to ``self.data``
-        :param timestamp: unix-epoch seconds, defaulting to the base implementation's choice
-        :param use_buffer: buffer and retry the *data* point on failure
-        :param flush: flush the backlog before writing
-        :raises InfluxWriteError: the data write failed (never the description)
+        Args:
+            data: readings to write, defaulting to ``self.data``
+            timestamp: unix-epoch seconds, defaulting to the base implementation's choice
+            use_buffer: buffer and retry the *data* point on failure
+            flush: flush the backlog before writing
+
+        Raises:
+            InfluxWriteError: the data write failed (never the description)
         """
         super().send_data(data=data, timestamp=timestamp, use_buffer=use_buffer, flush=flush)
         # Only when writing our *own* readings. `data is None` is what the collection path
@@ -642,7 +657,8 @@ class Hue(DataHandler):
         The device name is a tag and therefore escaped; it is never normalised, for the same
         reason the host tag is not - rewriting it would change series identity.
 
-        :param timestamp: unix-epoch seconds to stamp the points with
+        Args:
+            timestamp: unix-epoch seconds to stamp the points with
         """
         classes = getattr(self, "_device_classes", None)
         if not classes:
@@ -664,10 +680,10 @@ class Hue(DataHandler):
             self.influx_header = original_header
 
     def get_data(self):
-        """Get the data from the Hue Bridge
+        """Get the data from the Hue Bridge.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         # The host is escaped here but NOT normalised: the tag keeps whatever was
         # configured, because rewriting it would change the series identity of an existing
@@ -686,8 +702,8 @@ class Hue(DataHandler):
         identically - see ``_url_host``. A second copy of this construction is how
         one of the two paths would silently keep the bug.
 
-        :return: API base URL for this bridge
-        :rtype: str
+        Returns:
+            str: API base URL for this bridge
         """
         bridge = self.bridge()
         return f"https://{_url_host(bridge.host)}/api/{bridge.user}"
@@ -706,8 +722,8 @@ class Hue(DataHandler):
         The value is the configured host, resolved through ``bridge()`` rather than taken
         from a caller: an unknown bridge raises before it can reach a query.
 
-        :return: tag filters, including this bridge's host when there is one
-        :rtype: dict
+        Returns:
+            dict: tag filters, including this bridge's host when there is one
         """
         filters = dict(self.MCP_TAG_FILTERS)
         if self.instance is not None:
@@ -735,10 +751,11 @@ class Hue(DataHandler):
         only exposed by printing a traceback, which no code path does for these
         errors.
 
-        :param message: message that may contain the token
-        :type message: str
-        :return: the message with any occurrence of the token replaced
-        :rtype: str
+        Args:
+            message (str): message that may contain the token
+
+        Returns:
+            str: the message with any occurrence of the token replaced
         """
         # Every configured bridge's token, not just this worker's: enumeration cannot
         # raise, so this stays safe to call from an exception handler, and redacting the
@@ -756,10 +773,13 @@ class Hue(DataHandler):
         return message
 
     def get_data_from_hue_bridge(self):
-        """Connect to the Hue bridge and get the sensor data
+        """Connect to the Hue bridge and get the sensor data.
 
-        :return: hue_data
-        :rtype: dict
+        Returns:
+            dict: hue_data
+
+        Raises:
+            SourceConnectionError: the bridge could not be reached, or answered with an error
         """
         # Hue bridges are commonly reached over a self-signed local cert, so verification is
         # skipped by default; set hue.insecure: false in settings.yaml if yours has a valid cert.
@@ -812,15 +832,16 @@ class Hue(DataHandler):
         return hue_data
 
     def hue_device_name_to_name(self, device_name):
-        """Converts the device name into a name to be used in InfluxDB
+        """Converts the device name into a name to be used in InfluxDB.
 
         If no name mapping exists in the settings file, the name in the Hue settings is used.
         Any spaces will be replaced with underscores.
 
-        :param device_name: name of the device in the hue settings
-        :type device_name: str
-        :return: name
-        :rtype: str
+        Args:
+            device_name (str): name of the device in the hue settings
+
+        Returns:
+            str: name
         """
         if "sensors" in self.settings["hue"]:
             name = self.settings["hue"]["sensors"].get(device_name, device_name)
@@ -829,10 +850,10 @@ class Hue(DataHandler):
         return name.replace(" ", "_")
 
     def parse_hue_data(self):
-        """Parse the data from the bridge to get the values we want
+        """Parse the data from the bridge to get the values we want.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         data = {}
         # Field key -> the bridge's own type string, collected as the data is parsed and
@@ -885,7 +906,8 @@ class Hue(DataHandler):
         ``state``, ``type`` and ``capabilities`` used to resolve a target and check what
         it can do.
 
-        :raises SourceConnectionError: if the bridge can't be reached
+        Raises:
+            SourceConnectionError: if the bridge can't be reached
         """
         hue_data = self.get_data_from_hue_bridge()
         return {str(lid): light for lid, light in hue_data.get("lights", {}).items() if isinstance(light, dict)}
@@ -911,8 +933,8 @@ class Hue(DataHandler):
         the ``ct`` mired range comes from ``capabilities.control.ct`` when present,
         else the standard range.
 
-        :return: ``{"brightness","color_temp","color": bool, "ct_range": (min,max)|None}``
-        :rtype: dict
+        Returns:
+            dict: ``{"brightness","color_temp","color": bool, "ct_range": (min,max)|None}``
         """
         state = light.get("state") if isinstance(light.get("state"), dict) else {}
         state = state or {}
@@ -951,7 +973,8 @@ class Hue(DataHandler):
 
         Accepts an ``#rrggbb`` or ``rrggbb`` hex value, or a known colour name.
 
-        :raises ToolParamError: the value isn't a hex colour or a known name
+        Raises:
+            ToolParamError: the value isn't a hex colour or a known name
         """
         if isinstance(color, str) and color.strip():
             hex_str = cls._HUE_COLOR_NAMES.get(color.strip().lower(), color.strip()).lstrip("#").lower()
@@ -992,11 +1015,12 @@ class Hue(DataHandler):
         does not ask a white bulb for a colour. Reuses the collector's own authenticated
         bridge GET.
 
-        :return: list of ``{"id", "name", "controls": [...]}`` (plus
-            ``"color_temp_range_k": [min, max]`` for colour-temperature lights),
-            sorted by id
-        :rtype: list
-        :raises SourceConnectionError: if the bridge can't be reached
+        Returns:
+            list: list of ``{"id", "name", "controls": [...]}`` (plus ``"color_temp_range_k": [min, max]`` for
+                colour-temperature lights), sorted by id
+
+        Raises:
+            SourceConnectionError: if the bridge can't be reached
         """
         lights = self._fetch_lights()
         out = []
@@ -1035,24 +1059,21 @@ class Hue(DataHandler):
         on unless ``on`` is given explicitly, since the bridge ignores those on an
         off light.
 
-        :param device: the target light id or its exact bridge name
-        :type device: str
-        :param on: turn the device on (True) or off (False); None leaves it
-        :type on: bool or None
-        :param brightness_pct: target brightness 0-100 %; None leaves it
-        :type brightness_pct: int or float or None
-        :param color_temp_k: white colour temperature in kelvin (e.g. 2700 warm,
-            6500 cool), clamped to the light's supported range; None leaves it
-        :type color_temp_k: int or float or None
-        :param color: a colour as an ``#rrggbb`` hex or a known name; None leaves it
-        :type color: str or None
-        :return: a summary dict of what was applied
-        :rtype: dict
-        :raises ToolParamError: a caller/model input mistake - nothing to set, both
-            colour and colour temperature at once, an invalid value, a capability
-            the device lacks, or an unknown/ambiguous device (not retryable)
-        :raises SourceConnectionError: a bridge/transport failure reaching the
-            device list or PUTting the change (retryable)
+        Args:
+            device (str): the target light id or its exact bridge name
+            on (bool or None): turn the device on (True) or off (False); None leaves it
+            brightness_pct (int or float or None): target brightness 0-100 %; None leaves it
+            color_temp_k (int or float or None): white colour temperature in kelvin (e.g. 2700 warm, 6500 cool), clamped
+                to the light's supported range; None leaves it
+            color (str or None): a colour as an ``#rrggbb`` hex or a known name; None leaves it
+
+        Returns:
+            dict: a summary dict of what was applied
+
+        Raises:
+            ToolParamError: a caller/model input mistake - nothing to set, both colour and colour temperature at once,
+                an invalid value, a capability the device lacks, or an unknown/ambiguous device (not retryable)
+            SourceConnectionError: a bridge/transport failure reaching the device list or PUTting the change (retryable)
         """
         if on is None and brightness_pct is None and color_temp_k is None and color is None:
             raise ToolParamError(
@@ -1091,7 +1112,8 @@ class Hue(DataHandler):
     def _brightness_state(self, name, caps, brightness_pct):
         """Validate a brightness request against the light and return ``{"bri": ...}``.
 
-        :raises ToolParamError: the light isn't dimmable, or the value is invalid
+        Raises:
+            ToolParamError: the light isn't dimmable, or the value is invalid
         """
         if not caps["brightness"]:
             raise ToolParamError(f"device {name!r} does not support brightness (it is on/off only)")
@@ -1106,7 +1128,8 @@ class Hue(DataHandler):
 
         Kelvin is converted to mirek and clamped to the light's supported range.
 
-        :raises ToolParamError: the light lacks colour temperature, or the value is invalid
+        Raises:
+            ToolParamError: the light lacks colour temperature, or the value is invalid
         """
         if not caps["color_temp"]:
             raise ToolParamError(f"device {name!r} does not support colour temperature")
@@ -1118,7 +1141,8 @@ class Hue(DataHandler):
     def _color_state(self, name, caps, color):
         """Validate a colour request and return ``{"xy": [...]}``.
 
-        :raises ToolParamError: the light lacks colour, or the colour is invalid
+        Raises:
+            ToolParamError: the light lacks colour, or the colour is invalid
         """
         if not caps["color"]:
             raise ToolParamError(f"device {name!r} does not support colour")
@@ -1132,7 +1156,8 @@ class Hue(DataHandler):
         rather than guessed at, since actuating the wrong light is not a
         recoverable mistake.
 
-        :raises ToolParamError: the device is empty, unknown, or an ambiguous name
+        Raises:
+            ToolParamError: the device is empty, unknown, or an ambiguous name
         """
         if not isinstance(device, str) or not device.strip():
             raise ToolParamError(f"device must be a non-empty light id or name (got {device!r})")
@@ -1153,8 +1178,9 @@ class Hue(DataHandler):
         policy as the reads (``hue.insecure``, default true for a local
         self-signed bridge cert).
 
-        :raises SourceConnectionError: on a transport failure or a bridge error
-            (the CLIP API returns 200 with a list of per-key success/error items)
+        Raises:
+            SourceConnectionError: on a transport failure or a bridge error (the CLIP API returns 200 with a list of
+                per-key success/error items)
         """
         insecure = self.settings["hue"].get("insecure", True)
         url = f"{self._api_base()}/lights/{light_id}/state"

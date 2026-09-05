@@ -67,10 +67,11 @@ def _parse_systemd_creds_version(version_output):
 
     For example, "systemd 255 (255.4-1ubuntu8.4)\\n+PAM +AUDIT ...".
 
-    :param version_output: raw stdout from `systemd-creds --version`
-    :type version_output: str
-    :return: the version number, or None if it couldn't be parsed
-    :rtype: int or None
+    Args:
+        version_output (str): raw stdout from `systemd-creds --version`
+
+    Returns:
+        int or None: the version number, or None if it couldn't be parsed
     """
     match = re.search(r"systemd\s+(\d+)", version_output)
     return int(match.group(1)) if match else None
@@ -81,8 +82,8 @@ def _require_systemd_creds():
 
     Raises CredentialCliError with a specific, actionable message otherwise.
 
-    :raises CredentialCliError: if systemd-creds is missing or older than
-        MIN_SYSTEMD_CREDS_VERSION
+    Raises:
+        CredentialCliError: if systemd-creds is missing or older than MIN_SYSTEMD_CREDS_VERSION
     """
     try:
         result = subprocess.run(["systemd-creds", "--version"], capture_output=True, text=True, check=True)
@@ -120,9 +121,11 @@ def _read_secret_value(name):
     stripped, not any whitespace that's actually part of the value.
     _validate_secret_value() separately rejects any *embedded* newline.
 
-    :param name: credential name, used only in the interactive prompt
-    :type name: str
-    :rtype: str
+    Args:
+        name (str): credential name, used only in the interactive prompt
+
+    Returns:
+        str
     """
     if sys.stdin.isatty():
         return getpass.getpass(f"Value for {name}: ")
@@ -132,7 +135,8 @@ def _read_secret_value(name):
 def _validate_secret_value(name, value):
     """Reject empty/placeholder/multiline input before anything is touched on disk.
 
-    :raises CredentialCliError: if the value looks invalid
+    Raises:
+        CredentialCliError: if the value looks invalid
     """
     if not value.strip():
         raise CredentialCliError("Value must not be empty.")
@@ -154,7 +158,8 @@ def _validate_storage_name(name):
     all satisfy this; this only matters for --ensure-influx-storage's admin-supplied
     argument.
 
-    :raises CredentialCliError: if name isn't letters/digits/underscore/hyphen
+    Raises:
+        CredentialCliError: if name isn't letters/digits/underscore/hyphen
     """
     if not re.match(r"^[A-Za-z0-9_-]+$", name):
         raise CredentialCliError(
@@ -189,11 +194,17 @@ def _regenerate_dropin(credstore_dir=None, dropin_path=None, exclude=None):
     Idempotent and self-healing if a prior run was interrupted, with no separate state
     file needed.
 
-    :param exclude: a credential name to treat as absent even if its .cred file still
-        exists on disk - used by _cmd_remove so the drop-in never references a file
-        that's about to be deleted, even transiently (LoadCredentialEncrypted=
-        referencing a missing path hard-fails unit startup with 243/CREDENTIALS)
-    :type exclude: str or None
+    Args:
+        credstore_dir (pathlib.Path or None): directory holding the ``.cred`` files; None uses the
+            packaged default.
+        dropin_path (pathlib.Path or None): where to write the drop-in; None uses the packaged
+            default.
+        exclude (str or None): a credential name to treat as absent even if its .cred file still exists on disk - used
+            by _cmd_remove so the drop-in never references a file that's about to be deleted, even transiently
+            (LoadCredentialEncrypted= referencing a missing path hard-fails unit startup with 243/CREDENTIALS)
+
+    Raises:
+        CredentialCliError: the drop-in file cannot be written
     """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
@@ -227,8 +238,9 @@ def _reload_systemd():
 def _encrypt_credential(name, value, credstore_dir=None):
     """Encrypt value with systemd-creds and write it to credstore_dir/<name>.cred.
 
-    :raises CredentialCliError: if credstore_dir can't be created/secured, if
-        systemd-creds encrypt fails, or if the written .cred file can't be secured
+    Raises:
+        CredentialCliError: if credstore_dir can't be created/secured, if systemd-creds encrypt fails, or if the written
+            .cred file can't be secured
     """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
@@ -267,7 +279,8 @@ def _decrypt_credential(name, credstore_dir=None):
     root on the same host that holds the same TPM/host key systemd-creds encrypt
     used, so it can always decrypt what it just encrypted.
 
-    :raises CredentialCliError: if the credential doesn't exist or decryption fails
+    Raises:
+        CredentialCliError: if the credential doesn't exist or decryption fails
     """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
@@ -318,6 +331,10 @@ def _atomic_write(path, content):
     so writing to the symlink's own path would silently detach it - the symlink
     gets replaced by a plain file, rather than the thing it points to being
     updated - breaking whatever was managing it that way.
+
+    Raises:
+        OSError: the write, the ownership fix-up or the rename failed; the temporary file is removed before the original
+            error propagates
     """
     target = os.path.realpath(path) if os.path.islink(path) else path
     directory = os.path.dirname(target) or "."
@@ -413,8 +430,9 @@ def _append_field_to_section(settings_path, text, section_node, field, new_value
     end of file, so it lands after the section's last scalar (see ``_last_scalar_line``) at
     the indentation of an existing sibling key.
 
-    :raises CredentialCliError: the section is empty or flow-style, so there is no sibling
-        key to copy indentation from and no safe place to insert
+    Raises:
+        CredentialCliError: the section is empty or flow-style, so there is no sibling key to copy indentation from and
+            no safe place to insert
     """
     if not isinstance(section_node, yaml.MappingNode) or not section_node.value:
         raise CredentialCliError(
@@ -448,8 +466,8 @@ def _locate_rewritable_value(settings_path, text, top_node, top_key, field, new_
     Split out of _rewrite_settings_field so that function stays within the complexity limit
     and reads as "find the line, then splice it".
 
-    :raises CredentialCliError: the field is absent and not creatable, or is not a plain
-        single-line scalar
+    Raises:
+        CredentialCliError: the field is absent and not creatable, or is not a plain single-line scalar
     """
     value_node = _find_mapping_value(top_node, field)
     if value_node is not None and value_node.start_mark.line == value_node.end_mark.line:
@@ -473,11 +491,11 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
     which would silently strip every comment - example_settings.yaml is comment-dense and
     users are expected to keep reading and editing it.
 
-    :raises CredentialCliError: if the target section/field doesn't exist, or isn't a
-        plain single-line scalar (e.g. hand-edited into a block scalar) - refuses
-        rather than corrupting the file; also raised (rather than an unhandled
-        OSError escaping main()'s exception handling) if settings_path can't be read
-        or written, e.g. missing file or a permissions problem
+    Raises:
+        CredentialCliError: if the target section/field doesn't exist, or isn't a plain single-line scalar (e.g.
+            hand-edited into a block scalar) - refuses rather than corrupting the file; also raised (rather than an
+            unhandled OSError escaping main()'s exception handling) if settings_path can't be read or written, e.g.
+            missing file or a permissions problem
     """
     try:
         with open(settings_path, encoding="utf8") as f:
@@ -539,11 +557,11 @@ def _compose_settings_mapping(settings_path):
     complexity limit, and because the empty-file/non-mapping guard belongs with
     the read+parse step rather than with sources:-specific logic.
 
-    :raises CredentialCliError: if the file can't be read, isn't valid YAML, or is
-        syntactically valid YAML with no top-level mapping (e.g. an empty file, or
-        a bare sequence/scalar document like "- a\\n- b\\n") - neither is a valid
-        settings.yaml, and without this check the caller's own (key, value)
-        iteration would raise a raw AttributeError/TypeError instead
+    Raises:
+        CredentialCliError: if the file can't be read, isn't valid YAML, or is syntactically valid YAML with no
+            top-level mapping (e.g. an empty file, or a bare sequence/scalar document like "- a\\n- b\\n") - neither is
+            a valid settings.yaml, and without this check the caller's own (key, value) iteration would raise a raw
+            AttributeError/TypeError instead
     """
     try:
         with open(settings_path, encoding="utf8") as f:
@@ -573,10 +591,10 @@ def _load_sources_sequence(settings_path):
     item to anchor an append on, so _enable_source() handles that case by rewriting
     the key's own line into a block sequence instead.
 
-    :raises CredentialCliError: see _compose_settings_mapping(), plus if `sources:`
-        is missing entirely, or is a populated flow-style sequence (e.g.
-        `sources: [a, b]`) - there's no safe way to turn that into a block sequence by
-        inserting a line after it without producing invalid YAML
+    Raises:
+        CredentialCliError: see _compose_settings_mapping(), plus if `sources:` is missing entirely, or is a populated
+            flow-style sequence (e.g. `sources: [a, b]`) - there's no safe way to turn that into a block sequence by
+            inserting a line after it without producing invalid YAML
     """
     text, root = _compose_settings_mapping(settings_path)
 
@@ -618,12 +636,12 @@ def _enable_source(name, settings_path=None):
     Used instead of _rewrite_settings_field(), which only handles a single-line
     scalar value - `sources:` is a YAML sequence, a structurally different edit.
 
-    :return: True if the file was actually changed, False if `name` was already
-        present (so callers - e.g. the CLI - can report an accurate message
-        instead of always claiming "enabled")
-    :rtype: bool
-    :raises CredentialCliError: see _load_sources_sequence(), plus if settings_path
-        can't be written back
+    Returns:
+        bool: True if the file was actually changed, False if `name` was already present (so callers - e.g. the CLI -
+            can report an accurate message instead of always claiming "enabled")
+
+    Raises:
+        CredentialCliError: see _load_sources_sequence(), plus if settings_path can't be written back
     """
     if settings_path is None:
         settings_path = DEFAULT_SETTINGS_PATH
@@ -696,8 +714,8 @@ def _detect_influx_version(url):
     debconf-driven flow calls this before that field could even be collected (it's
     never asked by debconf, only ever hand-edited into settings.yaml afterwards).
 
-    :return: "v1", "v2", or "unknown" (unreachable/ambiguous - never raises)
-    :rtype: str
+    Returns:
+        str: "v1", "v2", or "unknown" (unreachable/ambiguous - never raises)
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
@@ -731,8 +749,11 @@ def _resolve_credential_value(name, influx, credstore_dir):
     settings.yaml value is the systemd-creds sentinel, decrypt the real value instead;
     otherwise the plain value already *is* the real value, never migrated.
 
-    :param influx: the parsed `influx:` settings block
-    :type influx: dict
+    Args:
+        name (str): the credential field name, e.g. ``token`` or ``password``.
+        influx (dict): the parsed `influx:` settings block
+        credstore_dir (pathlib.Path or None): directory holding the ``.cred`` files; None uses the
+            packaged default.
     """
     # Only ever called for the influx credentials, which are static - but routed through the
     # shared mapping regardless, so no credential lookup in this file can be the one that
@@ -840,6 +861,9 @@ def _resolve_org_id(url, headers, org_name, verify=True):
     """Look up the org ID for org_name.
 
     The v2 bucket-create API needs orgID, not just the org name.
+
+    Raises:
+        CredentialCliError: the org is unknown, or the API rejected the lookup
     """
     resp = requests.get(
         f"{url}/api/v2/orgs", params={"org": org_name}, headers=headers, verify=verify, timeout=HTTP_TIMEOUT_SECONDS
@@ -1018,11 +1042,12 @@ def _require_mapping_document(root, settings_path):
     valid YAML at all, turning a settings file that was merely wrong into one the
     service cannot load. Refusing leaves the damage where the admin left it.
 
-    :param root: composed YAML root node, or None for an empty document
-    :param settings_path: path, for the error message
-    :type settings_path: str
-    :return: None
-    :raises CredentialCliError: if the document exists and isn't a mapping
+    Args:
+        root: composed YAML root node, or None for an empty document
+        settings_path (str): path, for the error message
+
+    Raises:
+        CredentialCliError: if the document exists and isn't a mapping
     """
     if root is None or isinstance(root, yaml.MappingNode):
         return
@@ -1046,8 +1071,8 @@ def _ensure_section(settings_path, name, example_path):
     installs that have been running longest. Appending is safe in a way that
     rewriting is not: every existing byte is preserved.
 
-    :raises CredentialCliError: if either file can't be read/written, or the
-        example doesn't contain the requested section
+    Raises:
+        CredentialCliError: if either file can't be read/written, or the example doesn't contain the requested section
     """
     try:
         with open(settings_path, encoding="utf8") as f:
@@ -1134,6 +1159,10 @@ def _credential_name_arg(value):
     Replaces a fixed ``choices=`` list, which cannot express unbounded slot credentials.
     Rejection is just as firm - a typo is refused, not silently accepted as a new credential -
     but the acceptable set is described rather than enumerated.
+
+    Raises:
+        argparse.ArgumentTypeError: the name is neither a known credential field nor a
+            numbered Hue bridge username
     """
     if is_credential_name(value):
         return value
@@ -1185,7 +1214,7 @@ def main(argv=None):
     """Run the credential CLI.
 
     Args:
-        argv (list): Argument vector to parse, or None to read sys.argv.
+        argv (list or None): Argument vector to parse, or None to read sys.argv.
 
     Returns:
         int: A process exit status.

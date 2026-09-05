@@ -87,9 +87,11 @@ def credential_field(name):
     separation is what let ``--set-field hue.user2`` write a real token into settings.yaml in
     plaintext while ``_contains_real_secret`` stayed blind to it.
 
-    :param name: credential name, e.g. "influx-token", "hue-user", "hue-user3"
-    :return: (section, field) or None
-    :rtype: tuple or None
+    Args:
+        name: credential name, e.g. "influx-token", "hue-user", "hue-user3"
+
+    Returns:
+        tuple or None: (section, field) or None
     """
     if name in CREDENTIAL_FIELDS:
         return CREDENTIAL_FIELDS[name]
@@ -108,10 +110,12 @@ def credential_name_for(section, field):
     The inverse of :func:`credential_field`. Used to refuse a plaintext write to a secret
     field and to name the right command in the refusal.
 
-    :param section: top-level settings key, e.g. "hue"
-    :param field: field within it, e.g. "user2"
-    :return: credential name, or None
-    :rtype: str or None
+    Args:
+        section: top-level settings key, e.g. "hue"
+        field: field within it, e.g. "user2"
+
+    Returns:
+        str or None: credential name, or None
     """
     for name, path in CREDENTIAL_FIELDS.items():
         if (section, field) == path:
@@ -135,9 +139,11 @@ def placeholder_for(name):
     text. Returns None rather than raising for an unknown name - ``--remove`` indexed
     ``PLACEHOLDER_VALUES`` directly and would have died with a KeyError on a slot.
 
-    :param name: credential name
-    :return: placeholder text, or None
-    :rtype: str or None
+    Args:
+        name: credential name
+
+    Returns:
+        str or None: placeholder text, or None
     """
     if name in PLACEHOLDER_VALUES:
         return PLACEHOLDER_VALUES[name]
@@ -153,10 +159,11 @@ def slot_credential_names(settings):
     any ``hue.userN`` present is a credential this tool manages. Slot 1's ``hue-user`` is
     excluded - it is already a static entry.
 
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :return: credential names like ["hue-user2", "hue-user3"]
-    :rtype: list
+    Args:
+        settings (dict): parsed settings dictionary
+
+    Returns:
+        list: credential names like ["hue-user2", "hue-user3"]
     """
     section = settings.get(_SLOT_SECTION) if isinstance(settings, dict) else None
     if not isinstance(section, dict):
@@ -175,10 +182,11 @@ def sentinel_for(name):
     Cosmetic only, and never read back for real use - the actual value comes from
     apply_credential_substitution(). It is there to inform a human reading the file.
 
-    :param name: systemd-creds credential name, e.g. "influx-token"
-    :type name: str
-    :return: sentinel string
-    :rtype: str
+    Args:
+        name (str): systemd-creds credential name, e.g. "influx-token"
+
+    Returns:
+        str: sentinel string
     """
     return f"{SENTINEL_PREFIX} - run 'send-to-influx-set-credential {name}' to modify>"
 
@@ -199,10 +207,11 @@ def apply_credential_substitution(settings):
     iterate. Anything present that is not a credential name this tool manages is ignored -
     LoadCredentialEncrypted= is not exclusive to us.
 
-    :param settings: parsed settings dictionary, mutated in place and returned
-    :type settings: dict
-    :return: the same dict, with any found credentials overlaid
-    :rtype: dict
+    Args:
+        settings (dict): parsed settings dictionary, mutated in place and returned
+
+    Returns:
+        dict: the same dict, with any found credentials overlaid
     """
     creds_dir = os.environ.get("CREDENTIALS_DIRECTORY")
     if not creds_dir:
@@ -232,10 +241,12 @@ def _read_credential(cred_path, name):
     bytes with no guarantee of being valid UTF-8 - this project's own CLI always writes
     UTF-8, but LoadCredentialEncrypted= is not exclusive to it.
 
-    :param cred_path: path to the decrypted credential file
-    :param name: credential name, for the log message
-    :return: the value, or None
-    :rtype: str or None
+    Args:
+        cred_path: path to the decrypted credential file
+        name: credential name, for the log message
+
+    Returns:
+        str or None: the value, or None
     """
     if not os.path.isfile(cred_path):
         return None
@@ -258,10 +269,11 @@ def _overlay_credential(settings, name, path, value):
     then reports it as a ``ConfigError`` naming the section and its type, so a bad section is
     skipped here and explained there rather than reaching a collector half-applied.
 
-    :param settings: parsed settings dict, mutated in place
-    :param name: credential name, for the log message
-    :param path: the ``(section, field)`` this credential overlays
-    :param value: the decrypted value
+    Args:
+        settings: parsed settings dict, mutated in place
+        name: credential name, for the log message
+        path: the ``(section, field)`` this credential overlays
+        value: the decrypted value
     """
     top_key, field = path
     block = settings.get(top_key)

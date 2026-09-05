@@ -1,4 +1,4 @@
-"""Shared MQTT transport for data handlers whose source publishes to an MQTT broker"""
+"""Shared MQTT transport for data handlers whose source publishes to an MQTT broker."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
@@ -76,7 +76,7 @@ class MqttDataHandler(DataHandler):
     # source must set it; the worker refuses to stream a source that hasn't.
     STREAM_TOPIC_FILTER: "str | None" = None
 
-    def decode_stream_message(self, topic, payload):
+    def decode_stream_message(self, topic, payload):  # noqa: DOC202 - the Returns: is the contract
         """Decode a single streamed MQTT message into an InfluxDB field dict.
 
         Called by the worker's streaming path for every message that arrives on the
@@ -87,13 +87,16 @@ class MqttDataHandler(DataHandler):
         the immediate write goes through ``send_data`` which reads it - a per-message
         write can happen before the first periodic snapshot has set it.
 
-        :param topic: the message's MQTT topic
-        :type topic: str
-        :param payload: the message payload, already UTF-8 decoded
-        :type payload: str
-        :return: field keys/values to write as one point, or None/empty to ignore the
-            message (e.g. a control/metadata topic that isn't a state field)
-        :rtype: dict or None
+        Args:
+            topic (str): the message's MQTT topic
+            payload (str): the message payload, already UTF-8 decoded
+
+        Returns:
+            dict or None: field keys/values to write as one point, or None/empty to ignore the message (e.g. a
+                control/metadata topic that isn't a state field)
+
+        Raises:
+            NotImplementedError: always; a streaming MQTT source must override this
         """
         raise NotImplementedError("streaming MQTT sources must implement decode_stream_message()")
 
@@ -112,23 +115,22 @@ class MqttDataHandler(DataHandler):
         asynchronously, not as an exception from ``connect()``) aborts the collection
         window immediately.
 
-        :param topic_filter: MQTT topic filter to subscribe to (e.g. ``nuki/+/+``)
-        :type topic_filter: str
-        :param timeout: how many seconds to collect messages for
-        :type timeout: float
-        :return: (topic, payload) pairs in arrival order, payloads decoded as UTF-8
-        :rtype: list
-        :raises ConfigError: if ``timeout`` isn't a positive number, or if the
-            shared ``mqtt`` settings block is missing,
-            malformed, or has an out-of-range ``broker_port`` - a config-shape
-            problem, fatal like a missing source block, not something the worker loop
-            should retry. Checked here as well as in ``validate_settings()`` because
-            that only covers the *configured* sources: a one-off ``--source nuki`` on
-            an install where nuki isn't in ``sources:`` would otherwise reach this
-            code unvalidated and fail with a raw AttributeError/TypeError.
-        :raises SourceConnectionError: if the broker is unreachable, refuses the
-            connection (including bad credentials via the CONNACK reason code), or
-            accepts TCP but never completes the MQTT handshake within the window
+        Args:
+            topic_filter (str): MQTT topic filter to subscribe to (e.g. ``nuki/+/+``)
+            timeout (float): how many seconds to collect messages for
+
+        Returns:
+            list: (topic, payload) pairs in arrival order, payloads decoded as UTF-8
+
+        Raises:
+            ConfigError: if ``timeout`` isn't a positive number, or if the shared ``mqtt`` settings block is missing,
+                malformed, or has an out-of-range ``broker_port`` - a config-shape problem, fatal like a missing source
+                block, not something the worker loop should retry. Checked here as well as in ``validate_settings()``
+                because that only covers the *configured* sources: a one-off ``--source nuki`` on an install where nuki
+                isn't in ``sources:`` would otherwise reach this code unvalidated and fail with a raw
+                AttributeError/TypeError.
+            SourceConnectionError: if the broker is unreachable, refuses the connection (including bad credentials via
+                the CONNACK reason code), or accepts TCP but never completes the MQTT handshake within the window
         """
         errors = mqtt_block_errors(self.settings)
         if errors:
@@ -218,24 +220,20 @@ class MqttDataHandler(DataHandler):
         reconnects (``reconnect_delay_set``), and on_connect re-subscribes, which for
         retained topics redelivers current state.
 
-        :param topic_filter: MQTT topic filter to subscribe to (e.g. ``nuki/+/+``)
-        :type topic_filter: str
-        :param on_message: called ``on_message(topic, payload)`` for each message, with
-            ``payload`` already UTF-8 decoded; runs on the worker thread, not paho's
-        :type on_message: collections.abc.Callable
-        :param periodic: called with no arguments once every ``interval`` seconds - the
-            timer-based snapshot/heartbeat tick
-        :type periodic: collections.abc.Callable
-        :param interval: seconds between ``periodic`` ticks
-        :type interval: float
-        :param should_stop: set to end the stream and return
-        :type should_stop: threading.Event
-        :return: None
-        :raises ConfigError: if the shared ``mqtt`` block is missing/malformed or
-            ``interval`` isn't a positive number - fatal config shape, not retried
-            (same rationale as ``collect_mqtt_messages``)
-        :raises SourceConnectionError: if the broker is unreachable, refuses the CONNACK
-            (e.g. bad credentials), or never completes the initial handshake
+        Args:
+            topic_filter (str): MQTT topic filter to subscribe to (e.g. ``nuki/+/+``)
+            on_message (collections.abc.Callable): called ``on_message(topic, payload)`` for each message, with
+                ``payload`` already UTF-8 decoded; runs on the worker thread, not paho's
+            periodic (collections.abc.Callable): called with no arguments once every ``interval`` seconds - the
+                timer-based snapshot/heartbeat tick
+            interval (float): seconds between ``periodic`` ticks
+            should_stop (threading.Event): set to end the stream and return
+
+        Raises:
+            ConfigError: if the shared ``mqtt`` block is missing/malformed or ``interval`` isn't a positive number -
+                fatal config shape, not retried (same rationale as ``collect_mqtt_messages``)
+            SourceConnectionError: if the broker is unreachable, refuses the CONNACK (e.g. bad credentials), or never
+                completes the initial handshake
         """
         errors = mqtt_block_errors(self.settings)
         if errors:
@@ -291,17 +289,12 @@ class MqttDataHandler(DataHandler):
         is already written immediately as it arrives, so there's nothing to snapshot
         sooner.
 
-        :param message_queue: (topic, payload) pairs the network thread fills
-        :type message_queue: queue.Queue
-        :param on_message: caller callback invoked ``on_message(topic, payload)`` per message
-        :type on_message: collections.abc.Callable
-        :param periodic: caller callback invoked once every ``interval`` seconds
-        :type periodic: collections.abc.Callable
-        :param interval: seconds between ``periodic`` ticks
-        :type interval: float
-        :param should_stop: checked each iteration; set to end the loop
-        :type should_stop: threading.Event
-        :return: None
+        Args:
+            message_queue (queue.Queue): (topic, payload) pairs the network thread fills
+            on_message (collections.abc.Callable): caller callback invoked ``on_message(topic, payload)`` per message
+            periodic (collections.abc.Callable): caller callback invoked once every ``interval`` seconds
+            interval (float): seconds between ``periodic`` ticks
+            should_stop (threading.Event): checked each iteration; set to end the loop
         """
         next_snapshot = time.monotonic() + interval
         while not should_stop.is_set():
@@ -331,13 +324,10 @@ class MqttDataHandler(DataHandler):
         long-lived stream - the point, if it was buffered, flushes on the next write - so
         the exception is logged with its traceback and dropped rather than propagated.
 
-        :param on_message: caller callback invoked ``on_message(topic, payload)``
-        :type on_message: collections.abc.Callable
-        :param topic: the message's MQTT topic
-        :type topic: str
-        :param payload: the message payload, already UTF-8 decoded
-        :type payload: str
-        :return: None
+        Args:
+            on_message (collections.abc.Callable): caller callback invoked ``on_message(topic, payload)``
+            topic (str): the message's MQTT topic
+            payload (str): the message payload, already UTF-8 decoded
         """
         try:
             on_message(topic, payload)
@@ -361,13 +351,10 @@ class MqttDataHandler(DataHandler):
         - still full, so the oldest is dropped and the newest enqueued;
         - a drop still didn't free room in time, so it's the *newest* message that's lost.
 
-        :param message_queue: the bounded stream queue
-        :type message_queue: queue.Queue
-        :param item: the (topic, payload) pair to enqueue
-        :type item: tuple
-        :param topic: the new message's topic, for the warning
-        :type topic: str
-        :return: None
+        Args:
+            message_queue (queue.Queue): the bounded stream queue
+            item (tuple): the (topic, payload) pair to enqueue
+            topic (str): the new message's topic, for the warning
         """
         try:
             message_queue.put_nowait(item)
@@ -413,16 +400,15 @@ class MqttDataHandler(DataHandler):
         alongside the shared handshake accumulators and the ``stopping`` flag that keeps
         our own shutdown disconnect from being logged as a fault.
 
-        :param mqtt_settings: the shared ``mqtt`` settings block
-        :type mqtt_settings: dict
-        :param host: broker host (for logging on an unexpected disconnect)
-        :param port: broker port (for logging on an unexpected disconnect)
-        :param topic_filter: filter the on_connect callback (re)subscribes to
-        :type topic_filter: str
-        :param message_queue: queue the message callback puts (topic, payload) onto
-        :type message_queue: queue.Queue
-        :return: (client, state dict with ``failures``/``connected``/``stopping``)
-        :rtype: tuple
+        Args:
+            mqtt_settings (dict): the shared ``mqtt`` settings block
+            host: broker host (for logging on an unexpected disconnect)
+            port: broker port (for logging on an unexpected disconnect)
+            topic_filter (str): filter the on_connect callback (re)subscribes to
+            message_queue (queue.Queue): queue the message callback puts (topic, payload) onto
+
+        Returns:
+            tuple: (client, state dict with ``failures``/``connected``/``stopping``)
         """
         state = {
             "failures": [],
@@ -486,14 +472,14 @@ class MqttDataHandler(DataHandler):
         collector uses (a rejected CONNACK reported verbatim, or a handshake that never
         completed).
 
-        :param host: broker host (for the error message)
-        :param port: broker port (for the error message)
-        :param failures: accumulator the on_connect callback records a rejection into
-        :type failures: list
-        :param connected: accumulator the on_connect callback marks on success
-        :type connected: list
-        :return: None
-        :raises SourceConnectionError: if the handshake failed or never completed in time
+        Args:
+            host: broker host (for the error message)
+            port: broker port (for the error message)
+            failures (list): accumulator the on_connect callback records a rejection into
+            connected (list): accumulator the on_connect callback marks on success
+
+        Raises:
+            SourceConnectionError: if the handshake failed or never completed in time
         """
         deadline = time.monotonic() + STREAM_CONNECT_TIMEOUT
         while time.monotonic() < deadline and not failures and not connected:
@@ -514,15 +500,12 @@ class MqttDataHandler(DataHandler):
         empty list - indistinguishable from a healthy broker with nothing retained,
         which is the failure mode this transport exists to avoid everywhere else.
 
-        :param client: the paho client the callback fired on
-        :param reason_code: CONNACK reason code
-        :param topic_filter: filter to subscribe to
-        :type topic_filter: str
-        :param failures: accumulator for the reason this window cannot proceed
-        :type failures: list
-        :param connected: accumulator marking a usable, subscribed connection
-        :type connected: list
-        :return: None
+        Args:
+            client: the paho client the callback fired on
+            reason_code: CONNACK reason code
+            topic_filter (str): filter to subscribe to
+            failures (list): accumulator for the reason this window cannot proceed
+            connected (list): accumulator marking a usable, subscribed connection
         """
         if reason_code.is_failure:
             failures.append(f"broker rejected the connection: {reason_code}")
@@ -545,13 +528,12 @@ class MqttDataHandler(DataHandler):
         Both outcomes are logged at WARNING instead, keeping the failure diagnosable; the
         per-interval snapshot still covers the source until the next reconnect succeeds.
 
-        :param client: the paho client the callback fired on
-        :param reason_code: CONNACK reason code
-        :param topic_filter: filter to re-subscribe to
-        :type topic_filter: str
-        :param host: broker host, for the log message
-        :param port: broker port, for the log message
-        :return: None
+        Args:
+            client: the paho client the callback fired on
+            reason_code: CONNACK reason code
+            topic_filter (str): filter to re-subscribe to
+            host: broker host, for the log message
+            port: broker port, for the log message
         """
         if reason_code.is_failure:
             logging.warning(
@@ -579,17 +561,16 @@ class MqttDataHandler(DataHandler):
         list, indistinguishable from a healthy broker with nothing retained - silently
         masking a connection failure as "no data".
 
-        :param host: broker host (for the error message)
-        :param port: broker port (for the error message)
-        :param timeout: the collection window length (for the error message)
-        :param failures: reasons recorded by on_connect (a rejected CONNACK, or a
-            failed subscribe) - the first is reported verbatim, so the message
-            carries the specific cause rather than a guess at it
-        :type failures: list
-        :param connected: truthy entries recorded by on_connect on success
-        :type connected: list
-        :return: None
-        :raises SourceConnectionError: as described above; no-op on a healthy outcome
+        Args:
+            host: broker host (for the error message)
+            port: broker port (for the error message)
+            timeout: the collection window length (for the error message)
+            failures (list): reasons recorded by on_connect (a rejected CONNACK, or a failed subscribe) - the first is
+                reported verbatim, so the message carries the specific cause rather than a guess at it
+            connected (list): truthy entries recorded by on_connect on success
+
+        Raises:
+            SourceConnectionError: as described above; no-op on a healthy outcome
         """
         if failures:
             error = f"MQTT broker {host}:{port}: {failures[0]}"
