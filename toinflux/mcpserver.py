@@ -129,7 +129,9 @@ class OAuthStateStore:
     """
 
     def __init__(self, state_path):
-        """:param state_path: path of the JSON state file (created on first save)
+        """Bind the store to the file its clients and refresh tokens persist in.
+
+        :param state_path: path of the JSON state file (created on first save)
         :type state_path: str
         """
         self.state_path = state_path
@@ -535,7 +537,9 @@ class SendToInfluxOAuthProvider:
     """
 
     def __init__(self, public_url, expected_user, expected_password, state_store):
-        """:param public_url: external https URL (no trailing slash) the login page
+        """Bind the provider to the URL it issues against and the single account it accepts.
+
+        :param public_url: external https URL (no trailing slash) the login page
             and redirects are built against
         :type public_url: str
         :param expected_user: the configured mcp.user
