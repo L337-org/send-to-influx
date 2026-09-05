@@ -487,10 +487,10 @@ def test_the_docstring_exemption_matches_the_decorators_in_use():
                 if "register_tool" in source:
                     found.append(f"{module}:{node.name}: {source.splitlines()[0]}")
 
-    assert len(found) >= 10, (
-        f"only found {len(found)} tool registration(s), so this check is not seeing the "
-        f"surface it is meant to protect"
-    )
+    # One, not a count. The floor exists so a scan that matched nothing cannot pass vacuously;
+    # anything higher is the number of tools in disguise, and would fail the day one is removed
+    # for reasons that have nothing to do with the exemption this checks.
+    assert found, "found no tool registrations at all, so this check is not seeing the surface it protects"
     for dead in ("prompt", "_register_resource"):
         assert dead not in pattern, (
             f"tox.ini's ignore-decorators names {dead!r}, but that registration passes "
