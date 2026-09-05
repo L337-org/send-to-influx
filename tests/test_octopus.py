@@ -49,7 +49,12 @@ class TestOctopus:
                 assert handler.data == result
 
     def test_get_data_sets_timestamp_from_interval_start(self, sample_settings):
-        """get_data sets self.timestamp from the reading's interval_start, not the current time."""
+        """get_data sets self.timestamp from the reading's interval_start, not the current time.
+
+        Octopus publishes half-hourly readings hours late and revises them, so the same interval
+        arrives more than once. Stamping with collection time would write each arrival as a new
+        point; stamping with the interval's own start makes a re-write overwrite the previous
+        one, because InfluxDB keys a point by its series and timestamp."""
         settings = _octopus_settings(sample_settings)
         consumption_response = {"results": [{"consumption": 0.123, "interval_start": "2026-07-06T10:00:00+01:00"}]}
         with patch("toinflux.influx.load_settings") as mock_load_settings:

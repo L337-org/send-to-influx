@@ -83,11 +83,6 @@ Full detail: [architecture/collectors.md](architecture/collectors.md).
 
 Break one of these and the failure is silent or data-destroying.
 
-- **Timestamps are explicit** unix-epoch seconds: `self.timestamp` if `get_data()` set it, else the
-  time `send_data()` is called. Octopus sets it from the reading's own `interval_start` so re-writes
-  overwrite rather than duplicate.
-- **Field keys are escaped** per line protocol (commas, `=`, spaces). The header is taken verbatim, so
-  an unescaped tag value ends the tag set early and writes a corrupt point.
 - **A tag value is never normalised**, only escaped - rewriting one changes the series identity of an
   existing install.
 - **`DataHandler._write_buffers` is class-level, keyed by `worker_key`** (the `(source, instance)`
@@ -106,33 +101,38 @@ Break one of these and the failure is silent or data-destroying.
 - **The severity split is load-bearing:** self-contradictory config is a fatal `ConfigError`; "not
   usable yet" (no host, or a placeholder token) is only a **warning**, because the shipped example is
   exactly that state and raising would stop every collector.
-- **Nuki writes one point per lock**, tagged `device`, all sharing one timestamp per cycle. The
-  backlog is flushed **once per cycle, not once per lock** (`send_data(flush=...)`) - flushing per lock
-  charges the head buffered point one rejection each time and burns the whole allowance in one cycle.
-- **`Nuki._is_per_device()` discriminates on every value being a mapping**, not on whether `data` was
-  given: a lock carries a dict of fields, a heartbeat field never does. Getting this wrong made Nuki
-  write no heartbeat at all, silently.
 - **Name external values with `!r` in every message.** A lock name comes from MQTT and one containing
   a newline forges a journal line and reaches MCP clients.
-- **Subscribe from inside `on_connect`** - a subscription issued before CONNACK completes can be
-  silently lost.
-- **In the streaming path the paho thread only enqueues**; one worker thread does all InfluxDB I/O, so
-  a slow write cannot stall keepalives and drop the connection.
-- **Speedtest rejects a `ping` >= 5000 ms** as `SourceConnectionError`: that is the ceiling for a
-  genuine measurement, and a total probe failure otherwise reports ~1,800,000 ms as if real.
 - **Changing a measurement, tag set or field key means sweeping `tests/integration/` too.** Those
   tests are deselected by default and `pytest -m integration` without a broker skips cleanly, so a
   green local run proves nothing about them. Grep for the old names, run the suite against a real
   broker, then mutate the product back and confirm the test fails.
+
+**Guarded, so not review items** - `tests/test_repo_hygiene.py::test_every_named_guard_exists`
+keeps these names honest, and each guard's docstring carries the reasoning.
+
+- `tests/test_influx.py::TestDataHandler::test_send_data_appends_explicit_timestamp`, and its two
+  siblings for `self.timestamp` and the default
+- `tests/test_influx.py::TestDataHandler::test_send_data_escapes_field_keys`
+- `tests/test_octopus.py::TestOctopus::test_get_data_sets_timestamp_from_interval_start`
+- `tests/test_repo_hygiene.py::test_every_dynamic_tag_value_in_a_header_is_escaped`
+- `tests/test_nuki.py::TestPerLockPoints::test_the_backlog_is_flushed_once_per_cycle_not_once_per_lock`
+- `tests/test_nuki.py::TestPerLockPoints::test_the_shape_discriminator` - `_is_per_device()` keys on
+  every value being a mapping
+- `tests/test_mqtt.py::TestStreamMqttMessages::test_resubscribes_on_every_connect`
+- `tests/test_mqtt.py::TestStreamMqttMessages::test_message_callback_runs_off_the_network_thread`
+- `tests/test_speedtest.py::TestSpeedtest::test_get_data_raises_source_connection_error_on_implausible_ping`
+  - the ceiling is 5000 ms
 
 ### MCP server
 
 Optional, off unless both `mcp.user` and `mcp.password` are set (or forced off by `mcp.disabled:
 true`). A Streamable-HTTP server on the `mcp` SDK with built-in OAuth 2.1, in its own daemon thread.
 Read-only by default: the read tools, the dashboard tool, resources and prompts. A source becomes
-writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_read_write: true`.
+writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_read_write: true`. A
+disabled capability is not registered at all rather than registered-and-refusing:
+`tests/test_mcp_write.py::TestWriteToolRegistration::test_no_write_tools_when_nothing_enabled`.
 
-- **A disabled capability is not registered at all**, never registered-and-refusing.
 - **Per-source domain knowledge lives on the `DataHandler` subclass** as class attributes
   (`MCP_MEASUREMENT`, `MCP_TAG_FILTERS`, `MCP_INSTANCE_TAG`, `MCP_FIELD_METADATA`, `MCP_DESCRIPTION`,
   `MCP_LIVE_STATE`), never as a parallel schema in the MCP modules.
@@ -151,11 +151,12 @@ writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_re
   registration advertises ~1.2 KB of leading whitespace on the older half of the supported range.
   `_register_resource()` does not dedent, because every resource passes `description=` explicitly;
   a resource that ever relies on its docstring instead needs the same `cleandoc` treatment.
-- **A new deliberate failure inherits `ToInfluxError`; never widen the catch to `Exception`** - a
-  real bug must stay a crash, logged with its traceback and its text withheld. The translation
-  catches the base rather than a list of subclasses precisely so that inheriting is enough: when it
-  was a list, `ConfigError` was missing from it and every unconfigured-device failure reached the
-  model saying nothing.
+- **Never widen the catch to `Exception`** - a real bug must stay a crash, logged with its traceback
+  and its text withheld. The translation catches `ToInfluxError` rather than a list of subclasses
+  precisely so that inheriting is enough: when it was a list, `ConfigError` was missing from it and
+  every unconfigured-device failure reached the model saying nothing. Inheritance is swept for by
+  `tests/test_mcp_common.py::TestEveryDeliberateFailureIsTranslated::test_every_project_exception_is_a_toinflux_error`;
+  the widening is not, so that half is yours to check.
 - **A new tool or resource needs a test for what it says when it fails**, not only for what it
   returns when it works. `tests/test_mcp_surface.py` fails any registration that bypasses the
   registrars, because a bypass returns the right payload and passes every behaviour test.
@@ -164,9 +165,9 @@ writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_re
 - **Injection defence:** measurement and tags come from the static schema, a field must match a
   live-discovered key, every identifier is charset-validated and quoted, times are re-emitted as
   RFC3339, aggregations come from a fixed map. Never add a query path that bypasses this.
-- **The advertised surface is held to the AI-consumer standard** and guarded by
-  `tests/test_mcp_surface.py`: a description and distinct title on everything, a `SIBLINGS` entry, no
-  reference to a tool that does not exist, and a recorded byte budget.
+- **The advertised surface is held to the AI-consumer standard** in full by
+  `tests/test_mcp_surface.py` - descriptions, titles, siblings, dangling references, byte budget.
+  Read it, not this file, before changing a description: all of it fails CI on its own.
 
 Full detail: [architecture/mcp-server.md](architecture/mcp-server.md).
 
@@ -183,9 +184,10 @@ daemon thread each with a startup stagger. `SourceConnectionError` is retried wi
   section and an uncollectable source name are both terminal errors from validation.
 - **`--check-config` prints OK only if validation passes *and* something is actually requested.** "OK"
   must not mean "nothing will happen".
-- **Diagnostics go to stderr; stdout carries the program's data.** Every log level, plus
-  `--check-config`'s error output, is on stderr; `--dump`/`--print` JSON and `Configuration OK` are on
-  stdout. This is what makes `--dump | jq` reliable when a dump partially fails.
+- **Diagnostics go to stderr; stdout carries the program's data**, so `--dump | jq` stays reliable
+  when a dump partially fails. Guarded end to end by `tests/test_sendtoinflux.py::TestOutputStreams`:
+  `test_every_level_goes_to_stderr`, `test_check_config_verdict_on_stdout_failure_on_stderr` and
+  `test_a_partially_failing_dump_leaves_stdout_parseable`.
 
 Full detail: [architecture/runtime.md](architecture/runtime.md).
 

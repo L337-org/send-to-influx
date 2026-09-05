@@ -612,3 +612,182 @@ def test_every_dynamic_tag_value_in_a_header_is_escaped():
         "these functions build an influx_header by interpolation without escaping anything, so "
         "a space, comma or newline in the value would corrupt or split the point:\n  " + "\n  ".join(offenders)
     )
+
+
+# A ::-qualified reference is a promise that `pytest <it>` works from the repository root, so the
+# prefix is part of the nodeid rather than decoration.
+TESTS_DIR = "tests/"
+
+
+def _test_index():
+    """Index every test under `tests/`, keeping enough structure to judge a reference runnable.
+
+    Parsed rather than imported: importing the suite to inspect it would run module-level
+    fixtures and make this check depend on the rest of the suite being importable, which is
+    exactly when a documentation reference most needs verifying.
+
+    Files are keyed by their path relative to `tests/`, not by basename, because
+    `tests/integration/` holds a suite too: collapsing to the basename would both reject a
+    correct reference into a subdirectory and accept one naming a file that does not exist at
+    the path it gives. Only `Test`-prefixed classes are indexed, because those are the ones
+    pytest collects - `pytest tests/test_mqtt.py::_FakeReasonCode` is an error, so accepting a
+    reference to a helper class would be this check certifying something it cannot run.
+
+    :return: tuple of (bare test names, complete nodeids, {nodeid missing its class: class})
+    """
+    import ast
+
+    bare, nodeids, owner = set(), set(), {}
+    root = REPO_ROOT / "tests"
+    for path in sorted(root.rglob("test_*.py")):
+        relative = path.relative_to(root).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+                bare.add(node.name)
+                nodeids.add(f"{relative}::{node.name}")
+            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                nodeids.add(f"{relative}::{node.name}")
+                for member in node.body:
+                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name.startswith("test_"):
+                        bare.add(member.name)
+                        nodeids.add(f"{relative}::{node.name}::{member.name}")
+                        owner[f"{relative}::{member.name}"] = node.name
+    return bare, nodeids, owner
+
+
+def _recovered_nodeid(token, nodeids):
+    """The real nodeid for a reference whose test exists but whose path is wrong.
+
+    `tests/test_mqtt_streaming.py::test_x` names a real test at a path it does not live at,
+    because that file is under `tests/integration/`. Matching the filename *and* the rest of the
+    nodeid distinguishes that from a test which genuinely does not exist, which matters because
+    the two deserve opposite messages: one is a path to correct, the other an invariant left
+    guarded by nothing.
+
+    :param str token: the reference as written in the document
+    :param set nodeids: every complete nodeid, relative to `tests/`
+    :return: str the correct nodeid, or None where no single file carries that test
+    """
+    filename, _, rest = token.partition("::")
+    tail = f"{filename.split('/')[-1]}::{rest}"
+    matches = {known for known in nodeids if known.split("/")[-1] == tail}
+    return f"{TESTS_DIR}{matches.pop()}" if len(matches) == 1 else None
+
+
+def _suggested_nodeid(token, nodeids, owner):
+    """Rebuild `token` as a nodeid under `tests/`, completed as far as the index allows.
+
+    Three degrees of help, best first: the real path where the test can be found, the missing
+    class where the path is right but the nodeid is a bare method, and otherwise the whole token
+    prefixed. That last case runs when the filename is unknown or sits in two subtrees, so any
+    directory the author wrote is the only evidence left of where they meant - discarding it
+    would answer an unresolvable reference with a suggestion less likely to run than what they
+    had.
+
+    :param str token: the reference as written in the document
+    :param set nodeids: every complete nodeid, relative to `tests/`
+    :param dict owner: class owning each nodeid written without one
+    :return: str, the nodeid to suggest
+    """
+    recovered = _recovered_nodeid(token, nodeids)
+    if recovered:
+        return recovered
+    unprefixed = token[len(TESTS_DIR) :] if token.startswith(TESTS_DIR) else token
+    if unprefixed in owner:
+        return f"{TESTS_DIR}{unprefixed.replace('::', '::' + owner[unprefixed] + '::', 1)}"
+    return f"{TESTS_DIR}{token}"
+
+
+def _classify(token, where, bare, nodeids, owner):
+    """Judge one reference, saying which way it fails and what to write instead.
+
+    The two verdicts are deliberately not interchangeable. **missing** means no such test
+    exists, so the invariant it stood in for is now guarded by nothing - the failure this whole
+    check is for. **unrunnable** means the test is there but the reference cannot be run at it,
+    which is a correction to the document and nothing more. Reporting the second as the first
+    would tell a reader an invariant had lost its guard when it had not.
+
+    :param str token: the reference as written
+    :param str where: the document or documents carrying it, already rendered
+    :param set bare: every test name
+    :param set nodeids: every complete nodeid, relative to `tests/`
+    :param dict owner: class owning each nodeid written without one
+    :return: tuple of (None|"missing"|"unrunnable", message)
+    """
+    if "::" not in token:
+        # A bare name claims only that the test exists, so there is no path to get wrong.
+        return (None, "") if token in bare else ("missing", f"`{token}` in {where} is not a test")
+    if not token.startswith(TESTS_DIR):
+        return "unrunnable", (
+            f"`{token}` in {where} is not a path pytest can find from the repository "
+            f"root - write `{_suggested_nodeid(token, nodeids, owner)}`"
+        )
+    nodeid = token[len(TESTS_DIR) :]
+    if nodeid in nodeids:
+        return None, ""
+    if nodeid in owner:
+        qualified = nodeid.replace("::", "::" + owner[nodeid] + "::", 1)
+        return "unrunnable", (f"`{token}` in {where} is not one pytest can collect - write `{TESTS_DIR}{qualified}`")
+    recovered = _recovered_nodeid(token, nodeids)
+    if recovered:
+        return "unrunnable", f"`{token}` in {where} is that test at the wrong path - write `{recovered}`"
+    return "missing", f"`{token}` in {where} is not a test"
+
+
+def test_every_named_guard_exists():
+    """A test named in the documentation must still be a test, or the reference is worse than none.
+
+    `AGENTS.md` omits an invariant that CI already guarantees and names the guard where the
+    invariant would have been, so that deleting the guard leaves a reference to something that
+    no longer exists rather than silence. That only works while the reference resolves: a
+    renamed test turns the pointer back into the silence it was meant to replace, and does it
+    invisibly, because a wrong name reads exactly like a right one.
+
+    Two forms are allowed, and the difference is what the reference claims to be.
+
+    A `::`-qualified reference claims to be a **pytest nodeid**, so it must be one you can
+    actually run from the repository root - correctly pathed under `tests/`, and carrying the
+    owning class where the test is a method. Any omission means a reader who copies the pointer
+    to go and look at the guard gets a collection error rather than the guard. The failure says
+    what to write instead.
+
+    A bare `test_name` claims only that a test by that name exists, which is what prose wants
+    when it names a file once and then several of its tests - three full nodeids in one sentence
+    is unreadable, and the existence check is no weaker for the shorter form.
+
+    A failure names every document carrying the stale reference, not the first one found, so a
+    rename that invalidates three copies shows all three instead of hiding two behind the first.
+    """
+    bare, nodeids, owner = _test_index()
+    # Every document a token appears in, not just the first. A guard named in `AGENTS.md` and
+    # again in the architecture layer is the expected case rather than an exotic one, and
+    # reporting one site at a time means fixing one and being told about the next on the
+    # following run.
+    referenced = {}
+    for relative in sorted(p.relative_to(REPO_ROOT) for p in _tracked_files() if p.suffix == ".md"):
+        text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        pattern = r"`((?:[\w/]+/)?[A-Za-z_][A-Za-z0-9_]*\.py(?:::[A-Za-z_][A-Za-z0-9_]*)+|test_[a-z0-9_]+)`"
+        for match in re.finditer(pattern, text):
+            token = match.group(1)
+            # A bare `test_foo.py` names a file, not a test, so it makes no claim to check here.
+            if not token.endswith(".py"):
+                referenced.setdefault(token, set()).add(str(relative))
+
+    missing, unrunnable = [], []
+    for token, documents in sorted(referenced.items()):
+        bucket, message = _classify(token, ", ".join(sorted(documents)), bare, nodeids, owner)
+        if bucket == "missing":
+            missing.append(message)
+        elif bucket == "unrunnable":
+            unrunnable.append(message)
+
+    assert referenced, "found no test references in any tracked document - the scan is not working"
+    assert not missing, (
+        "these documents name a test that does not exist, so the reference resolves to nothing "
+        "and the invariant it stands in for is now guarded by neither:\n  " + "\n  ".join(missing)
+    )
+    assert not unrunnable, (
+        "these references are not nodeids you can run from the repository root, so a reader "
+        "following one gets a collection error:\n  " + "\n  ".join(unrunnable)
+    )
