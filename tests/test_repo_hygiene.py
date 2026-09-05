@@ -108,10 +108,11 @@ def _is_text(path):
     byte is the usual binary marker, and anything that is not valid UTF-8 is not text we can
     meaningfully search either.
 
-    :param path: the file to check
-    :type path: pathlib.Path
-    :return: True if the file should be scanned
-    :rtype: bool
+    Args:
+        path (pathlib.Path): the file to check
+
+    Returns:
+        bool: True if the file should be scanned
     """
     if path.suffix.lower() in BINARY_SUFFIXES:
         return False
@@ -227,8 +228,8 @@ def _declared_minimum_pythons():
     3.11, and the suite runs on 3.10 in CI. Each pattern asserts it matched, so a file
     reshuffled beyond their reach fails loudly instead of quietly checking nothing.
 
-    :return: ``{source description: minor version}``
-    :rtype: dict
+    Returns:
+        dict: ``{source description: minor version}``
     """
     found = {}
 
@@ -318,8 +319,8 @@ def _modules_that_carry_a_header():
     finds at the top of a module, and a test file is neither. Derived from what git tracks
     rather than from a list, so a module added later is covered without anyone remembering.
 
-    :return: absolute paths, as ``_tracked_files()`` yields them
-    :rtype: list
+    Returns:
+        list: absolute paths, as ``_tracked_files()`` yields them
     """
     return [path for path in _tracked_files() if path.suffix == ".py" and "tests" not in path.parts]
 
@@ -332,9 +333,11 @@ def _header_assignments(text):
     while being no header at all. "Above the first import or definition" is what "at the top"
     means here in practice - comments and the module docstring do not count as statements.
 
-    :param str text: the module's source
-    :return: ``{name: value}`` for every literal assignment in the header region
-    :rtype: dict
+    Args:
+        text (str): the module's source
+
+    Returns:
+        dict: ``{name: value}`` for every literal assignment in the header region
     """
     import ast
 
@@ -543,6 +546,48 @@ def test_every_tool_with_signature_hints_is_exempted_from_doc108():
     assert not wrong, "the per-tool half of the CS.6.14 exemption is out of step:\n  " + "\n  ".join(wrong)
 
 
+def _every_python_file():
+    """Every Python file whose docstrings this project's conventions govern.
+
+    Returns:
+        sorted list of paths under toinflux/, scripts/ and tests/
+    """
+    return sorted(
+        path for directory in ("toinflux", "scripts", "tests") for path in (REPO_ROOT / directory).rglob("*.py")
+    )
+
+
+def test_no_docstring_uses_the_reStructuredText_field_syntax():
+    """Every docstring uses Google sections, not reST field lists.
+
+    CS.6.3 is one format per project, and the linter cannot enforce it here: tests/ is exempt
+    from D and DOC in tox.ini, so a `:param x:` under tests/ passes CI in silence. That is not
+    hypothetical - three files under tests/ kept 43 reST fields through a conversion that was
+    reported as covering the repository, and nothing failed.
+
+    Checked against the docstrings themselves rather than the file text, so a string that
+    merely contains a colon-prefixed word is not a false positive.
+    """
+    import ast
+
+    fields = re.compile(r"^\s*:(param|type|returns?|rtype|raises|ivar|vartype)\b", re.MULTILINE)
+    found = []
+    for path in _every_python_file():
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            docstring = ast.get_docstring(node) or ""
+            if fields.search(docstring):
+                name = getattr(node, "name", "<module>")
+                found.append(f"{path.relative_to(REPO_ROOT)}:{getattr(node, 'lineno', 0)} {name}")
+
+    assert (
+        not found
+    ), "these docstrings still use reST field lists; the project convention is Google sections:\n  " + "\n  ".join(
+        found
+    )
+
+
 def test_no_docstring_repeats_a_section_header():
     """No docstring carries the same Google section header twice.
 
@@ -555,7 +600,7 @@ def test_no_docstring_repeats_a_section_header():
     import ast
 
     duplicated = []
-    for path in sorted(REPO_ROOT.glob("toinflux/*.py")) + sorted(REPO_ROOT.glob("scripts/*.py")):
+    for path in _every_python_file():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -581,9 +626,12 @@ def _module_constant(relative, name):
     dependencies, which a hygiene check has no business doing, and the MCP modules are
     optional at runtime so importing them here would make this test depend on an extra.
 
-    :param str relative: module path relative to the repository root
-    :param str name: the constant's name
-    :return: the constant's literal value
+    Args:
+        relative (str): module path relative to the repository root
+        name (str): the constant's name
+
+    Returns:
+        the constant's literal value
     """
     import ast
 
@@ -715,7 +763,8 @@ def _test_index():
     pytest collects - `pytest tests/test_mqtt.py::_FakeReasonCode` is an error, so accepting a
     reference to a helper class would be this check certifying something it cannot run.
 
-    :return: tuple of (bare test names, complete nodeids, {nodeid missing its class: class})
+    Returns:
+        tuple of (bare test names, complete nodeids, {nodeid missing its class: class})
     """
     import ast
 
@@ -747,9 +796,12 @@ def _recovered_nodeid(token, nodeids):
     the two deserve opposite messages: one is a path to correct, the other an invariant left
     guarded by nothing.
 
-    :param str token: the reference as written in the document
-    :param set nodeids: every complete nodeid, relative to `tests/`
-    :return: str the correct nodeid, or None where no single file carries that test
+    Args:
+        token (str): the reference as written in the document
+        nodeids (set): every complete nodeid, relative to `tests/`
+
+    Returns:
+        str the correct nodeid, or None where no single file carries that test
     """
     filename, _, rest = token.partition("::")
     tail = f"{filename.split('/')[-1]}::{rest}"
@@ -767,10 +819,13 @@ def _suggested_nodeid(token, nodeids, owner):
     would answer an unresolvable reference with a suggestion less likely to run than what they
     had.
 
-    :param str token: the reference as written in the document
-    :param set nodeids: every complete nodeid, relative to `tests/`
-    :param dict owner: class owning each nodeid written without one
-    :return: str, the nodeid to suggest
+    Args:
+        token (str): the reference as written in the document
+        nodeids (set): every complete nodeid, relative to `tests/`
+        owner (dict): class owning each nodeid written without one
+
+    Returns:
+        str, the nodeid to suggest
     """
     recovered = _recovered_nodeid(token, nodeids)
     if recovered:
@@ -790,12 +845,15 @@ def _classify(token, where, bare, nodeids, owner):
     which is a correction to the document and nothing more. Reporting the second as the first
     would tell a reader an invariant had lost its guard when it had not.
 
-    :param str token: the reference as written
-    :param str where: the document or documents carrying it, already rendered
-    :param set bare: every test name
-    :param set nodeids: every complete nodeid, relative to `tests/`
-    :param dict owner: class owning each nodeid written without one
-    :return: tuple of (None|"missing"|"unrunnable", message)
+    Args:
+        token (str): the reference as written
+        where (str): the document or documents carrying it, already rendered
+        bare (set): every test name
+        nodeids (set): every complete nodeid, relative to `tests/`
+        owner (dict): class owning each nodeid written without one
+
+    Returns:
+        tuple of (None|"missing"|"unrunnable", message)
     """
     if "::" not in token:
         # A bare name claims only that the test exists, so there is no path to get wrong.

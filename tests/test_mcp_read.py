@@ -343,10 +343,13 @@ def _keys(field_names, tag_keys=(), types=None):
     caller needing only the injection allowlist sees; pass ``types`` where the
     assertion is about the type itself.
 
-    :param field_names: the field keys
-    :param tag_keys: the measurement's tag keys
-    :param types: {field: influx type}, overriding the untyped default
-    :return: MeasurementKeys
+    Args:
+        field_names: the field keys
+        tag_keys: the measurement's tag keys
+        types: {field: influx type}, overriding the untyped default
+
+    Returns:
+        MeasurementKeys
     """
     field_types = dict(types) if types else {name: None for name in field_names}
     return MeasurementKeys(field_types=field_types, tag_keys=frozenset(tag_keys))
@@ -734,9 +737,11 @@ def _tool_text(result):
     content blocks (or a (blocks, structured) tuple). One helper so the shape is
     asserted in exactly one place.
 
-    :param result: whatever ``MCPServer.call_tool`` returned
-    :return: the text of the first content block
-    :rtype: str
+    Args:
+        result: whatever ``MCPServer.call_tool`` returned
+
+    Returns:
+        str: the text of the first content block
     """
     return result.content[0].text
 
