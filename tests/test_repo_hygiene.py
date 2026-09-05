@@ -549,12 +549,23 @@ def test_every_tool_with_signature_hints_is_exempted_from_doc108():
 def _every_python_file():
     """Every Python file whose docstrings this project's conventions govern.
 
+    Derived from `_tracked_files()` rather than walking the filesystem, for the reason given
+    there: a scratch .py left under `tests/` on someone's machine is not a fact about this
+    repository, and failing on one would report the wrong thing.
+
+    This file is added back explicitly. `_tracked_files()` drops it because the checks that
+    scan for a forbidden pattern would otherwise match the pattern's own definition here - but
+    a docstring convention applies to this file exactly as it does to any other, and its own
+    docstrings were part of the conversion these guards protect.
+
     Returns:
-        sorted list of paths under toinflux/, scripts/ and tests/
+        sorted list of tracked .py paths under toinflux/, scripts/ and tests/
     """
-    return sorted(
-        path for directory in ("toinflux", "scripts", "tests") for path in (REPO_ROOT / directory).rglob("*.py")
-    )
+    roots = ("toinflux", "scripts", "tests")
+    tracked = {
+        path for path in _tracked_files() if path.suffix == ".py" and path.relative_to(REPO_ROOT).parts[0] in roots
+    }
+    return sorted(tracked | {Path(__file__)})
 
 
 def test_no_docstring_uses_the_reStructuredText_field_syntax():
