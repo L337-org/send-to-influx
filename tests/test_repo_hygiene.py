@@ -626,25 +626,54 @@ def _test_index():
     fixtures and make this check depend on the rest of the suite being importable, which is
     exactly when a documentation reference most needs verifying.
 
-    :return: tuple of (bare test names, complete nodeids, {file::name: owning class})
+    Files are keyed by their path relative to `tests/`, not by basename, because
+    `tests/integration/` holds a suite too: collapsing to the basename would both reject a
+    correct reference into a subdirectory and accept one naming a file that does not exist at
+    the path it gives. Only `Test`-prefixed classes are indexed, because those are the ones
+    pytest collects - `pytest tests/test_mqtt.py::_FakeReasonCode` is an error, so accepting a
+    reference to a helper class would be this check certifying something it cannot run.
+
+    :return: tuple of (bare test names, complete nodeids, {nodeid missing its class: class})
     """
     import ast
 
     bare, nodeids, owner = set(), set(), {}
-    for path in sorted((REPO_ROOT / "tests").rglob("test_*.py")):
+    root = REPO_ROOT / "tests"
+    for path in sorted(root.rglob("test_*.py")):
+        relative = path.relative_to(root).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
                 bare.add(node.name)
-                nodeids.add(f"{path.name}::{node.name}")
-            elif isinstance(node, ast.ClassDef):
-                nodeids.add(f"{path.name}::{node.name}")
+                nodeids.add(f"{relative}::{node.name}")
+            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                nodeids.add(f"{relative}::{node.name}")
                 for member in node.body:
                     if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name.startswith("test_"):
                         bare.add(member.name)
-                        nodeids.add(f"{path.name}::{node.name}::{member.name}")
-                        owner[f"{path.name}::{member.name}"] = node.name
+                        nodeids.add(f"{relative}::{node.name}::{member.name}")
+                        owner[f"{relative}::{member.name}"] = node.name
     return bare, nodeids, owner
+
+
+def _suggested_nodeid(token, nodeids):
+    """Rebuild `token` as a nodeid under `tests/`, using the real path where one can be identified.
+
+    A reference written without a directory, or with the wrong one, cannot simply have `tests/`
+    stuck on the front: `test_mqtt_streaming.py::...` lives in `tests/integration/`. Matching on
+    the filename recovers the real path, and where that is ambiguous or unknown the plain prefix
+    is still a better message than none.
+
+    :param str token: the reference as written in the document
+    :param set nodeids: every complete nodeid, relative to `tests/`
+    :return: str, the nodeid to suggest
+    """
+    filename, _, rest = token.partition("::")
+    filename = filename.split("/")[-1]
+    candidates = {known.split("::")[0] for known in nodeids if known.split("/")[-1].startswith(f"{filename}::")}
+    if len(candidates) == 1:
+        return f"{TESTS_DIR}{candidates.pop()}::{rest}"
+    return f"{TESTS_DIR}{token.split('/')[-1]}"
 
 
 def test_every_named_guard_exists():
@@ -659,9 +688,10 @@ def test_every_named_guard_exists():
     Two forms are allowed, and the difference is what the reference claims to be.
 
     A `::`-qualified reference claims to be a **pytest nodeid**, so it must be one you can
-    actually run from the repository root - `tests/`-prefixed, and carrying the owning class where
-    the test is a method. Either omission means a reader who copies the pointer to go and look at
-    the guard gets a collection error rather than the guard. The failure says which to add.
+    actually run from the repository root - correctly pathed under `tests/`, and carrying the
+    owning class where the test is a method. Any omission means a reader who copies the pointer
+    to go and look at the guard gets a collection error rather than the guard. The failure says
+    what to write instead.
 
     A bare `test_name` claims only that a test by that name exists, which is what prose wants
     when it names a file once and then several of its tests - three full nodeids in one sentence
@@ -687,7 +717,7 @@ def test_every_named_guard_exists():
         if not token.startswith(TESTS_DIR):
             unrunnable.append(
                 f"{relative} names `{token}`, which pytest cannot find from the repository "
-                f"root - write `{TESTS_DIR}{token.split('/')[-1]}`"
+                f"root - write `{_suggested_nodeid(token, nodeids)}`"
             )
             continue
         nodeid = token[len(TESTS_DIR) :]
@@ -699,7 +729,7 @@ def test_every_named_guard_exists():
                 f"{relative} names `{token}`, which pytest cannot collect - " f"write `{TESTS_DIR}{qualified}`"
             )
         else:
-            missing.append(f"{relative} names `{token}`, which is not a test")
+            missing.append(f"{relative} names `{token}`, which is not a test at that path")
 
     assert referenced, "found no test references in any tracked document - the scan is not working"
     assert not missing, (
