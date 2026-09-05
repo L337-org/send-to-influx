@@ -1,4 +1,4 @@
-"""Functions to get data from a Hue Bridge and format ready for InfluxDB"""
+"""Functions to get data from a Hue Bridge and format ready for InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -430,7 +430,7 @@ HUE_DEFAULT_TEMPERATURE_UNIT = "°C"
 
 
 class Hue(DataHandler):
-    """Child class of DataHandler to get data from a Hue Bridge"""
+    """Child class of DataHandler to get data from a Hue Bridge."""
 
     MCP_DESCRIPTION = "Philips Hue: lights and smart plugs (on/off, brightness) and motion/temperature/light sensors."
 
@@ -664,7 +664,7 @@ class Hue(DataHandler):
             self.influx_header = original_header
 
     def get_data(self):
-        """Get the data from the Hue Bridge
+        """Get the data from the Hue Bridge.
 
         :return: data
         :rtype: dict
@@ -756,7 +756,7 @@ class Hue(DataHandler):
         return message
 
     def get_data_from_hue_bridge(self):
-        """Connect to the Hue bridge and get the sensor data
+        """Connect to the Hue bridge and get the sensor data.
 
         :return: hue_data
         :rtype: dict
@@ -812,7 +812,7 @@ class Hue(DataHandler):
         return hue_data
 
     def hue_device_name_to_name(self, device_name):
-        """Converts the device name into a name to be used in InfluxDB
+        """Converts the device name into a name to be used in InfluxDB.
 
         If no name mapping exists in the settings file, the name in the Hue settings is used.
         Any spaces will be replaced with underscores.
@@ -829,7 +829,7 @@ class Hue(DataHandler):
         return name.replace(" ", "_")
 
     def parse_hue_data(self):
-        """Parse the data from the bridge to get the values we want
+        """Parse the data from the bridge to get the values we want.
 
         :return: data
         :rtype: dict

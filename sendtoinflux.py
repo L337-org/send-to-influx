@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Script to get data from a variety of sources and send it to InfluxDB"""
+"""Script to get data from a variety of sources and send it to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"

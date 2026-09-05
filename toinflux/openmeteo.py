@@ -1,4 +1,4 @@
-"""Functions to get Open-Meteo weather data ready to send to InfluxDB"""
+"""Functions to get Open-Meteo weather data ready to send to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -15,7 +15,7 @@ DEFAULT_FIELDS = ["temperature_2m"]
 
 
 class OpenMeteo(DataHandler):
-    """Child class of DataHandler to get weather data from Open-Meteo"""
+    """Child class of DataHandler to get weather data from Open-Meteo."""
 
     MCP_DESCRIPTION = "Open-Meteo weather: temperature, humidity, precipitation, cloud, wind and radiation."
     # Writes to the "weather" measurement, not "openmeteo".
@@ -50,7 +50,7 @@ class OpenMeteo(DataHandler):
     }
 
     def get_data(self):
-        """Get current weather observations from Open-Meteo
+        """Get current weather observations from Open-Meteo.
 
         :return: data
         :rtype: dict

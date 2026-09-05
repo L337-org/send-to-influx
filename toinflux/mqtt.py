@@ -1,4 +1,4 @@
-"""Shared MQTT transport for data handlers whose source publishes to an MQTT broker"""
+"""Shared MQTT transport for data handlers whose source publishes to an MQTT broker."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"

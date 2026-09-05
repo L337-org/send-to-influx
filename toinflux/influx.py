@@ -1,4 +1,4 @@
-"""Parent class for data handlers to send data to InfluxDB"""
+"""Parent class for data handlers to send data to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -151,7 +151,7 @@ def worker_label(source, instance=None):
 
 
 class DataHandler:
-    """Class to send data to InfluxDB"""
+    """Class to send data to InfluxDB."""
 
     # Whether this source is event-driven over a held-open connection rather than
     # polled on a timer. False for every HTTP/API source (they have no persistent

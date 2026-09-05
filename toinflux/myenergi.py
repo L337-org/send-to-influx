@@ -1,4 +1,4 @@
-"""Functions to get MyEnergi data ready to send to InfluxDB"""
+"""Functions to get MyEnergi data ready to send to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -335,7 +335,7 @@ def duplicate_label_errors(settings):
 
 
 class MyEnergi(DataHandler):
-    """Child class of DataHandler to get data from MyEnergi"""
+    """Child class of DataHandler to get data from MyEnergi."""
 
     # All three types share the `myenergi` measurement, and `device` is the tag that tells
     # them apart - now carrying the operator's label rather than the type name. Naming it as
@@ -430,7 +430,7 @@ class MyEnergi(DataHandler):
         return self.device().serial
 
     def get_data_from_myenergi(self, url):
-        """Get the data from the myenergi API
+        """Get the data from the myenergi API.
 
         :param url: full API endpoint URL
         :type url: str
@@ -560,7 +560,7 @@ class MyEnergi(DataHandler):
         return item.get("hr", 0)
 
     def dayhour_results(self, year, month, day, hour=None):
-        """Get the data for a specific day
+        """Get the data for a specific day.
 
         :param year: four-digit year, e.g. "2026"
         :type year: str
@@ -616,7 +616,7 @@ class MyEnergi(DataHandler):
 
 
 class Zappi(MyEnergi):
-    """Child class of MyEnergi (which is in turn a child of DataHandler) to get data from a Zappi"""
+    """Child class of MyEnergi (which is in turn a child of DataHandler) to get data from a Zappi."""
 
     MCP_DESCRIPTION = "MyEnergi Zappi EV charger: charge and session energy, grid/generation power, and status."
 
@@ -655,7 +655,7 @@ class Zappi(MyEnergi):
     }
 
     def get_data(self):
-        """Get the data from the Zappi
+        """Get the data from the Zappi.
 
         :return: data
         :rtype: dict
@@ -669,7 +669,7 @@ class Zappi(MyEnergi):
         return self.data
 
     def parse_zappi_data(self):
-        """Parse the data from the myenergi to get the values we want
+        """Parse the data from the myenergi to get the values we want.
 
         :return: data
         :rtype: dict
@@ -692,7 +692,7 @@ class Zappi(MyEnergi):
 
 
 class Eddi(MyEnergi):
-    """Child class of MyEnergi to get data from an Eddi hot water diverter"""
+    """Child class of MyEnergi to get data from an Eddi hot water diverter."""
 
     MCP_DESCRIPTION = "MyEnergi Eddi hot-water diverter: diversion power, tank temperatures, and status."
     MCP_MEASUREMENT = "myenergi"
@@ -712,7 +712,7 @@ class Eddi(MyEnergi):
     }
 
     def get_data(self):
-        """Get the data from the Eddi
+        """Get the data from the Eddi.
 
         :return: data
         :rtype: dict
@@ -726,7 +726,7 @@ class Eddi(MyEnergi):
         return self.data
 
     def parse_eddi_data(self):
-        """Parse the data from the MyEnergi API for the Eddi device
+        """Parse the data from the MyEnergi API for the Eddi device.
 
         :return: data
         :rtype: dict
@@ -735,7 +735,7 @@ class Eddi(MyEnergi):
 
 
 class Harvi(MyEnergi):
-    """Child class of MyEnergi to get data from a Harvi CT clamp energy monitor"""
+    """Child class of MyEnergi to get data from a Harvi CT clamp energy monitor."""
 
     MCP_DESCRIPTION = "MyEnergi Harvi energy monitor: CT-clamp power readings per channel."
     MCP_MEASUREMENT = "myenergi"
@@ -751,7 +751,7 @@ class Harvi(MyEnergi):
     }
 
     def get_data(self):
-        """Get the data from the Harvi
+        """Get the data from the Harvi.
 
         :return: data
         :rtype: dict
@@ -765,7 +765,7 @@ class Harvi(MyEnergi):
         return self.data
 
     def parse_harvi_data(self):
-        """Parse the data from the MyEnergi API for the Harvi device
+        """Parse the data from the MyEnergi API for the Harvi device.
 
         :return: data
         :rtype: dict

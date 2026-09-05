@@ -275,14 +275,11 @@ Each has been raised before and declined with reasons recorded.
 ## Docstrings
 
 **Google style** - `Args:` and `Returns:` sections, capitalised, with the type in the entry
-because this code carries no annotations. `flake8-docstrings` enforces it; the convention, the
-backlog and the exemptions all live in `tox.ini`.
+because this code carries no annotations. `flake8-docstrings` enforces it, and the convention
+and the exemptions live in `tox.ini`.
 
-**Most of this repository is not there yet**, and that is deliberate rather than overlooked.
-The `extend-ignore` list in `tox.ini` holds exactly the rules that still fail - D415, D212,
-D205 and D209, largest first. Everything else is enforced today, so no passing rule can
-regress while the backlog is worked through. Take one entry off that list at a time and fix
-what it names in the same change; do not add to it.
+**Every docstring rule is enforced**, so there is no backlog to work through and nothing to
+add to. A rule that fails is a change to make, not an entry to park.
 
 **The MCP surface is exempt, and must stay exempt.** A tool, prompt or resource docstring is
 the advertised interface a client loads and a model reads, so CS.6.14 hands it to the

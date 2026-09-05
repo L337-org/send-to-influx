@@ -1,4 +1,4 @@
-"""General functions for sending data to InfluxDB"""
+"""General functions for sending data to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"

@@ -1,4 +1,4 @@
-"""Speedtest class to send data to InfluxDB"""
+"""Speedtest class to send data to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -28,7 +28,7 @@ MAX_PLAUSIBLE_PING_MS = 5000
 
 
 class Speedtest(DataHandler):
-    """Child class of DataHandler to run a speed test and send the results to InfluxDB"""
+    """Child class of DataHandler to run a speed test and send the results to InfluxDB."""
 
     MCP_DESCRIPTION = "Internet speed test: download/upload throughput and latency."
     # get_data() runs a full download/upload test (minutes, saturates the link),

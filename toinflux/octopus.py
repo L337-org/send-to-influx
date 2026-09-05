@@ -1,4 +1,4 @@
-"""Functions to get Octopus Energy data ready to send to InfluxDB"""
+"""Functions to get Octopus Energy data ready to send to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -14,7 +14,7 @@ OCTOPUS_BASE_URL = "https://api.octopus.energy/v1"
 
 
 class Octopus(DataHandler):
-    """Child class of DataHandler to get data from Octopus Energy"""
+    """Child class of DataHandler to get data from Octopus Energy."""
 
     MCP_DESCRIPTION = "Octopus Energy smart meter: latest electricity/gas consumption and unit rate."
     # ~24 h delayed, so a live API read is no fresher than InfluxDB - current-state

@@ -1,4 +1,4 @@
-"""Functions to get data from Nuki smart locks via MQTT and format it for InfluxDB"""
+"""Functions to get data from Nuki smart locks via MQTT and format it for InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"

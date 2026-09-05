@@ -1,4 +1,4 @@
-"""Functions to get National Grid Carbon Intensity data ready to send to InfluxDB"""
+"""Functions to get National Grid Carbon Intensity data ready to send to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -14,7 +14,7 @@ ACCEPT_JSON = {"Accept": "application/json"}
 
 
 class CarbonIntensity(DataHandler):
-    """Child class of DataHandler to get National Grid carbon intensity data"""
+    """Child class of DataHandler to get National Grid carbon intensity data."""
 
     MCP_DESCRIPTION = "UK carbon intensity (actual/forecast gCO2/kWh) and the generation fuel mix."
     # Only the two intensity fields carry a unit here. The gen_<fuel>
