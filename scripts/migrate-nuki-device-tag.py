@@ -433,7 +433,7 @@ def iter_rewritten_lines(points, counts, keys_by_label):  # noqa: DOC403 - a gen
         keys_by_label (dict): per-lock set of old field keys, mutated in place
 
     Yields:
-        collections.abc.Iterator: an iterator of line protocol strings
+        str: one line-protocol line per rewritten point
 
     Raises:
         MigrationError: a field key could not be split, or a lock name cannot be a tag
