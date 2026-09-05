@@ -281,7 +281,7 @@ and the exemptions live in `tox.ini`. There is no second dialect: the Sphinx `:p
 
 **No docstring rule is ignored**, so there is no backlog to work through and nothing to add to.
 A rule that fails is a change to make, not an entry to park. Two things are exempt by name
-rather than by rule, both covered below: the MCP surface, and tests.
+rather than by rule, both covered below: tool docstrings, and tests.
 
 **Tool docstrings are exempt, and must stay exempt.** A tool's docstring *is* its advertised
 description, and the schema beside it already carries every parameter's type - so CS.6.14 hands
