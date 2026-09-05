@@ -614,6 +614,11 @@ def test_every_dynamic_tag_value_in_a_header_is_escaped():
     )
 
 
+# A ::-qualified reference is a promise that `pytest <it>` works from the repository root, so the
+# prefix is part of the nodeid rather than decoration.
+TESTS_DIR = "tests/"
+
+
 def _test_index():
     """Index every test under `tests/`, keeping enough structure to judge a reference runnable.
 
@@ -654,9 +659,9 @@ def test_every_named_guard_exists():
     Two forms are allowed, and the difference is what the reference claims to be.
 
     A `::`-qualified reference claims to be a **pytest nodeid**, so it must be one you can
-    actually run. `file.py::test_name` for a test that is a method on a class is rejected: pytest
-    cannot collect it, so a reader who copies the pointer to go and look at the guard gets an
-    error rather than the guard. The failure names the class to add.
+    actually run from the repository root - `tests/`-prefixed, and carrying the owning class where
+    the test is a method. Either omission means a reader who copies the pointer to go and look at
+    the guard gets a collection error rather than the guard. The failure says which to add.
 
     A bare `test_name` claims only that a test by that name exists, which is what prose wants
     when it names a file once and then several of its tests - three full nodeids in one sentence
@@ -666,12 +671,10 @@ def test_every_named_guard_exists():
     referenced = {}
     for relative in sorted(p.relative_to(REPO_ROOT) for p in _tracked_files() if p.suffix == ".md"):
         text = (REPO_ROOT / relative).read_text(encoding="utf-8")
-        pattern = r"`(?:[\w/]+/)?([A-Za-z_][A-Za-z0-9_]*\.py(?:::[A-Za-z_][A-Za-z0-9_]*)+|test_[a-z0-9_]+)`"
+        pattern = r"`((?:[\w/]+/)?[A-Za-z_][A-Za-z0-9_]*\.py(?:::[A-Za-z_][A-Za-z0-9_]*)+|test_[a-z0-9_]+)`"
         for match in re.finditer(pattern, text):
             token = match.group(1)
-            # A bare `test_foo.py` names a file, not a test. Any directory prefix is dropped by
-            # the pattern, so `tests/test_x.py::test_y` and `test_x.py::test_y` are one claim -
-            # prose uses both spellings and neither is wrong.
+            # A bare `test_foo.py` names a file, not a test, so it makes no claim to check here.
             if not token.endswith(".py"):
                 referenced.setdefault(token, str(relative))
 
@@ -680,12 +683,20 @@ def test_every_named_guard_exists():
         if "::" not in token:
             if token not in bare:
                 missing.append(f"{relative} names `{token}`, which is not a test")
-        elif token in nodeids:
             continue
-        elif token in owner:
+        if not token.startswith(TESTS_DIR):
             unrunnable.append(
-                f"{relative} names `{token}`, which pytest cannot collect - "
-                f"write `{token.replace('::', '::' + owner[token] + '::', 1)}`"
+                f"{relative} names `{token}`, which pytest cannot find from the repository "
+                f"root - write `{TESTS_DIR}{token.split('/')[-1]}`"
+            )
+            continue
+        nodeid = token[len(TESTS_DIR) :]
+        if nodeid in nodeids:
+            continue
+        if nodeid in owner:
+            qualified = nodeid.replace("::", "::" + owner[nodeid] + "::", 1)
+            unrunnable.append(
+                f"{relative} names `{token}`, which pytest cannot collect - " f"write `{TESTS_DIR}{qualified}`"
             )
         else:
             missing.append(f"{relative} names `{token}`, which is not a test")
@@ -696,6 +707,6 @@ def test_every_named_guard_exists():
         "and the invariant it stands in for is now guarded by neither:\n  " + "\n  ".join(missing)
     )
     assert not unrunnable, (
-        "these references are missing the class that owns the test, so they are not runnable "
-        "nodeids and a reader following one gets a collection error:\n  " + "\n  ".join(unrunnable)
+        "these references are not nodeids you can run from the repository root, so a reader "
+        "following one gets a collection error:\n  " + "\n  ".join(unrunnable)
     )

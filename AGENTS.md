@@ -108,21 +108,21 @@ Break one of these and the failure is silent or data-destroying.
   green local run proves nothing about them. Grep for the old names, run the suite against a real
   broker, then mutate the product back and confirm the test fails.
 
-**Guarded, so not review items.** Named rather than dropped so that deleting a guard leaves a
-dangling reference instead of silence - and `test_repo_hygiene.py::test_every_named_guard_exists`
-turns that reference into a CI failure. The reasoning lives in each guard's docstring.
+**Guarded, so not review items** - `tests/test_repo_hygiene.py::test_every_named_guard_exists`
+keeps these names honest, and each guard's docstring carries the reasoning.
 
-| Invariant | Guard |
-|---|---|
-| Explicit epoch-second timestamps: the passed one, else `self.timestamp`, else now | `test_influx.py::TestDataHandler::test_send_data_appends_explicit_timestamp` and its two siblings |
-| Octopus stamps from `interval_start`, so a revised reading overwrites | `test_octopus.py::TestOctopus::test_get_data_sets_timestamp_from_interval_start` |
-| Field keys are escaped per line protocol | `test_influx.py::TestDataHandler::test_send_data_escapes_field_keys` |
-| No source builds an `influx_header` from a computed value without escaping it | `test_repo_hygiene.py::test_every_dynamic_tag_value_in_a_header_is_escaped` |
-| Nuki flushes the backlog once per cycle, not once per lock | `test_nuki.py::TestPerLockPoints::test_the_backlog_is_flushed_once_per_cycle_not_once_per_lock` |
-| `Nuki._is_per_device()` discriminates on every value being a mapping | `test_nuki.py::TestPerLockPoints::test_the_shape_discriminator` |
-| Subscription is issued from inside `on_connect`, on every connect | `test_mqtt.py::TestStreamMqttMessages::test_resubscribes_on_every_connect` |
-| The paho thread only enqueues; the caller runs off the network thread | `test_mqtt.py::TestStreamMqttMessages::test_message_callback_runs_off_the_network_thread` |
-| Speedtest rejects a `ping` >= 5000 ms as a connection failure | `test_speedtest.py::TestSpeedtest::test_get_data_raises_source_connection_error_on_implausible_ping` |
+- `tests/test_influx.py::TestDataHandler::test_send_data_appends_explicit_timestamp`, and its two
+  siblings for `self.timestamp` and the default
+- `tests/test_influx.py::TestDataHandler::test_send_data_escapes_field_keys`
+- `tests/test_octopus.py::TestOctopus::test_get_data_sets_timestamp_from_interval_start`
+- `tests/test_repo_hygiene.py::test_every_dynamic_tag_value_in_a_header_is_escaped`
+- `tests/test_nuki.py::TestPerLockPoints::test_the_backlog_is_flushed_once_per_cycle_not_once_per_lock`
+- `tests/test_nuki.py::TestPerLockPoints::test_the_shape_discriminator` - `_is_per_device()` keys on
+  every value being a mapping
+- `tests/test_mqtt.py::TestStreamMqttMessages::test_resubscribes_on_every_connect`
+- `tests/test_mqtt.py::TestStreamMqttMessages::test_message_callback_runs_off_the_network_thread`
+- `tests/test_speedtest.py::TestSpeedtest::test_get_data_raises_source_connection_error_on_implausible_ping`
+  - the ceiling is 5000 ms
 
 ### MCP server
 
@@ -130,8 +130,8 @@ Optional, off unless both `mcp.user` and `mcp.password` are set (or forced off b
 true`). A Streamable-HTTP server on the `mcp` SDK with built-in OAuth 2.1, in its own daemon thread.
 Read-only by default: the read tools, the dashboard tool, resources and prompts. A source becomes
 writable only when it is `MCP_WRITABLE` *and* the operator sets `<source>.mcp_read_write: true`. A
-disabled capability is not registered at all rather than registered-and-refusing, which
-`test_mcp_write.py::TestWriteToolRegistration::test_no_write_tools_when_nothing_enabled` asserts by listing the tools.
+disabled capability is not registered at all rather than registered-and-refusing:
+`tests/test_mcp_write.py::TestWriteToolRegistration::test_no_write_tools_when_nothing_enabled`.
 
 - **Per-source domain knowledge lives on the `DataHandler` subclass** as class attributes
   (`MCP_MEASUREMENT`, `MCP_TAG_FILTERS`, `MCP_INSTANCE_TAG`, `MCP_FIELD_METADATA`, `MCP_DESCRIPTION`,
@@ -154,9 +154,9 @@ disabled capability is not registered at all rather than registered-and-refusing
 - **Never widen the catch to `Exception`** - a real bug must stay a crash, logged with its traceback
   and its text withheld. The translation catches `ToInfluxError` rather than a list of subclasses
   precisely so that inheriting is enough: when it was a list, `ConfigError` was missing from it and
-  every unconfigured-device failure reached the model saying nothing. That a new exception inherits
-  correctly is guarded by `test_mcp_common.py::TestEveryDeliberateFailureIsTranslated::test_every_project_exception_is_a_toinflux_error`,
-  which sweeps the whole package; that the catch is not widened is not, and is yours to check.
+  every unconfigured-device failure reached the model saying nothing. Inheritance is swept for by
+  `tests/test_mcp_common.py::TestEveryDeliberateFailureIsTranslated::test_every_project_exception_is_a_toinflux_error`;
+  the widening is not, so that half is yours to check.
 - **A new tool or resource needs a test for what it says when it fails**, not only for what it
   returns when it works. `tests/test_mcp_surface.py` fails any registration that bypasses the
   registrars, because a bypass returns the right payload and passes every behaviour test.
@@ -165,10 +165,9 @@ disabled capability is not registered at all rather than registered-and-refusing
 - **Injection defence:** measurement and tags come from the static schema, a field must match a
   live-discovered key, every identifier is charset-validated and quoted, times are re-emitted as
   RFC3339, aggregations come from a fixed map. Never add a query path that bypasses this.
-- **The advertised surface is held to the AI-consumer standard**, in full, by
-  `tests/test_mcp_surface.py` - descriptions, titles, siblings, dangling references and the byte
-  budget. Read it rather than this file before changing a description; nothing about the standard is
-  restated here, because everything in it fails CI on its own.
+- **The advertised surface is held to the AI-consumer standard** in full by
+  `tests/test_mcp_surface.py` - descriptions, titles, siblings, dangling references, byte budget.
+  Read it, not this file, before changing a description: all of it fails CI on its own.
 
 Full detail: [architecture/mcp-server.md](architecture/mcp-server.md).
 
@@ -186,7 +185,7 @@ daemon thread each with a startup stagger. `SourceConnectionError` is retried wi
 - **`--check-config` prints OK only if validation passes *and* something is actually requested.** "OK"
   must not mean "nothing will happen".
 - **Diagnostics go to stderr; stdout carries the program's data**, so `--dump | jq` stays reliable
-  when a dump partially fails. Guarded end to end by `test_sendtoinflux.py::TestOutputStreams`:
+  when a dump partially fails. Guarded end to end by `tests/test_sendtoinflux.py::TestOutputStreams`:
   `test_every_level_goes_to_stderr`, `test_check_config_verdict_on_stdout_failure_on_stderr` and
   `test_a_partially_failing_dump_leaves_stdout_parseable`.
 
