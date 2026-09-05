@@ -279,9 +279,18 @@ because this code carries no annotations. `flake8-docstrings` enforces it, and t
 and the exemptions live in `tox.ini`. There is no second dialect: the Sphinx `:param:` /
 `:return:` form this code used to carry is gone.
 
-**No docstring rule is ignored**, so there is no backlog to work through and nothing to add to.
-A rule that fails is a change to make, not an entry to park. Two things are exempt by name
+**No pydocstyle rule is ignored**, so nothing is parked there. Two things are exempt by name
 rather than by rule, both covered below: tool docstrings, and tests.
+
+**`pydoclint` answers the question pydocstyle cannot**: does the docstring agree with the
+signature? D417 only checks the parameters of a section a docstring already has, so a function
+documenting none of its parameters passes it - which is how 133 of them did, silently, in every
+dialect this repository has used. `pydoclint` runs as a flake8 plugin in the same job. Its
+backlog is the `DOC` entries in `tox.ini`, worked the same way as the D entries were: an entry
+comes off with the change that fixes everything it names, and nothing is added to it.
+
+Note that a `Returns:` section is *omitted* for a function that returns nothing - writing
+`Returns: None` is itself a finding (DOC202), not the safe option.
 
 **Tool docstrings are exempt, and must stay exempt.** A tool's docstring *is* its advertised
 description, and the schema beside it already carries every parameter's type - so CS.6.14 hands
