@@ -431,9 +431,6 @@ class DataHandler:
                 discarded the backlog after one, instead of surviving five. Such a caller flushes on its first point and
                 passes False for the rest. Ignored when ``use_buffer`` is False, which skips the buffer entirely.
 
-        Returns:
-            None
-
         Raises:
             InfluxWriteError: if the write to InfluxDB fails
         """
@@ -475,9 +472,6 @@ class DataHandler:
             url (str): the write URL from _build_write_request
             post_kwargs (dict): the request kwargs from _build_write_request
             flush (bool): whether to flush the backlog first - see send_data
-
-        Returns:
-            None
 
         Raises:
             InfluxWriteError: the flush or the post failed
@@ -540,9 +534,6 @@ class DataHandler:
             url (str): destination InfluxDB write URL
             kwargs (dict): extra requests.Session.post() kwargs (auth/headers/verify/timeout)
 
-        Returns:
-            None
-
         Raises:
             InfluxWriteError: on a connection/5xx failure, or on a 4xx-rejected point that hasn't yet reached
                 MAX_POINT_REJECTIONS
@@ -582,9 +573,6 @@ class DataHandler:
             buffer (collections.deque): the source's buffer (from ``_write_buffers``)
             url (str): destination InfluxDB write URL
             kwargs (dict): extra requests.Session.post() kwargs (auth/headers/verify/timeout)
-
-        Returns:
-            None
 
         Raises:
             InfluxWriteError: on a connection/5xx failure, or a 4xx rejection below the MAX_POINT_REJECTIONS cap
@@ -646,9 +634,6 @@ class DataHandler:
             url (str): destination InfluxDB write URL
             kwargs (dict): extra requests.Session.post() kwargs (auth/headers/verify/timeout)
 
-        Returns:
-            None
-
         Raises:
             InfluxWriteError: if the write to InfluxDB fails; carries the response's HTTP status code (or None for a
                 connection failure) as ``status_code``
@@ -678,9 +663,6 @@ class DataHandler:
         Args:
             buffer (collections.deque): the source's buffer (from ``_write_buffers``)
             line (str): line-protocol point that failed to send
-
-        Returns:
-            None
         """
         if any(entry[0] == line for entry in buffer):
             logging.debug("Point already buffered for worker '%s'; not buffering a duplicate copy", self.worker_label)

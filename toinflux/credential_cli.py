@@ -1036,9 +1036,6 @@ def _require_mapping_document(root, settings_path):
         root: composed YAML root node, or None for an empty document
         settings_path (str): path, for the error message
 
-    Returns:
-        None
-
     Raises:
         CredentialCliError: if the document exists and isn't a mapping
     """

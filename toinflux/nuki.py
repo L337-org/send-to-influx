@@ -238,9 +238,6 @@ class Nuki(MqttDataHandler):
                 flush=...)`` - valid for every other source - raises TypeError on this one alone. False means no flush
                 at all; True means once for the whole snapshot rather than once per lock (see the loop below).
 
-        Returns:
-            None
-
         Raises:
             InfluxWriteError: if any lock's write failed
         """
@@ -416,9 +413,6 @@ class Nuki(MqttDataHandler):
         Args:
             device_id (str): the device the name belongs to
             name (str): the name payload as received (UTF-8 decoded)
-
-        Returns:
-            None
         """
         label = self._device_label(name, device_id)
         for other_id, other_name in self._device_names.items():

@@ -120,9 +120,6 @@ def stream_source_data(source, args, data_handler, should_stop, on_activity=None
         should_stop (threading.Event): set to end the stream and return
         on_activity (collections.abc.Callable or None): optional no-arg callback stamped on each write/tick, so the
             multi-source stall watchdog sees a live stream making progress
-
-    Returns:
-        None
     """
     sink = _StreamSink(source, args, data_handler, on_activity)
     data_handler.stream_mqtt_messages(
@@ -254,9 +251,6 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
         source (str): source name, used as the ``source`` tag
         ok (bool): whether the most recent collection cycle succeeded
         consecutive_failures (int): current failure streak for this source
-
-    Returns:
-        None
     """
     if data_handler is None:
         return
@@ -947,9 +941,6 @@ def check_for_stalled_sources(units, stopped_units, last_activity, stalled_units
             updates
         settings (dict or None): parsed settings dict, for per-source interval-aware thresholds; None falls back to
             STALL_WARNING_SECONDS for every worker
-
-    Returns:
-        None
     """
     now = time.time()
     for unit in units:

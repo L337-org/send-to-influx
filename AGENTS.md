@@ -289,6 +289,10 @@ dialect this repository has used. `pydoclint` runs as a flake8 plugin in the sam
 backlog is the `DOC` entries in `tox.ini`, worked the same way as the D entries were: an entry
 comes off with the change that fixes everything it names, and nothing is added to it.
 
+One of its judgements is worth knowing before it surprises you: a bare `return` counts as
+returning something, so a function that exits early without a value still wants a `Returns:`
+section by DOC201 - even though writing `Returns: None` is DOC202. Both are in the backlog.
+
 Note that a `Returns:` section is *omitted* for a function that returns nothing - writing
 `Returns: None` is itself a finding (DOC202), not the safe option.
 

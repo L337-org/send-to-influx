@@ -226,9 +226,6 @@ class MqttDataHandler(DataHandler):
             interval (float): seconds between ``periodic`` ticks
             should_stop (threading.Event): set to end the stream and return
 
-        Returns:
-            None
-
         Raises:
             ConfigError: if the shared ``mqtt`` block is missing/malformed or ``interval`` isn't a positive number -
                 fatal config shape, not retried (same rationale as ``collect_mqtt_messages``)
@@ -295,9 +292,6 @@ class MqttDataHandler(DataHandler):
             periodic (collections.abc.Callable): caller callback invoked once every ``interval`` seconds
             interval (float): seconds between ``periodic`` ticks
             should_stop (threading.Event): checked each iteration; set to end the loop
-
-        Returns:
-            None
         """
         next_snapshot = time.monotonic() + interval
         while not should_stop.is_set():
@@ -331,9 +325,6 @@ class MqttDataHandler(DataHandler):
             on_message (collections.abc.Callable): caller callback invoked ``on_message(topic, payload)``
             topic (str): the message's MQTT topic
             payload (str): the message payload, already UTF-8 decoded
-
-        Returns:
-            None
         """
         try:
             on_message(topic, payload)
@@ -361,9 +352,6 @@ class MqttDataHandler(DataHandler):
             message_queue (queue.Queue): the bounded stream queue
             item (tuple): the (topic, payload) pair to enqueue
             topic (str): the new message's topic, for the warning
-
-        Returns:
-            None
         """
         try:
             message_queue.put_nowait(item)
@@ -487,9 +475,6 @@ class MqttDataHandler(DataHandler):
             failures (list): accumulator the on_connect callback records a rejection into
             connected (list): accumulator the on_connect callback marks on success
 
-        Returns:
-            None
-
         Raises:
             SourceConnectionError: if the handshake failed or never completed in time
         """
@@ -518,9 +503,6 @@ class MqttDataHandler(DataHandler):
             topic_filter (str): filter to subscribe to
             failures (list): accumulator for the reason this window cannot proceed
             connected (list): accumulator marking a usable, subscribed connection
-
-        Returns:
-            None
         """
         if reason_code.is_failure:
             failures.append(f"broker rejected the connection: {reason_code}")
@@ -549,9 +531,6 @@ class MqttDataHandler(DataHandler):
             topic_filter (str): filter to re-subscribe to
             host: broker host, for the log message
             port: broker port, for the log message
-
-        Returns:
-            None
         """
         if reason_code.is_failure:
             logging.warning(
@@ -586,9 +565,6 @@ class MqttDataHandler(DataHandler):
             failures (list): reasons recorded by on_connect (a rejected CONNACK, or a failed subscribe) - the first is
                 reported verbatim, so the message carries the specific cause rather than a guess at it
             connected (list): truthy entries recorded by on_connect on success
-
-        Returns:
-            None
 
         Raises:
             SourceConnectionError: as described above; no-op on a healthy outcome
