@@ -504,6 +504,45 @@ def test_the_docstring_exemption_matches_the_decorators_in_use():
     )
 
 
+def test_every_tool_with_signature_hints_is_exempted_from_doc108():
+    """Each @register_tool function carries `# noqa: DOC108` exactly when it needs one.
+
+    tox.ini's `ignore-decorators` covers the D codes and stops there: it is a
+    flake8-docstrings option, and pydoclint 0.9.1 has no decorator-based exemption at all.
+    So the DOC half of the same exemption is per function, and nothing in the config would
+    notice a new tool missing it.
+
+    A tool's signature type hints are load-bearing rather than decorative - the MCP SDK builds
+    the advertised inputSchema from them, and a `bool` parameter with the hint removed is
+    published to the model as a string - so the marker is the right answer and removing the
+    hints is not.
+
+    Asserted in both directions, because a marker on a tool that needs none is the same kind of
+    inert configuration this test exists to catch.
+    """
+    import ast
+
+    marker = "# noqa: DOC108"
+    wrong = []
+    for module in ("mcp_read.py", "mcp_write.py", "mcp_dashboards.py"):
+        path = REPO_ROOT / "toinflux" / module
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not any("register_tool" in ast.unparse(d) for d in node.decorator_list):
+                continue
+            args = node.args
+            hinted = any(a.annotation for a in args.args + args.posonlyargs + args.kwonlyargs)
+            marked = marker in lines[node.lineno - 1]
+            if hinted and not marked:
+                wrong.append(f"{module}:{node.lineno} {node.name}: has signature type hints but no {marker!r}")
+            if marked and not hinted:
+                wrong.append(f"{module}:{node.lineno} {node.name}: carries {marker!r} but has no signature type hints")
+
+    assert not wrong, "the per-tool half of the CS.6.14 exemption is out of step:\n  " + "\n  ".join(wrong)
+
+
 def test_no_docstring_repeats_a_section_header():
     """No docstring carries the same Google section header twice.
 

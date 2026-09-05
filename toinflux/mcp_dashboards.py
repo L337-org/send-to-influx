@@ -305,7 +305,7 @@ def register_dashboard_tools(server, settings, settings_file=None):
     import anyio
 
     @register_tool(server, title="Suggest Dashboard Panels", annotations=_READ_ONLY)
-    async def suggest_dashboard_panels(source: str, fields: "list[str] | None" = None) -> dict:
+    async def suggest_dashboard_panels(source: str, fields: "list[str] | None" = None) -> dict:  # noqa: DOC108
         """Describe a source's fields as chart panels: per field an InfluxQL `query`,
         a `panel_type`, the `aggregation` to use, `avoid_aggregations`, a Grafana
         `unit`, `value_mappings` decoding a coded field to labels, and an `alias`
