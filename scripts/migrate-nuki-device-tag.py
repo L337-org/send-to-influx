@@ -191,7 +191,11 @@ def line_protocol_value(field, value):
 
 
 def escape_tag(value):
-    """Escape a tag value for line protocol, refusing what cannot be escaped."""
+    """Escape a tag value for line protocol, refusing what cannot be escaped.
+
+    Raises:
+        MigrationError: the value contains a newline, which separates points and so cannot appear in a tag
+    """
     if any(char in value for char in (chr(10), chr(13))):
         raise MigrationError(
             f"lock name {value!r} contains a newline, which cannot appear in a tag value - "
@@ -339,7 +343,11 @@ class Influx:
         return columns, rows
 
     def write(self, lines):
-        """Write a batch of line protocol points at nanosecond precision."""
+        """Write a batch of line protocol points at nanosecond precision.
+
+        Raises:
+            MigrationError: InfluxDB rejected the write, or could not be reached
+        """
         if not lines:
             return
         response = self.session.post(
@@ -584,6 +592,10 @@ def phase_rewrite(influx, args):
     run, inspected in Grafana for as long as wanted, and only then followed by phase 2.
     Re-running it rewrites identical points over themselves, which InfluxDB treats as an
     overwrite, so it is idempotent.
+
+    Raises:
+        MigrationError: the points migrated but the manifest could not be written, leaving the delete phase with nothing
+            to drive it
     """
     keys = old_field_keys(influx)
     if not keys:
@@ -729,6 +741,9 @@ def phase_delete(influx, args):
     what phase 1 confirmed it had carried across. Never a blanket ``DROP MEASUREMENT``: the
     new points live in the same measurement, and dropping it would destroy the migration's
     own output along with the history.
+
+    Raises:
+        MigrationError: the manifest is unreadable, names a different database, or lists no series to drop
     """
     try:
         with open(args.manifest, encoding="utf-8") as handle:
