@@ -178,15 +178,17 @@ class ReadSchema:
     instance_values: set = dataclass_field(default_factory=set)
 
     def metadata_for(self, field):
-        """Return the metadata dict for a field in this schema - see the
-        module-level :func:`metadata_for`.
+        """Return the metadata dict for a field in this schema.
+
+        See the module-level :func:`metadata_for`.
         """
         return metadata_for(self.field_metadata, field)
 
 
 def resolve_db(source_settings, influx_settings):
-    """Return the database/bucket name the collector actually writes to, matching
-    ``DataHandler._build_write_request()`` exactly: v2 (``influx.token`` set) uses
+    """Return the database or bucket name the collector actually writes to.
+
+    Matches ``DataHandler._build_write_request()`` exactly: v2 (``influx.token`` set) uses
     ``bucket`` falling back to ``db``; v1 uses ``db`` only, ignoring ``bucket``.
 
     Mirroring the write path matters because a config can carry both keys - e.g.
@@ -203,8 +205,10 @@ def resolve_db(source_settings, influx_settings):
 
 
 def build_schema(handler, discovered, db, instance_values=None):
-    """Assemble a ReadSchema from a DataHandler instance's static class metadata,
-    the live discovered keys, and the resolved db (see resolve_db).
+    """Assemble a ReadSchema for a DataHandler instance.
+
+    Combines its static class metadata, the live discovered keys, and the resolved db
+    (see resolve_db).
 
     Note the field set comes from ``SHOW FIELD KEYS``, which is per-measurement,
     not per-tag. For the three MyEnergi devices that share the ``myenergi``
@@ -239,10 +243,12 @@ def build_schema(handler, discovered, db, instance_values=None):
 
 
 def metadata_for(field_metadata, field):
-    """Return the metadata dict for a field: an exact key match first, else the
-    *longest* matching ``_``-delimited suffix (so ``Front_Door_stateValue`` picks
-    up ``stateValue``, and a longer key wins over a shorter one it ends with -
-    e.g. ``stateValue`` over ``value``). Empty dict when nothing matches.
+    """Return the metadata dict for a field.
+
+    An exact key match first, else the *longest* matching ``_``-delimited suffix (so
+    ``Front_Door_stateValue`` picks up ``stateValue``, and a longer key wins over a
+    shorter one it ends with - e.g. ``stateValue`` over ``value``). Empty dict when
+    nothing matches.
     Longest-wins is deterministic regardless of dict order and stays correct as
     metadata grows.
 
@@ -340,9 +346,10 @@ def annotate_rows(schema, field, columns, values):
 
 
 def _annotate_state_field(field_metadata, name, value):
-    """Shape one current-state field into ``{"value"[, "unit"][, "label"]}``,
-    reusing the same per-field metadata (unit, coded-value labels) as the history
-    tool. An undocumented coded value passes through with a null label.
+    """Shape one current-state field into ``{"value"[, "unit"][, "label"]}``.
+
+    Reuses the same per-field metadata (unit, coded-value labels) as the history tool.
+    An undocumented coded value passes through with a null label.
 
     :param field_metadata: the source's ``MCP_FIELD_METADATA``
     :param name: the field key (possibly device-prefixed)
@@ -563,8 +570,9 @@ def _select_and_group(field, aggregation, group_by, instance_clause):
 
 
 def build_panel_query(schema, field, aggregation, group_by_tags=()):
-    """Build an InfluxQL SELECT for a *dashboard panel*, using Grafana's own macros
-    for the time window and the bucket width.
+    """Build an InfluxQL SELECT for a *dashboard panel*.
+
+    Uses Grafana's own macros for the time window and the bucket width.
 
     Deliberately separate from :func:`build_query` rather than a flag on it, because
     the two produce different things and mixing them would let one leak into the
@@ -659,8 +667,9 @@ def _build_single_point_query(measurement, tag_filters, fields, order, group_by_
 
 
 def build_latest_query(measurement, tag_filters, fields, group_by_tag=None):
-    """Build an InfluxQL SELECT for the single most recent point of a measurement -
-    the current-state read for a non-live source (see MCP_LIVE_STATE).
+    """Build an InfluxQL SELECT for the single most recent point of a measurement.
+
+    The current-state read for a non-live source (see MCP_LIVE_STATE).
 
     :param measurement: the InfluxDB measurement name
     :param tag_filters: static tag key/value filters (may be empty)
@@ -695,10 +704,11 @@ def build_edge_time_query(measurement, tag_filters, order, group_by_tag=None):
 
 
 def _influx_read_request(influx_settings, db, query):
-    """Build (url, kwargs) for a GET /query, mirroring _build_write_request's
-    v1/v2 branch: token+org via the v2 /query compatibility endpoint (Token
-    header), else v1 /query with HTTP basic auth. epoch=s returns numeric unix
-    timestamps rather than RFC3339 strings.
+    """Build (url, kwargs) for a GET /query.
+
+    Mirrors _build_write_request's v1/v2 branch: token and org via the v2 /query
+    compatibility endpoint (Token header), else v1 /query with HTTP basic auth.
+    ``epoch=s`` returns numeric unix timestamps rather than RFC3339 strings.
 
     :param influx_settings: the ``influx`` settings block
     :param db: the database/bucket name to query
@@ -724,8 +734,9 @@ def _influx_read_request(influx_settings, db, query):
 
 
 def _get(session, url, kwargs, description):
-    """Issue a GET and return parsed JSON, mapping failures to
-    SourceConnectionError with a message naming what was attempted.
+    """Issue a GET and return parsed JSON.
+
+    Maps failures to SourceConnectionError with a message naming what was attempted.
     """
     try:
         with warnings.catch_warnings():
@@ -749,8 +760,9 @@ def _get(session, url, kwargs, description):
 
 @dataclass(frozen=True)
 class MeasurementKeys:
-    """What a measurement currently holds: its field keys with their InfluxDB
-    types, and its tag keys.
+    """What a measurement currently holds.
+
+    Its field keys with their InfluxDB types, and its tag keys.
 
     ``field_types`` maps a field key to ``"float"``/``"integer"``/``"string"``/
     ``"boolean"`` as ``SHOW FIELD KEYS`` reports it, **or to None** where the
@@ -1162,8 +1174,9 @@ def _v2_retention(session, influx_settings, bucket):
 
 
 def _retention_for(session, influx_settings, db):
-    """Read the retention configuration bounding how far back data could go, degrading to
-    an explicit "not known" rather than failing the whole call.
+    """Read the retention configuration bounding how far back data could go.
+
+    Degrades to an explicit "not known" rather than failing the whole call.
 
     Retention is the *second* half of the data-range answer and the less important one: if
     it cannot be read, the earliest/latest range is still worth returning. So a failure
@@ -1201,9 +1214,11 @@ def configured_instances(source, settings):
 
 
 def resolve_schema(source, settings, settings_file, instance=None):
-    """Build a fully-populated ReadSchema for a source: its static class metadata
-    plus the live field allowlist discovered from InfluxDB. Constructs a handler
-    from current settings each call, so a live settings edit is picked up.
+    """Build a fully-populated ReadSchema for a source.
+
+    Its static class metadata plus the live field allowlist discovered from InfluxDB.
+    Constructs a handler from current settings each call, so a live settings edit is
+    picked up.
 
     ``instance`` scopes the schema to one target of an instanced source, which shows up as
     an extra tag filter (a Hue bridge's ``host``) - see ``DataHandler.mcp_tag_filters()``.
@@ -1301,8 +1316,9 @@ def _list_sources_result(settings, settings_file):
 
 
 def _field_entry(schema, name, detail=False):
-    """Describe one field of a schema: its name, type, unit, coded values, kind and
-    (on request) its description.
+    """Describe one field of a schema.
+
+    Its name, type, unit, coded values, kind and, on request, its description.
 
     Every key but ``field`` is omitted when there is nothing to say, so a caller
     can tell "no unit" from "unit unknown" the only way that is honest - by the key
@@ -1440,8 +1456,10 @@ def _query_history_result(
 
 
 def _run_query_history(handler, schema, field, start, end, aggregation, group_by, limit, instance=None):
-    """Execute the query and shape the payload (session lifecycle owned by the
-    caller). Split out so _query_history_result's finally: stays a thin wrapper.
+    """Execute the query and shape the payload.
+
+    The session lifecycle is owned by the caller. Split out so _query_history_result's
+    ``finally`` stays a thin wrapper.
 
     Two payload shapes, and which one you get depends on the *source*, never on how
     many producers it happens to have:
@@ -1575,8 +1593,9 @@ def _row_to_state(fields, columns, values):
 
 
 def _latest_recorded_per_instance(handler):
-    """Read the latest recorded point *per producer* for a non-live source with an
-    instance axis.
+    """Read the latest recorded point *per producer*.
+
+    For a non-live source with an instance axis.
 
     Speedtest is the case: several hosts write to one measurement, so a single
     ungrouped "latest point" answers with whichever host happened to write most
@@ -1905,8 +1924,9 @@ def _documentation_field_line(key, meta):
 
 
 def build_documentation(settings, settings_file):
-    """Assemble a static Markdown reference of every configured source: its
-    description and, per annotated field, the unit, any coded-value meanings, how it
+    """Assemble a static Markdown reference of every configured source.
+
+    Its description and, per annotated field, the unit, any coded-value meanings, how it
     may be aggregated, and what it means where the name does not say.
 
     Generated from the source classes' own MCP metadata (MCP_DESCRIPTION +
@@ -1963,10 +1983,11 @@ def _documentation_result(settings, settings_file):
 
 
 def register_read_tools(server, settings, settings_file=None):
-    """Register the read-only MCP tools on a MCPServer server: list the queryable
-    sources, list a source's fields, and query a field's history. Blocking HTTP
-    runs in a worker thread so the async event loop isn't stalled during an
-    InfluxDB round trip.
+    """Register the read-only MCP tools on a MCPServer server.
+
+    Lists the queryable sources, lists a source's fields, and queries a field's history.
+    Blocking HTTP runs in a worker thread so the async event loop is not stalled during
+    an InfluxDB round trip.
 
     Every tool's description is part of the advertised surface and is held to the
     AI-consumer standard: it names the sibling tools a caller might otherwise reach

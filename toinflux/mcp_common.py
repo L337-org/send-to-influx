@@ -129,8 +129,9 @@ def translate_failures(fn, error_cls):
 
 
 def configured_sources(settings):
-    """Return the lowercased source names the MCP tools expose - the same
-    ``sources:`` list the collectors run, so the two can't drift. Empty when
+    """Return the lowercased source names the MCP tools expose.
+
+    The same ``sources:`` list the collectors run, so the two cannot drift. Empty when
     nothing is configured.
 
     :param settings: parsed settings dict
@@ -191,10 +192,11 @@ def resolve_handlers(source, settings, settings_file):
 
 
 def resolve_handler(source, settings, settings_file, instance=None):
-    """Construct the DataHandler for a configured source, or raise
-    ``ToolParamError`` if the name isn't one the MCP tools expose. Case-insensitive,
-    matching the collector factory. The caller owns the returned handler's session
-    and must close it (see :func:`close_session`).
+    """Construct the DataHandler for a configured source.
+
+    Raises ``ToolParamError`` if the name is not one the MCP tools expose.
+    Case-insensitive, matching the collector factory. The caller owns the returned
+    handler's session and must close it (see :func:`close_session`).
 
     :param source: source name from a tool argument
     :param settings: parsed settings dict
@@ -245,8 +247,9 @@ def resolve_handler(source, settings, settings_file, instance=None):
 
 
 def close_session(session):
-    """Best-effort close of a handler's ``requests.Session``, swallowing any error -
-    this runs in cleanup paths and must never mask the real result or exception.
+    """Best-effort close of a handler's ``requests.Session``, swallowing any error.
+
+    This runs in cleanup paths and must never mask the real result or exception.
 
     :param session: the handler's requests.Session
     """

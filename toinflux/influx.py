@@ -57,10 +57,11 @@ FLUSH_CHUNK_SIZE = 100
 
 
 def _is_point_rejection(status_code):
-    """True when an HTTP status code means the server received and rejected the submitted
-    *payload* (a 4xx other than the transient 408/429) - as opposed to a connection
-    failure (None), a server-side error (5xx), or a rate-limit/timeout condition that
-    says nothing about the point's validity.
+    """True when a status code means the server received and rejected the *payload*.
+
+    A 4xx other than the transient 408/429, as opposed to a connection failure (None), a
+    server-side error (5xx), or a rate-limit or timeout condition that says nothing about
+    the point's validity.
     """
     return status_code is not None and 400 <= status_code < 500 and status_code not in TRANSIENT_CLIENT_ERRORS
 
@@ -301,10 +302,11 @@ class DataHandler:
         return {}
 
     def mcp_write_enabled(self):
-        """Return True only when this source is writable *and* the operator has
-        opted in with ``<source>.mcp_read_write: true`` (strict ``is True``, so a
-        stray truthy string like ``"true"`` doesn't silently enable device
-        control). The default is off - writes are opt-in per source.
+        """Return True only when this source is writable and the operator has opted in.
+
+        Opting in means ``<source>.mcp_read_write: true``, tested with a strict ``is
+        True`` so a stray truthy string like ``"true"`` does not silently enable device
+        control. The default is off - writes are opt-in per source.
         """
         return self.MCP_WRITABLE and self.source_settings.get("mcp_read_write", False) is True
 
@@ -514,9 +516,11 @@ class DataHandler:
         return True
 
     def _flush_buffer(self, buffer, url, kwargs):
-        """Flush a source's buffered points, oldest first, in newline-joined chunks of
-        FLUSH_CHUNK_SIZE per HTTP request (InfluxDB's write endpoints accept multi-point
-        bodies natively, so a large backlog costs a handful of requests, not one each).
+        """Flush a source's buffered points, oldest first.
+
+        Sends newline-joined chunks of FLUSH_CHUNK_SIZE per HTTP request. InfluxDB's write
+        endpoints accept multi-point bodies natively, so a large backlog costs a handful
+        of requests rather than one each.
 
         A connection failure or 5xx stops the flush and re-raises, leaving everything
         in the buffer to retry next cycle - those failures say nothing about the points
@@ -563,9 +567,11 @@ class DataHandler:
                 buffer.popleft()
 
     def _flush_head(self, buffer, url, kwargs):
-        """POST the single point at the head of the buffer, removing it on success or -
-        after MAX_POINT_REJECTIONS separate server rejections - dropping it with a
-        warning. Any other failure re-raises with the point left in place.
+        """POST the single point at the head of the buffer.
+
+        Removes it on success, or drops it with a warning after MAX_POINT_REJECTIONS
+        separate server rejections. Any other failure re-raises with the point left in
+        place.
 
         :param buffer: the source's buffer (from ``_write_buffers``)
         :type buffer: collections.deque
@@ -596,10 +602,11 @@ class DataHandler:
         buffer.popleft()
 
     def _build_write_request(self, influx_settings):
-        """Build the URL/kwargs used to POST a line-protocol body to this source's InfluxDB
-        target. Independent of any one point's content, so it's computed once per
-        ``send_data()`` call and reused for every line posted during that call (any
-        flushed backlog plus the new point).
+        """Build the URL and kwargs for POSTing line protocol to this source's InfluxDB.
+
+        Independent of any one point's content, so it is computed once per ``send_data()``
+        call and reused for every line posted during that call - any flushed backlog plus
+        the new point.
 
         :param influx_settings: the ``influx`` settings block
         :type influx_settings: dict
@@ -650,12 +657,14 @@ class DataHandler:
             raise exc from e
 
     def _buffer_point(self, buffer, line):
-        """Append a failed point to a source's write buffer as a fresh
-        ``[line, rejection_count]`` entry, warning if this evicts the oldest buffered
-        point because the buffer was already full. An identical line already in the
-        buffer is not added again - some sources (Octopus) re-serve the same reading
-        with the same timestamp for many collection cycles, and duplicate copies would
-        only waste capacity, since flushing them is an idempotent overwrite anyway.
+        """Append a failed point to a source's write buffer.
+
+        Added as a fresh ``[line, rejection_count]`` entry, warning if this evicts the
+        oldest buffered point because the buffer was already full. An identical line
+        already in the buffer is not added again - some sources (Octopus) re-serve the
+        same reading with the same timestamp for many collection cycles, and duplicate
+        copies would only waste capacity, since flushing them is an idempotent overwrite
+        anyway.
 
         :param buffer: the source's buffer (from ``_write_buffers``)
         :type buffer: collections.deque

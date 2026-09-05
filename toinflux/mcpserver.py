@@ -84,8 +84,10 @@ input {{ padding: 0.4em; }}
 
 
 def _hash_token(token):
-    """Return the hex SHA-256 of a token string - the only form a refresh token
-    is ever persisted in, so the state file never contains a replayable value.
+    """Return the hex SHA-256 of a token string.
+
+    The only form a refresh token is ever persisted in, so the state file never contains
+    a replayable value.
 
     :param token: token string
     :type token: str
@@ -121,8 +123,10 @@ def _refresh_entry_expired(entry, now):
 
 
 class OAuthStateStore:
-    """Persistent OAuth state: dynamic client registrations and refresh-token
-    hashes, saved atomically to a 0600 JSON file on every mutation.
+    """Persistent OAuth state.
+
+    Dynamic client registrations and refresh-token hashes, saved atomically to a 0600
+    JSON file on every mutation.
 
     Only the server thread's event loop touches an instance, but a lock guards
     save() anyway so a future second caller can't interleave partial writes.
@@ -166,10 +170,11 @@ class OAuthStateStore:
                 )
 
     def _load(self):
-        """Load existing state; a missing file is a normal first run, and a
-        corrupt one is logged and treated as empty (the connector re-registers
-        and the user logs in again - annoying, recoverable) rather than
-        preventing the whole service from starting.
+        """Load existing state.
+
+        A missing file is a normal first run. A corrupt one is logged and treated as
+        empty - the connector re-registers and the user logs in again, which is annoying
+        but recoverable - rather than preventing the whole service from starting.
         """
         self._tighten_permissions()
         try:
@@ -234,10 +239,10 @@ class OAuthStateStore:
 
 
 class LoginThrottle:
-    """Tracks consecutive login failures per client address and enforces a
-    lockout window once the limit is hit. See the constants above for why
-    per-address is effectively global behind a reverse proxy - and why that's
-    the intended behaviour, not a limitation.
+    """Track consecutive login failures per client address and lock out on the limit.
+
+    See the constants above for why per-address is effectively global behind a reverse
+    proxy, and why that is the intended behaviour rather than a limitation.
     """
 
     def __init__(self, limit=LOGIN_FAILURE_LIMIT, lockout_seconds=LOGIN_LOCKOUT_SECONDS):
@@ -528,9 +533,10 @@ def build_mcp_server(settings, settings_file=None):
 
 
 class SendToInfluxOAuthProvider:
-    """OAuthAuthorizationServerProvider implementation for the single-user
-    resource-owner model: one configured user/password, clients registered
-    dynamically by Claude, tokens issued by this process.
+    """OAuthAuthorizationServerProvider for the single-user resource-owner model.
+
+    One configured user and password, clients registered dynamically by Claude, and
+    tokens issued by this process.
 
     The SDK's token endpoint performs PKCE verification, expiry checks, and
     client/redirect binding itself - this class only stores, loads, and issues.
@@ -578,8 +584,9 @@ class SendToInfluxOAuthProvider:
         return True
 
     def complete_authorization(self, txn_id, subject):
-        """Consume a login transaction after successful authentication: mint the
-        authorization code and return the client redirect URL carrying it.
+        """Consume a login transaction after successful authentication.
+
+        Mints the authorization code and returns the client redirect URL carrying it.
 
         :param txn_id: the (validated) transaction id from the login form
         :type txn_id: str
@@ -642,8 +649,10 @@ class SendToInfluxOAuthProvider:
         logging.info("MCP OAuth client registered: %s (%s)", client_info.client_id, client_info.client_name)
 
     async def authorize(self, client, params):
-        """Start the resource-owner login: stash the request as a single-use
-        transaction and send the browser to the login page.
+        """Start the resource-owner login.
+
+        Stashes the request as a single-use transaction and sends the browser to the
+        login page.
         """
         txn_id = secrets.token_urlsafe(32)
         self._prune_transactions()
@@ -755,8 +764,10 @@ class SendToInfluxOAuthProvider:
         )
 
     def _prune_transactions(self):
-        """Drop expired login transactions (bounds the dict against drive-by
-        /authorize requests that never complete a login).
+        """Drop expired login transactions.
+
+        Bounds the dict against drive-by /authorize requests that never complete a
+        login.
         """
         cutoff = time.time() - LOGIN_TXN_TTL_SECONDS
         expired = [key for key, entry in self._transactions.items() if entry["created_at"] < cutoff]

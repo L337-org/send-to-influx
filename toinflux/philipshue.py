@@ -53,8 +53,9 @@ def bridge_field_names(slot):
 
 
 def _comparable_host(host):
-    """Normalise a host for *comparison only*, so two spellings of one address are
-    recognised as the same bridge.
+    """Normalise a host for *comparison only*.
+
+    Two spellings of one address are then recognised as the same bridge.
 
     ``2001:db8::1`` and ``2001:0db8:0000:0000:0000:0000:0000:0001`` are the same
     address written differently, and ``HUE1.local``/``hue1.local`` differ only in case -
@@ -878,10 +879,11 @@ class Hue(DataHandler):
         return data
 
     def _fetch_lights(self):
-        """Return ``{light_id(str): light_object(dict)}`` for every light/plug the
-        bridge exposes, via the collector's own authenticated GET. The light
-        objects carry the ``state``/``type``/``capabilities`` used to resolve a
-        target and check what it can do.
+        """Return ``{light_id(str): light_object(dict)}`` for every light and plug.
+
+        Fetched via the collector's own authenticated GET. The light objects carry the
+        ``state``, ``type`` and ``capabilities`` used to resolve a target and check what
+        it can do.
 
         :raises SourceConnectionError: if the bridge can't be reached
         """
@@ -890,8 +892,10 @@ class Hue(DataHandler):
 
     @staticmethod
     def _names_by_id(lights):
-        """Return ``{id: name}`` from a ``{id: light_object}`` map (a missing or
-        blank name falls back to the id), for name/id resolution and error text.
+        """Return ``{id: name}`` from a ``{id: light_object}`` map.
+
+        A missing or blank name falls back to the id. Used for name and id resolution and
+        for error text.
         """
         return {light_id: str(light.get("name") or light_id) for light_id, light in lights.items()}
 
@@ -943,8 +947,9 @@ class Hue(DataHandler):
 
     @classmethod
     def _color_to_xy(cls, color):
-        """Convert a colour (an ``#rrggbb``/``rrggbb`` hex or a known name) to a
-        Hue CIE ``xy`` pair.
+        """Convert a colour to a Hue CIE ``xy`` pair.
+
+        Accepts an ``#rrggbb`` or ``rrggbb`` hex value, or a known colour name.
 
         :raises ToolParamError: the value isn't a hex colour or a known name
         """
@@ -960,8 +965,10 @@ class Hue(DataHandler):
 
     @staticmethod
     def _rgb_to_xy(r, g, b):
-        """Convert 0-255 sRGB to a Hue CIE ``[x, y]`` pair (gamma-corrected sRGB ->
-        XYZ -> xy chromaticity; the bridge clamps to the light's own gamut).
+        """Convert 0-255 sRGB to a Hue CIE ``[x, y]`` pair.
+
+        Gamma-corrected sRGB to XYZ to xy chromaticity; the bridge clamps to the light's
+        own gamut.
         """
 
         def _linear(channel):
@@ -978,10 +985,12 @@ class Hue(DataHandler):
         return [round(x / total, 4), round(y / total, 4)]
 
     def mcp_list_writable_devices(self):
-        """Return the controllable Hue lights/plugs, each with its id, name and the
-        controls it supports - the write allowlist and the model's discovery of
-        what each device can actually do (so it doesn't ask a white bulb for a
-        colour). Reuses the collector's own authenticated bridge GET.
+        """Return the controllable Hue lights and plugs, with the controls each supports.
+
+        Each entry carries its id, name and supported controls. This is both the write
+        allowlist and the model's discovery of what each device can actually do, so it
+        does not ask a white bulb for a colour. Reuses the collector's own authenticated
+        bridge GET.
 
         :return: list of ``{"id", "name", "controls": [...]}`` (plus
             ``"color_temp_range_k": [min, max]`` for colour-temperature lights),
@@ -1093,8 +1102,9 @@ class Hue(DataHandler):
         return {"bri": self._bri_from_percent(brightness_pct)}
 
     def _color_temp_state(self, name, caps, color_temp_k):
-        """Validate a colour-temperature request and return ``{"ct": ...}`` (kelvin
-        converted to mirek and clamped to the light's supported range).
+        """Validate a colour-temperature request and return ``{"ct": ...}``.
+
+        Kelvin is converted to mirek and clamped to the light's supported range.
 
         :raises ToolParamError: the light lacks colour temperature, or the value is invalid
         """

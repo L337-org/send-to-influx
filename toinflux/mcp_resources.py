@@ -70,9 +70,10 @@ def _register_resource(server, *args, **kwargs):
 
 
 def register_resources(server, settings, settings_file=None):
-    """Register the read resources on a MCPServer server: the documentation
-    reference, plus a schema and a current-state resource per configured source.
-    Blocking work runs in a worker thread, mirroring the read tools.
+    """Register the read resources on a MCPServer server.
+
+    The documentation reference, plus a schema and a current-state resource per
+    configured source. Blocking work runs in a worker thread, mirroring the read tools.
 
     :param server: the MCPServer instance
     :param settings: parsed settings dict

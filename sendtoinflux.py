@@ -137,8 +137,9 @@ def stream_source_data(source, args, data_handler, should_stop, on_activity=None
 
 
 class _StreamSink:
-    """Bridges a streaming source's transport callbacks to the collector's write, heartbeat
-    and stall-activity behaviour.
+    """Bridges a streaming source's transport callbacks to the collector.
+
+    Covers the write, heartbeat and stall-activity behaviour.
 
     Holds the per-run context (source, args, handler, activity callback) so the transport's
     ``on_message``/``periodic`` callbacks are plain bound methods rather than closures. See
@@ -169,9 +170,11 @@ class _StreamSink:
             self.on_activity()
 
     def on_message(self, topic, payload):
-        """Write the point for one arriving message immediately (the interrupt path), and
-        note that the stream showed life this interval so the next heartbeat counts it
-        healthy even if the periodic probe happens to fail.
+        """Write the point for one arriving message immediately.
+
+        This is the interrupt path. It also notes that the stream showed life this
+        interval, so the next heartbeat counts it healthy even if the periodic probe
+        happens to fail.
         """
         data = self.data_handler.decode_stream_message(topic, payload)
         if not data:
@@ -187,8 +190,10 @@ class _StreamSink:
             pass
 
     def periodic(self):
-        """Run the periodic tick once per interval: an active full-state probe of the
-        source (its normal poll), the heartbeat, and a stall-activity stamp.
+        """Run the periodic tick once per interval.
+
+        An active full-state probe of the source (its normal poll), the heartbeat, and a
+        stall-activity stamp.
 
         The probe doubles as the streaming source's health signal. It hits the same broker
         as the live stream, so its failure correlates with the stream being down - exactly
@@ -229,8 +234,9 @@ class _StreamSink:
 
 
 def send_heartbeat(data_handler, source, ok, consecutive_failures):
-    """Write a ``collector_status`` point via the source's own DataHandler, so a dead
-    collector shows up as ``ok=0`` in Grafana instead of a silent gap.
+    """Write a ``collector_status`` point via the source's own DataHandler.
+
+    A dead collector then shows up as ``ok=0`` in Grafana instead of a silent gap.
 
     Reuses send_data() by temporarily swapping in a heartbeat measurement header -
     it doesn't care what measurement/fields it's sending. Passes an explicit
@@ -303,8 +309,10 @@ def maybe_send_heartbeat(args, data_handler, source, ok, consecutive_failures):
 
 
 def _stamp_activity(last_activity, unit):
-    """Stamp ``last_activity[unit]`` with the current time for the multi-source stall
-    watchdog, or do nothing when stall detection isn't in use (``last_activity`` is None).
+    """Stamp ``last_activity[unit]`` with the current time for the stall watchdog.
+
+    Does nothing when stall detection is not in use, which is when ``last_activity`` is
+    None.
 
     Keyed by work unit, not source name: a source running several workers needs the
     watchdog to tell which one stopped making progress.
@@ -484,8 +492,9 @@ def _configure_logging_or_exit(settings, args):
 
 
 def register_thread_dump_handler():
-    """Register a SIGUSR1 handler that dumps every thread's live stack trace to
-    stderr (captured by the journal under systemd).
+    """Register a SIGUSR1 handler that dumps every thread's live stack trace.
+
+    Written to stderr, which the journal captures under systemd.
 
     A hang produces no exception and therefore no log line of its own, so this
     is the only way to see what every thread is actually blocked on without
@@ -591,8 +600,9 @@ def _requested_sources(settings, args):
 
 
 def _check_config_and_exit(settings, args):
-    """Handle ``--check-config``: validate, report, and exit - 0 if valid and something
-    is configured, 1 otherwise.
+    """Handle ``--check-config``: validate, report, and exit.
+
+    Exits 0 if valid and something is configured, 1 otherwise.
 
     :param settings: parsed settings dictionary
     :type settings: dict
@@ -889,12 +899,13 @@ def run_workers(units, args, stagger_seconds, settings=None):
 
 
 def _stall_threshold_seconds(source, settings):
-    """Return how long a source may go without activity before it's flagged as
-    stalled: STALL_WARNING_SECONDS, or STALL_INTERVAL_MULTIPLIER times the
-    source's own configured ``interval`` if that's larger - a source legitimately
-    sleeps for its full interval between cycles, so a flat threshold shorter than
-    that would flag every long-interval source (e.g. speedtest's 6-hour default)
-    as stalled on every single cycle. Falls back to the flat threshold if
+    """Return how long a source may go without activity before it is flagged as stalled.
+
+    STALL_WARNING_SECONDS, or STALL_INTERVAL_MULTIPLIER times the source's own configured
+    ``interval`` if that is larger - a source legitimately sleeps for its full interval
+    between cycles, so a flat threshold shorter than that would flag every long-interval
+    source (e.g. speedtest's 6-hour default) as stalled on every single cycle. Falls back
+    to the flat threshold if
     ``settings``/the source's ``interval`` isn't available or isn't a finite positive
     number. ``.inf`` is valid YAML and passes a plain ``> 0`` check, so without the
     explicit finiteness check it would produce an infinite threshold - which raises
@@ -921,12 +932,13 @@ def _stall_threshold_seconds(source, settings):
 
 
 def check_for_stalled_sources(units, stopped_units, last_activity, stalled_units, settings=None):
-    """Warn once per stall about a worker whose thread is alive but has
-    made no progress (success or failure) in over its stall threshold (see
-    ``_stall_threshold_seconds``) - the thread-is_alive() check above can't
-    catch this, since a thread stuck mid-instruction (e.g. the GIL-starvation-
-    shaped hang this was added to diagnose) never dies, it just stops making
-    progress silently. Logs once per stall (tracked via ``stalled_units``)
+    """Warn about a worker whose thread is alive but has stopped making progress.
+
+    Fires when a worker has made no progress, success or failure, for longer than its
+    stall threshold (see ``_stall_threshold_seconds``). The thread-is_alive() check above
+    cannot catch this, since a thread stuck mid-instruction - such as the
+    GIL-starvation-shaped hang this was added to diagnose - never dies, it just stops
+    making progress silently. Logs once per stall (tracked via ``stalled_units``)
     rather than every supervisor tick, and clears the flag once activity
     resumes so a later recurrence warns again.
 

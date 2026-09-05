@@ -571,12 +571,13 @@ class MqttDataHandler(DataHandler):
 
     @staticmethod
     def _raise_for_failed_connection(host, port, timeout, failures, connected):
-        """Raise SourceConnectionError if the collection window ended without a usable
-        connection - either the broker refused the CONNACK (e.g. bad credentials), or
-        it accepted TCP but never completed the MQTT handshake at all (stalled
-        network, hung broker). Without the latter check an unfinished handshake would
-        return an empty message list, indistinguishable from a healthy broker with
-        nothing retained - silently masking a connection failure as "no data".
+        """Raise SourceConnectionError if the window ended without a usable connection.
+
+        Either the broker refused the CONNACK (e.g. bad credentials), or it accepted TCP
+        but never completed the MQTT handshake at all (stalled network, hung broker).
+        Without the latter check an unfinished handshake would return an empty message
+        list, indistinguishable from a healthy broker with nothing retained - silently
+        masking a connection failure as "no data".
 
         :param host: broker host (for the error message)
         :param port: broker port (for the error message)

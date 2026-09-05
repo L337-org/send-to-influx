@@ -1,5 +1,7 @@
-"""send-to-influx-set-credential: manage secrets in systemd-creds for the packaged
-.deb/systemd install, and make small direct edits to settings.yaml alongside them.
+"""send-to-influx-set-credential: the credential CLI for the packaged install.
+
+Manages secrets in systemd-creds for the packaged .deb/systemd install, and makes small
+direct edits to settings.yaml alongside them.
 
 Only meaningful on a systemd host with systemd-creds (systemd >= 250) - not a
 requirement of the base package, since that would make the whole package
@@ -61,8 +63,9 @@ class CredentialCliError(Exception):
 
 
 def _parse_systemd_creds_version(version_output):
-    r"""Parse the leading version number out of `systemd-creds --version` output
-    (e.g. "systemd 255 (255.4-1ubuntu8.4)\\n+PAM +AUDIT ...").
+    r"""Parse the leading version number out of `systemd-creds --version` output.
+
+    For example, "systemd 255 (255.4-1ubuntu8.4)\\n+PAM +AUDIT ...".
 
     :param version_output: raw stdout from `systemd-creds --version`
     :type version_output: str
@@ -74,8 +77,9 @@ def _parse_systemd_creds_version(version_output):
 
 
 def _require_systemd_creds():
-    """Confirm systemd-creds exists and is new enough. Raises CredentialCliError with
-    a specific, actionable message otherwise.
+    """Confirm systemd-creds exists and is new enough.
+
+    Raises CredentialCliError with a specific, actionable message otherwise.
 
     :raises CredentialCliError: if systemd-creds is missing or older than
         MIN_SYSTEMD_CREDS_VERSION
@@ -180,8 +184,9 @@ def _cred_path(name, credstore_dir=None):
 
 
 def _regenerate_dropin(credstore_dir=None, dropin_path=None, exclude=None):
-    """Rewrite the systemd drop-in from a fresh directory listing of credstore_dir -
-    idempotent and self-healing if a prior run was interrupted, no separate state
+    """Rewrite the systemd drop-in from a fresh directory listing of credstore_dir.
+
+    Idempotent and self-healing if a prior run was interrupted, with no separate state
     file needed.
 
     :param exclude: a credential name to treat as absent even if its .cred file still
@@ -301,10 +306,10 @@ def _decrypt_credential(name, credstore_dir=None):
 
 
 def _atomic_write(path, content):
-    """Write content to path atomically (temp file + os.replace), preserving the
-    original file's owner/mode if it already exists - a naive rewrite would
-    otherwise land owned by whoever ran this script instead of
-    send-to-influx:send-to-influx 0600/0644.
+    """Write content to path atomically, preserving the original file's owner and mode.
+
+    Uses a temp file plus os.replace. A naive rewrite would otherwise land owned by
+    whoever ran this script instead of send-to-influx:send-to-influx 0600/0644.
 
     If path is a symlink, writes through to its resolved target instead of
     replacing the symlink itself - some admins manage settings.yaml as a symlink
@@ -399,8 +404,9 @@ def _last_scalar_line(node):
 
 
 def _append_field_to_section(settings_path, text, section_node, field, new_value):
-    """Insert ``field: value`` at the end of a section's own block, preserving every
-    existing byte.
+    """Insert ``field: value`` at the end of a section's own block.
+
+    Preserves every existing byte.
 
     The same property that makes ``_ensure_section`` safe - appending never rewrites what is
     already there - except the insertion point has to be *inside* the section rather than at
@@ -434,8 +440,10 @@ def _append_field_to_section(settings_path, text, section_node, field, new_value
 
 
 def _locate_rewritable_value(settings_path, text, top_node, top_key, field, new_value):
-    """Return the scalar node whose value should be replaced, or None if the field was
-    *created* instead (in which case the file has already been written).
+    """Return the scalar node whose value should be replaced.
+
+    None if the field was *created* instead, in which case the file has already been
+    written.
 
     Split out of _rewrite_settings_field so that function stays within the complexity limit
     and reads as "find the line, then splice it".
@@ -458,11 +466,12 @@ def _locate_rewritable_value(settings_path, text, top_node, top_key, field, new_
 
 
 def _rewrite_settings_field(settings_path, top_key, field, new_value):
-    """Replace a single scalar field's value in place, preserving every other byte of
-    the file (comments, ordering, blank lines) by locating the exact source line via
-    yaml.compose() rather than a full load+dump round trip, which would silently
-    strip every comment - example_settings.yaml is comment-dense and users are
-    expected to keep reading/editing it.
+    """Replace a single scalar field's value in place.
+
+    Preserves every other byte of the file (comments, ordering, blank lines) by locating
+    the exact source line via yaml.compose() rather than a full load+dump round trip,
+    which would silently strip every comment - example_settings.yaml is comment-dense and
+    users are expected to keep reading and editing it.
 
     :raises CredentialCliError: if the target section/field doesn't exist, or isn't a
         plain single-line scalar (e.g. hand-edited into a block scalar) - refuses
@@ -553,8 +562,9 @@ def _compose_settings_mapping(settings_path):
 
 
 def _load_sources_sequence(settings_path):
-    """Read and parse settings_path, returning (text, sources_key_node, sources_node)
-    for its top-level `sources:` key and sequence.
+    """Read and parse settings_path for its top-level `sources:` key and sequence.
+
+    Returns (text, sources_key_node, sources_node).
 
     `sources_node` is None when `sources:` is empty - either a bare key with nothing
     but comments under it (parses as a null scalar - the shipped default, since a
@@ -600,9 +610,10 @@ def _load_sources_sequence(settings_path):
 
 
 def _enable_source(name, settings_path=None):
-    """Idempotently append `name` to settings.yaml's top-level `sources:` sequence,
-    preserving the rest of the file untouched - a no-op if already present, so a
-    later dpkg-reconfigure re-running this doesn't duplicate entries.
+    """Idempotently append `name` to settings.yaml's top-level `sources:` sequence.
+
+    Preserves the rest of the file untouched, and is a no-op if already present, so a
+    later dpkg-reconfigure re-running this does not duplicate entries.
 
     Used instead of _rewrite_settings_field(), which only handles a single-line
     scalar value - `sources:` is a YAML sequence, a structurally different edit.
@@ -672,9 +683,10 @@ def _enable_source(name, settings_path=None):
 
 
 def _detect_influx_version(url):
-    """Probe url to determine whether it's an InfluxDB v1 or v2 instance, without
-    needing any credential - both /health (v2) and /ping (v1, and v2 for backward
-    compat) are unauthenticated health-check endpoints on real InfluxDB servers.
+    """Probe url to determine whether it is an InfluxDB v1 or v2 instance.
+
+    Needs no credential: both /health (v2) and /ping (v1, and v2 for backward compat) are
+    unauthenticated health-check endpoints on real InfluxDB servers.
 
     Always skips TLS verification, unconditionally - unlike _ensure_influx_storage(),
     this never transmits a credential (no auth header, no auth tuple) and the result
@@ -712,11 +724,12 @@ def _detect_influx_version(url):
 
 
 def _resolve_credential_value(name, influx, credstore_dir):
-    """Return the real value for one of the influx.* credential fields, whether or
-    not it's been migrated to systemd-creds - both are legitimate, since migration
-    is opt-in and per-field (see toinflux.credentials). If the plain settings.yaml
-    value is the systemd-creds sentinel, decrypt the real value instead; otherwise
-    the plain value already *is* the real value (never migrated).
+    """Return the real value for one of the influx.* credential fields.
+
+    Works whether or not it has been migrated to systemd-creds - both are legitimate,
+    since migration is opt-in and per-field (see toinflux.credentials). If the plain
+    settings.yaml value is the systemd-creds sentinel, decrypt the real value instead;
+    otherwise the plain value already *is* the real value, never migrated.
 
     :param influx: the parsed `influx:` settings block
     :type influx: dict
@@ -733,8 +746,9 @@ def _resolve_credential_value(name, influx, credstore_dir):
 
 def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
     """Best-effort create the InfluxDB database (v1) or bucket (v2) named `name`.
-    Never raises on failure (permissions/auth/unreachable) - logs and returns, since
-    install/auto-enable must not be blocked by this.
+
+    Never raises on failure (permissions, auth, unreachable) - logs and returns, since
+    install and auto-enable must not be blocked by this.
 
     Authenticates by reading url/org straight from settings.yaml (never secrets) and
     resolving user/password/token via _resolve_credential_value() - each is read
@@ -823,8 +837,9 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
 
 
 def _resolve_org_id(url, headers, org_name, verify=True):
-    """Look up the org ID for org_name - the v2 bucket-create API needs orgID, not
-    just the org name.
+    """Look up the org ID for org_name.
+
+    The v2 bucket-create API needs orgID, not just the org name.
     """
     resp = requests.get(
         f"{url}/api/v2/orgs", params={"org": org_name}, headers=headers, verify=verify, timeout=HTTP_TIMEOUT_SECONDS
@@ -955,9 +970,10 @@ def _stored_credential_names(credstore_dir):
 
 
 def _extract_section(text, name):
-    """Return the source lines of top-level section ``name`` from a settings file,
-    including the comment block immediately above it and any trailing blank line,
-    or None if the section isn't there.
+    """Return the source lines of top-level section ``name`` from a settings file.
+
+    Includes the comment block immediately above it and any trailing blank line, or None
+    if the section is not there.
 
     Deliberately textual rather than a YAML round trip: the point is to copy the
     shipped example's *documentation* (its comments explain every field) into the
@@ -1018,8 +1034,9 @@ def _require_mapping_document(root, settings_path):
 
 
 def _ensure_section(settings_path, name, example_path):
-    """Append top-level section ``name`` to settings.yaml, copied from the shipped
-    example, if the file doesn't already have it. Returns True if it was added.
+    """Append top-level section ``name`` to settings.yaml, copied from the shipped example.
+
+    A no-op if the file already has it. Returns True if it was added.
 
     This exists because settings.yaml is created once at install time and then
     never rewritten by an upgrade (a deliberate Debian-policy choice - see

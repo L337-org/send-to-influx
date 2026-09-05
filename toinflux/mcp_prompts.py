@@ -29,9 +29,10 @@ from toinflux.mcp_write import writable_enabled_sources
 
 
 def register_prompts(server, settings, settings_file=None, enabled_sources=None):
-    """Register the task prompts on a MCPServer server. ``home_status`` and
-    ``usage_trends`` are always registered; ``control_device`` only when a source
-    has writes enabled (so it isn't offered on a read-only install).
+    """Register the task prompts on a MCPServer server.
+
+    ``home_status`` and ``usage_trends`` are always registered; ``control_device`` only
+    when a source has writes enabled, so it is not offered on a read-only install.
 
     :param server: the MCPServer instance
     :param settings: parsed settings dict

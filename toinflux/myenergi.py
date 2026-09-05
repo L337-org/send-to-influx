@@ -44,8 +44,9 @@ _HOURLY_DESCRIPTION = "Energy {} during the current hour; resets on the hour, so
 
 @dataclass(frozen=True)
 class MyEnergiDevice:
-    """One configured MyEnergi device: which serial identifies it, what to call it, and
-    which fields to collect.
+    """One configured MyEnergi device.
+
+    Which serial identifies it, what to call it, and which fields to collect.
 
     ``label`` is the emitted ``device`` tag value, not a display name - see
     ``enumerate_devices``. ``fields`` is None when everything the API returns should be
