@@ -51,7 +51,12 @@ SHUTDOWN = threading.Event()
 
 
 def print_source_data(source, data):
-    """Print data from a source in a consistent JSON envelope."""
+    """Print data from a source in a consistent JSON envelope.
+
+    Args:
+        source (str): the source name, used as the envelope's key
+        data (dict): the collected point to print
+    """
     blob = {
         "source": source,
         "time": time.strftime("%a, %d %b %Y, %H:%M:%S %Z", time.localtime()),
@@ -63,7 +68,16 @@ def print_source_data(source, data):
 def get_backoff_delay(
     failure_count, backoff_base_seconds=BACKOFF_BASE_SECONDS, backoff_max_seconds=BACKOFF_MAX_SECONDS
 ):
-    """Return the bounded exponential backoff delay in seconds."""
+    """Return the bounded exponential backoff delay in seconds.
+
+    Args:
+        failure_count (int): consecutive failures so far, which sets the exponent
+        backoff_base_seconds (int or float): the delay after the first failure
+        backoff_max_seconds (int or float): the ceiling the delay is clamped to
+
+    Returns:
+        int or float: the delay to wait before the next attempt
+    """
     exponent = max(0, failure_count - 1)
     if backoff_base_seconds <= 0:
         return 0
@@ -80,6 +94,14 @@ def collect_source_data(source, args, data_handler):
     Printed output is labelled with the handler's ``worker_label`` rather than the bare
     source name, so a source running several workers (a multi-bridge Hue install) says
     which one each block came from.
+
+    Args:
+        source (str): the source name being collected
+        args (argparse.Namespace): the parsed command line, for the print and dump switches
+        data_handler (DataHandler): the handler to collect through
+
+    Returns:
+        int or float: the source's configured interval, so the caller knows how long to sleep
     """
     data = data_handler.get_data()
     if args.print:
@@ -293,7 +315,15 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
 
 
 def maybe_send_heartbeat(args, data_handler, source, ok, consecutive_failures):
-    """Send a heartbeat unless running in --print mode, which never touches InfluxDB."""
+    """Send a heartbeat unless running in --print mode, which never touches InfluxDB.
+
+    Args:
+        args (argparse.Namespace): the parsed command line; --print suppresses the write
+        data_handler (DataHandler): the handler whose InfluxDB target the point goes to
+        source (str): the source name to tag the point with
+        ok (bool): whether the cycle succeeded
+        consecutive_failures (int): how many cycles have failed in a row
+    """
     if not args.print:
         send_heartbeat(data_handler, source, ok=ok, consecutive_failures=consecutive_failures)
 
@@ -411,14 +441,26 @@ def create_source_worker(unit, source_start_delay, args, stopped_sources, last_a
 
 
 def spawn_source_thread(worker):
-    """Create and start a daemon thread for a source worker."""
+    """Create and start a daemon thread for a source worker.
+
+    Args:
+        worker (callable): the worker function the thread runs
+
+    Returns:
+        threading.Thread: the started daemon thread
+    """
     source_thread = threading.Thread(target=worker, daemon=True)
     source_thread.start()
     return source_thread
 
 
 def signal_handler(sig, _frame):
-    """Signal handler to exit gracefully."""
+    """Signal handler to exit gracefully.
+
+    Args:
+        sig (int): the signal number received
+        _frame (types.FrameType or None): the interrupted stack frame, unused
+    """
     logging.info("Exiting on signal %s", sig)
     # Ask any streaming source to break out of its network loop and disconnect. In
     # single-source mode the loop runs on this (the main) thread, so the SystemExit
