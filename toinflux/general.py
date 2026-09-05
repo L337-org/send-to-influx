@@ -117,8 +117,7 @@ def flatten_dict(data, parent_key="", sep="_"):
 
 
 def get_class(source, settings_file=None, instance=None):
-    """
-    Construct and return a DataHandler for the given data source name.
+    """Construct and return a DataHandler for the given data source name.
 
     Returns an *instance*, not the class - ``source_class()`` is the one that returns the
     type, without constructing it. The wording here said "class object" long after this
@@ -149,8 +148,7 @@ def get_class(source, settings_file=None, instance=None):
 
 
 def source_class(source):
-    """
-    Return the DataHandler subclass for a source name, without constructing it.
+    """Return the DataHandler subclass for a source name, without constructing it.
 
     Separated from ``get_class()`` so a caller that only needs the class's static domain
     knowledge - the MCP read layer asking which measurement a source writes to - can get it
@@ -175,8 +173,7 @@ def source_class(source):
 
 
 def _source_classes():
-    """
-    Return the source-name to class mapping - the single registration point.
+    """Return the source-name to class mapping - the single registration point.
 
     Every caller that needs to know what sources exist, or which class one means, reads it
     from here: ``get_class()``, ``source_class()`` and ``known_sources()``. A second copy of
@@ -219,8 +216,7 @@ def _source_classes():
 
 
 def measurement_for(source):
-    """
-    Return the InfluxDB measurement a source writes to, from its class alone.
+    """Return the InfluxDB measurement a source writes to, from its class alone.
 
     ``MCP_MEASUREMENT`` when the class overrides it, else the source name - the same rule
     ``build_schema()`` applies, kept here so a caller that has no handler can ask.
@@ -235,8 +231,7 @@ def measurement_for(source):
 
 
 def known_sources():
-    """
-    Return every source name this build knows about, lowercased.
+    """Return every source name this build knows about, lowercased.
 
     Read from the one class mapping, so it cannot drift from what ``get_class()`` accepts.
 
@@ -251,8 +246,7 @@ def known_sources():
 
 
 def shares_measurement(source):
-    """
-    Return True when any *other* known source writes to the same measurement.
+    """Return True when any *other* known source writes to the same measurement.
 
     Derived from the classes rather than declared on them, and deliberately from every
     *known* source rather than the currently configured ones. Sharing is a property of the
@@ -294,8 +288,7 @@ MQTT_SOURCES = frozenset({"nuki"})
 
 
 def _hue_bridge_hosts(settings):
-    """
-    Return the host of every usable configured Hue bridge - one per worker.
+    """Return the host of every usable configured Hue bridge - one per worker.
 
     Imported inside the function, like ``get_class()`` does: ``philipshue`` imports
     ``influx``, which imports this module, so a module-level import would be circular.
@@ -326,8 +319,7 @@ def _hue_bridge_hosts(settings):
 # single unit. Add a source by adding its enumerator here, and nothing else can be
 # forgotten.
 def _myenergi_device_labels(source):
-    """
-    Return an enumerator giving the labels of every configured device for one MyEnergi source.
+    """Return an enumerator giving the labels of every configured device for one MyEnergi source.
 
     One worker per device, so a second zappi collects on its own schedule with its own
     backoff and write buffer, and one unreachable device delays only itself.
@@ -364,8 +356,7 @@ INSTANCED_SOURCES = frozenset(_INSTANCE_ENUMERATORS)
 
 
 def _source_instances(source, settings):
-    """
-    Return the instance values a single source expands to.
+    """Return the instance values a single source expands to.
 
     ``[None]`` for an ordinary single-target source. For an instanced source, one entry per
     configured target - and an **empty** list when it has none, which means the source is
@@ -383,8 +374,7 @@ def _source_instances(source, settings):
 
 
 def expand_sources(sources, settings):
-    """
-    Expand configured source names into the work units the runtime actually runs.
+    """Expand configured source names into the work units the runtime actually runs.
 
     A work unit is ``(source, instance)`` - the same shape as
     ``DataHandler.worker_key`` - and each one becomes exactly one worker. Most sources
@@ -415,8 +405,7 @@ def expand_sources(sources, settings):
 
 
 def mqtt_block_errors(settings, context=""):
-    """
-    Return a list of error strings for the shared ``mqtt`` settings block itself -
+    """Return a list of error strings for the shared ``mqtt`` settings block itself -
     its own type, ``broker_host`` presence and type, ``username``/``password`` types,
     and ``broker_port`` type and range - independent of which sources happen to need
     it. The type checks matter because YAML coerces silently (``broker_host: 10.0``
@@ -511,7 +500,8 @@ def _validate_hue_bridges(settings, sources):
 
 def _validate_mqtt_block(settings, sources):
     """Return a list of error strings for the shared mqtt block, which is required
-    if (and only if) an MQTT-based source is among the sources being validated."""
+    if (and only if) an MQTT-based source is among the sources being validated.
+    """
     mqtt_sources = sorted(str(src) for src in sources if src in MQTT_SOURCES)
     if not mqtt_sources:
         return []
@@ -697,7 +687,8 @@ def mcp_block_errors(settings):
 
 def _mcp_enabled_block_errors(mcp):
     """Return the error strings that only apply once the MCP server is enabled:
-    a usable public_url and a parseable, non-public bind_address."""
+    a usable public_url and a parseable, non-public bind_address.
+    """
     errors = []
     public_url = mcp.get("public_url")
     if not (isinstance(public_url, str) and public_url.strip()):
@@ -847,8 +838,7 @@ def _log_config_warnings(warnings_found, settings_path, warn):
 
 
 def _validate_myenergi_devices(settings, sources):
-    """
-    Validate the configured MyEnergi devices for every selected device source.
+    """Validate the configured MyEnergi devices for every selected device source.
 
     Same severity split as the Hue bridges: self-contradictory configuration is fatal (a
     devices entry with no label, a duplicate label or serial, a non-list devices key), while

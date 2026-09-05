@@ -309,5 +309,6 @@ def register_dashboard_tools(server, settings, settings_file=None):
         `kind` and `avoid_aggregations` are absent where the source never said how a
         field may be aggregated - which is not permission to average it. Reads the
         field set live from InfluxDB and changes nothing; an unknown source or field
-        is an error, and so is an unreachable InfluxDB."""
+        is an error, and so is an unreachable InfluxDB.
+        """
         return await anyio.to_thread.run_sync(suggest_panels_result, source, settings, settings_file, fields)

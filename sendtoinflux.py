@@ -90,8 +90,7 @@ def collect_source_data(source, args, data_handler):
 
 
 def stream_source_data(source, args, data_handler, should_stop, on_activity=None):
-    """
-    Run a streaming (event-driven) source, blocking until ``should_stop`` is set.
+    """Run a streaming (event-driven) source, blocking until ``should_stop`` is set.
 
     Streaming sources (MQTT - see ``MqttDataHandler``) hold their subscription open
     instead of polling on a timer, so a state change is written the instant it arrives
@@ -138,8 +137,7 @@ def stream_source_data(source, args, data_handler, should_stop, on_activity=None
 
 
 class _StreamSink:
-    """
-    Bridges a streaming source's transport callbacks to the collector's write, heartbeat
+    """Bridges a streaming source's transport callbacks to the collector's write, heartbeat
     and stall-activity behaviour.
 
     Holds the per-run context (source, args, handler, activity callback) so the transport's
@@ -173,7 +171,8 @@ class _StreamSink:
     def on_message(self, topic, payload):
         """Write the point for one arriving message immediately (the interrupt path), and
         note that the stream showed life this interval so the next heartbeat counts it
-        healthy even if the periodic probe happens to fail."""
+        healthy even if the periodic probe happens to fail.
+        """
         data = self.data_handler.decode_stream_message(topic, payload)
         if not data:
             return
@@ -230,8 +229,7 @@ class _StreamSink:
 
 
 def send_heartbeat(data_handler, source, ok, consecutive_failures):
-    """
-    Write a ``collector_status`` point via the source's own DataHandler, so a dead
+    """Write a ``collector_status`` point via the source's own DataHandler, so a dead
     collector shows up as ``ok=0`` in Grafana instead of a silent gap.
 
     Reuses send_data() by temporarily swapping in a heartbeat measurement header -
@@ -309,14 +307,14 @@ def _stamp_activity(last_activity, unit):
     watchdog, or do nothing when stall detection isn't in use (``last_activity`` is None).
 
     Keyed by work unit, not source name: a source running several workers needs the
-    watchdog to tell which one stopped making progress."""
+    watchdog to tell which one stopped making progress.
+    """
     if last_activity is not None:
         last_activity[unit] = time.time()
 
 
 def _should_stream(data_handler):
-    """
-    Whether to run the event-driven stream loop for this handler rather than polling.
+    """Whether to run the event-driven stream loop for this handler rather than polling.
 
     True only when it's a ``STREAMING`` transport *and* a concrete source has actually
     given it a topic filter to subscribe to. ``MqttDataHandler`` sets ``STREAMING = True``
@@ -462,8 +460,7 @@ def maybe_start_mcp_server(settings, args):
 
 
 def _configure_logging_or_exit(settings, args):
-    """
-    Configure logging from settings/args, exiting 1 with a clean message on failure.
+    """Configure logging from settings/args, exiting 1 with a clean message on failure.
 
     :param settings: loaded settings dict
     :type settings: dict
@@ -510,8 +507,7 @@ def register_thread_dump_handler():
 
 
 def _exit_if_nothing_to_collect(units, requested, settings, args):
-    """
-    Stop with a clear message when there is nothing to collect.
+    """Stop with a clear message when there is nothing to collect.
 
     Two distinct causes land here, logged distinctly so the journal makes clear which one
     happened: nothing was requested at all (``sources:`` empty/absent and no ``--source`` -
@@ -570,8 +566,7 @@ def _exit_if_nothing_to_collect(units, requested, settings, args):
 
 
 def _requested_sources(settings, args):
-    """
-    Return the lowercased source names requested for this run.
+    """Return the lowercased source names requested for this run.
 
     ``--source`` wins; otherwise the ``sources:`` list; otherwise nothing is requested -
     an empty or absent ``sources:`` list is a valid "nothing configured" state, not a
@@ -596,8 +591,7 @@ def _requested_sources(settings, args):
 
 
 def _check_config_and_exit(settings, args):
-    """
-    Handle ``--check-config``: validate, report, and exit - 0 if valid and something
+    """Handle ``--check-config``: validate, report, and exit - 0 if valid and something
     is configured, 1 otherwise.
 
     :param settings: parsed settings dictionary
@@ -746,8 +740,7 @@ def main():
 
 
 def _dump_source_and_exit(units, args):
-    """
-    Collect one reading per work unit, print it as JSON, and exit - the ``--dump`` mode.
+    """Collect one reading per work unit, print it as JSON, and exit - the ``--dump`` mode.
 
     A one-shot manual/debugging run has no worker loop to retry it with backoff, so a
     connection failure exits with a distinct code (2) rather than an unhandled traceback,
@@ -791,8 +784,7 @@ def _dump_source_and_exit(units, args):
 
 
 def run_one_worker(unit, args):
-    """
-    Run a single work unit on this thread, in either print or send mode.
+    """Run a single work unit on this thread, in either print or send mode.
 
     Used when exactly one worker is needed, which keeps the streaming path's clean
     shutdown: a signal raises SystemExit on this thread and unwinds through the MQTT
@@ -849,8 +841,7 @@ def run_one_worker(unit, args):
 
 
 def run_workers(units, args, stagger_seconds, settings=None):
-    """
-    Run every work unit concurrently, with staggered start offsets.
+    """Run every work unit concurrently, with staggered start offsets.
 
     One thread per unit, so a source with several instances (a multi-bridge Hue install)
     gets one worker per bridge, each with its own backoff - an unreachable bridge delays

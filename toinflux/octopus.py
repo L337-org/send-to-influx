@@ -76,8 +76,7 @@ class Octopus(DataHandler):
         return int(datetime.fromisoformat(interval_start.replace("Z", "+00:00")).timestamp())
 
     def get_data(self):
-        """
-        Get the latest electricity/gas consumption and optionally current unit rate from Octopus Energy.
+        """Get the latest electricity/gas consumption and optionally current unit rate from Octopus Energy.
 
         Consumption is returned as the most recent half-hourly reading (smart meter data
         typically arrives with a delay of up to 24 hours). Gas consumption is only collected

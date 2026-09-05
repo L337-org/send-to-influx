@@ -100,8 +100,7 @@ def _is_per_device(payload):
 
 
 class Nuki(MqttDataHandler):
-    """
-    Child class of MqttDataHandler to get lock/door-sensor state from Nuki smart locks.
+    """Child class of MqttDataHandler to get lock/door-sensor state from Nuki smart locks.
 
     Nuki devices publish their state to the configured MQTT broker with the retain
     flag set on every state topic, so a short subscribe window per collection cycle
@@ -185,8 +184,7 @@ class Nuki(MqttDataHandler):
         self._device_names = {}
 
     def get_data(self):
-        """
-        Get the current state of every Nuki device from the MQTT broker.
+        """Get the current state of every Nuki device from the MQTT broker.
 
         Returns ``{device: {field: value}}`` - one entry per lock - rather than the single
         flattened dict this used to return. ``send_data()`` writes one point per entry.
@@ -201,8 +199,7 @@ class Nuki(MqttDataHandler):
         return self.data
 
     def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True):
-        """
-        Write one point per lock, rather than one point carrying every lock's fields.
+        """Write one point per lock, rather than one point carrying every lock's fields.
 
         ``self.data`` is ``{device: {field: value}}``, so this walks it and delegates each
         entry to the base implementation with that lock's header swapped in - the same
@@ -295,8 +292,7 @@ class Nuki(MqttDataHandler):
         return None
 
     def parse_nuki_data(self):
-        """
-        Collect retained MQTT messages and parse them into per-lock InfluxDB fields.
+        """Collect retained MQTT messages and parse them into per-lock InfluxDB fields.
 
         Messages are grouped per device by the ID segment of the topic
         (``nuki/<id>/<field>``); each device's ``name`` topic is consumed as its label
@@ -342,8 +338,7 @@ class Nuki(MqttDataHandler):
         return data
 
     def decode_stream_message(self, topic, payload):
-        """
-        Decode one streamed Nuki message into a single InfluxDB field (the interrupt path).
+        """Decode one streamed Nuki message into a single InfluxDB field (the interrupt path).
 
         The event-driven counterpart to parse_nuki_data's per-topic handling: a ``name``
         topic is remembered as that device's label and produces no point of its own; any
@@ -383,8 +378,7 @@ class Nuki(MqttDataHandler):
 
     @staticmethod
     def _device_label(name, device_id):
-        """
-        The ``device`` tag value for a lock: its Nuki-app name with spaces underscored, or the
+        """The ``device`` tag value for a lock: its Nuki-app name with spaces underscored, or the
         device ID when the name is blank or absent.
 
         **The underscores stay, even though a tag value does not need them.** They were
@@ -407,8 +401,7 @@ class Nuki(MqttDataHandler):
         return (name.strip() or device_id).replace(" ", "_")
 
     def _remember_device_name(self, device_id, name):
-        """
-        Record a device's name for use as its streaming label.
+        """Record a device's name for use as its streaming label.
 
         Warns if the name resolves to a label already claimed by a *different* device - two
         locks sharing a Nuki-app name now share one series, so their readings interleave
@@ -439,8 +432,7 @@ class Nuki(MqttDataHandler):
 
     @staticmethod
     def _decode_field(field, raw):
-        """
-        Decode one state topic's payload into an InfluxDB field key and value.
+        """Decode one state topic's payload into an InfluxDB field key and value.
 
         ``state``/``doorsensorState`` are renamed to ``stateValue``/
         ``doorsensorStateValue`` (see :data:`STATE_VALUE_FIELDS`); their value is
@@ -469,8 +461,7 @@ class Nuki(MqttDataHandler):
 
     @staticmethod
     def _decode_scalar(raw):
-        """
-        Cast a bare MQTT payload string to the most specific Python type it matches.
+        """Cast a bare MQTT payload string to the most specific Python type it matches.
 
         :param raw: the payload as received (UTF-8 decoded)
         :type raw: str

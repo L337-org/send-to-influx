@@ -44,8 +44,7 @@ MAX_QUEUED_MESSAGES = 10000
 
 
 class MqttDataHandler(DataHandler):
-    """
-    Intermediate parent class for data handlers that collect from an MQTT broker.
+    """Intermediate parent class for data handlers that collect from an MQTT broker.
 
     Owns the generic transport only - connect, subscribe, collect for a fixed window,
     disconnect - the same way MyEnergi is a shared parent holding common API auth for
@@ -78,8 +77,7 @@ class MqttDataHandler(DataHandler):
     STREAM_TOPIC_FILTER: "str | None" = None
 
     def decode_stream_message(self, topic, payload):
-        """
-        Decode a single streamed MQTT message into an InfluxDB field dict.
+        """Decode a single streamed MQTT message into an InfluxDB field dict.
 
         Called by the worker's streaming path for every message that arrives on the
         live subscription (``STREAM_TOPIC_FILTER``), to turn one topic/payload into
@@ -100,8 +98,7 @@ class MqttDataHandler(DataHandler):
         raise NotImplementedError("streaming MQTT sources must implement decode_stream_message()")
 
     def collect_mqtt_messages(self, topic_filter, timeout):
-        """
-        Connect to the configured MQTT broker, subscribe, and collect messages.
+        """Connect to the configured MQTT broker, subscribe, and collect messages.
 
         Runs the client's network loop for ``timeout`` seconds, then disconnects and
         returns whatever arrived. Sources whose brokers hold retained messages (e.g.
@@ -192,8 +189,7 @@ class MqttDataHandler(DataHandler):
         return messages
 
     def stream_mqtt_messages(self, topic_filter, on_message, periodic, interval, should_stop):
-        """
-        Hold an MQTT subscription open and react to messages as they arrive.
+        """Hold an MQTT subscription open and react to messages as they arrive.
 
         Unlike ``collect_mqtt_messages`` (a fixed poll window that connects, drains and
         disconnects), this keeps a persistent connection: ``on_message`` is invoked for
@@ -280,8 +276,7 @@ class MqttDataHandler(DataHandler):
             client.loop_stop()
 
     def _run_stream_loop(self, message_queue, on_message, periodic, interval, should_stop):
-        """
-        Consume queued messages and run the periodic snapshot, both on this one thread.
+        """Consume queued messages and run the periodic snapshot, both on this one thread.
 
         paho's network thread only enqueues (see ``_build_stream_client``), so every
         InfluxDB write - the immediate per-message write via ``on_message`` and the
@@ -330,8 +325,7 @@ class MqttDataHandler(DataHandler):
 
     @staticmethod
     def _dispatch_stream_message(on_message, topic, payload):
-        """
-        Invoke the caller's per-message callback, logging and swallowing any error.
+        """Invoke the caller's per-message callback, logging and swallowing any error.
 
         One bad or failed message (e.g. an InfluxDB write failure) must not tear down a
         long-lived stream - the point, if it was buffered, flushes on the next write - so
@@ -352,8 +346,7 @@ class MqttDataHandler(DataHandler):
 
     @staticmethod
     def _drop_oldest_and_enqueue(message_queue, item, topic):
-        """
-        Enqueue onto a (was-)full stream queue, dropping the oldest entry only if needed.
+        """Enqueue onto a (was-)full stream queue, dropping the oldest entry only if needed.
 
         The caller (paho's network thread) reaches here after its own ``put_nowait``
         found the queue full, and must stay non-blocking. The sole consumer may have
@@ -411,8 +404,7 @@ class MqttDataHandler(DataHandler):
         # message was enqueued with nothing dropped - no warning.
 
     def _build_stream_client(self, mqtt_settings, host, port, topic_filter, message_queue):
-        """
-        Construct the paho client and callbacks for a persistent stream.
+        """Construct the paho client and callbacks for a persistent stream.
 
         The message callback only *enqueues* decoded (topic, payload) pairs onto
         ``message_queue`` - it does no InfluxDB I/O - so paho's network thread stays
@@ -486,8 +478,7 @@ class MqttDataHandler(DataHandler):
         return client, state
 
     def _await_initial_connection(self, host, port, failures, connected):
-        """
-        Block until the initial CONNACK + subscribe resolves, then raise if it failed.
+        """Block until the initial CONNACK + subscribe resolves, then raise if it failed.
 
         Polls the ``failures``/``connected`` accumulators the on_connect callback writes
         from paho's network thread, up to ``STREAM_CONNECT_TIMEOUT`` seconds, then defers
@@ -511,8 +502,7 @@ class MqttDataHandler(DataHandler):
 
     @staticmethod
     def _subscribe_on_connect(client, reason_code, topic_filter, failures, connected):
-        """
-        Handle a CONNACK: subscribe if it succeeded, otherwise record why not.
+        """Handle a CONNACK: subscribe if it succeeded, otherwise record why not.
 
         Both outcomes are recorded rather than raised - paho runs this inside its own
         network loop, where an exception would be swallowed - and turned into a
@@ -545,8 +535,7 @@ class MqttDataHandler(DataHandler):
 
     @staticmethod
     def _resubscribe_on_reconnect(client, reason_code, topic_filter, host, port):
-        """
-        Re-subscribe after a reconnect once the stream is past its initial handshake.
+        """Re-subscribe after a reconnect once the stream is past its initial handshake.
 
         paho drops subscriptions on a reconnect, so this re-issues the subscribe (which is
         what makes a dropped connection self-heal). Unlike the initial handshake (see
@@ -582,8 +571,7 @@ class MqttDataHandler(DataHandler):
 
     @staticmethod
     def _raise_for_failed_connection(host, port, timeout, failures, connected):
-        """
-        Raise SourceConnectionError if the collection window ended without a usable
+        """Raise SourceConnectionError if the collection window ended without a usable
         connection - either the broker refused the CONNACK (e.g. bad credentials), or
         it accepted TCP but never completed the MQTT handshake at all (stalled
         network, hung broker). Without the latter check an unfinished handshake would
