@@ -656,28 +656,83 @@ def _test_index():
     return bare, nodeids, owner
 
 
-def _suggested_nodeid(token, nodeids):
-    """Rebuild `token` as a nodeid under `tests/`, using the real path where one can be identified.
+def _recovered_nodeid(token, nodeids):
+    """The real nodeid for a reference whose test exists but whose path is wrong.
 
-    A reference written without a directory, or with the wrong one, cannot simply have `tests/`
-    stuck on the front: `test_mqtt_streaming.py::...` lives in `tests/integration/`. Matching on
-    the filename recovers the real path.
-
-    Where the filename is unknown or sits in two subtrees, the whole token is prefixed rather
-    than its basename. Any directory the author wrote is then the only evidence left of where
-    they meant, so discarding it would answer an unresolvable reference with a suggestion that
-    is less likely to run than what they had.
+    `tests/test_mqtt_streaming.py::test_x` names a real test at a path it does not live at,
+    because that file is under `tests/integration/`. Matching the filename *and* the rest of the
+    nodeid distinguishes that from a test which genuinely does not exist, which matters because
+    the two deserve opposite messages: one is a path to correct, the other an invariant left
+    guarded by nothing.
 
     :param str token: the reference as written in the document
     :param set nodeids: every complete nodeid, relative to `tests/`
-    :return: str, the nodeid to suggest
+    :return: str the correct nodeid, or None where no single file carries that test
     """
     filename, _, rest = token.partition("::")
-    filename = filename.split("/")[-1]
-    candidates = {known.split("::")[0] for known in nodeids if known.split("/")[-1].startswith(f"{filename}::")}
-    if len(candidates) == 1:
-        return f"{TESTS_DIR}{candidates.pop()}::{rest}"
+    tail = f"{filename.split('/')[-1]}::{rest}"
+    matches = {known for known in nodeids if known.split("/")[-1] == tail}
+    return f"{TESTS_DIR}{matches.pop()}" if len(matches) == 1 else None
+
+
+def _suggested_nodeid(token, nodeids, owner):
+    """Rebuild `token` as a nodeid under `tests/`, completed as far as the index allows.
+
+    Three degrees of help, best first: the real path where the test can be found, the missing
+    class where the path is right but the nodeid is a bare method, and otherwise the whole token
+    prefixed. That last case runs when the filename is unknown or sits in two subtrees, so any
+    directory the author wrote is the only evidence left of where they meant - discarding it
+    would answer an unresolvable reference with a suggestion less likely to run than what they
+    had.
+
+    :param str token: the reference as written in the document
+    :param set nodeids: every complete nodeid, relative to `tests/`
+    :param dict owner: class owning each nodeid written without one
+    :return: str, the nodeid to suggest
+    """
+    recovered = _recovered_nodeid(token, nodeids)
+    if recovered:
+        return recovered
+    unprefixed = token[len(TESTS_DIR) :] if token.startswith(TESTS_DIR) else token
+    if unprefixed in owner:
+        return f"{TESTS_DIR}{unprefixed.replace('::', '::' + owner[unprefixed] + '::', 1)}"
     return f"{TESTS_DIR}{token}"
+
+
+def _classify(token, where, bare, nodeids, owner):
+    """Judge one reference, saying which way it fails and what to write instead.
+
+    The two verdicts are deliberately not interchangeable. **missing** means no such test
+    exists, so the invariant it stood in for is now guarded by nothing - the failure this whole
+    check is for. **unrunnable** means the test is there but the reference cannot be run at it,
+    which is a correction to the document and nothing more. Reporting the second as the first
+    would tell a reader an invariant had lost its guard when it had not.
+
+    :param str token: the reference as written
+    :param str where: the document or documents carrying it, already rendered
+    :param set bare: every test name
+    :param set nodeids: every complete nodeid, relative to `tests/`
+    :param dict owner: class owning each nodeid written without one
+    :return: tuple of (None|"missing"|"unrunnable", message)
+    """
+    if "::" not in token:
+        # A bare name claims only that the test exists, so there is no path to get wrong.
+        return (None, "") if token in bare else ("missing", f"`{token}` in {where} is not a test")
+    if not token.startswith(TESTS_DIR):
+        return "unrunnable", (
+            f"`{token}` in {where} is not a path pytest can find from the repository "
+            f"root - write `{_suggested_nodeid(token, nodeids, owner)}`"
+        )
+    nodeid = token[len(TESTS_DIR) :]
+    if nodeid in nodeids:
+        return None, ""
+    if nodeid in owner:
+        qualified = nodeid.replace("::", "::" + owner[nodeid] + "::", 1)
+        return "unrunnable", (f"`{token}` in {where} is not one pytest can collect - write `{TESTS_DIR}{qualified}`")
+    recovered = _recovered_nodeid(token, nodeids)
+    if recovered:
+        return "unrunnable", f"`{token}` in {where} is that test at the wrong path - write `{recovered}`"
+    return "missing", f"`{token}` in {where} is not a test"
 
 
 def test_every_named_guard_exists():
@@ -721,27 +776,11 @@ def test_every_named_guard_exists():
 
     missing, unrunnable = [], []
     for token, documents in sorted(referenced.items()):
-        where = ", ".join(sorted(documents))
-        if "::" not in token:
-            if token not in bare:
-                missing.append(f"`{token}` in {where} is not a test")
-            continue
-        if not token.startswith(TESTS_DIR):
-            unrunnable.append(
-                f"`{token}` in {where} is not a path pytest can find from the repository "
-                f"root - write `{_suggested_nodeid(token, nodeids)}`"
-            )
-            continue
-        nodeid = token[len(TESTS_DIR) :]
-        if nodeid in nodeids:
-            continue
-        if nodeid in owner:
-            qualified = nodeid.replace("::", "::" + owner[nodeid] + "::", 1)
-            unrunnable.append(
-                f"`{token}` in {where} is not one pytest can collect - " f"write `{TESTS_DIR}{qualified}`"
-            )
-        else:
-            missing.append(f"`{token}` in {where} is not a test at that path")
+        bucket, message = _classify(token, ", ".join(sorted(documents)), bare, nodeids, owner)
+        if bucket == "missing":
+            missing.append(message)
+        elif bucket == "unrunnable":
+            unrunnable.append(message)
 
     assert referenced, "found no test references in any tracked document - the scan is not working"
     assert not missing, (
