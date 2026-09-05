@@ -661,8 +661,12 @@ def _suggested_nodeid(token, nodeids):
 
     A reference written without a directory, or with the wrong one, cannot simply have `tests/`
     stuck on the front: `test_mqtt_streaming.py::...` lives in `tests/integration/`. Matching on
-    the filename recovers the real path, and where that is ambiguous or unknown the plain prefix
-    is still a better message than none.
+    the filename recovers the real path.
+
+    Where the filename is unknown or sits in two subtrees, the whole token is prefixed rather
+    than its basename. Any directory the author wrote is then the only evidence left of where
+    they meant, so discarding it would answer an unresolvable reference with a suggestion that
+    is less likely to run than what they had.
 
     :param str token: the reference as written in the document
     :param set nodeids: every complete nodeid, relative to `tests/`
@@ -673,7 +677,7 @@ def _suggested_nodeid(token, nodeids):
     candidates = {known.split("::")[0] for known in nodeids if known.split("/")[-1].startswith(f"{filename}::")}
     if len(candidates) == 1:
         return f"{TESTS_DIR}{candidates.pop()}::{rest}"
-    return f"{TESTS_DIR}{token.split('/')[-1]}"
+    return f"{TESTS_DIR}{token}"
 
 
 def test_every_named_guard_exists():
