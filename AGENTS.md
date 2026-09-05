@@ -284,8 +284,8 @@ rather than by rule, both covered below: tool docstrings, and tests.
 
 **`pydoclint` answers the question pydocstyle cannot**: does the docstring agree with the
 signature? D417 only checks the parameters of a section a docstring already has, so a function
-documenting none of its parameters passes it - which is how 133 of them did, silently, in every
-dialect this repository has used. `pydoclint` runs as a flake8 plugin in the same job. Its
+documenting none of its parameters passes it, silently, in every dialect this repository has
+used. `pydoclint` runs as a flake8 plugin in the same job. Its
 backlog is the `DOC` entries in `tox.ini`: an entry comes off with the change that fixes
 everything it names, nothing is added to it, and every code absent from the list is enforced.
 
