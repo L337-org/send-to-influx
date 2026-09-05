@@ -668,14 +668,16 @@ def _build_single_point_query(measurement, tag_filters, fields, order, group_by_
     the value read and the timestamp-only reads.
 
     Selects each field explicitly (not ``*``) so tag columns are excluded, and applies the
-    source's static tag filters. Measurement, field and tag keys are charset-validated and
+    source's static tag filters. ``fields=None`` selects ``*`` instead, for a caller that
+    reads only the timestamp - excluding tag columns protects a *value* read, and no value
+    is read there. Measurement, field and tag keys are charset-validated and
     double-quoted, tag values quoted string literals - the same layered defence as
     build_query. Fields come from key discovery (the live allowlist), never model input.
 
     Args:
         measurement: the InfluxDB measurement name
         tag_filters: static tag key/value filters (may be empty)
-        fields: the field keys to select (non-empty)
+        fields: the field keys to select, or None to select ``*`` for a timestamp-only read
         order: ``"DESC"`` for the newest point, ``"ASC"`` for the oldest
         group_by_tag: a tag key to return one point per value of, or None for a single point across the whole
             measurement
