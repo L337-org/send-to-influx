@@ -89,9 +89,11 @@ def _hash_token(token):
     The only form a refresh token is ever persisted in, so the state file never contains
     a replayable value.
 
-    :param token: token string
-    :type token: str
-    :rtype: str
+    Args:
+        token (str): token string
+
+    Returns:
+        str
     """
     return hashlib.sha256(token.encode("utf8")).hexdigest()
 
@@ -107,10 +109,12 @@ def _refresh_entry_expired(entry, now):
     "never expires" and is honoured. ``bool`` is excluded explicitly because it
     is an ``int`` subclass and a stray ``true`` should not read as epoch 1.
 
-    :param entry: the persisted entry (any JSON-decoded value)
-    :param now: current unix time
-    :type now: float
-    :rtype: bool
+    Args:
+        entry: the persisted entry (any JSON-decoded value)
+        now (float): current unix time
+
+    Returns:
+        bool
     """
     if not isinstance(entry, dict):
         return True
@@ -135,8 +139,8 @@ class OAuthStateStore:
     def __init__(self, state_path):
         """Bind the store to the file its clients and refresh tokens persist in.
 
-        :param state_path: path of the JSON state file (created on first save)
-        :type state_path: str
+        Args:
+            state_path (str): path of the JSON state file (created on first save)
         """
         self.state_path = state_path
         self._lock = threading.Lock()
@@ -293,12 +297,13 @@ def resolve_state_path(settings, settings_file=None):
     still apply, and ``/etc/send-to-influx`` is root-owned while the service runs as
     ``send-to-influx``. Nothing there was ever writable by it, so the state never persisted.
 
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :param settings_file: the settings path the process was started with, used
-        to anchor the default; None means the project-root default
-    :type settings_file: str or None
-    :rtype: str
+    Args:
+        settings (dict): parsed settings dictionary
+        settings_file (str or None): the settings path the process was started with, used to anchor the default; None
+            means the project-root default
+
+    Returns:
+        str
     """
     configured = (settings.get("mcp") or {}).get("state_file")
     if isinstance(configured, str) and configured.strip():
@@ -336,10 +341,11 @@ def _transport_security_settings(public_url):
     hostname: behind the reverse proxy every request arrives with the public Host
     header, which the SDK's localhost-only default would reject.
 
-    :param public_url: the external HTTPS address, trailing slash already stripped
-    :type public_url: str
-    :return: transport security settings for the streamable-http app
-    :rtype: mcp.server.transport_security.TransportSecuritySettings
+    Args:
+        public_url (str): the external HTTPS address, trailing slash already stripped
+
+    Returns:
+        mcp.server.transport_security.TransportSecuritySettings: transport security settings for the streamable-http app
     """
     from mcp.server.transport_security import TransportSecuritySettings
 
@@ -375,11 +381,14 @@ def app_options(settings):
     SDK's localhost-only DNS-rebinding default, which rejects every
     reverse-proxied request - so every call site derives them from here.
 
-    :param settings: parsed settings dictionary (validated, post-substitution)
-    :type settings: dict
-    :return: keyword arguments accepted by ``streamable_http_app()``
-    :rtype: dict
-    :raises ConfigError: if ``mcp.bind_address`` is unusable
+    Args:
+        settings (dict): parsed settings dictionary (validated, post-substitution)
+
+    Returns:
+        dict: keyword arguments accepted by ``streamable_http_app()``
+
+    Raises:
+        ConfigError: if ``mcp.bind_address`` is unusable
     """
     host, _ = parse_mcp_bind_address((settings.get("mcp") or {}).get("bind_address"))
     public_url = settings["mcp"]["public_url"].strip().rstrip("/")
@@ -395,11 +404,14 @@ def run_options(settings):
 
     The app options plus the bind port, which only the run path needs.
 
-    :param settings: parsed settings dictionary (validated, post-substitution)
-    :type settings: dict
-    :return: keyword arguments accepted by ``run()`` for the streamable-http transport
-    :rtype: dict
-    :raises ConfigError: if ``mcp.bind_address`` is unusable
+    Args:
+        settings (dict): parsed settings dictionary (validated, post-substitution)
+
+    Returns:
+        dict: keyword arguments accepted by ``run()`` for the streamable-http transport
+
+    Raises:
+        ConfigError: if ``mcp.bind_address`` is unusable
     """
     _, port = parse_mcp_bind_address((settings.get("mcp") or {}).get("bind_address"))
     return {**app_options(settings), "port": port}
@@ -418,13 +430,15 @@ def build_mcp_server(settings, settings_file=None):
     ``run()``/``streamable_http_app()`` instead of the constructor. See
     ``app_options()``/``run_options()``.
 
-    :param settings: parsed settings dictionary (validated, post-substitution)
-    :type settings: dict
-    :param settings_file: settings path, for anchoring the default state file
-    :type settings_file: str or None
-    :return: a configured MCPServer instance
-    :rtype: mcp.server.mcpserver.MCPServer
-    :raises ConfigError: if the mcp SDK is unavailable or settings are unusable
+    Args:
+        settings (dict): parsed settings dictionary (validated, post-substitution)
+        settings_file (str or None): settings path, for anchoring the default state file
+
+    Returns:
+        mcp.server.mcpserver.MCPServer: a configured MCPServer instance
+
+    Raises:
+        ConfigError: if the mcp SDK is unavailable or settings are unusable
     """
     try:
         from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
@@ -545,15 +559,11 @@ class SendToInfluxOAuthProvider:
     def __init__(self, public_url, expected_user, expected_password, state_store):
         """Bind the provider to the URL it issues against and the single account it accepts.
 
-        :param public_url: external https URL (no trailing slash) the login page
-            and redirects are built against
-        :type public_url: str
-        :param expected_user: the configured mcp.user
-        :type expected_user: str
-        :param expected_password: the configured mcp.password
-        :type expected_password: str
-        :param state_store: persistence for clients and refresh tokens
-        :type state_store: OAuthStateStore
+        Args:
+            public_url (str): external https URL (no trailing slash) the login page and redirects are built against
+            expected_user (str): the configured mcp.user
+            expected_password (str): the configured mcp.password
+            state_store (OAuthStateStore): persistence for clients and refresh tokens
         """
         self.public_url = public_url
         self._expected_user = expected_user
@@ -588,11 +598,12 @@ class SendToInfluxOAuthProvider:
 
         Mints the authorization code and returns the client redirect URL carrying it.
 
-        :param txn_id: the (validated) transaction id from the login form
-        :type txn_id: str
-        :param subject: the authenticated username, propagated to issued tokens
-        :type subject: str
-        :rtype: str
+        Args:
+            txn_id (str): the (validated) transaction id from the login form
+            subject (str): the authenticated username, propagated to issued tokens
+
+        Returns:
+            str
         """
         from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
 
@@ -803,11 +814,12 @@ def start_mcp_server_thread(settings, settings_file=None):
     else (a bind failure, a crash inside the SDK) is logged and retried after a
     flat delay, since the server exiting means nobody can query it.
 
-    :param settings: parsed settings dictionary (validated)
-    :type settings: dict
-    :param settings_file: settings path, threaded through for the state file default
-    :type settings_file: str or None
-    :rtype: threading.Thread
+    Args:
+        settings (dict): parsed settings dictionary (validated)
+        settings_file (str or None): settings path, threaded through for the state file default
+
+    Returns:
+        threading.Thread
     """
     host, port = parse_mcp_bind_address((settings.get("mcp") or {}).get("bind_address"))
 

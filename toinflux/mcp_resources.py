@@ -57,10 +57,13 @@ def _register_resource(server, *args, **kwargs):
     ``translate_failures()``: a bug must stay a crash, logged with its traceback and
     its text kept off the wire.
 
-    :param server: the MCPServer instance
-    :param args: passed to ``server.resource()`` (the URI)
-    :param kwargs: passed to ``server.resource()`` (name, title, description, ...)
-    :return: a decorator registering the function as a resource
+    Args:
+        server: the MCPServer instance
+        args: passed to ``server.resource()`` (the URI)
+        kwargs: passed to ``server.resource()`` (name, title, description, ...)
+
+    Returns:
+        a decorator registering the function as a resource
     """
 
     def decorator(fn):
@@ -75,10 +78,13 @@ def register_resources(server, settings, settings_file=None):
     The documentation reference, plus a schema and a current-state resource per
     configured source. Blocking work runs in a worker thread, mirroring the read tools.
 
-    :param server: the MCPServer instance
-    :param settings: parsed settings dict
-    :param settings_file: settings path, for re-resolving handlers per read
-    :return: the server
+    Args:
+        server: the MCPServer instance
+        settings: parsed settings dict
+        settings_file: settings path, for re-resolving handlers per read
+
+    Returns:
+        the server
     """
     import anyio
 

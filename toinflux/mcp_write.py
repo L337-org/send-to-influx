@@ -45,9 +45,12 @@ def writable_enabled_sources(settings, settings_file=None):
     check, then its session closed - this runs once at server-build time to decide
     whether to register write tools at all.
 
-    :param settings: parsed settings dict
-    :param settings_file: settings path, for constructing handlers
-    :return: list of source names enabled for writes
+    Args:
+        settings: parsed settings dict
+        settings_file: settings path, for constructing handlers
+
+    Returns:
+        list of source names enabled for writes
     """
     enabled = []
     for source in configured_sources(settings):
@@ -70,7 +73,8 @@ def _resolve_writable_handlers(source, settings, settings_file):
     setting covers every bridge, since they are one estate behind one settings block. The
     caller owns every session and must close them all.
 
-    :raises ToolParamError: unknown source, no usable target, or not opted in for writes
+    Raises:
+        ToolParamError: unknown source, no usable target, or not opted in for writes
     """
     handlers = resolve_handlers(source, settings, settings_file)
     if not handlers[0][1].mcp_write_enabled():
@@ -88,7 +92,8 @@ def _resolve_writable_handler(source, settings, settings_file):
     Raises ToolParamError otherwise. The caller owns the returned handler's session and
     must close it.
 
-    :raises ToolParamError: unknown source, or a source not opted in for writes
+    Raises:
+        ToolParamError: unknown source, or a source not opted in for writes
     """
     handler = resolve_handler(source, settings, settings_file)
     if not handler.mcp_write_enabled():
@@ -145,11 +150,16 @@ def _hue_matches_across_bridges(handlers, device, bridge):
     construction what ``hue_list_devices`` advertises, instead of two paths that happen to
     derive the same answer.
 
-    :param handlers: ``[(instance, handler), ...]`` to search
-    :param device: light id or exact name to match
-    :param bridge: the bridge the caller named, or None
-    :return: ``([(instance, handler, light_id, name), ...], [(instance, exc), ...])``
-    :raises SourceConnectionError: the named or only bridge could not be reached
+    Args:
+        handlers: ``[(instance, handler), ...]`` to search
+        device: light id or exact name to match
+        bridge: the bridge the caller named, or None
+
+    Returns:
+        ``([(instance, handler, light_id, name), ...], [(instance, exc), ...])``
+
+    Raises:
+        SourceConnectionError: the named or only bridge could not be reached
     """
     matches, unreachable = [], []
     for instance, handler in handlers:
@@ -187,14 +197,18 @@ def _resolve_hue_target(handlers, device, bridge):
     an identical retry. Acting on a lone match found elsewhere is deliberately *not* the
     behaviour: the silent bridge may carry the same name.
 
-    :param handlers: ``[(instance, handler), ...]`` from _resolve_writable_handlers
-    :param device: light id or exact name, from the tool call
-    :param bridge: bridge host to restrict to, or None to search every bridge
-    :return: ``(instance, handler, light_id, name)`` for the single match
-    :raises ToolParamError: unknown bridge, unknown device, an ambiguous device, or a bridge
-        that could not be reached while arbitrating across several
-    :raises SourceConnectionError: the bridge named in ``bridge`` is unreachable, or the only
-        configured bridge is
+    Args:
+        handlers: ``[(instance, handler), ...]`` from _resolve_writable_handlers
+        device: light id or exact name, from the tool call
+        bridge: bridge host to restrict to, or None to search every bridge
+
+    Returns:
+        ``(instance, handler, light_id, name)`` for the single match
+
+    Raises:
+        ToolParamError: unknown bridge, unknown device, an ambiguous device, or a bridge that could not be reached while
+            arbitrating across several
+        SourceConnectionError: the bridge named in ``bridge`` is unreachable, or the only configured bridge is
     """
     if not isinstance(device, str) or not device.strip():
         raise ToolParamError(f"device must be a non-empty light id or name (got {device!r})")
@@ -430,14 +444,16 @@ def register_write_tools(server, settings, settings_file=None, enabled_sources=N
     When no source is enabled for writes, nothing is registered - the write capability is
     entirely absent from the server.
 
-    :param server: the MCPServer instance
-    :param settings: parsed settings dict
-    :param settings_file: settings path, for re-resolving handlers per call
-    :param enabled_sources: the pre-computed write-enabled source list, if the
-        caller already has it (build_mcp_server shares one computation with
-        register_prompts); ``None`` computes it here (constructing a handler per
-        source), so the function still stands alone.
-    :return: the server
+    Args:
+        server: the MCPServer instance
+        settings: parsed settings dict
+        settings_file: settings path, for re-resolving handlers per call
+        enabled_sources: the pre-computed write-enabled source list, if the caller already has it (build_mcp_server
+            shares one computation with register_prompts); ``None`` computes it here (constructing a handler per
+            source), so the function still stands alone.
+
+    Returns:
+        the server
     """
     enabled = writable_enabled_sources(settings, settings_file) if enabled_sources is None else enabled_sources
     if not enabled:

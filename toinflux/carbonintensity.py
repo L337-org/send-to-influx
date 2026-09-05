@@ -37,10 +37,11 @@ class CarbonIntensity(DataHandler):
     def _get(self, path):
         """Make a GET request to the Carbon Intensity API.
 
-        :param path: API path relative to the base URL (without leading slash)
-        :type path: str
-        :return: parsed JSON response
-        :rtype: dict
+        Args:
+            path (str): API path relative to the base URL (without leading slash)
+
+        Returns:
+            dict: parsed JSON response
         """
         url = f"{CARBON_INTENSITY_BASE_URL}/{path}"
         try:
@@ -64,8 +65,8 @@ class CarbonIntensity(DataHandler):
         If ``include_generation`` is set in settings, generation fuel mix percentages
         are also collected from the ``/generation`` endpoint.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         self.influx_header = "carbonintensity,source=national_grid "
         self.data = {}

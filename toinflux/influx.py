@@ -19,12 +19,11 @@ from toinflux.exceptions import ConfigError
 class InfluxWriteError(ToInfluxError):
     """Raised when a write to InfluxDB fails.
 
-    :ivar status_code: the HTTP status code of the failed write, or None when no
-        response was received at all (connection error/timeout). Defaults to None via
-        a class-level fallback and is set as an instance attribute after construction
-        (see _post_line) rather than via a custom __init__, so the exception's
-        args/str() stay a plain single message.
-    :vartype status_code: int or None
+    Attributes:
+        status_code (int or None): the HTTP status code of the failed write, or None when no response was received at
+            all (connection error/timeout). Defaults to None via a class-level fallback and is set as an instance
+            attribute after construction (see _post_line) rather than via a custom __init__, so the exception's
+            args/str() stay a plain single message.
     """
 
     status_code = None
@@ -76,9 +75,11 @@ def _format_field_value(value):
     type is fixed by its first write and existing databases already have
     these fields established as float.
 
-    :param value: field value to format
-    :return: line protocol representation of the value
-    :rtype: str
+    Args:
+        value: field value to format
+
+    Returns:
+        str: line protocol representation of the value
     """
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -105,10 +106,14 @@ def escape_key_or_tag_value(value):
     configuration boundary, where the error can name the settings key at fault - this is the
     backstop that makes it impossible to reach a write by any route, present and future.
 
-    :param value: key or tag value to escape
-    :return: escaped line protocol representation
-    :rtype: str
-    :raises InfluxWriteError: the value contains a character that cannot appear in a tag
+    Args:
+        value: key or tag value to escape
+
+    Returns:
+        str: escaped line protocol representation
+
+    Raises:
+        InfluxWriteError: the value contains a character that cannot appear in a tag
     """
     value = str(value)
     if any(char in value for char in "\n\r"):
@@ -139,11 +144,12 @@ def worker_label(source, instance=None):
     operator greps for no reason. ``worker_key`` is unaffected and keeps the instance, since
     it is an identity rather than a label.
 
-    :param source: source name
-    :type source: str
-    :param instance: the worker's instance, or None for a single-target source
-    :return: label for log output
-    :rtype: str
+    Args:
+        source (str): source name
+        instance: the worker's instance, or None for a single-target source
+
+    Returns:
+        str: label for log output
     """
     if instance is None or instance == source:
         return f"{source}"
@@ -251,8 +257,8 @@ class DataHandler:
         A method rather than the bare class attribute because the answer depends on *which*
         instance this handler serves, which a class attribute cannot express.
 
-        :return: tag key/value filters for this handler's reads
-        :rtype: dict
+        Returns:
+            dict: tag key/value filters for this handler's reads
         """
         return dict(self.MCP_TAG_FILTERS)
 
@@ -274,8 +280,8 @@ class DataHandler:
         round trip, so it keeps reading the class attribute directly and a source with
         only per-install metadata is simply absent from it.
 
-        :return: {field key: {"unit"/"codes"/"kind"/"description"}}
-        :rtype: dict
+        Returns:
+            dict: {field key: {"unit"/"codes"/"kind"/"description"}}
         """
         return dict(self.MCP_FIELD_METADATA)
 
@@ -294,8 +300,8 @@ class DataHandler:
         data carries, or the health series and the measurement disagree about who wrote
         what.
 
-        :return: extra tag key/value pairs, empty for a single-writer source
-        :rtype: dict
+        Returns:
+            dict: extra tag key/value pairs, empty for a single-writer source
         """
         if self.instance is not None:
             return {"host": self.instance}
@@ -379,8 +385,8 @@ class DataHandler:
         name (e.g. reading ``settings[source]["interval"]``) must be able to take it
         back out without re-parsing.
 
-        :return: (source name, instance or None)
-        :rtype: tuple
+        Returns:
+            tuple: (source name, instance or None)
         """
         return (self.source, self.instance)
 
@@ -393,7 +399,8 @@ class DataHandler:
         that the supervisor in ``sendtoinflux.py``, which has to label a worker before its
         handler exists, formats it identically.
 
-        :rtype: str
+        Returns:
+            str
         """
         return worker_label(self.source, self.instance)
 
@@ -409,31 +416,26 @@ class DataHandler:
         losing it. Either way, a failure still raises ``InfluxWriteError`` so the
         existing worker backoff/retry behaviour is unaffected.
 
-        :param data: data to send to InfluxDB
-        :type data: dict
-        :param timestamp: unix epoch seconds to write the point at (matching the
-            ``precision=s`` write parameter below). Defaults to ``self.timestamp``
-            (set by some handlers' ``get_data()`` to the time of collection, e.g.
-            a reading's own interval start) and falls back to the current time.
-        :type timestamp: int or None
-        :param use_buffer: when False, skip the backlog flush and don't buffer this
-            point on failure - just POST it and raise if that fails. Used for
-            fire-and-forget writes with no replay value (the collector_status
-            heartbeat), which would otherwise consume buffer capacity that belongs
-            to real measurements.
-        :type use_buffer: bool
-        :param flush: when False, post this point without first flushing the
-            backlog. Exists for a source that writes several points per collection
-            cycle through this method - Nuki writes one per lock - because the write
-            buffer is per *worker*, not per point: flushing on every point charged
-            the head buffered point one rejection per point, so a five-lock install
-            burned all of ``MAX_POINT_REJECTIONS`` in a single cycle and discarded
-            the backlog after one, instead of surviving five. Such a caller flushes
-            on its first point and passes False for the rest. Ignored when
-            ``use_buffer`` is False, which skips the buffer entirely.
-        :type flush: bool
-        :return: None
-        :raises InfluxWriteError: if the write to InfluxDB fails
+        Args:
+            data (dict): data to send to InfluxDB
+            timestamp (int or None): unix epoch seconds to write the point at (matching the ``precision=s`` write
+                parameter below). Defaults to ``self.timestamp`` (set by some handlers' ``get_data()`` to the time of
+                collection, e.g. a reading's own interval start) and falls back to the current time.
+            use_buffer (bool): when False, skip the backlog flush and don't buffer this point on failure - just POST it
+                and raise if that fails. Used for fire-and-forget writes with no replay value (the collector_status
+                heartbeat), which would otherwise consume buffer capacity that belongs to real measurements.
+            flush (bool): when False, post this point without first flushing the backlog. Exists for a source that
+                writes several points per collection cycle through this method - Nuki writes one per lock - because the
+                write buffer is per *worker*, not per point: flushing on every point charged the head buffered point one
+                rejection per point, so a five-lock install burned all of ``MAX_POINT_REJECTIONS`` in a single cycle and
+                discarded the backlog after one, instead of surviving five. Such a caller flushes on its first point and
+                passes False for the rest. Ignored when ``use_buffer`` is False, which skips the buffer entirely.
+
+        Returns:
+            None
+
+        Raises:
+            InfluxWriteError: if the write to InfluxDB fails
         """
         # if the data is not provided, use the data from the class
         if data is None:
@@ -468,16 +470,17 @@ class DataHandler:
         Split out of ``send_data`` only to keep that method within the project's cyclomatic
         complexity limit; the behaviour is unchanged.
 
-        :param data_to_send: the line protocol point, or None for a flush-only call
-        :type data_to_send: str or None
-        :param url: the write URL from _build_write_request
-        :type url: str
-        :param post_kwargs: the request kwargs from _build_write_request
-        :type post_kwargs: dict
-        :param flush: whether to flush the backlog first - see send_data
-        :type flush: bool
-        :return: None
-        :raises InfluxWriteError: the flush or the post failed
+        Args:
+            data_to_send (str or None): the line protocol point, or None for a flush-only call
+            url (str): the write URL from _build_write_request
+            post_kwargs (dict): the request kwargs from _build_write_request
+            flush (bool): whether to flush the backlog first - see send_data
+
+        Returns:
+            None
+
+        Raises:
+            InfluxWriteError: the flush or the post failed
         """
         buffer = self._write_buffers.setdefault(self.worker_key, deque(maxlen=MAX_BUFFERED_POINTS))
         try:
@@ -498,12 +501,12 @@ class DataHandler:
         reading only warrants a warning when there's also no backlog to flush; a cycle
         that exists purely to drain the backlog logs at DEBUG.
 
-        :param data: whatever the caller supplied (or self.data resolved to)
-        :param use_buffer: the send_data() call's use_buffer flag
-        :type use_buffer: bool
-        :return: True when a backlog flush should still proceed, False when there is
-            nothing at all for this call to do
-        :rtype: bool
+        Args:
+            data: whatever the caller supplied (or self.data resolved to)
+            use_buffer (bool): the send_data() call's use_buffer flag
+
+        Returns:
+            bool: True when a backlog flush should still proceed, False when there is nothing at all for this call to do
         """
         has_backlog = bool(use_buffer and self._write_buffers.get(self.worker_key))
         if data and not isinstance(data, dict):
@@ -532,15 +535,17 @@ class DataHandler:
         middlebox answering 4xx for a down InfluxDB nor one bad point can cause
         unbounded loss or unbounded head-of-line blocking.
 
-        :param buffer: the source's buffer (from ``_write_buffers``)
-        :type buffer: collections.deque
-        :param url: destination InfluxDB write URL
-        :type url: str
-        :param kwargs: extra requests.Session.post() kwargs (auth/headers/verify/timeout)
-        :type kwargs: dict
-        :return: None
-        :raises InfluxWriteError: on a connection/5xx failure, or on a 4xx-rejected
-            point that hasn't yet reached MAX_POINT_REJECTIONS
+        Args:
+            buffer (collections.deque): the source's buffer (from ``_write_buffers``)
+            url (str): destination InfluxDB write URL
+            kwargs (dict): extra requests.Session.post() kwargs (auth/headers/verify/timeout)
+
+        Returns:
+            None
+
+        Raises:
+            InfluxWriteError: on a connection/5xx failure, or on a 4xx-rejected point that hasn't yet reached
+                MAX_POINT_REJECTIONS
         """
         while buffer:
             # islice iterates the deque linearly - indexing a deque is O(n) per access,
@@ -573,15 +578,16 @@ class DataHandler:
         separate server rejections. Any other failure re-raises with the point left in
         place.
 
-        :param buffer: the source's buffer (from ``_write_buffers``)
-        :type buffer: collections.deque
-        :param url: destination InfluxDB write URL
-        :type url: str
-        :param kwargs: extra requests.Session.post() kwargs (auth/headers/verify/timeout)
-        :type kwargs: dict
-        :return: None
-        :raises InfluxWriteError: on a connection/5xx failure, or a 4xx rejection
-            below the MAX_POINT_REJECTIONS cap
+        Args:
+            buffer (collections.deque): the source's buffer (from ``_write_buffers``)
+            url (str): destination InfluxDB write URL
+            kwargs (dict): extra requests.Session.post() kwargs (auth/headers/verify/timeout)
+
+        Returns:
+            None
+
+        Raises:
+            InfluxWriteError: on a connection/5xx failure, or a 4xx rejection below the MAX_POINT_REJECTIONS cap
         """
         entry = buffer[0]
         try:
@@ -608,10 +614,11 @@ class DataHandler:
         call and reused for every line posted during that call - any flushed backlog plus
         the new point.
 
-        :param influx_settings: the ``influx`` settings block
-        :type influx_settings: dict
-        :return: (url, kwargs for requests.Session.post())
-        :rtype: tuple
+        Args:
+            influx_settings (dict): the ``influx`` settings block
+
+        Returns:
+            tuple: (url, kwargs for requests.Session.post())
         """
         timeout = influx_settings.get("timeout", 5)
         if influx_settings.get("token"):
@@ -634,15 +641,17 @@ class DataHandler:
     def _post_line(self, line, url, kwargs):
         """POST a line-protocol body (one point, or several newline-joined) to InfluxDB.
 
-        :param line: line-protocol body to send
-        :type line: str
-        :param url: destination InfluxDB write URL
-        :type url: str
-        :param kwargs: extra requests.Session.post() kwargs (auth/headers/verify/timeout)
-        :type kwargs: dict
-        :return: None
-        :raises InfluxWriteError: if the write to InfluxDB fails; carries the response's
-            HTTP status code (or None for a connection failure) as ``status_code``
+        Args:
+            line (str): line-protocol body to send
+            url (str): destination InfluxDB write URL
+            kwargs (dict): extra requests.Session.post() kwargs (auth/headers/verify/timeout)
+
+        Returns:
+            None
+
+        Raises:
+            InfluxWriteError: if the write to InfluxDB fails; carries the response's HTTP status code (or None for a
+                connection failure) as ``status_code``
         """
         try:
             with warnings.catch_warnings():
@@ -666,11 +675,12 @@ class DataHandler:
         copies would only waste capacity, since flushing them is an idempotent overwrite
         anyway.
 
-        :param buffer: the source's buffer (from ``_write_buffers``)
-        :type buffer: collections.deque
-        :param line: line-protocol point that failed to send
-        :type line: str
-        :return: None
+        Args:
+            buffer (collections.deque): the source's buffer (from ``_write_buffers``)
+            line (str): line-protocol point that failed to send
+
+        Returns:
+            None
         """
         if any(entry[0] == line for entry in buffer):
             logging.debug("Point already buffered for worker '%s'; not buffering a duplicate copy", self.worker_label)

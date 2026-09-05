@@ -447,17 +447,23 @@ def test_the_declared_licence_agrees_across_the_project():
 
 
 def test_the_docstring_exemption_matches_the_decorators_in_use():
-    """The docstring rules must keep skipping every advertised MCP registration.
+    """The docstring rules must keep skipping the tool docstrings, and only those.
 
-    A tool, prompt or resource docstring is the advertised interface a client loads and a model
-    reads, so CS.6.14 hands it to the AI-consumer rules rather than to CS.6's. tox.ini exempts
-    them by matching the decorator, which is a regex over decorator source - and a regex goes
-    stale silently. Rename `register_tool` and the sixteen advertised descriptions quietly fall
-    under rules that are wrong for them: D417 would start demanding an `Args:` block duplicating
-    what the schema already carries, on every session that loads the surface.
+    A tool's docstring *is* its advertised description, and the schema alongside it already
+    carries every parameter's type - so CS.6.14 hands it to the AI-consumer rules rather than to
+    CS.6's, where D417 would demand an `Args:` block duplicating the schema on every session that
+    loads the surface. tox.ini exempts them by matching the decorator, which is a regex over
+    decorator source, and a regex goes stale silently: rename `register_tool` and the advertised
+    descriptions quietly fall under rules that are wrong for them.
 
-    Asserts in both directions. Every registration decorator actually in use is matched, so a
-    rename fails here; and the count is floored, so a scan that found nothing cannot pass.
+    Prompts and resources are **not** exempt, and are asserted absent below. Both pass
+    `description=` explicitly at registration, so their docstrings reach no client at all and
+    there is nothing to trade off - they follow the ordinary convention like any other code.
+    They were exempt once on the assumption that "registered" meant "advertised".
+
+    Asserts in every direction. Every tool decorator in use is matched, so a rename fails here;
+    the count is floored, so a scan that found nothing cannot pass; and the two dead entries
+    cannot come back.
     """
     import ast
     import configparser
@@ -478,13 +484,19 @@ def test_the_docstring_exemption_matches_the_decorators_in_use():
                 continue
             for decorator in node.decorator_list:
                 source = ast.unparse(decorator)
-                if "register" in source or "prompt" in source:
+                if "register_tool" in source:
                     found.append(f"{module}:{node.name}: {source.splitlines()[0]}")
 
-    assert len(found) >= 12, (
-        f"only found {len(found)} registration decorator(s), so this check is not seeing the "
+    assert len(found) >= 10, (
+        f"only found {len(found)} tool registration(s), so this check is not seeing the "
         f"surface it is meant to protect"
     )
+    for dead in ("prompt", "_register_resource"):
+        assert dead not in pattern, (
+            f"tox.ini's ignore-decorators names {dead!r}, but that registration passes "
+            f"`description=` explicitly, so its docstring reaches no client and the exemption "
+            f"buys nothing. It follows the ordinary convention."
+        )
     unmatched = [f for f in found if not exempt.search(f.split(": ", 1)[1])]
     assert not unmatched, (
         f"tox.ini's ignore-decorators pattern {pattern!r} no longer matches these registration "

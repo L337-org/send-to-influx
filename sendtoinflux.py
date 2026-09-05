@@ -113,18 +113,16 @@ def stream_source_data(source, args, data_handler, should_stop, on_activity=None
     ``SourceConnectionError`` and a config-shape problem raises ``ConfigError``, both left
     to the caller's existing retry/stop handling (identical to the polling path).
 
-    :param source: source name
-    :type source: str
-    :param args: parsed CLI arguments (``args.print`` routes writes to stdout)
-    :type args: argparse.Namespace
-    :param data_handler: the source's streaming DataHandler instance
-    :type data_handler: toinflux.mqtt.MqttDataHandler
-    :param should_stop: set to end the stream and return
-    :type should_stop: threading.Event
-    :param on_activity: optional no-arg callback stamped on each write/tick, so the
-        multi-source stall watchdog sees a live stream making progress
-    :type on_activity: collections.abc.Callable or None
-    :return: None
+    Args:
+        source (str): source name
+        args (argparse.Namespace): parsed CLI arguments (``args.print`` routes writes to stdout)
+        data_handler (toinflux.mqtt.MqttDataHandler): the source's streaming DataHandler instance
+        should_stop (threading.Event): set to end the stream and return
+        on_activity (collections.abc.Callable or None): optional no-arg callback stamped on each write/tick, so the
+            multi-source stall watchdog sees a live stream making progress
+
+    Returns:
+        None
     """
     sink = _StreamSink(source, args, data_handler, on_activity)
     data_handler.stream_mqtt_messages(
@@ -250,17 +248,15 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
     during an InfluxDB outage would consume a buffer slot per heartbeat, evicting
     real measurement points, and recovery would backfill stale ok=0 status lines.
 
-    :param data_handler: the source's DataHandler instance, or None if it hasn't
-        been constructed yet (e.g. a config error) - in which case there's no
-        handler to send a heartbeat through, so this is a no-op
-    :type data_handler: DataHandler or None
-    :param source: source name, used as the ``source`` tag
-    :type source: str
-    :param ok: whether the most recent collection cycle succeeded
-    :type ok: bool
-    :param consecutive_failures: current failure streak for this source
-    :type consecutive_failures: int
-    :return: None
+    Args:
+        data_handler (DataHandler or None): the source's DataHandler instance, or None if it hasn't been constructed yet
+            (e.g. a config error) - in which case there's no handler to send a heartbeat through, so this is a no-op
+        source (str): source name, used as the ``source`` tag
+        ok (bool): whether the most recent collection cycle succeeded
+        consecutive_failures (int): current failure streak for this source
+
+    Returns:
+        None
     """
     if data_handler is None:
         return
@@ -332,10 +328,11 @@ def _should_stream(data_handler):
     source is wired can't strand that source in the stream path subscribing to ``None`` and
     retrying forever - it keeps polling, exactly as it did before streaming existed.
 
-    :param data_handler: the source's DataHandler instance
-    :type data_handler: toinflux.influx.DataHandler
-    :return: True to take the streaming path, False to poll on the timer
-    :rtype: bool
+    Args:
+        data_handler (toinflux.influx.DataHandler): the source's DataHandler instance
+
+    Returns:
+        bool: True to take the streaming path, False to poll on the timer
     """
     return bool(data_handler.STREAMING) and getattr(data_handler, "STREAM_TOPIC_FILTER", None) is not None
 
@@ -343,26 +340,24 @@ def _should_stream(data_handler):
 def create_source_worker(unit, source_start_delay, args, stopped_sources, last_activity=None):
     """Create a worker function for continuous collection of one work unit, with retries.
 
-    :param unit: the ``(source, instance)`` work unit this worker serves - the same shape
-        as ``DataHandler.worker_key``. ``instance`` is None for a single-target source, and
-        a bridge host for a Hue worker. One worker per unit is what gives each bridge its
-        own backoff, so an unreachable one cannot stall the others.
-    :type unit: tuple
-    :param stopped_sources: shared set that the worker adds its ``unit`` to when it
-        gives up permanently (a ConfigError), so the supervisor loop knows not to restart
-        it. Holds work units, not source names, so one bridge giving up does not stop the
-        others being restarted.
-    :type stopped_sources: set
-    :param last_activity: shared dict the worker stamps with ``unit: time.time()``
-        on every successful or failed cycle - keyed by work unit, so two workers on one
-        source name stay distinguishable to the watchdog - so the supervisor loop can
-        tell a source that's merely retrying (already visible via its own WARNING
-        lines) from one that's stopped making any progress at all - a thread stuck
-        mid-instruction never reaches either branch, so this is the only signal a
-        silent stall produces. None (the default) skips this bookkeeping - used by
-        callers that don't need stall detection (e.g. tests exercising retry logic
-        in isolation).
-    :type last_activity: dict or None
+    Args:
+        source_start_delay (int or float): seconds to wait before the first cycle, so a bank of
+            workers starting together does not hit every API at once.
+        args (argparse.Namespace): the parsed command line, for the settings path and the print
+            and dump switches.
+        unit (tuple): the ``(source, instance)`` work unit this worker serves - the same shape as
+            ``DataHandler.worker_key``. ``instance`` is None for a single-target source, and a bridge host for a Hue
+            worker. One worker per unit is what gives each bridge its own backoff, so an unreachable one cannot stall
+            the others.
+        stopped_sources (set): shared set that the worker adds its ``unit`` to when it gives up permanently (a
+            ConfigError), so the supervisor loop knows not to restart it. Holds work units, not source names, so one
+            bridge giving up does not stop the others being restarted.
+        last_activity (dict or None): shared dict the worker stamps with ``unit: time.time()`` on every successful or
+            failed cycle - keyed by work unit, so two workers on one source name stay distinguishable to the watchdog -
+            so the supervisor loop can tell a source that's merely retrying (already visible via its own WARNING lines)
+            from one that's stopped making any progress at all - a thread stuck mid-instruction never reaches either
+            branch, so this is the only signal a silent stall produces. None (the default) skips this bookkeeping - used
+            by callers that don't need stall detection (e.g. tests exercising retry logic in isolation).
     """
     source, instance = unit
     label = worker_label(source, instance)
@@ -451,12 +446,12 @@ def maybe_start_mcp_server(settings, args):
     SDK, which the disabled path must not require - same pattern as paho-mqtt
     only being imported by the MQTT transport.
 
-    :param settings: loaded settings dict
-    :type settings: dict
-    :param args: parsed CLI arguments
-    :type args: argparse.Namespace
-    :return: the server thread, or None when not started
-    :rtype: threading.Thread or None
+    Args:
+        settings (dict): loaded settings dict
+        args (argparse.Namespace): parsed CLI arguments
+
+    Returns:
+        threading.Thread or None: the server thread, or None when not started
     """
     if args.print or args.dump:
         return None
@@ -470,10 +465,9 @@ def maybe_start_mcp_server(settings, args):
 def _configure_logging_or_exit(settings, args):
     """Configure logging from settings/args, exiting 1 with a clean message on failure.
 
-    :param settings: loaded settings dict
-    :type settings: dict
-    :param args: parsed CLI arguments
-    :type args: argparse.Namespace
+    Args:
+        settings (dict): loaded settings dict
+        args (argparse.Namespace): parsed CLI arguments
     """
     loglevel = "DEBUG" if args.verbose else settings.get("loglevel", "INFO")
     try:
@@ -538,15 +532,14 @@ def _exit_if_nothing_to_collect(units, requested, settings, args):
     both. Any error it raises has already been logged by validate_settings itself, so it is
     swallowed here rather than replacing the message above.
 
-    :param units: work units from ``expand_sources()``
-    :type units: list
-    :param requested: the source names that were asked for
-    :type requested: list
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :param args: parsed CLI arguments, for the settings path used in log labels
-    :type args: argparse.Namespace
-    :return: None - exits the process when there is nothing to run
+    Args:
+        units (list): work units from ``expand_sources()``
+        requested (list): the source names that were asked for
+        settings (dict): parsed settings dictionary
+        args (argparse.Namespace): parsed CLI arguments, for the settings path used in log labels
+
+    Returns:
+        None - exits the process when there is nothing to run
     """
     if units:
         return
@@ -584,12 +577,12 @@ def _requested_sources(settings, args):
     These are *source names*, not work units - ``expand_sources()`` turns them into
     workers, and is the one place that knows a source may have several instances.
 
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :param args: parsed CLI arguments
-    :type args: argparse.Namespace
-    :return: lowercased source names requested for this run, empty if none
-    :rtype: list
+    Args:
+        settings (dict): parsed settings dictionary
+        args (argparse.Namespace): parsed CLI arguments
+
+    Returns:
+        list: lowercased source names requested for this run, empty if none
     """
     if args.source:
         return [args.source.lower()]
@@ -604,11 +597,12 @@ def _check_config_and_exit(settings, args):
 
     Exits 0 if valid and something is configured, 1 otherwise.
 
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :param args: parsed CLI arguments
-    :type args: argparse.Namespace
-    :return: None - always exits the process
+    Args:
+        settings (dict): parsed settings dictionary
+        args (argparse.Namespace): parsed CLI arguments
+
+    Returns:
+        None - always exits the process
     """
     # load_settings() already validated the configured sources above; also validate
     # args.source specifically, since a user checking config for a particular
@@ -766,11 +760,12 @@ def _dump_source_and_exit(units, args):
     the failure is reported, and the exit code is 2 - a partial result *with* its failure
     status, rather than silence.
 
-    :param units: the ``(source, instance)`` work units to dump
-    :type units: list
-    :param args: parsed CLI arguments
-    :type args: argparse.Namespace
-    :return: never returns - always exits the process
+    Args:
+        units (list): the ``(source, instance)`` work units to dump
+        args (argparse.Namespace): parsed CLI arguments
+
+    Returns:
+        never returns - always exits the process
     """
     instanced = any(instance is not None for _, instance in units)
     collected, failed = {}, []
@@ -801,10 +796,9 @@ def run_one_worker(unit, args):
     transport's ``finally`` to disconnect properly, which the daemon-thread path can only
     do best-effort. Several units go to ``run_workers()`` instead.
 
-    :param unit: the ``(source, instance)`` work unit to run
-    :type unit: tuple
-    :param args: parsed CLI arguments
-    :type args: argparse.Namespace
+    Args:
+        unit (tuple): the ``(source, instance)`` work unit to run
+        args (argparse.Namespace): parsed CLI arguments
     """
     source, instance = unit
     label = worker_label(source, instance)
@@ -858,16 +852,12 @@ def run_workers(units, args, stagger_seconds, settings=None):
     only itself. The stagger runs across the *expanded* list, so bridges are spread out
     exactly as separate sources are, rather than all hitting their bridges at once.
 
-    :param units: ``[(source, instance), ...]`` from ``expand_sources()``
-    :type units: list
-    :param args: parsed CLI arguments
-    :type args: argparse.Namespace
-    :param stagger_seconds: delay between worker start offsets (coerced to int)
-    :type stagger_seconds: int
-    :param settings: parsed settings dict, used to read each source's own
-        ``interval`` for the stall watchdog's threshold; None (the default)
-        falls back to STALL_WARNING_SECONDS for every worker
-    :type settings: dict or None
+    Args:
+        units (list): ``[(source, instance), ...]`` from ``expand_sources()``
+        args (argparse.Namespace): parsed CLI arguments
+        stagger_seconds (int): delay between worker start offsets (coerced to int)
+        settings (dict or None): parsed settings dict, used to read each source's own ``interval`` for the stall
+            watchdog's threshold; None (the default) falls back to STALL_WARNING_SECONDS for every worker
     """
     try:
         stagger_value = int(stagger_seconds)
@@ -914,11 +904,12 @@ def _stall_threshold_seconds(source, settings):
     already rejected it - this check is kept for both anyway, since relying on
     that comparison quirk for NaN specifically would be a fragile thing to depend on.)
 
-    :param source: source name
-    :type source: str
-    :param settings: parsed settings dict, or None
-    :type settings: dict or None
-    :rtype: int or float
+    Args:
+        source (str): source name
+        settings (dict or None): parsed settings dict, or None
+
+    Returns:
+        int or float
     """
     interval = ((settings or {}).get(source) or {}).get("interval")
     if (
@@ -947,20 +938,18 @@ def check_for_stalled_sources(units, stopped_units, last_activity, stalled_units
     to keep one stalled bridge from being mistaken for the whole source. The threshold is
     still per source, since the interval is a property of the settings block.
 
-    :param units: the work units being supervised, ``[(source, instance), ...]``
-    :type units: list
-    :param stopped_units: units that gave up permanently (ConfigError) - excluded
-    :type stopped_units: set
-    :param last_activity: shared dict from create_source_worker(), unit -> last
-        successful-or-failed cycle's time.time()
-    :type last_activity: dict
-    :param stalled_units: units already warned about the current stall - mutated
-        in place so the caller's loop sees updates
-    :type stalled_units: set
-    :param settings: parsed settings dict, for per-source interval-aware
-        thresholds; None falls back to STALL_WARNING_SECONDS for every worker
-    :type settings: dict or None
-    :return: None
+    Args:
+        units (list): the work units being supervised, ``[(source, instance), ...]``
+        stopped_units (set): units that gave up permanently (ConfigError) - excluded
+        last_activity (dict): shared dict from create_source_worker(), unit -> last successful-or-failed cycle's
+            time.time()
+        stalled_units (set): units already warned about the current stall - mutated in place so the caller's loop sees
+            updates
+        settings (dict or None): parsed settings dict, for per-source interval-aware thresholds; None falls back to
+            STALL_WARNING_SECONDS for every worker
+
+    Returns:
+        None
     """
     now = time.time()
     for unit in units:

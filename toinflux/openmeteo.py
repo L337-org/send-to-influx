@@ -52,8 +52,8 @@ class OpenMeteo(DataHandler):
     def get_data(self):
         """Get current weather observations from Open-Meteo.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         fields = self.source_settings.get("fields", DEFAULT_FIELDS)
         params = {

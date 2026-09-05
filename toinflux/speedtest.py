@@ -67,10 +67,11 @@ class Speedtest(DataHandler):
         ``SourceConnectionError`` rather than starting a second, overlapping test
         that would skew both.
 
-        :return: data
-        :rtype: dict
-        :raises SourceConnectionError: a run is already in progress, the test
-            failed, or it returned an implausible result
+        Returns:
+            dict: data
+
+        Raises:
+            SourceConnectionError: a run is already in progress, the test failed, or it returned an implausible result
         """
         if not Speedtest._run_lock.acquire(blocking=False):
             raise SourceConnectionError("a Speedtest run is already in progress on this host")
@@ -85,8 +86,8 @@ class Speedtest(DataHandler):
         The caller (``get_data``) holds ``_run_lock``. Split out so ``get_data`` is just
         the lock guard around it.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
         """
         try:
             st = speedtest.Speedtest(timeout=self.settings["speedtest"].get("timeout", 120))
@@ -140,8 +141,8 @@ class Speedtest(DataHandler):
         One implementation for the data and the heartbeat: the two must agree, or a
         health series and its measurement would disagree about which machine wrote what.
 
-        :return: the local hostname up to the first dot
-        :rtype: str
+        Returns:
+            str: the local hostname up to the first dot
         """
         return gethostname().split(".")[0]
 
@@ -153,8 +154,8 @@ class Speedtest(DataHandler):
         writing ``collector_status,source=speedtest`` and overwriting each other, so one
         host dying looked exactly like a healthy estate.
 
-        :return: ``{"host": <this machine>}``
-        :rtype: dict
+        Returns:
+            dict: ``{"host": <this machine>}``
         """
         return {"host": self.collector_host()}
 
@@ -178,12 +179,15 @@ class Speedtest(DataHandler):
         Silently answering the wrong question is worse than refusing, especially when the
         number looks entirely plausible.
 
-        :param host: optionally assert which machine should run it; must be this one
-        :return: ``{"source", "host", "recorded", "result": {field: {"value"[, "unit"]}}}``
-        :rtype: dict
-        :raises ToolParamError: ``host`` names a machine other than this one
-        :raises SourceConnectionError: a run is already in progress, or the test
-            failed
+        Args:
+            host: optionally assert which machine should run it; must be this one
+
+        Returns:
+            dict: ``{"source", "host", "recorded", "result": {field: {"value"[, "unit"]}}}``
+
+        Raises:
+            ToolParamError: ``host`` names a machine other than this one
+            SourceConnectionError: a run is already in progress, or the test failed
         """
         this_host = self.collector_host()
         if host is not None and host != this_host:

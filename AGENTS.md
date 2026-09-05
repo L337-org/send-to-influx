@@ -276,19 +276,23 @@ Each has been raised before and declined with reasons recorded.
 
 **Google style** - `Args:` and `Returns:` sections, capitalised, with the type in the entry
 because this code carries no annotations. `flake8-docstrings` enforces it, and the convention
-and the exemptions live in `tox.ini`.
+and the exemptions live in `tox.ini`. There is no second dialect: the Sphinx `:param:` /
+`:return:` form this code used to carry is gone.
 
 **No docstring rule is ignored**, so there is no backlog to work through and nothing to add to.
 A rule that fails is a change to make, not an entry to park. Two things are exempt by name
 rather than by rule, both covered below: the MCP surface, and tests.
 
-**The MCP surface is exempt, and must stay exempt.** A tool, prompt or resource docstring is
-the advertised interface a client loads and a model reads, so CS.6.14 hands it to the
-AI-consumer rules instead: it wants what the schema cannot already carry, and a structured
-parameter block duplicates what the schema has - paid for on every session that loads it.
-`ignore-decorators` in `tox.ini` does that, and
-`tests/test_repo_hygiene.py::test_the_docstring_exemption_matches_the_decorators_in_use`
+**Tool docstrings are exempt, and must stay exempt.** A tool's docstring *is* its advertised
+description, and the schema beside it already carries every parameter's type - so CS.6.14 hands
+it to the AI-consumer rules instead, where D417 would otherwise demand an `Args:` block
+duplicating the schema on every session that loads the surface. `ignore-decorators` in `tox.ini`
+does that, and `tests/test_repo_hygiene.py::test_the_docstring_exemption_matches_the_decorators_in_use`
 fails if a rename ever makes the pattern stop matching.
+
+**Prompts and resources are not exempt.** Both pass `description=` explicitly at registration,
+so their docstrings reach no client at all and there is nothing to trade off. They follow the
+ordinary convention, and the same guard fails if either is added back to the pattern.
 
 Tests are exempt too: a test's name is its documentation.
 

@@ -164,8 +164,11 @@ def value_mappings(codes):
     ``[{"type": "value", "options": {"1": {"text": "locked", "index": 0}}}]``. Keys are
     strings because that is what Grafana writes, and ``index`` fixes the legend order.
 
-    :param codes: the field's ``{int: str}`` code map
-    :return: the mappings list, or an empty list when there are no codes
+    Args:
+        codes: the field's ``{int: str}`` code map
+
+    Returns:
+        the mappings list, or an empty list when there are no codes
     """
     if not codes:
         return []
@@ -182,8 +185,11 @@ def series_tags(schema):
     its own label) groups by nothing, while Hue's ``host`` and Nuki's ``device`` - real
     axes with several members - are grouped.
 
-    :param schema: the source's ReadSchema
-    :return: sorted list of tag keys
+    Args:
+        schema: the source's ReadSchema
+
+    Returns:
+        sorted list of tag keys
     """
     return sorted(set(schema.tag_keys) - set(schema.tag_filters))
 
@@ -202,9 +208,12 @@ def _alias(field, tags):
     extension rather than an observed one, and is documented as such rather than left
     looking verified. It is reachable only by a measurement growing a second free tag.
 
-    :param field: the field being charted, the fallback name for a single series
-    :param tags: the tag keys being grouped by
-    :return: the alias expression
+    Args:
+        field: the field being charted, the fallback name for a single series
+        tags: the tag keys being grouped by
+
+    Returns:
+        the alias expression
     """
     if not tags:
         return field
@@ -216,10 +225,13 @@ def panel_spec(schema, field, tags):
 
     Covers its query, type, aggregation, unit and value mappings.
 
-    :param schema: the source's ReadSchema
-    :param field: the field key
-    :param tags: tag keys to separate into series (see :func:`series_tags`)
-    :return: the panel spec dict
+    Args:
+        schema: the source's ReadSchema
+        field: the field key
+        tags: tag keys to separate into series (see :func:`series_tags`)
+
+    Returns:
+        the panel spec dict
     """
     meta = schema.metadata_for(field)
     kind = field_kind(meta, schema.field_types.get(field))
@@ -247,13 +259,18 @@ def panel_spec(schema, field, tags):
 def suggest_panels_result(source, settings, settings_file, fields=None):
     """Build the suggest_dashboard_panels payload (runs in a worker thread).
 
-    :param source: source name from a tool argument
-    :param settings: parsed settings dict
-    :param settings_file: settings path, threaded to the handler's own load
-    :param fields: field keys to describe, or None for every recorded field
-    :return: dict payload
-    :raises ToolParamError: unknown source, or a field the source has not recorded
-    :raises SourceConnectionError: the InfluxDB schema read failed
+    Args:
+        source: source name from a tool argument
+        settings: parsed settings dict
+        settings_file: settings path, threaded to the handler's own load
+        fields: field keys to describe, or None for every recorded field
+
+    Returns:
+        dict payload
+
+    Raises:
+        ToolParamError: unknown source, or a field the source has not recorded
+        SourceConnectionError: the InfluxDB schema read failed
     """
     handler, schema = resolve_schema(source, settings, settings_file)
     try:
@@ -280,9 +297,10 @@ def suggest_panels_result(source, settings, settings_file, fields=None):
 def register_dashboard_tools(server, settings, settings_file=None):
     """Register the dashboard-suggestion tool on a MCPServer server.
 
-    :param server: the MCPServer instance
-    :param settings: the parsed settings dict
-    :param settings_file: settings path, for re-resolving handlers per call
+    Args:
+        server: the MCPServer instance
+        settings: the parsed settings dict
+        settings_file: settings path, for re-resolving handlers per call
     """
     import anyio
 
