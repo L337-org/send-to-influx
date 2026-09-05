@@ -673,6 +673,8 @@ def _build_single_point_query(measurement, tag_filters, fields, order, group_by_
     build_query. Fields come from key discovery (the live allowlist), never model input.
 
     Args:
+        group_by_tag: a tag key to return one point per value of, or None for a single point across the whole
+            measurement
         measurement: the InfluxDB measurement name
         tag_filters: static tag key/value filters (may be empty)
         fields: the field keys to select (non-empty)
@@ -713,6 +715,8 @@ def build_latest_query(measurement, tag_filters, fields, group_by_tag=None):
     The current-state read for a non-live source (see MCP_LIVE_STATE).
 
     Args:
+        group_by_tag: a tag key to return one point per value of, or None for a single point across the whole
+            measurement
         measurement: the InfluxDB measurement name
         tag_filters: static tag key/value filters (may be empty)
         fields: the field keys to select (non-empty)
@@ -740,6 +744,8 @@ def build_edge_time_query(measurement, tag_filters, order, group_by_tag=None):
     read from it.
 
     Args:
+        group_by_tag: a tag key to return one point per value of, or None for a single point across the whole
+            measurement
         measurement: the InfluxDB measurement name
         tag_filters: static tag key/value filters (may be empty)
         order: ``"ASC"`` for the oldest point, ``"DESC"`` for the newest
@@ -963,6 +969,10 @@ def discover_tag_values(session, influx_settings, db, measurement, tag):
     so its answers are not interchangeable with v1's by default.
 
     Args:
+        session: the requests session to query through; the caller owns its lifetime.
+        influx_settings: the parsed ``influx:`` block, for the URL and credentials.
+        db: the database or bucket to query.
+        measurement: the measurement whose tag values to enumerate.
         tag: the tag key to enumerate (from the source class, never model input)
 
     Returns:
@@ -1321,6 +1331,9 @@ def resolve_schema(source, settings, settings_file, instance=None):
     the caller did not name one.
 
     Args:
+        source: the configured source name.
+        settings: the parsed settings document.
+        settings_file: the settings path, for constructing the handler.
         instance: the instance to scope to, or None for all of them
 
     Raises:
@@ -1908,6 +1921,8 @@ def _edge_times_per_instance(handler, schema, order):
     of every host in it.
 
     Args:
+        handler: the source's DataHandler, for the session and settings.
+        schema: the source's resolved ReadSchema.
         order: ``"ASC"`` for each producer's oldest point, ``"DESC"`` for its newest
 
     Returns:
