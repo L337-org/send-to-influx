@@ -42,6 +42,9 @@ def configure_logging(
         loglevel (str): logging level name (e.g. "INFO", "DEBUG"); falls back to INFO if invalid
         log_max_bytes (int): max size in bytes before the log file is rotated
         log_backup_count (int): number of rotated log files to keep
+
+    Raises:
+        ConfigError: the logfile path cannot be opened for writing
     """
     fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     root = logging.getLogger()
@@ -1125,6 +1128,9 @@ def load_settings(settings_file=None):
 
     Returns:
         dict: parsed settings dictionary
+
+    Raises:
+        ConfigError: the file is missing, unparseable, or does not hold a non-empty mapping
     """
     if not settings_file:
         settings_file = "settings.yaml"

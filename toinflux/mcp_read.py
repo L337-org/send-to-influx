@@ -684,6 +684,9 @@ def _build_single_point_query(measurement, tag_filters, fields, order, group_by_
 
     Returns:
         the InfluxQL query string
+
+    Raises:
+        ValueError: ``order`` is neither ``"ASC"`` nor ``"DESC"``
     """
     if order not in ("ASC", "DESC"):
         raise ValueError(f"order must be ASC or DESC, got {order!r}")
@@ -795,6 +798,9 @@ def _get(session, url, kwargs, description):
     """Issue a GET and return parsed JSON.
 
     Maps failures to SourceConnectionError with a message naming what was attempted.
+
+    Raises:
+        SourceConnectionError: the InfluxDB query could not be issued or returned unusable JSON
     """
     try:
         with warnings.catch_warnings():

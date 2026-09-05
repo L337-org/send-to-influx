@@ -351,6 +351,9 @@ class DataHandler:
             settings_file (str or None): Path to settings.yaml, or None for the default location.
             instance (str or None): Which instance of the source this serves, where a source can have
                 more than one - a Hue bridge host, say. None for a single-target source.
+
+        Raises:
+            ConfigError: ``source`` names no section in the loaded settings
         """
         self.settings = load_settings(settings_file)
         self.source = source

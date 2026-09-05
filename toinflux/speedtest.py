@@ -88,6 +88,9 @@ class Speedtest(DataHandler):
 
         Returns:
             dict: data
+
+        Raises:
+            SourceConnectionError: the test could not run, or reported an implausible result
         """
         try:
             st = speedtest.Speedtest(timeout=self.settings["speedtest"].get("timeout", 120))

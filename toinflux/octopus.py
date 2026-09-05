@@ -49,6 +49,9 @@ class Octopus(DataHandler):
 
         Returns:
             dict: parsed JSON response
+
+        Raises:
+            SourceConnectionError: the API could not be reached, or answered with an error
         """
         url = f"{OCTOPUS_BASE_URL}/{path}"
         try:

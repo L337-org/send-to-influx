@@ -54,6 +54,9 @@ class OpenMeteo(DataHandler):
 
         Returns:
             dict: data
+
+        Raises:
+            SourceConnectionError: the API could not be reached, or answered with an error
         """
         fields = self.source_settings.get("fields", DEFAULT_FIELDS)
         params = {

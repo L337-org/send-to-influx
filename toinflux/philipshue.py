@@ -777,6 +777,9 @@ class Hue(DataHandler):
 
         Returns:
             dict: hue_data
+
+        Raises:
+            SourceConnectionError: the bridge could not be reached, or answered with an error
         """
         # Hue bridges are commonly reached over a self-signed local cert, so verification is
         # skipped by default; set hue.insecure: false in settings.yaml if yours has a valid cert.

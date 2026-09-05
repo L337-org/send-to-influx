@@ -271,6 +271,9 @@ def suggest_panels_result(source, settings, settings_file, fields=None):
     Raises:
         ToolParamError: unknown source, or a field the source has not recorded
         SourceConnectionError: the InfluxDB schema read failed
+
+    Raises:
+        ToolParamError: the source, field or aggregation is not one this server offers
     """
     handler, schema = resolve_schema(source, settings, settings_file)
     try:

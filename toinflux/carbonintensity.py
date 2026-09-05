@@ -42,6 +42,9 @@ class CarbonIntensity(DataHandler):
 
         Returns:
             dict: parsed JSON response
+
+        Raises:
+            SourceConnectionError: the API could not be reached, or answered with an error
         """
         url = f"{CARBON_INTENSITY_BASE_URL}/{path}"
         try:

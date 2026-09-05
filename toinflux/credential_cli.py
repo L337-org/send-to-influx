@@ -202,6 +202,9 @@ def _regenerate_dropin(credstore_dir=None, dropin_path=None, exclude=None):
         exclude (str or None): a credential name to treat as absent even if its .cred file still exists on disk - used
             by _cmd_remove so the drop-in never references a file that's about to be deleted, even transiently
             (LoadCredentialEncrypted= referencing a missing path hard-fails unit startup with 243/CREDENTIALS)
+
+    Raises:
+        CredentialCliError: the drop-in file cannot be written
     """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
@@ -328,6 +331,10 @@ def _atomic_write(path, content):
     so writing to the symlink's own path would silently detach it - the symlink
     gets replaced by a plain file, rather than the thing it points to being
     updated - breaking whatever was managing it that way.
+
+    Raises:
+        OSError: the write, the ownership fix-up or the rename failed; the temporary file is removed before the original
+            error propagates
     """
     target = os.path.realpath(path) if os.path.islink(path) else path
     directory = os.path.dirname(target) or "."
@@ -854,6 +861,9 @@ def _resolve_org_id(url, headers, org_name, verify=True):
     """Look up the org ID for org_name.
 
     The v2 bucket-create API needs orgID, not just the org name.
+
+    Raises:
+        CredentialCliError: the org is unknown, or the API rejected the lookup
     """
     resp = requests.get(
         f"{url}/api/v2/orgs", params={"org": org_name}, headers=headers, verify=verify, timeout=HTTP_TIMEOUT_SECONDS
@@ -1149,6 +1159,10 @@ def _credential_name_arg(value):
     Replaces a fixed ``choices=`` list, which cannot express unbounded slot credentials.
     Rejection is just as firm - a typo is refused, not silently accepted as a new credential -
     but the acceptable set is described rather than enumerated.
+
+    Raises:
+        argparse.ArgumentTypeError: the name is neither a known credential field nor a
+            numbered Hue bridge username
     """
     if is_credential_name(value):
         return value

@@ -372,7 +372,7 @@ def _transport_security_settings(public_url):
     )
 
 
-def app_options(settings):
+def app_options(settings):  # noqa: DOC502 - ConfigError propagates from parse_mcp_bind_address, not raised here
     """Build the keyword arguments for ``MCPServer.streamable_http_app()``.
 
     The single canonical source of the transport options, because mcp 2.x takes
@@ -399,7 +399,7 @@ def app_options(settings):
     }
 
 
-def run_options(settings):
+def run_options(settings):  # noqa: DOC502 - ConfigError propagates from parse_mcp_bind_address, not raised here
     """Build the keyword arguments for ``MCPServer.run(transport="streamable-http")``.
 
     The app options plus the bind port, which only the run path needs.

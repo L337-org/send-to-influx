@@ -94,6 +94,9 @@ class MqttDataHandler(DataHandler):
         Returns:
             dict or None: field keys/values to write as one point, or None/empty to ignore the message (e.g. a
                 control/metadata topic that isn't a state field)
+
+        Raises:
+            NotImplementedError: always; a streaming MQTT source must override this
         """
         raise NotImplementedError("streaming MQTT sources must implement decode_stream_message()")
 

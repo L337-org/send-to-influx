@@ -442,6 +442,9 @@ class MyEnergi(DataHandler):
 
         Returns:
             dict: parsed JSON response
+
+        Raises:
+            SourceConnectionError: the API could not be reached, or answered with an error
         """
         # Get the data for the given serial from the MyEnergi API
         auth = HTTPDigestAuth(self.auth_serial(), self.settings["myenergi"]["apikey"])
