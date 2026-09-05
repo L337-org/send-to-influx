@@ -209,7 +209,7 @@ class _StreamSink:
 
         Args:
             topic (str): the MQTT topic the message arrived on
-            payload (str or bytes): the message body, decoded by the transport
+            payload (str): the message body, already UTF-8 decoded by the transport
 
         Returns:
             nothing; the point is written as a side effect
