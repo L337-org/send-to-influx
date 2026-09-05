@@ -308,7 +308,8 @@ def _register_hue_write_tools(server, settings, settings_file):
         unreachable bridge's lights are absent and the bridge is named under
         `unreachable`, so a short list means "could not ask", not "no such light" -
         and that includes the case where no bridge answers at all, which returns an
-        empty `devices` list rather than an error."""
+        empty `devices` list rather than an error.
+        """
         return await anyio.to_thread.run_sync(_hue_list_devices_result, settings, settings_file)
 
     # Additive/reversible (turns a light on/off, adjusts brightness/colour) and
@@ -354,7 +355,8 @@ def _register_hue_write_tools(server, settings, settings_file):
           colour lights only.
 
         Setting brightness/temperature/colour turns the light on unless on=false.
-        Returns the resolved device and the state actually applied."""
+        Returns the resolved device and the state actually applied.
+        """
         return await anyio.to_thread.run_sync(
             lambda: _hue_set_light_result(
                 settings,
@@ -404,7 +406,8 @@ def _register_speedtest_write_tools(server, settings, settings_file):
         runs. Only one runs at a time per host: if a scheduled or triggered run is
         already in progress, that's reported rather than a second test started. The
         result is also recorded to InfluxDB like a scheduled run (best-effort; a
-        failed recording is flagged, not fatal)."""
+        failed recording is flagged, not fatal).
+        """
         return await anyio.to_thread.run_sync(_speedtest_run_result, settings, settings_file, host)
 
     return server

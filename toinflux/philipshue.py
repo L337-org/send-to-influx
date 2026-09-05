@@ -38,8 +38,7 @@ _SLOT_FIELD_RE = re.compile(r"^(?:host|user)(?P<suffix>\d*)$")
 
 
 def bridge_field_names(slot):
-    """
-    Return the ``(host_field, user_field)`` settings keys for a slot number.
+    """Return the ``(host_field, user_field)`` settings keys for a slot number.
 
     Slot 1 is the unnumbered pair, so this is the single place that knows the
     numbering convention - callers never build ``f"host{n}"`` themselves.
@@ -54,8 +53,7 @@ def bridge_field_names(slot):
 
 
 def _comparable_host(host):
-    """
-    Normalise a host for *comparison only*, so two spellings of one address are
+    """Normalise a host for *comparison only*, so two spellings of one address are
     recognised as the same bridge.
 
     ``2001:db8::1`` and ``2001:0db8:0000:0000:0000:0000:0000:0001`` are the same
@@ -84,8 +82,7 @@ def _comparable_host(host):
 
 
 def _usable_token(value):
-    """
-    Whether a configured Hue token is real, as opposed to absent or a stand-in.
+    """Whether a configured Hue token is real, as opposed to absent or a stand-in.
 
     Unusable means: not a string, blank, still the example placeholder, or a
     systemd-creds sentinel that was never substituted (settings.yaml says the value
@@ -106,8 +103,7 @@ def _usable_token(value):
 
 
 def _parse_slot_field(field):
-    """
-    Interpret a settings field name as a bridge slot.
+    """Interpret a settings field name as a bridge slot.
 
     :param field: a key from the ``hue`` block
     :return: ``(slot, error)`` - ``(None, None)`` when the field doesn't name a slot at
@@ -129,8 +125,7 @@ def _parse_slot_field(field):
 
 
 def _bridge_for_slot(hue_settings, slot):
-    """
-    Resolve one slot into a bridge, an error, or a warning.
+    """Resolve one slot into a bridge, an error, or a warning.
 
     At most one of ``bridge``/``error``/``warning`` is ever set, and all three are
     ``None`` for a vacant slot, which is a legitimate resting state rather than a fault.
@@ -197,8 +192,7 @@ def _bridge_for_slot(hue_settings, slot):
 
 
 def _credstore_caveat():
-    """
-    Return the systemd-creds caveat to append to an unset-token warning, or ``""``.
+    """Return the systemd-creds caveat to append to an unset-token warning, or ``""``.
 
     A credential migrated with ``send-to-influx-set-credential`` is mounted by systemd for
     the service alone, so from any other context it reads as unset and this warning is a
@@ -229,8 +223,7 @@ def _credstore_caveat():
 
 
 def _duplicate_host_errors(configured):
-    """
-    Return an error for every slot addressing a bridge an earlier slot already addresses.
+    """Return an error for every slot addressing a bridge an earlier slot already addresses.
 
     Compared through ``_comparable_host``, so two spellings of one address are caught.
 
@@ -263,8 +256,7 @@ def _duplicate_host_errors(configured):
 
 
 def _slot_numbers(hue_settings):
-    """
-    Return ``(slots, errors)`` for the slot-shaped fields in a ``hue`` block.
+    """Return ``(slots, errors)`` for the slot-shaped fields in a ``hue`` block.
 
     Slots come back in **numeric** order. The keys are scanned with ``sorted()``, which is
     lexicographic and so puts ``host10`` before ``host2``; slots are numeric identifiers,
@@ -293,8 +285,7 @@ def _slot_numbers(hue_settings):
 
 
 def enumerate_bridges(hue_settings):
-    """
-    Enumerate the bridges configured in a ``hue`` settings block.
+    """Enumerate the bridges configured in a ``hue`` settings block.
 
     The single source of truth for "which bridges are configured", shared by
     ``validate_settings()``, the worker spawner and the CLI modes - if validation and
@@ -356,8 +347,7 @@ def enumerate_bridges(hue_settings):
 
 
 def _url_host(host):
-    """
-    Format a configured host for use in the authority part of a URL.
+    """Format a configured host for use in the authority part of a URL.
 
     A bare IPv6 literal has to be bracketed - ``https://2001:db8::1/...`` is
     ambiguous, because everything from the first colon onward parses as a port,
@@ -483,8 +473,7 @@ class Hue(DataHandler):
     }
 
     def bridge(self):
-        """
-        Return the bridge this handler collects from.
+        """Return the bridge this handler collects from.
 
         ``self.instance`` names the bridge by host. ``None`` means "the first configured
         bridge", which is what keeps a single-bridge install - and every caller that
@@ -674,8 +663,7 @@ class Hue(DataHandler):
             self.influx_header = original_header
 
     def get_data(self):
-        """
-        Get the data from the Hue Bridge
+        """Get the data from the Hue Bridge
 
         :return: data
         :rtype: dict
@@ -690,8 +678,7 @@ class Hue(DataHandler):
         return self.data
 
     def _api_base(self):
-        """
-        Return the bridge's authenticated API base URL, ``https://<host>/api/<user>``.
+        """Return the bridge's authenticated API base URL, ``https://<host>/api/<user>``.
 
         Shared by the read path (``get_data_from_hue_bridge``) and the MCP write
         path (``_put_light_state``) so that both bracket an IPv6 host
@@ -727,8 +714,7 @@ class Hue(DataHandler):
         return filters
 
     def _redact(self, message):
-        """
-        Replace the bridge token with a marker before a message is logged or raised.
+        """Replace the bridge token with a marker before a message is logged or raised.
 
         The CLIP v1 API carries the whitelist token in the URL path, and requests
         puts the request URL into its exception messages - both for a connection
@@ -769,8 +755,7 @@ class Hue(DataHandler):
         return message
 
     def get_data_from_hue_bridge(self):
-        """
-        Connect to the Hue bridge and get the sensor data
+        """Connect to the Hue bridge and get the sensor data
 
         :return: hue_data
         :rtype: dict
@@ -826,8 +811,7 @@ class Hue(DataHandler):
         return hue_data
 
     def hue_device_name_to_name(self, device_name):
-        """
-        Converts the device name into a name to be used in InfluxDB
+        """Converts the device name into a name to be used in InfluxDB
 
         If no name mapping exists in the settings file, the name in the Hue settings is used.
         Any spaces will be replaced with underscores.
@@ -844,8 +828,7 @@ class Hue(DataHandler):
         return name.replace(" ", "_")
 
     def parse_hue_data(self):
-        """
-        Parse the data from the bridge to get the values we want
+        """Parse the data from the bridge to get the values we want
 
         :return: data
         :rtype: dict
@@ -908,7 +891,8 @@ class Hue(DataHandler):
     @staticmethod
     def _names_by_id(lights):
         """Return ``{id: name}`` from a ``{id: light_object}`` map (a missing or
-        blank name falls back to the id), for name/id resolution and error text."""
+        blank name falls back to the id), for name/id resolution and error text.
+        """
         return {light_id: str(light.get("name") or light_id) for light_id, light in lights.items()}
 
     @classmethod
@@ -977,7 +961,8 @@ class Hue(DataHandler):
     @staticmethod
     def _rgb_to_xy(r, g, b):
         """Convert 0-255 sRGB to a Hue CIE ``[x, y]`` pair (gamma-corrected sRGB ->
-        XYZ -> xy chromaticity; the bridge clamps to the light's own gamut)."""
+        XYZ -> xy chromaticity; the bridge clamps to the light's own gamut).
+        """
 
         def _linear(channel):
             c = channel / 255

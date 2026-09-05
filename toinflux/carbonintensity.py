@@ -56,8 +56,7 @@ class CarbonIntensity(DataHandler):
         return response.json()
 
     def get_data(self):
-        """
-        Get current national grid carbon intensity and optionally fuel mix from
+        """Get current national grid carbon intensity and optionally fuel mix from
         the National Grid ESO Carbon Intensity API.
 
         Carbon intensity (gCO2/kWh) is collected from the ``/intensity`` endpoint.

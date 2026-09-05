@@ -58,8 +58,7 @@ class MyEnergiDevice:
 
 
 def enumerate_devices(source, source_settings):
-    """
-    Return the devices configured for one MyEnergi source, plus any problems found.
+    """Return the devices configured for one MyEnergi source, plus any problems found.
 
     Two config shapes, and both may appear together. A ``serial`` at the top of the block is
     the legacy single-device form every existing install has; its ``label`` is optional and
@@ -126,8 +125,7 @@ def enumerate_devices(source, source_settings):
 
 
 def _checked_label(position, label, what="label"):
-    """
-    Return a label as a stripped, writable string, or an error saying why not.
+    """Return a label as a stripped, writable string, or an error saying why not.
 
     A label becomes the InfluxDB ``device`` tag, and the line protocol has no escape for a
     newline - a newline is what separates points, so one inside a tag value ends the point
@@ -159,8 +157,7 @@ def _checked_label(position, label, what="label"):
 
 
 def _checked_legacy_label(source, source_settings):
-    """
-    Return the label for the legacy top-of-block device, or an error saying why not.
+    """Return the label for the legacy top-of-block device, or an error saying why not.
 
     An **absent** label defaults to the source name, which is what keeps an existing install
     writing ``device=zappi`` and is why this feature needed no data migration.
@@ -193,8 +190,7 @@ def _checked_legacy_label(source, source_settings):
 
 
 def _device_from_entry(position, entry, block_fields):
-    """
-    Build one device from a ``devices:`` entry, or report why it cannot be built.
+    """Build one device from a ``devices:`` entry, or report why it cannot be built.
 
     Extracted from ``enumerate_devices`` to keep it inside the project's complexity limit
     once each field gained validation.
@@ -228,8 +224,7 @@ def _device_from_entry(position, entry, block_fields):
 
 
 def _checked_serial(position, value):
-    """
-    Return a device serial as a non-blank string, or an error saying why not.
+    """Return a device serial as a non-blank string, or an error saying why not.
 
     A blank serial was accepted before - only ``is None`` was tested - and failed much later
     at device selection, reported as "no device has serial ''" rather than as the
@@ -248,8 +243,7 @@ def _checked_serial(position, value):
 
 
 def _checked_fields(position, value):
-    """
-    Return a validated ``fields`` list, or an error saying why not.
+    """Return a validated ``fields`` list, or an error saying why not.
 
     ``fields: "frq"`` - a bare string rather than a list - was accepted and then iterated
     character by character when filtering the API response, so the collector ran, wrote
@@ -282,8 +276,7 @@ def _checked_fields(position, value):
 
 
 def _duplicate_errors(source, devices):
-    """
-    Return errors for duplicate labels or serials within one source's devices.
+    """Return errors for duplicate labels or serials within one source's devices.
 
     A repeated label means two devices writing to one series, silently interleaving two
     devices' readings; a repeated serial means two workers collecting the same device and
@@ -314,8 +307,7 @@ def _duplicate_errors(source, devices):
 
 
 def duplicate_label_errors(settings):
-    """
-    Return errors for a label used by more than one MyEnergi source.
+    """Return errors for a label used by more than one MyEnergi source.
 
     Uniqueness has to span all three blocks, not just one: the types share the ``myenergi``
     measurement and the label is the ``device`` tag value, so a zappi and an eddi both
@@ -353,8 +345,7 @@ class MyEnergi(DataHandler):
     MCP_TAG_FILTERS: dict = {}
 
     def device(self):
-        """
-        Return the configured device this handler collects from.
+        """Return the configured device this handler collects from.
 
         ``self.instance`` is a device label; ``None`` means the first configured device, which
         is what keeps a single-device install - and every caller that builds a handler without
@@ -380,8 +371,7 @@ class MyEnergi(DataHandler):
         raise ConfigError(f"no {self.source} device is labelled {self.instance!r}; configured labels: {known}")
 
     def mcp_tag_filters(self):
-        """
-        Scope reads to this handler's own device.
+        """Scope reads to this handler's own device.
 
         A method rather than the class attribute because the answer depends on which device
         this handler serves. It also carries the type discrimination that
@@ -395,8 +385,7 @@ class MyEnergi(DataHandler):
         return {"device": self.device().label}
 
     def heartbeat_tags(self):
-        """
-        Tag the heartbeat with this device, matching the tag its own data carries.
+        """Tag the heartbeat with this device, matching the tag its own data carries.
 
         The base implementation would tag ``host=<instance>``, which for MyEnergi is a device
         label and not a host at all - so the health series would disagree with the
@@ -414,8 +403,7 @@ class MyEnergi(DataHandler):
         return {"device": self.device().label}
 
     def auth_serial(self):
-        """
-        Return the serial used as the MyEnergi API's digest username.
+        """Return the serial used as the MyEnergi API's digest username.
 
         The credential is account-scoped rather than per device: the real zappi serial
         authenticates against the zappi, eddi *and* harvi endpoints alike, verified against
@@ -441,8 +429,7 @@ class MyEnergi(DataHandler):
         return self.device().serial
 
     def get_data_from_myenergi(self, url):
-        """
-        Get the data from the myenergi API
+        """Get the data from the myenergi API
 
         :param url: full API endpoint URL
         :type url: str
@@ -473,8 +460,7 @@ class MyEnergi(DataHandler):
             raise SourceConnectionError(str(e)) from e
 
     def _parse_device_data(self, device_key, url_key):
-        """
-        Fetch data for a MyEnergi device and filter it to configured fields if set.
+        """Fetch data for a MyEnergi device and filter it to configured fields if set.
 
         The endpoint is per device *type* and returns every device of that type on the
         account, so the configured serial is what picks one out of the list. Taking index 0
@@ -508,8 +494,7 @@ class MyEnergi(DataHandler):
         return device_data
 
     def _select_device(self, myenergi_data, device_key, device=None):
-        """
-        Pick the device matching this source's configured serial out of the API response.
+        """Pick the device matching this source's configured serial out of the API response.
 
         ``sno`` is the serial field - confirmed against the live MyEnergi API, where it is
         the only key in a device object whose value equals the configured serial. Compared
@@ -574,8 +559,7 @@ class MyEnergi(DataHandler):
         return item.get("hr", 0)
 
     def dayhour_results(self, year, month, day, hour=None):
-        """
-        Get the data for a specific day
+        """Get the data for a specific day
 
         :param year: four-digit year, e.g. "2026"
         :type year: str
@@ -670,8 +654,7 @@ class Zappi(MyEnergi):
     }
 
     def get_data(self):
-        """
-        Get the data from the Zappi
+        """Get the data from the Zappi
 
         :return: data
         :rtype: dict
@@ -685,8 +668,7 @@ class Zappi(MyEnergi):
         return self.data
 
     def parse_zappi_data(self):
-        """
-        Parse the data from the myenergi to get the values we want
+        """Parse the data from the myenergi to get the values we want
 
         :return: data
         :rtype: dict
@@ -729,8 +711,7 @@ class Eddi(MyEnergi):
     }
 
     def get_data(self):
-        """
-        Get the data from the Eddi
+        """Get the data from the Eddi
 
         :return: data
         :rtype: dict
@@ -744,8 +725,7 @@ class Eddi(MyEnergi):
         return self.data
 
     def parse_eddi_data(self):
-        """
-        Parse the data from the MyEnergi API for the Eddi device
+        """Parse the data from the MyEnergi API for the Eddi device
 
         :return: data
         :rtype: dict
@@ -770,8 +750,7 @@ class Harvi(MyEnergi):
     }
 
     def get_data(self):
-        """
-        Get the data from the Harvi
+        """Get the data from the Harvi
 
         :return: data
         :rtype: dict
@@ -785,8 +764,7 @@ class Harvi(MyEnergi):
         return self.data
 
     def parse_harvi_data(self):
-        """
-        Parse the data from the MyEnergi API for the Harvi device
+        """Parse the data from the MyEnergi API for the Harvi device
 
         :return: data
         :rtype: dict

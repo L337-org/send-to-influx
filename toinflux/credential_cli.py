@@ -824,7 +824,8 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
 
 def _resolve_org_id(url, headers, org_name, verify=True):
     """Look up the org ID for org_name - the v2 bucket-create API needs orgID, not
-    just the org name."""
+    just the org name.
+    """
     resp = requests.get(
         f"{url}/api/v2/orgs", params={"org": org_name}, headers=headers, verify=verify, timeout=HTTP_TIMEOUT_SECONDS
     )
@@ -954,8 +955,7 @@ def _stored_credential_names(credstore_dir):
 
 
 def _extract_section(text, name):
-    """
-    Return the source lines of top-level section ``name`` from a settings file,
+    """Return the source lines of top-level section ``name`` from a settings file,
     including the comment block immediately above it and any trailing blank line,
     or None if the section isn't there.
 
@@ -994,8 +994,7 @@ def _extract_section(text, name):
 
 
 def _require_mapping_document(root, settings_path):
-    r"""
-    Refuse a settings file whose top-level YAML document isn't a mapping.
+    r"""Refuse a settings file whose top-level YAML document isn't a mapping.
 
     An empty file (``root is None``) is fine to append to - the appended section
     simply becomes the whole document. Anything else must already be a mapping:
@@ -1019,8 +1018,7 @@ def _require_mapping_document(root, settings_path):
 
 
 def _ensure_section(settings_path, name, example_path):
-    """
-    Append top-level section ``name`` to settings.yaml, copied from the shipped
+    """Append top-level section ``name`` to settings.yaml, copied from the shipped
     example, if the file doesn't already have it. Returns True if it was added.
 
     This exists because settings.yaml is created once at install time and then

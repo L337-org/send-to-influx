@@ -17,8 +17,7 @@ from toinflux.exceptions import ConfigError
 
 
 class InfluxWriteError(ToInfluxError):
-    """
-    Raised when a write to InfluxDB fails.
+    """Raised when a write to InfluxDB fails.
 
     :ivar status_code: the HTTP status code of the failed write, or None when no
         response was received at all (connection error/timeout). Defaults to None via
@@ -61,13 +60,13 @@ def _is_point_rejection(status_code):
     """True when an HTTP status code means the server received and rejected the submitted
     *payload* (a 4xx other than the transient 408/429) - as opposed to a connection
     failure (None), a server-side error (5xx), or a rate-limit/timeout condition that
-    says nothing about the point's validity."""
+    says nothing about the point's validity.
+    """
     return status_code is not None and 400 <= status_code < 500 and status_code not in TRANSIENT_CLIENT_ERRORS
 
 
 def _format_field_value(value):
-    """
-    Format a value as an InfluxDB line protocol field value.
+    """Format a value as an InfluxDB line protocol field value.
 
     Booleans become ``true``/``false`` and strings are quoted with internal
     backslashes/quotes escaped. Numbers (including ints) are left as bare,
@@ -89,8 +88,7 @@ def _format_field_value(value):
 
 
 def escape_key_or_tag_value(value):
-    r"""
-    Escape a value for use as an InfluxDB line protocol key or tag value.
+    r"""Escape a value for use as an InfluxDB line protocol key or tag value.
 
     Per the line protocol spec, commas, equals signs and spaces must be
     backslash-escaped in measurement/tag/field keys and tag values (field
@@ -121,8 +119,7 @@ def escape_key_or_tag_value(value):
 
 
 def worker_label(source, instance=None):
-    """
-    Format a worker's identity for log messages: ``source`` or ``source@instance``.
+    """Format a worker's identity for log messages: ``source`` or ``source@instance``.
 
     Display only - never parsed, never a dict key (that is ``DataHandler.worker_key``),
     and never an emitted tag value. Lives at module level as well as on the handler
@@ -307,7 +304,8 @@ class DataHandler:
         """Return True only when this source is writable *and* the operator has
         opted in with ``<source>.mcp_read_write: true`` (strict ``is True``, so a
         stray truthy string like ``"true"`` doesn't silently enable device
-        control). The default is off - writes are opt-in per source."""
+        control). The default is off - writes are opt-in per source.
+        """
         return self.MCP_WRITABLE and self.source_settings.get("mcp_read_write", False) is True
 
     # Bounded per-worker buffer of points that failed to write, flushed on the next
@@ -369,8 +367,7 @@ class DataHandler:
 
     @property
     def worker_key(self):
-        """
-        Identity of the worker this handler belongs to, as ``(source, instance)``.
+        """Identity of the worker this handler belongs to, as ``(source, instance)``.
 
         Used to key anything that is per *worker* rather than per source: the write
         buffer here, and the supervisor's activity/stopped/stalled bookkeeping in
@@ -387,8 +384,7 @@ class DataHandler:
 
     @property
     def worker_label(self):
-        """
-        Human-readable identity for log messages: ``source`` or ``source@instance``.
+        """Human-readable identity for log messages: ``source`` or ``source@instance``.
 
         Display only - never parsed, and never used as a dict key or an emitted tag
         value (see ``worker_key``). Delegates to the module-level ``worker_label()`` so
@@ -400,8 +396,7 @@ class DataHandler:
         return worker_label(self.source, self.instance)
 
     def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True):
-        """
-        Sends data to influxDB.
+        """Sends data to influxDB.
 
         Before sending the new point, first tries to flush any points buffered from
         earlier failed writes to this source (oldest first) - see ``_write_buffers``.
@@ -494,8 +489,7 @@ class DataHandler:
             raise
 
     def _log_missing_data(self, data, use_buffer):
-        """
-        Log appropriately for a send_data() call with no usable data of its own.
+        """Log appropriately for a send_data() call with no usable data of its own.
 
         A truthy non-dict isn't an empty reading, it's a handler bug - it gets its own
         explicit warning rather than hiding behind the no-data messages. An empty
@@ -520,8 +514,7 @@ class DataHandler:
         return True
 
     def _flush_buffer(self, buffer, url, kwargs):
-        """
-        Flush a source's buffered points, oldest first, in newline-joined chunks of
+        """Flush a source's buffered points, oldest first, in newline-joined chunks of
         FLUSH_CHUNK_SIZE per HTTP request (InfluxDB's write endpoints accept multi-point
         bodies natively, so a large backlog costs a handful of requests, not one each).
 
@@ -570,8 +563,7 @@ class DataHandler:
                 buffer.popleft()
 
     def _flush_head(self, buffer, url, kwargs):
-        """
-        POST the single point at the head of the buffer, removing it on success or -
+        """POST the single point at the head of the buffer, removing it on success or -
         after MAX_POINT_REJECTIONS separate server rejections - dropping it with a
         warning. Any other failure re-raises with the point left in place.
 
@@ -604,8 +596,7 @@ class DataHandler:
         buffer.popleft()
 
     def _build_write_request(self, influx_settings):
-        """
-        Build the URL/kwargs used to POST a line-protocol body to this source's InfluxDB
+        """Build the URL/kwargs used to POST a line-protocol body to this source's InfluxDB
         target. Independent of any one point's content, so it's computed once per
         ``send_data()`` call and reused for every line posted during that call (any
         flushed backlog plus the new point).
@@ -634,8 +625,7 @@ class DataHandler:
         return url, kwargs
 
     def _post_line(self, line, url, kwargs):
-        """
-        POST a line-protocol body (one point, or several newline-joined) to InfluxDB.
+        """POST a line-protocol body (one point, or several newline-joined) to InfluxDB.
 
         :param line: line-protocol body to send
         :type line: str
@@ -660,8 +650,7 @@ class DataHandler:
             raise exc from e
 
     def _buffer_point(self, buffer, line):
-        """
-        Append a failed point to a source's write buffer as a fresh
+        """Append a failed point to a source's write buffer as a fresh
         ``[line, rejection_count]`` entry, warning if this evicts the oldest buffered
         point because the buffer was already full. An identical line already in the
         buffer is not added again - some sources (Octopus) re-serve the same reading

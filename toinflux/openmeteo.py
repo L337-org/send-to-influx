@@ -50,8 +50,7 @@ class OpenMeteo(DataHandler):
     }
 
     def get_data(self):
-        """
-        Get current weather observations from Open-Meteo
+        """Get current weather observations from Open-Meteo
 
         :return: data
         :rtype: dict

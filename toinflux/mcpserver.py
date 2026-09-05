@@ -129,7 +129,8 @@ class OAuthStateStore:
     """
 
     def __init__(self, state_path):
-        """
+        """Bind the store to the file its clients and refresh tokens persist in.
+
         :param state_path: path of the JSON state file (created on first save)
         :type state_path: str
         """
@@ -148,7 +149,8 @@ class OAuthStateStore:
         no client ever registers. The file holds client registrations and
         refresh-token hashes, so tighten on load too rather than trusting the
         next write. A chmod failure (not the owner, odd filesystem) is logged,
-        not fatal."""
+        not fatal.
+        """
         try:
             mode = os.stat(self.state_path).st_mode
         except OSError:
@@ -167,7 +169,8 @@ class OAuthStateStore:
         """Load existing state; a missing file is a normal first run, and a
         corrupt one is logged and treated as empty (the connector re-registers
         and the user logs in again - annoying, recoverable) rather than
-        preventing the whole service from starting."""
+        preventing the whole service from starting.
+        """
         self._tighten_permissions()
         try:
             with open(self.state_path, encoding="utf8") as f:
@@ -221,7 +224,8 @@ class OAuthStateStore:
         A malformed entry (non-mapping, or a non-numeric ``expires_at``) counts
         as expired - same recoverable-state contract as the provider's load
         paths, and pruning is the one place every entry gets touched, so a bad
-        one must not be able to break token issuance (see _refresh_entry_expired)."""
+        one must not be able to break token issuance (see _refresh_entry_expired).
+        """
         now = time.time()
         expired = [key for key, entry in self.refresh_tokens.items() if _refresh_entry_expired(entry, now)]
         for key in expired:
@@ -233,7 +237,8 @@ class LoginThrottle:
     """Tracks consecutive login failures per client address and enforces a
     lockout window once the limit is hit. See the constants above for why
     per-address is effectively global behind a reverse proxy - and why that's
-    the intended behaviour, not a limitation."""
+    the intended behaviour, not a limitation.
+    """
 
     def __init__(self, limit=LOGIN_FAILURE_LIMIT, lockout_seconds=LOGIN_LOCKOUT_SECONDS):
         """Build a throttle over consecutive login failures per client address.
@@ -532,7 +537,8 @@ class SendToInfluxOAuthProvider:
     """
 
     def __init__(self, public_url, expected_user, expected_password, state_store):
-        """
+        """Bind the provider to the URL it issues against and the single account it accepts.
+
         :param public_url: external https URL (no trailing slash) the login page
             and redirects are built against
         :type public_url: str
@@ -608,7 +614,8 @@ class SendToInfluxOAuthProvider:
         A malformed persisted entry (hand-edited file, an older/newer schema) is
         dropped and treated as an unknown client rather than raised - the state
         file's whole contract is that bad state is recoverable (the connector
-        just re-registers), never something that breaks requests."""
+        just re-registers), never something that breaks requests.
+        """
         from mcp.shared.auth import OAuthClientInformationFull
         from pydantic import ValidationError
 
@@ -636,7 +643,8 @@ class SendToInfluxOAuthProvider:
 
     async def authorize(self, client, params):
         """Start the resource-owner login: stash the request as a single-use
-        transaction and send the browser to the login page."""
+        transaction and send the browser to the login page.
+        """
         txn_id = secrets.token_urlsafe(32)
         self._prune_transactions()
         self._transactions[txn_id] = {
@@ -660,7 +668,8 @@ class SendToInfluxOAuthProvider:
 
         Same recoverable-state contract as get_client(): a malformed entry is
         dropped and treated as an invalid token (the client falls back to a full
-        re-authorization), never raised into the token endpoint."""
+        re-authorization), never raised into the token endpoint.
+        """
         from mcp.server.auth.provider import RefreshToken
 
         token_hash = _hash_token(refresh_token)
@@ -701,7 +710,8 @@ class SendToInfluxOAuthProvider:
         The token string is read via getattr with the value itself as fallback,
         so a raw-string token (or any future representation without a .token
         attribute) revokes cleanly instead of raising AttributeError into the
-        revocation endpoint."""
+        revocation endpoint.
+        """
         from mcp.server.auth.provider import RefreshToken
 
         token_str = getattr(token, "token", token)
@@ -746,7 +756,8 @@ class SendToInfluxOAuthProvider:
 
     def _prune_transactions(self):
         """Drop expired login transactions (bounds the dict against drive-by
-        /authorize requests that never complete a login)."""
+        /authorize requests that never complete a login).
+        """
         cutoff = time.time() - LOGIN_TXN_TTL_SECONDS
         expired = [key for key, entry in self._transactions.items() if entry["created_at"] < cutoff]
         for key in expired:
@@ -764,7 +775,8 @@ class SendToInfluxOAuthProvider:
 
         The SDK enforces code expiry at exchange time regardless; this only stops
         a client that repeatedly completes /login but never calls /token from
-        growing the dict without bound. Called when a new code is minted."""
+        growing the dict without bound. Called when a new code is minted.
+        """
         now = time.time()
         expired = [key for key, auth_code in self._auth_codes.items() if auth_code.expires_at < now]
         for key in expired:

@@ -179,7 +179,8 @@ class ReadSchema:
 
     def metadata_for(self, field):
         """Return the metadata dict for a field in this schema - see the
-        module-level :func:`metadata_for`."""
+        module-level :func:`metadata_for`.
+        """
         return metadata_for(self.field_metadata, field)
 
 
@@ -724,7 +725,8 @@ def _influx_read_request(influx_settings, db, query):
 
 def _get(session, url, kwargs, description):
     """Issue a GET and return parsed JSON, mapping failures to
-    SourceConnectionError with a message naming what was attempted."""
+    SourceConnectionError with a message naming what was attempted.
+    """
     try:
         with warnings.catch_warnings():
             if not kwargs.get("verify", True):
@@ -1996,7 +1998,8 @@ def register_read_tools(server, settings, settings_file=None):
 
         Reads configuration only and changes nothing - no InfluxDB or device request -
         so it answers even when nothing is reachable, and a configured source whose
-        settings are unusable is left out rather than failing the call."""
+        settings are unusable is left out rather than failing the call.
+        """
         return await anyio.to_thread.run_sync(_list_sources_result, settings, settings_file)
 
     @register_tool(server, title="List Source Fields", annotations=_READ_ONLY)
@@ -2030,7 +2033,8 @@ def register_read_tools(server, settings, settings_file=None):
         nothing. A source that has never written anything lists no fields - that
         is "nothing recorded yet", not "no such source". An unknown source is an
         error, and so is an unreachable InfluxDB: neither is reported as an empty
-        list."""
+        list.
+        """
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file, detail)
 
     @register_tool(server, title="Query Historical Data", annotations=_READ_ONLY)
@@ -2114,7 +2118,8 @@ def register_read_tools(server, settings, settings_file=None):
         Nuki locks, Speedtest hosts) the fields are grouped per producer under
         `instances` instead, even when there is only one. An unreachable producer
         carries an `error` there while the rest still report fields; only when every
-        one fails is the whole call an error."""
+        one fails is the whole call an error.
+        """
         return await anyio.to_thread.run_sync(current_state_result, source, settings, settings_file)
 
     @register_tool(server, title="Get Data Range & Retention", annotations=_READ_ONLY)
@@ -2148,7 +2153,8 @@ def register_read_tools(server, settings, settings_file=None):
         unreachable InfluxDB, and reading changes nothing. A failure to read
         retention alone does not fail the call: `retention.known` comes back false
         with a `reason`, reported rather than omitted so it is never mistaken for
-        unlimited retention."""
+        unlimited retention.
+        """
         return await anyio.to_thread.run_sync(data_range_result, source, settings, settings_file)
 
     @register_tool(server, title="Get Field Documentation", annotations=_READ_ONLY)
@@ -2165,7 +2171,8 @@ def register_read_tools(server, settings, settings_file=None):
 
         Returns `{format: 'markdown', content: ...}`. Built from the source classes'
         own metadata, so it changes nothing and cannot fail on an unreachable source
-        or InfluxDB; a source whose configuration is unusable is omitted."""
+        or InfluxDB; a source whose configuration is unusable is omitted.
+        """
         return await anyio.to_thread.run_sync(_documentation_result, settings, settings_file)
 
     return server
