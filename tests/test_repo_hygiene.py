@@ -700,8 +700,15 @@ def test_every_named_guard_exists():
     A bare `test_name` claims only that a test by that name exists, which is what prose wants
     when it names a file once and then several of its tests - three full nodeids in one sentence
     is unreadable, and the existence check is no weaker for the shorter form.
+
+    A failure names every document carrying the stale reference, not the first one found, so a
+    rename that invalidates three copies shows all three instead of hiding two behind the first.
     """
     bare, nodeids, owner = _test_index()
+    # Every document a token appears in, not just the first. A guard named in `AGENTS.md` and
+    # again in the architecture layer is the expected case rather than an exotic one, and
+    # reporting one site at a time means fixing one and being told about the next on the
+    # following run.
     referenced = {}
     for relative in sorted(p.relative_to(REPO_ROOT) for p in _tracked_files() if p.suffix == ".md"):
         text = (REPO_ROOT / relative).read_text(encoding="utf-8")
@@ -710,17 +717,18 @@ def test_every_named_guard_exists():
             token = match.group(1)
             # A bare `test_foo.py` names a file, not a test, so it makes no claim to check here.
             if not token.endswith(".py"):
-                referenced.setdefault(token, str(relative))
+                referenced.setdefault(token, set()).add(str(relative))
 
     missing, unrunnable = [], []
-    for token, relative in sorted(referenced.items()):
+    for token, documents in sorted(referenced.items()):
+        where = ", ".join(sorted(documents))
         if "::" not in token:
             if token not in bare:
-                missing.append(f"{relative} names `{token}`, which is not a test")
+                missing.append(f"`{token}` in {where} is not a test")
             continue
         if not token.startswith(TESTS_DIR):
             unrunnable.append(
-                f"{relative} names `{token}`, which pytest cannot find from the repository "
+                f"`{token}` in {where} is not a path pytest can find from the repository "
                 f"root - write `{_suggested_nodeid(token, nodeids)}`"
             )
             continue
@@ -730,10 +738,10 @@ def test_every_named_guard_exists():
         if nodeid in owner:
             qualified = nodeid.replace("::", "::" + owner[nodeid] + "::", 1)
             unrunnable.append(
-                f"{relative} names `{token}`, which pytest cannot collect - " f"write `{TESTS_DIR}{qualified}`"
+                f"`{token}` in {where} is not one pytest can collect - " f"write `{TESTS_DIR}{qualified}`"
             )
         else:
-            missing.append(f"{relative} names `{token}`, which is not a test at that path")
+            missing.append(f"`{token}` in {where} is not a test at that path")
 
     assert referenced, "found no test references in any tracked document - the scan is not working"
     assert not missing, (
