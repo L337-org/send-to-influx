@@ -614,34 +614,32 @@ def test_every_dynamic_tag_value_in_a_header_is_escaped():
     )
 
 
-def _defined_tests():
-    """Collect every test callable under `tests/`, by bare name and by qualified path.
+def _test_index():
+    """Index every test under `tests/`, keeping enough structure to judge a reference runnable.
 
     Parsed rather than imported: importing the suite to inspect it would run module-level
     fixtures and make this check depend on the rest of the suite being importable, which is
     exactly when a documentation reference most needs verifying.
 
-    :return: set of str, holding `name`, `file.py::name` and `file.py::Class::name` for each
+    :return: tuple of (bare test names, complete nodeids, {file::name: owning class})
     """
     import ast
 
-    names = set()
+    bare, nodeids, owner = set(), set(), {}
     for path in sorted((REPO_ROOT / "tests").rglob("test_*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
-                names.update({node.name, f"{path.name}::{node.name}"})
+                bare.add(node.name)
+                nodeids.add(f"{path.name}::{node.name}")
             elif isinstance(node, ast.ClassDef):
+                nodeids.add(f"{path.name}::{node.name}")
                 for member in node.body:
                     if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name.startswith("test_"):
-                        names.update(
-                            {
-                                member.name,
-                                f"{path.name}::{member.name}",
-                                f"{path.name}::{node.name}::{member.name}",
-                            }
-                        )
-    return names
+                        bare.add(member.name)
+                        nodeids.add(f"{path.name}::{node.name}::{member.name}")
+                        owner[f"{path.name}::{member.name}"] = node.name
+    return bare, nodeids, owner
 
 
 def test_every_named_guard_exists():
@@ -653,27 +651,51 @@ def test_every_named_guard_exists():
     renamed test turns the pointer back into the silence it was meant to replace, and does it
     invisibly, because a wrong name reads exactly like a right one.
 
-    Bare names are accepted as well as qualified ones because prose reads better naming a test
-    once and its file once, and a bare name is no less checkable - the set holds both forms.
+    Two forms are allowed, and the difference is what the reference claims to be.
+
+    A `::`-qualified reference claims to be a **pytest nodeid**, so it must be one you can
+    actually run. `file.py::test_name` for a test that is a method on a class is rejected: pytest
+    cannot collect it, so a reader who copies the pointer to go and look at the guard gets an
+    error rather than the guard. The failure names the class to add.
+
+    A bare `test_name` claims only that a test by that name exists, which is what prose wants
+    when it names a file once and then several of its tests - three full nodeids in one sentence
+    is unreadable, and the existence check is no weaker for the shorter form.
     """
+    bare, nodeids, owner = _test_index()
     referenced = {}
     for relative in sorted(p.relative_to(REPO_ROOT) for p in _tracked_files() if p.suffix == ".md"):
         text = (REPO_ROOT / relative).read_text(encoding="utf-8")
         pattern = r"`(?:[\w/]+/)?([A-Za-z_][A-Za-z0-9_]*\.py(?:::[A-Za-z_][A-Za-z0-9_]*)+|test_[a-z0-9_]+)`"
         for match in re.finditer(pattern, text):
             token = match.group(1)
-            # A bare `test_foo.py` names a file, not a test. Only a ::-qualified path or a bare
-            # test_ function name claims that a specific test exists, which is what this checks.
-            # Any directory prefix is dropped by the pattern, so `tests/test_x.py::test_y` and
-            # `test_x.py::test_y` are the same claim - prose uses both and neither is wrong.
-            if token.endswith(".py"):
-                continue
-            referenced.setdefault(token, str(relative))
+            # A bare `test_foo.py` names a file, not a test. Any directory prefix is dropped by
+            # the pattern, so `tests/test_x.py::test_y` and `test_x.py::test_y` are one claim -
+            # prose uses both spellings and neither is wrong.
+            if not token.endswith(".py"):
+                referenced.setdefault(token, str(relative))
 
-    known = _defined_tests()
-    missing = sorted(f"{relative} names `{token}`" for token, relative in referenced.items() if token not in known)
+    missing, unrunnable = [], []
+    for token, relative in sorted(referenced.items()):
+        if "::" not in token:
+            if token not in bare:
+                missing.append(f"{relative} names `{token}`, which is not a test")
+        elif token in nodeids:
+            continue
+        elif token in owner:
+            unrunnable.append(
+                f"{relative} names `{token}`, which pytest cannot collect - "
+                f"write `{token.replace('::', '::' + owner[token] + '::', 1)}`"
+            )
+        else:
+            missing.append(f"{relative} names `{token}`, which is not a test")
+
     assert referenced, "found no test references in any tracked document - the scan is not working"
     assert not missing, (
         "these documents name a test that does not exist, so the reference resolves to nothing "
         "and the invariant it stands in for is now guarded by neither:\n  " + "\n  ".join(missing)
+    )
+    assert not unrunnable, (
+        "these references are missing the class that owns the test, so they are not runnable "
+        "nodeids and a reader following one gets a collection error:\n  " + "\n  ".join(unrunnable)
     )
