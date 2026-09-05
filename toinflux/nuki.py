@@ -378,8 +378,10 @@ class Nuki(MqttDataHandler):
 
     @staticmethod
     def _device_label(name, device_id):
-        """The ``device`` tag value for a lock: its Nuki-app name with spaces underscored, or the
-        device ID when the name is blank or absent.
+        """The ``device`` tag value for a lock.
+
+        Its Nuki-app name with spaces underscored, or the device ID when the name is blank or
+        absent.
 
         **The underscores stay, even though a tag value does not need them.** They were
         originally there because the name was part of a field key. The migration for existing

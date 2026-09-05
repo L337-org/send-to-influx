@@ -39,10 +39,11 @@ from toinflux.mcp_common import (
 
 
 def writable_enabled_sources(settings, settings_file=None):
-    """Return the configured sources that are both writable and opted in via
-    ``<source>.mcp_read_write: true``. Each handler is constructed to check, then
-    its session closed - this runs once at server-build time to decide whether to
-    register write tools at all.
+    """Return the configured sources that are both writable and opted in.
+
+    Opting in means ``<source>.mcp_read_write: true``. Each handler is constructed to
+    check, then its session closed - this runs once at server-build time to decide
+    whether to register write tools at all.
 
     :param settings: parsed settings dict
     :param settings_file: settings path, for constructing handlers
@@ -82,9 +83,10 @@ def _resolve_writable_handlers(source, settings, settings_file):
 
 
 def _resolve_writable_handler(source, settings, settings_file):
-    """Construct a handler for a source and confirm it's enabled for writes, or
-    raise ToolParamError. The caller owns the returned handler's session and must
-    close it.
+    """Construct a handler for a source and confirm it is enabled for writes.
+
+    Raises ToolParamError otherwise. The caller owns the returned handler's session and
+    must close it.
 
     :raises ToolParamError: unknown source, or a source not opted in for writes
     """
@@ -423,9 +425,10 @@ _WRITE_TOOL_REGISTRARS = {
 
 
 def register_write_tools(server, settings, settings_file=None, enabled_sources=None):
-    """Register each write-enabled source's own write tool(s) on a MCPServer server.
-    When no source is enabled for writes, nothing is registered - the write
-    capability is entirely absent from the server.
+    """Register each write-enabled source's own write tools on a MCPServer server.
+
+    When no source is enabled for writes, nothing is registered - the write capability is
+    entirely absent from the server.
 
     :param server: the MCPServer instance
     :param settings: parsed settings dict

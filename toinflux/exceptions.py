@@ -41,9 +41,10 @@ class SourceConnectionError(ToInfluxError):
 
 
 class ToolParamError(ToInfluxError, ValueError):
-    """An MCP tool was called with an invalid parameter - an unknown field or
-    device, a time/range/aggregation that doesn't parse, an out-of-range value,
-    or a missing required argument.
+    """An MCP tool was called with an invalid parameter.
+
+    An unknown field or device, a time, range or aggregation that does not parse, an
+    out-of-range value, or a missing required argument.
 
     A caller/model mistake, surfaced back to the model as a tool error and never
     retried. Deliberately distinct from SourceConnectionError, which is a

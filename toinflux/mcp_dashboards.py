@@ -1,5 +1,7 @@
-"""Dashboard-panel suggestions for the MCP server: turn a source's schema into the
-query, panel type, aggregation and value mappings a Grafana panel needs.
+"""Dashboard-panel suggestions for the MCP server.
+
+Turns a source's schema into the query, panel type, aggregation and value mappings a
+Grafana panel needs.
 
 **Why this is a tool and not a prompt.** A prompt would have been cheaper - no
 permanent advertised surface - but it fails at the one job this exists for. A prompt
@@ -210,8 +212,9 @@ def _alias(field, tags):
 
 
 def panel_spec(schema, field, tags):
-    """Describe one field as a dashboard panel: its query, type, aggregation, unit and
-    value mappings.
+    """Describe one field as a dashboard panel.
+
+    Covers its query, type, aggregation, unit and value mappings.
 
     :param schema: the source's ReadSchema
     :param field: the field key

@@ -1,6 +1,8 @@
-"""Credential shape shared between the systemd-creds runtime substitution
-(toinflux/general.py) and the send-to-influx-set-credential CLI
-(toinflux/credential_cli.py) - kept in one place so the two can't drift apart.
+"""The credential shape shared by the runtime substitution and the credential CLI.
+
+Used by the systemd-creds runtime substitution (toinflux/general.py) and the
+send-to-influx-set-credential CLI (toinflux/credential_cli.py), kept in one place so the
+two cannot drift apart.
 """
 
 __author__ = "Gavin Lucas"
@@ -76,8 +78,9 @@ def _slot_suffix(text, prefix):
 
 
 def credential_field(name):
-    """Return the ``(section, field)`` a credential name overlays, or None if it is not a
-    credential name at all.
+    """Return the ``(section, field)`` a credential name overlays.
+
+    None if it is not a credential name at all.
 
     Covers both the static table and the numbered slots, so every caller asks one question
     instead of checking a dict and then remembering the slot rule separately. That
@@ -167,10 +170,10 @@ def slot_credential_names(settings):
 
 
 def sentinel_for(name):
-    """Return the cosmetic placeholder written into settings.yaml once a credential
-    is migrated to systemd-creds - never read back for real use (the actual value
-    comes from apply_credential_substitution()), just informational for a human
-    reading the file.
+    """Return the placeholder written into settings.yaml once a credential is migrated.
+
+    Cosmetic only, and never read back for real use - the actual value comes from
+    apply_credential_substitution(). It is there to inform a human reading the file.
 
     :param name: systemd-creds credential name, e.g. "influx-token"
     :type name: str

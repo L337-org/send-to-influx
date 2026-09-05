@@ -405,10 +405,11 @@ def expand_sources(sources, settings):
 
 
 def mqtt_block_errors(settings, context=""):
-    """Return a list of error strings for the shared ``mqtt`` settings block itself -
-    its own type, ``broker_host`` presence and type, ``username``/``password`` types,
-    and ``broker_port`` type and range - independent of which sources happen to need
-    it. The type checks matter because YAML coerces silently (``broker_host: 10.0``
+    """Return a list of error strings for the shared ``mqtt`` settings block itself.
+
+    Covers its own type, ``broker_host`` presence and type, ``username`` and ``password``
+    types, and ``broker_port`` type and range, independent of which sources happen to
+    need it. The type checks matter because YAML coerces silently (``broker_host: 10.0``
     is a float, ``broker_host: yes`` is a bool) and a non-string reaches paho as a
     raw TypeError that the transport's connection-error handling can't catch.
 
@@ -458,8 +459,9 @@ def mqtt_block_errors(settings, context=""):
 
 
 def _validate_hue_bridges(settings, sources):
-    """Return ``(errors, warnings)`` for the ``hue`` block's bridge slots, checked only
-    when hue is among the sources being validated.
+    """Return ``(errors, warnings)`` for the ``hue`` block's bridge slots.
+
+    Checked only when hue is among the sources being validated.
 
     Delegates to ``toinflux.philipshue.enumerate_bridges()`` rather than re-deriving the
     slot rules here: the runtime enumerates bridges with that same function, and two
@@ -499,8 +501,10 @@ def _validate_hue_bridges(settings, sources):
 
 
 def _validate_mqtt_block(settings, sources):
-    """Return a list of error strings for the shared mqtt block, which is required
-    if (and only if) an MQTT-based source is among the sources being validated.
+    """Return a list of error strings for the shared mqtt block.
+
+    The block is required if, and only if, an MQTT-based source is among the sources
+    being validated.
     """
     mqtt_sources = sorted(str(src) for src in sources if src in MQTT_SOURCES)
     if not mqtt_sources:
@@ -518,9 +522,11 @@ MCP_DEFAULT_BIND_ADDRESS = "127.0.0.1:8420"
 
 
 def mcp_enabled(settings):
-    """Return True when the MCP server is enabled - both ``mcp.user`` and
-    ``mcp.password`` set to non-blank strings, and ``mcp.disabled`` not set to
-    ``true``. Credentials-present is the primary enablement mechanism;
+    """Return True when the MCP server is enabled.
+
+    Both ``mcp.user`` and ``mcp.password`` must be set to non-blank strings, and
+    ``mcp.disabled`` must not be set to ``true``. Credentials-present is the primary
+    enablement mechanism;
     ``mcp.disabled`` is a forced-off override on top of it (see
     ``mcp_block_errors()``) for a source whose password was migrated to
     systemd-creds - blanking the YAML fields alone doesn't disable it there,
@@ -542,8 +548,9 @@ def mcp_enabled(settings):
 
 
 def _split_bind_address(value, original):
-    """Split a bind-address string into ``(host, port_text)``, handling both
-    ``host:port`` and bracketed IPv6 ``[addr]:port``.
+    """Split a bind-address string into ``(host, port_text)``.
+
+    Handles both ``host:port`` and bracketed IPv6 ``[addr]:port``.
 
     :raises ConfigError: if the shape is not one of those two forms
     """
@@ -686,8 +693,9 @@ def mcp_block_errors(settings):
 
 
 def _mcp_enabled_block_errors(mcp):
-    """Return the error strings that only apply once the MCP server is enabled:
-    a usable public_url and a parseable, non-public bind_address.
+    """Return the error strings that only apply once the MCP server is enabled.
+
+    A usable public_url, and a parseable, non-public bind_address.
     """
     errors = []
     public_url = mcp.get("public_url")
@@ -956,9 +964,9 @@ def validate_settings(settings, source=None, settings_path="settings.yaml", warn
 
 
 def _contains_real_secret(settings):
-    """Return True if any known credential field holds something that looks like a
-    real, user-entered secret - not empty, not a placeholder, not a systemd-creds
-    sentinel.
+    """Return True if any known credential field looks like a real, user-entered secret.
+
+    That means not empty, not a placeholder, and not a systemd-creds sentinel.
 
     :param settings: settings dictionary to inspect
     :type settings: dict
@@ -991,8 +999,10 @@ def _contains_real_secret(settings):
 
 
 def _enforce_settings_file_permissions(settings_path, raw_settings):
-    """Warn (always) and optionally refuse (if enforce_permissions is true) when
-    settings_path is group/other readable and actually contains a real credential.
+    """Warn, and optionally refuse, on a world-readable settings file holding a secret.
+
+    Warns always; refuses when enforce_permissions is true. Applies when settings_path is
+    group or other readable and actually contains a real credential.
 
     Takes an explicit snapshot of the raw, pre-substitution settings dict as a
     parameter rather than depending on being called before
@@ -1039,10 +1049,11 @@ def _enforce_settings_file_permissions(settings_path, raw_settings):
 
 
 def _clear_unsubstituted_credential_sentinels(settings):
-    """Blank any credential field that still holds the literal sentinel text after
-    apply_credential_substitution() ran - i.e. settings.yaml was migrated to
-    systemd-creds but the matching credential file wasn't found (drop-in removed,
-    service run outside systemd, etc). Left unhandled, a non-empty sentinel string
+    """Blank any credential field still holding the sentinel text after substitution ran.
+
+    That state means settings.yaml was migrated to systemd-creds but the matching
+    credential file was not found - drop-in removed, service run outside systemd, and so
+    on. Left unhandled, a non-empty sentinel string
     passes validate_settings()'s existing truthiness checks, and the daemon starts
     "successfully" then fails auth forever as a retried SourceConnectionError instead
     of failing fast as the ConfigError it actually is - this reuses

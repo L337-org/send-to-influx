@@ -80,9 +80,10 @@ class Speedtest(DataHandler):
             Speedtest._run_lock.release()
 
     def _run_speedtest(self):
-        """Run the test and populate ``self.data``/``self.influx_header``; the
-        caller (``get_data``) holds ``_run_lock``. Split out so ``get_data`` is
-        just the lock guard around it.
+        """Run the test and populate ``self.data`` and ``self.influx_header``.
+
+        The caller (``get_data``) holds ``_run_lock``. Split out so ``get_data`` is just
+        the lock guard around it.
 
         :return: data
         :rtype: dict
@@ -158,8 +159,9 @@ class Speedtest(DataHandler):
         return {"host": self.collector_host()}
 
     def mcp_trigger_run(self, host=None):
-        """Run a speed test now (the MCP write action for this source) and return
-        the result, recording it to InfluxDB like a scheduled run.
+        """Run a speed test now and return the result.
+
+        The MCP write action for this source, recording to InfluxDB like a scheduled run.
 
         ``get_data()`` enforces the one-run-at-a-time lock, so a run already in
         progress surfaces as ``SourceConnectionError`` rather than a second test.
