@@ -293,8 +293,14 @@ One of its judgements is worth knowing before it surprises you: a bare `return` 
 returning something, so a function that exits early without a value still wants a `Returns:`
 section by DOC201 - even though writing `Returns: None` is DOC202. Both are in the backlog.
 
-Note that a `Returns:` section is *omitted* for a function that returns nothing - writing
-`Returns: None` is itself a finding (DOC202), not the safe option.
+Two of its judgements are worth knowing before they surprise you, because they are finer than
+"document what you return":
+
+* A function with **no `return` statement at all** omits `Returns:` - writing `Returns: None`
+  there is DOC202.
+* A function with a **bare `return`** as an early exit must *have* a `Returns:` section -
+  omitting it is DOC201 - even though it returns nothing either. Say what the caller gets;
+  `check-return-types = False` is what stops the absent annotation making that a type mismatch.
 
 **Tool docstrings are exempt, and must stay exempt.** A tool's docstring *is* its advertised
 description, and the schema beside it already carries every parameter's type - so CS.6.14 hands

@@ -511,7 +511,6 @@ class MyEnergi(DataHandler):
         wrong serial rather than a type mismatch.
 
         Args:
-            device (str or None): the serial to select, or None to use this source's configured one
             myenergi_data (dict): the parsed API response
             device_key (str): the response key for this device type, e.g. "zappi"
 

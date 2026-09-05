@@ -76,7 +76,7 @@ class MqttDataHandler(DataHandler):
     # source must set it; the worker refuses to stream a source that hasn't.
     STREAM_TOPIC_FILTER: "str | None" = None
 
-    def decode_stream_message(self, topic, payload):
+    def decode_stream_message(self, topic, payload):  # noqa: DOC202 - the Returns: is the contract
         """Decode a single streamed MQTT message into an InfluxDB field dict.
 
         Called by the worker's streaming path for every message that arrives on the

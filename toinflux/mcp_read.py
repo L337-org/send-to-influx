@@ -673,12 +673,12 @@ def _build_single_point_query(measurement, tag_filters, fields, order, group_by_
     build_query. Fields come from key discovery (the live allowlist), never model input.
 
     Args:
-        group_by_tag: a tag key to return one point per value of, or None for a single point across the whole
-            measurement
         measurement: the InfluxDB measurement name
         tag_filters: static tag key/value filters (may be empty)
         fields: the field keys to select (non-empty)
         order: ``"DESC"`` for the newest point, ``"ASC"`` for the oldest
+        group_by_tag: a tag key to return one point per value of, or None for a single point across the whole
+            measurement
 
     Returns:
         the InfluxQL query string
@@ -715,11 +715,11 @@ def build_latest_query(measurement, tag_filters, fields, group_by_tag=None):
     The current-state read for a non-live source (see MCP_LIVE_STATE).
 
     Args:
-        group_by_tag: a tag key to return one point per value of, or None for a single point across the whole
-            measurement
         measurement: the InfluxDB measurement name
         tag_filters: static tag key/value filters (may be empty)
         fields: the field keys to select (non-empty)
+        group_by_tag: a tag key to return one point per value of, or None for a single point across the whole
+            measurement
 
     Returns:
         the InfluxQL query string
@@ -744,11 +744,11 @@ def build_edge_time_query(measurement, tag_filters, order, group_by_tag=None):
     read from it.
 
     Args:
-        group_by_tag: a tag key to return one point per value of, or None for a single point across the whole
-            measurement
         measurement: the InfluxDB measurement name
         tag_filters: static tag key/value filters (may be empty)
         order: ``"ASC"`` for the oldest point, ``"DESC"`` for the newest
+        group_by_tag: a tag key to return one point per value of, or None for a single point across the whole
+            measurement
 
     Returns:
         the InfluxQL query string
@@ -878,7 +878,7 @@ def _statement_results(payload, description):
     return out
 
 
-def _key_column(all_series, column):
+def _key_column(all_series, column):  # noqa: DOC403 - a generator, but unannotated
     """Yield each row's value from a named column across a statement's series.
 
     Skips a series that has no such column, with a warning, rather than falling
@@ -889,8 +889,8 @@ def _key_column(all_series, column):
         all_series: the series list for one statement
         column: the column name to read (e.g. "fieldKey")
 
-    Returns:
-        iterator of (series, row, value) triples, the value always a string, so a caller can read a second column of the
+    Yields:
+        tuple: (series, row, value) triples, the value always a string, so a caller can read a second column of the
             same row
     """
     for series in all_series:

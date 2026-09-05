@@ -164,6 +164,15 @@ class _StreamSink:
     """
 
     def __init__(self, source, args, data_handler, on_activity):
+        """Hold the per-run context the transport callbacks need.
+
+        Args:
+            source (str): the source name, for the printed envelope and the heartbeat tag.
+            args (argparse.Namespace): the parsed command line; ``--print`` diverts writes.
+            data_handler (DataHandler): the handler points are written through.
+            on_activity (callable or None): called on each write to stamp the stall watchdog,
+                or None when stall detection is off.
+        """
         self.source = source
         self.args = args
         self.data_handler = data_handler
@@ -177,6 +186,11 @@ class _StreamSink:
         self._consecutive_probe_failures = 0
 
     def _write(self, data):
+        """Write one point, or print it in ``--print`` mode.
+
+        Args:
+            data (dict): the point to write.
+        """
         if self.args.print:
             print_source_data(self.source, data)
         else:
@@ -192,6 +206,13 @@ class _StreamSink:
         This is the interrupt path. It also notes that the stream showed life this
         interval, so the next heartbeat counts it healthy even if the periodic probe
         happens to fail.
+
+        Args:
+            topic (str): the MQTT topic the message arrived on
+            payload (str or bytes): the message body, decoded by the transport
+
+        Returns:
+            nothing; the point is written as a side effect
         """
         data = self.data_handler.decode_stream_message(topic, payload)
         if not data:
@@ -273,6 +294,9 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
         source (str): source name, used as the ``source`` tag
         ok (bool): whether the most recent collection cycle succeeded
         consecutive_failures (int): current failure streak for this source
+
+    Returns:
+        nothing; the point is written as a side effect
     """
     if data_handler is None:
         return
@@ -336,6 +360,10 @@ def _stamp_activity(last_activity, unit):
 
     Keyed by work unit, not source name: a source running several workers needs the
     watchdog to tell which one stopped making progress.
+
+    Args:
+        last_activity (dict or None): the shared stamp map, or None when stall detection is off
+        unit (tuple): the ``(source, instance)`` work unit to stamp
     """
     if last_activity is not None:
         last_activity[unit] = time.time()
@@ -365,14 +393,12 @@ def create_source_worker(unit, source_start_delay, args, stopped_sources, last_a
     """Create a worker function for continuous collection of one work unit, with retries.
 
     Args:
+        unit (tuple): the ``(source, instance)`` work unit this worker serves - the same shape as
+            ``DataHandler.worker_key``.
         source_start_delay (int or float): seconds to wait before the first cycle, so a bank of
             workers starting together does not hit every API at once.
         args (argparse.Namespace): the parsed command line, for the settings path and the print
             and dump switches.
-        unit (tuple): the ``(source, instance)`` work unit this worker serves - the same shape as
-            ``DataHandler.worker_key``. ``instance`` is None for a single-target source, and a bridge host for a Hue
-            worker. One worker per unit is what gives each bridge its own backoff, so an unreachable one cannot stall
-            the others.
         stopped_sources (set): shared set that the worker adds its ``unit`` to when it gives up permanently (a
             ConfigError), so the supervisor loop knows not to restart it. Holds work units, not source names, so one
             bridge giving up does not stop the others being restarted.
@@ -382,6 +408,9 @@ def create_source_worker(unit, source_start_delay, args, stopped_sources, last_a
             from one that's stopped making any progress at all - a thread stuck mid-instruction never reaches either
             branch, so this is the only signal a silent stall produces. None (the default) skips this bookkeeping - used
             by callers that don't need stall detection (e.g. tests exercising retry logic in isolation).
+
+    Returns:
+        callable: the worker function, ready to run on its own thread
     """
     source, instance = unit
     label = worker_label(source, instance)
@@ -535,6 +564,9 @@ def register_thread_dump_handler():
     embedding context (e.g. a captured/wrapped stream, as under pytest) -
     degrade to a warning rather than taking the whole process down over an
     optional diagnostic.
+
+    Returns:
+        nothing; the handler is installed as a side effect
     """
     if not hasattr(signal, "SIGUSR1"):
         logging.debug("SIGUSR1 is not available on this platform; skipping thread-dump handler registration")
@@ -637,8 +669,6 @@ def _check_config_and_exit(settings, args):
         settings (dict): parsed settings dictionary
         args (argparse.Namespace): parsed CLI arguments
 
-    Returns:
-        None - always exits the process
     """
     # load_settings() already validated the configured sources above; also validate
     # args.source specifically, since a user checking config for a particular
@@ -671,7 +701,11 @@ def _check_config_and_exit(settings, args):
 
 
 def main():
-    """Run the collector until it is asked to stop."""
+    """Run the collector until it is asked to stop.
+
+    Returns:
+        nothing; the process exits through ``sys.exit`` on every path
+    """
     # register the signal handler for ctrl-c and termination
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -800,8 +834,6 @@ def _dump_source_and_exit(units, args):
         units (list): the ``(source, instance)`` work units to dump
         args (argparse.Namespace): parsed CLI arguments
 
-    Returns:
-        never returns - always exits the process
     """
     instanced = any(instance is not None for _, instance in units)
     collected, failed = {}, []
@@ -835,6 +867,9 @@ def run_one_worker(unit, args):
     Args:
         unit (tuple): the ``(source, instance)`` work unit to run
         args (argparse.Namespace): parsed CLI arguments
+
+    Returns:
+        nothing; the worker runs until it stops or the process exits
     """
     source, instance = unit
     label = worker_label(source, instance)
