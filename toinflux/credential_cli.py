@@ -1200,7 +1200,7 @@ def main(argv=None):
     """Run the credential CLI.
 
     Args:
-        argv (list): Argument vector to parse, or None to read sys.argv.
+        argv (list or None): Argument vector to parse, or None to read sys.argv.
 
     Returns:
         int: A process exit status.

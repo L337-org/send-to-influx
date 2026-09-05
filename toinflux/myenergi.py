@@ -577,7 +577,7 @@ class MyEnergi(DataHandler):
             year (str): four-digit year, e.g. "2026"
             month (str): zero-padded month, e.g. "06"
             day (str): zero-padded day, e.g. "29"
-            hour (int): hour of the day (0-23); if None, results for the whole day are returned
+            hour (int or None): hour of the day (0-23); if None, results for the whole day are returned
 
         Returns:
             dict: Charge, Import, Export and Genera values in kWh

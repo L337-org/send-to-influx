@@ -347,9 +347,9 @@ class DataHandler:
         """Build a handler for one source, and optionally one instance of it.
 
         Args:
-            source (str): The source name, or None for the base handler.
-            settings_file (str): Path to settings.yaml, or None for the default location.
-            instance (str): Which instance of the source this serves, where a source can have
+            source (str or None): The source name, or None for the base handler.
+            settings_file (str or None): Path to settings.yaml, or None for the default location.
+            instance (str or None): Which instance of the source this serves, where a source can have
                 more than one - a Hue bridge host, say. None for a single-target source.
         """
         self.settings = load_settings(settings_file)
@@ -417,7 +417,7 @@ class DataHandler:
         existing worker backoff/retry behaviour is unaffected.
 
         Args:
-            data (dict): data to send to InfluxDB
+            data (dict or None): data to send to InfluxDB
             timestamp (int or None): unix epoch seconds to write the point at (matching the ``precision=s`` write
                 parameter below). Defaults to ``self.timestamp`` (set by some handlers' ``get_data()`` to the time of
                 collection, e.g. a reading's own interval start) and falls back to the current time.
