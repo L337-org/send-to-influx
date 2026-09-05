@@ -278,8 +278,9 @@ Each has been raised before and declined with reasons recorded.
 because this code carries no annotations. `flake8-docstrings` enforces it, and the convention
 and the exemptions live in `tox.ini`.
 
-**Every docstring rule is enforced**, so there is no backlog to work through and nothing to
-add to. A rule that fails is a change to make, not an entry to park.
+**No docstring rule is ignored**, so there is no backlog to work through and nothing to add to.
+A rule that fails is a change to make, not an entry to park. Two things are exempt by name
+rather than by rule, both covered below: the MCP surface, and tests.
 
 **The MCP surface is exempt, and must stay exempt.** A tool, prompt or resource docstring is
 the advertised interface a client loads and a model reads, so CS.6.14 hands it to the
