@@ -612,3 +612,68 @@ def test_every_dynamic_tag_value_in_a_header_is_escaped():
         "these functions build an influx_header by interpolation without escaping anything, so "
         "a space, comma or newline in the value would corrupt or split the point:\n  " + "\n  ".join(offenders)
     )
+
+
+def _defined_tests():
+    """Collect every test callable under `tests/`, by bare name and by qualified path.
+
+    Parsed rather than imported: importing the suite to inspect it would run module-level
+    fixtures and make this check depend on the rest of the suite being importable, which is
+    exactly when a documentation reference most needs verifying.
+
+    :return: set of str, holding `name`, `file.py::name` and `file.py::Class::name` for each
+    """
+    import ast
+
+    names = set()
+    for path in sorted((REPO_ROOT / "tests").rglob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+                names.update({node.name, f"{path.name}::{node.name}"})
+            elif isinstance(node, ast.ClassDef):
+                for member in node.body:
+                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name.startswith("test_"):
+                        names.update(
+                            {
+                                member.name,
+                                f"{path.name}::{member.name}",
+                                f"{path.name}::{node.name}::{member.name}",
+                            }
+                        )
+    return names
+
+
+def test_every_named_guard_exists():
+    """A test named in the documentation must still be a test, or the reference is worse than none.
+
+    `AGENTS.md` omits an invariant that CI already guarantees and names the guard where the
+    invariant would have been, so that deleting the guard leaves a reference to something that
+    no longer exists rather than silence. That only works while the reference resolves: a
+    renamed test turns the pointer back into the silence it was meant to replace, and does it
+    invisibly, because a wrong name reads exactly like a right one.
+
+    Bare names are accepted as well as qualified ones because prose reads better naming a test
+    once and its file once, and a bare name is no less checkable - the set holds both forms.
+    """
+    referenced = {}
+    for relative in sorted(p.relative_to(REPO_ROOT) for p in _tracked_files() if p.suffix == ".md"):
+        text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        pattern = r"`(?:[\w/]+/)?([A-Za-z_][A-Za-z0-9_]*\.py(?:::[A-Za-z_][A-Za-z0-9_]*)+|test_[a-z0-9_]+)`"
+        for match in re.finditer(pattern, text):
+            token = match.group(1)
+            # A bare `test_foo.py` names a file, not a test. Only a ::-qualified path or a bare
+            # test_ function name claims that a specific test exists, which is what this checks.
+            # Any directory prefix is dropped by the pattern, so `tests/test_x.py::test_y` and
+            # `test_x.py::test_y` are the same claim - prose uses both and neither is wrong.
+            if token.endswith(".py"):
+                continue
+            referenced.setdefault(token, str(relative))
+
+    known = _defined_tests()
+    missing = sorted(f"{relative} names `{token}`" for token, relative in referenced.items() if token not in known)
+    assert referenced, "found no test references in any tracked document - the scan is not working"
+    assert not missing, (
+        "these documents name a test that does not exist, so the reference resolves to nothing "
+        "and the invariant it stands in for is now guarded by neither:\n  " + "\n  ".join(missing)
+    )

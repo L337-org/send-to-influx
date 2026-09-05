@@ -436,6 +436,15 @@ class TestPerLockPoints:
         ],
     )
     def test_the_shape_discriminator(self, payload, per_device):
+        """Per-device is decided by every value being a mapping, not by whether data was given.
+
+        A lock carries a dict of fields; a heartbeat field never does. The discriminator first
+        asked whether `data` was passed at all, which is true of both - so a heartbeat took the
+        per-device branch, was written under a lock's header, and Nuki emitted no heartbeat at
+        all. Nothing failed and nothing logged; the series simply stopped appearing.
+
+        The mixed payload at the end is produced by no code path today. It is here to pin the
+        direction the discriminator falls in if one ever appears."""
         from toinflux.nuki import _is_per_device
 
         assert _is_per_device(payload) is per_device
