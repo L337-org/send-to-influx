@@ -208,10 +208,8 @@ def _resolve_hue_target(handlers, device, bridge):
     Raises:
         ToolParamError: unknown bridge, unknown device, an ambiguous device, or a bridge that could not be reached while
             arbitrating across several
-        SourceConnectionError: the bridge named in ``bridge`` is unreachable, or the only configured bridge is
-
-    Raises:
-        ToolParamError: the named light is unknown, ambiguous, or on no configured bridge
+        SourceConnectionError: the bridge named in ``bridge`` is unreachable, or the only configured bridge
+            is unreachable
     """
     if not isinstance(device, str) or not device.strip():
         raise ToolParamError(f"device must be a non-empty light id or name (got {device!r})")

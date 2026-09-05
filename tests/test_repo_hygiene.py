@@ -504,6 +504,37 @@ def test_the_docstring_exemption_matches_the_decorators_in_use():
     )
 
 
+def test_no_docstring_repeats_a_section_header():
+    """No docstring carries the same Google section header twice.
+
+    A second ``Raises:`` is not a style nit: pydocstyle and pydoclint both read the first
+    section and stop, so the duplicate is invisible to every check while a human reader sees
+    two contradictory lists. Both instances this catches were introduced by a script that
+    appended a section without noticing the docstring already had one, and were found in
+    review rather than by CI - which is what this test is here to change.
+    """
+    import ast
+
+    duplicated = []
+    for path in sorted(REPO_ROOT.glob("toinflux/*.py")) + sorted(REPO_ROOT.glob("scripts/*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            docstring = ast.get_docstring(node) or ""
+            for section in ("Args", "Returns", "Raises", "Yields", "Attributes"):
+                count = len(re.findall(rf"^\s*{section}:\s*$", docstring, re.MULTILINE))
+                if count > 1:
+                    name = getattr(node, "name", "<module>")
+                    duplicated.append(f"{path.name}:{getattr(node, 'lineno', 0)} {name}: {count}x '{section}:'")
+
+    assert (
+        not duplicated
+    ), "these docstrings repeat a section header, so everything after the first is ignored:\n  " + "\n  ".join(
+        duplicated
+    )
+
+
 def _module_constant(relative, name):
     """The value of a module-level constant, read without importing the module.
 
