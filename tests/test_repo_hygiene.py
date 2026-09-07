@@ -565,7 +565,7 @@ def _every_python_file():
     tracked = {
         path for path in _tracked_files() if path.suffix == ".py" and path.relative_to(REPO_ROOT).parts[0] in roots
     }
-    return sorted(tracked | {Path(__file__)})
+    return sorted(tracked | {Path(__file__).resolve()})
 
 
 def test_no_docstring_uses_the_reStructuredText_field_syntax():
