@@ -562,12 +562,13 @@ def _every_python_file():
     docstrings were part of the conversion these guards protect.
 
     Returns:
-        list: tracked .py paths under toinflux/, scripts/ and tests/, sorted
+        list: every tracked .py path, sorted
     """
-    roots = ("toinflux", "scripts", "tests")
-    tracked = {
-        path for path in _tracked_files() if path.suffix == ".py" and path.relative_to(REPO_ROOT).parts[0] in roots
-    }
+    # Every tracked .py, not an allow-list of directories. The allow-list named toinflux/,
+    # scripts/ and tests/ and so left sendtoinflux.py - the entry point, and the largest single
+    # module - outside all three docstring guards, which is how four untyped Returns entries
+    # survived in it. A guard with a directory allow-list has a blind spot by construction.
+    tracked = {path for path in _tracked_files() if path.suffix == ".py"}
     return sorted(tracked | {Path(__file__).resolve()})
 
 

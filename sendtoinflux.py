@@ -200,7 +200,7 @@ class _StreamSink:
         if self.on_activity is not None:
             self.on_activity()
 
-    def on_message(self, topic, payload):
+    def on_message(self, topic, payload) -> None:
         """Write the point for one arriving message immediately.
 
         This is the interrupt path. It also notes that the stream showed life this
@@ -210,9 +210,6 @@ class _StreamSink:
         Args:
             topic (str): the MQTT topic the message arrived on
             payload (str): the message body, already UTF-8 decoded by the transport
-
-        Returns:
-            nothing; the point is written as a side effect
         """
         data = self.data_handler.decode_stream_message(topic, payload)
         if not data:
@@ -271,7 +268,7 @@ class _StreamSink:
         self._stamp_activity()
 
 
-def send_heartbeat(data_handler, source, ok, consecutive_failures):
+def send_heartbeat(data_handler, source, ok, consecutive_failures) -> None:
     """Write a ``collector_status`` point via the source's own DataHandler.
 
     A dead collector then shows up as ``ok=0`` in Grafana instead of a silent gap.
@@ -295,8 +292,6 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures):
         ok (bool): whether the most recent collection cycle succeeded
         consecutive_failures (int): current failure streak for this source
 
-    Returns:
-        nothing; the point is written as a side effect
     """
     if data_handler is None:
         return
@@ -550,7 +545,7 @@ def _configure_logging_or_exit(settings, args):
         sys.exit(1)
 
 
-def register_thread_dump_handler():
+def register_thread_dump_handler() -> None:
     """Register a SIGUSR1 handler that dumps every thread's live stack trace.
 
     Written to stderr, which the journal captures under systemd.
@@ -564,9 +559,6 @@ def register_thread_dump_handler():
     embedding context (e.g. a captured/wrapped stream, as under pytest) -
     degrade to a warning rather than taking the whole process down over an
     optional diagnostic.
-
-    Returns:
-        nothing; the handler is installed as a side effect
     """
     if not hasattr(signal, "SIGUSR1"):
         logging.debug("SIGUSR1 is not available on this platform; skipping thread-dump handler registration")
@@ -577,7 +569,7 @@ def register_thread_dump_handler():
         logging.warning("Could not register SIGUSR1 thread-dump handler: %s", exc)
 
 
-def _exit_if_nothing_to_collect(units, requested, settings, args):
+def _exit_if_nothing_to_collect(units, requested, settings, args) -> None:
     """Stop with a clear message when there is nothing to collect.
 
     Two distinct causes land here, logged distinctly so the journal makes clear which one
@@ -605,9 +597,6 @@ def _exit_if_nothing_to_collect(units, requested, settings, args):
         requested (list): the source names that were asked for
         settings (dict): parsed settings dictionary
         args (argparse.Namespace): parsed CLI arguments, for the settings path used in log labels
-
-    Returns:
-        None - exits the process when there is nothing to run
     """
     if units:
         return
@@ -857,7 +846,7 @@ def _dump_source_and_exit(units, args):
     sys.exit(2 if failed else 0)
 
 
-def run_one_worker(unit, args):
+def run_one_worker(unit, args) -> None:
     """Run a single work unit on this thread, in either print or send mode.
 
     Used when exactly one worker is needed, which keeps the streaming path's clean
@@ -868,9 +857,6 @@ def run_one_worker(unit, args):
     Args:
         unit (tuple): the ``(source, instance)`` work unit to run
         args (argparse.Namespace): parsed CLI arguments
-
-    Returns:
-        nothing; the worker runs until it stops or the process exits
     """
     source, instance = unit
     label = worker_label(source, instance)
@@ -981,7 +967,7 @@ def _stall_threshold_seconds(source, settings):
         settings (dict or None): parsed settings dict, or None
 
     Returns:
-        int or float
+        int or float: how long a worker may go without progress before it is reported stalled
     """
     interval = ((settings or {}).get(source) or {}).get("interval")
     if (
