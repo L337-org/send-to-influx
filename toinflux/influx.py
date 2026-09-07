@@ -61,6 +61,13 @@ def _is_point_rejection(status_code):
     A 4xx other than the transient 408/429, as opposed to a connection failure (None), a
     server-side error (5xx), or a rate-limit or timeout condition that says nothing about
     the point's validity.
+
+    Args:
+        status_code (int or None): the HTTP status the write returned, or None if the
+            connection failed before one arrived
+
+    Returns:
+        bool: True when the payload itself was rejected
     """
     return status_code is not None and 400 <= status_code < 500 and status_code not in TRANSIENT_CLIENT_ERRORS
 
@@ -76,7 +83,7 @@ def _format_field_value(value):
     these fields established as float.
 
     Args:
-        value: field value to format
+        value (bool, str, int or float): field value to format
 
     Returns:
         str: line protocol representation of the value
@@ -107,7 +114,7 @@ def escape_key_or_tag_value(value):
     backstop that makes it impossible to reach a write by any route, present and future.
 
     Args:
-        value: key or tag value to escape
+        value (str): key or tag value to escape
 
     Returns:
         str: escaped line protocol representation
@@ -146,7 +153,7 @@ def worker_label(source, instance=None):
 
     Args:
         source (str): source name
-        instance: the worker's instance, or None for a single-target source
+        instance (str or None): the worker's instance, or None for a single-target source
 
     Returns:
         str: label for log output
@@ -157,7 +164,32 @@ def worker_label(source, instance=None):
 
 
 class DataHandler:
-    """Class to send data to InfluxDB."""
+    """Class to send data to InfluxDB.
+
+    The base every collector subclasses. Each attribute below is a default a subclass
+    overrides only where it differs; the comment beside each declaration says why it exists,
+    and these entries say what it means and what the default is.
+
+    Attributes:
+        STREAMING (bool): False - whether this source is event-driven over a held-open
+            connection rather than polled on a timer. A property of the transport.
+        MCP_MEASUREMENT (str or None): None, meaning the measurement is the source's own
+            name. Set where they differ, or where sources share one measurement.
+        MCP_TAG_FILTERS (dict): empty - tag key/value filters that pick this source out of a
+            measurement several sources write to.
+        MCP_FIELD_METADATA (dict): empty - per-field unit, coded values, aggregation kind and
+            description for the read tools. See the comment below for the accepted keys.
+        MCP_DESCRIPTION (str): empty - the one-line description this source advertises to an
+            MCP client.
+        MCP_LIVE_STATE (bool): True - whether a current-state read may call ``get_data()``
+            live. False where a live read is expensive or no fresher than InfluxDB.
+        MCP_WRITABLE (bool): False - whether this source offers a write action at all. The
+            operator still has to opt in per source; see ``mcp_write_enabled()``.
+        MCP_INSTANCE_TAG (str or None): None for a single-target source - the tag naming which
+            instance produced a point, where one source has several.
+        MCP_LIVE_STATE_COVERS_ALL_INSTANCES (bool): False - whether one live read returns every
+            instance, rather than needing one read per instance.
+    """
 
     # Whether this source is event-driven over a held-open connection rather than
     # polled on a timer. False for every HTTP/API source (they have no persistent
@@ -313,6 +345,9 @@ class DataHandler:
         Opting in means ``<source>.mcp_read_write: true``, tested with a strict ``is
         True`` so a stray truthy string like ``"true"`` does not silently enable device
         control. The default is off - writes are opt-in per source.
+
+        Returns:
+            bool: True when this source is writable and the operator has opted in
         """
         return self.MCP_WRITABLE and self.source_settings.get("mcp_read_write", False) is True
 
@@ -499,7 +534,7 @@ class DataHandler:
         that exists purely to drain the backlog logs at DEBUG.
 
         Args:
-            data: whatever the caller supplied (or self.data resolved to)
+            data (dict or None): whatever the caller supplied (or self.data resolved to)
             use_buffer (bool): the send_data() call's use_buffer flag
 
         Returns:

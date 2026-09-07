@@ -165,10 +165,10 @@ def value_mappings(codes):
     strings because that is what Grafana writes, and ``index`` fixes the legend order.
 
     Args:
-        codes: the field's ``{int: str}`` code map
+        codes (dict or None): the field's ``{int: str}`` code map
 
     Returns:
-        the mappings list, or an empty list when there are no codes
+        list: the mappings, empty when there are no codes
     """
     if not codes:
         return []
@@ -186,10 +186,10 @@ def series_tags(schema):
     axes with several members - are grouped.
 
     Args:
-        schema: the source's ReadSchema
+        schema (ReadSchema): the source's schema
 
     Returns:
-        sorted list of tag keys
+        list: tag keys, sorted
     """
     return sorted(set(schema.tag_keys) - set(schema.tag_filters))
 
@@ -209,11 +209,11 @@ def _alias(field, tags):
     looking verified. It is reachable only by a measurement growing a second free tag.
 
     Args:
-        field: the field being charted, the fallback name for a single series
-        tags: the tag keys being grouped by
+        field (str): the field being charted, the fallback name for a single series
+        tags (list): the tag keys being grouped by
 
     Returns:
-        the alias expression
+        str: the alias expression
     """
     if not tags:
         return field
@@ -226,12 +226,12 @@ def panel_spec(schema, field, tags):
     Covers its query, type, aggregation, unit and value mappings.
 
     Args:
-        schema: the source's ReadSchema
-        field: the field key
-        tags: tag keys to separate into series (see :func:`series_tags`)
+        schema (ReadSchema): the source's schema
+        field (str): the field key
+        tags (list): tag keys to separate into series (see ``series_tags``)
 
     Returns:
-        the panel spec dict
+        dict: the panel spec
     """
     meta = schema.metadata_for(field)
     kind = field_kind(meta, schema.field_types.get(field))
@@ -260,13 +260,14 @@ def suggest_panels_result(source, settings, settings_file, fields=None):
     """Build the suggest_dashboard_panels payload (runs in a worker thread).
 
     Args:
-        source: source name from a tool argument
-        settings: parsed settings dict
-        settings_file: settings path, threaded to the handler's own load
-        fields: field keys to describe, or None for every recorded field
+        source (str): source name from a tool argument
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to the handler's own load
+        fields (list or None): field keys to describe, or None for every recorded field
 
     Returns:
-        dict payload
+        dict: the ``suggest_dashboard_panels`` payload - source, database, measurement,
+            datasource type, the series tags, and one panel spec per requested field
 
     Raises:
         ToolParamError: unknown source, or a field the source has not recorded
@@ -298,9 +299,9 @@ def register_dashboard_tools(server, settings, settings_file=None):
     """Register the dashboard-suggestion tool on a MCPServer server.
 
     Args:
-        server: the MCPServer instance
-        settings: the parsed settings dict
-        settings_file: settings path, for re-resolving handlers per call
+        server (MCPServer): the server to register the tool on
+        settings (dict): the parsed settings dict
+        settings_file (str or None): settings path, for re-resolving handlers per call
     """
     import anyio
 
