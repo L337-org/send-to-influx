@@ -131,11 +131,13 @@ def get_class(source, settings_file=None, instance=None):
     Args:
         source (str): data source name
         settings_file (str or None): path to the settings file (default: settings.yaml in the project root)
-        instance: which instance of the source this handler serves, for a source that can have several targets behind
-            one settings block - Hue, whose instance is a bridge host, and each MyEnergi type, whose instance is a
-            device label. ``None`` - the default, and what every caller that does not care about instances passes -
-            means the source's single target, or the first configured bridge or device, which is what keeps
-            single-target installs and the MCP tools behaving exactly as they did before instances existed.
+        instance (str or None): which instance of the source this handler serves, for a source
+            that can have several targets behind one settings block - Hue, whose instance is a
+            bridge host, and each MyEnergi type, whose instance is a device label. ``None`` -
+            the default, and what every caller that does not care about instances passes -
+            means the source's single target, or the first configured bridge or device, which
+            is what keeps single-target installs and the MCP tools behaving exactly as they did
+            before instances existed.
 
     Returns:
         DataHandler: a constructed handler for the source
@@ -488,6 +490,15 @@ def _validate_hue_bridges(settings, sources):
     because ``validate_settings()`` runs inside ``load_settings()`` and therefore on
     every ``DataHandler`` construction - logging from here would repeat the same line per
     source at startup and again on every failure-triggered rebuild.
+
+    Args:
+        settings (dict): the whole parsed settings document
+        sources (list): the source names being validated; the hue block is checked only if
+            hue is among them
+
+    Returns:
+        tuple: ``(errors, warnings)`` - errors are self-contradictory configuration, warnings
+            an unusable bridge the caller may choose not to surface
     """
     # Absent section: _validate_source_block already reports "no configuration section
     # found for source 'hue'", which is both accurate and sufficient. Enumerating a
@@ -513,6 +524,14 @@ def _validate_mqtt_block(settings, sources):
 
     The block is required if, and only if, an MQTT-based source is among the sources
     being validated.
+
+    Args:
+        settings (dict): the whole parsed settings document
+        sources (list): the source names being validated; the block is required if and only if
+            an MQTT-based source is among them
+
+    Returns:
+        list: error strings, empty when the block is usable
     """
     mqtt_sources = sorted(str(src) for src in sources if src in MQTT_SOURCES)
     if not mqtt_sources:
@@ -564,6 +583,14 @@ def _split_bind_address(value, original):
 
     Raises:
         ConfigError: if the shape is not one of those two forms
+
+    Args:
+        value (str): the bind address to split
+        original (str): the value as the operator wrote it, quoted back in the error so the
+            message names what they typed rather than a normalised form
+
+    Returns:
+        tuple: ``(host, port_text)``, both unvalidated strings
     """
     if value.startswith("["):
         closing = value.find("]")
@@ -628,6 +655,10 @@ def _reject_public_bind_host(host, bind_address):
 
     Raises:
         ConfigError: for an any-interface or globally-routable bind host
+
+    Args:
+        host (str): the host part of the bind address, already split out
+        bind_address (str): the whole configured value, for the error message
     """
     if host in MCP_DISALLOWED_BIND_HOSTS:
         raise ConfigError(
@@ -712,6 +743,12 @@ def _mcp_enabled_block_errors(mcp):
     """Return the error strings that only apply once the MCP server is enabled.
 
     A usable public_url, and a parseable, non-public bind_address.
+
+    Args:
+        mcp (dict): the ``mcp`` settings block
+
+    Returns:
+        list: error strings, empty when the block is usable
     """
     errors = []
     public_url = mcp.get("public_url")
@@ -752,7 +789,14 @@ def _mcp_enabled_block_errors(mcp):
 
 
 def _validate_influx_block(influx):
-    """Return a list of error strings for the influx configuration block."""
+    """Return a list of error strings for the influx configuration block.
+
+    Args:
+        influx (dict): the ``influx`` settings block
+
+    Returns:
+        list: error strings, empty when the block is usable
+    """
     errors = []
     if not influx.get("url"):
         errors.append("influx.url is required")
@@ -817,6 +861,9 @@ def _validate_source_block(source, settings, is_v2):
         is_v2 (bool): whether the influx block is configured for v2 (token) auth - v2's send_data() accepts either db or
             bucket (falling back from bucket to db), but v1's send_data() reads source_settings["db"] directly with no
             fallback, so a v1 config needs db specifically, not just "db or bucket"
+
+    Returns:
+        list: error strings for that section, empty when it is usable
     """
     if not source:
         return []
