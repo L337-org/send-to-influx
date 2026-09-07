@@ -177,7 +177,7 @@ def line_protocol_value(field, value):
 
     Args:
         field (str): the bare field name, to decide whether it must stay text
-        value: the value as InfluxDB returned it
+        value (bool, str, int or float): the value as InfluxDB returned it
 
     Returns:
         str: the line protocol representation
@@ -195,6 +195,12 @@ def escape_tag(value):
 
     Raises:
         MigrationError: the value contains a newline, which separates points and so cannot appear in a tag
+
+    Args:
+        value (str): the tag value to escape
+
+    Returns:
+        str: the value, escaped for line protocol
     """
     if any(char in value for char in (chr(10), chr(13))):
         raise MigrationError(
@@ -347,6 +353,9 @@ class Influx:
 
         Raises:
             MigrationError: InfluxDB rejected the write, or could not be reached
+
+        Args:
+            lines (list): the line-protocol points to write
         """
         if not lines:
             return
@@ -371,6 +380,12 @@ def old_series_hosts(influx):
     series distinguished by their tags - and the old ones can be dropped by naming that tag,
     leaving the migration's own output untouched. Without this the only available delete would
     be measurement-wide, which would destroy the migrated points along with the history.
+
+    Args:
+        influx (Influx): the connection wrapper for the database being migrated
+
+    Returns:
+        list: the hosts that wrote the old series, sorted
     """
     _, values = influx.query(f'SHOW TAG VALUES FROM "{MEASUREMENT}" WITH KEY = "host"')
     return sorted({row[1] for row in values if len(row) > 1 and isinstance(row[1], str)})
@@ -382,6 +397,12 @@ def old_field_keys(influx):
     A key with no underscore cannot be an old prefixed key, so the bare keys the new
     collector writes are left alone - which is what makes a second run a no-op rather than a
     re-migration.
+
+    Args:
+        influx (Influx): the connection wrapper for the database being migrated
+
+    Returns:
+        list: the old per-lock field keys, sorted
     """
     _, values = influx.query(f'SHOW FIELD KEYS FROM "{MEASUREMENT}"')
     return sorted({row[0] for row in values if row and isinstance(row[0], str) and "_" in row[0]})
@@ -393,6 +414,13 @@ def read_old_points(influx, keys):
     Selects the old keys explicitly rather than ``*`` so a point that also carries new bare
     keys - possible once the new collector has started writing - contributes only its old
     half, and the new half is not rewritten on top of itself.
+
+    Args:
+        influx (Influx): the connection wrapper for the database being migrated
+        keys (list): the old field keys to read
+
+    Returns:
+        list: the points read, ready to be rewritten
     """
     selected = ", ".join(f'"{escape_influxql_identifier(key)}"' for key in keys)
     columns, values = influx.query(f'SELECT {selected} FROM "{MEASUREMENT}"')
@@ -513,7 +541,7 @@ def _write_all(influx, points, counts, keys_by_label):
     manifest is produced, and phase 2 refuses to run without one.
 
     Args:
-        influx: the connection to write through
+        influx (Influx): the connection to write through
         points (dict): the old points that were read
         counts (collections.Counter): per-lock point counter, mutated in place
         keys_by_label (dict): per-lock old field keys, mutated in place
@@ -596,6 +624,13 @@ def phase_rewrite(influx, args):
     Raises:
         MigrationError: the points migrated but the manifest could not be written, leaving the delete phase with nothing
             to drive it
+
+    Args:
+        influx (Influx): the connection wrapper for the database being migrated
+        args (argparse.Namespace): the parsed command-line options
+
+    Returns:
+        int: the process exit status - 0 on success
     """
     keys = old_field_keys(influx)
     if not keys:
@@ -663,7 +698,7 @@ def _v2_delete_help(hosts, args):
 
     Args:
         hosts (list): the old host tag values recorded in the manifest
-        args: the parsed arguments, for the url and database
+        args (argparse.Namespace): the parsed arguments, for the url and database
 
     Returns:
         str: the message body
@@ -714,9 +749,9 @@ def _drop_old_series(influx, hosts, args):
     with the history it was preserving.
 
     Args:
-        influx: the connection to delete through
+        influx (Influx): the connection to delete through
         hosts (list): the old host tag values recorded in the manifest
-        args: the parsed arguments, for the remedy text on v2
+        args (argparse.Namespace): the parsed arguments, for the remedy text on v2
 
     Raises:
         MigrationError: the delete failed, or the target is v2 - in which case the message is the request that does
@@ -744,6 +779,13 @@ def phase_delete(influx, args):
 
     Raises:
         MigrationError: the manifest is unreadable, names a different database, or lists no series to drop
+
+    Args:
+        influx (Influx): the connection wrapper for the database being migrated
+        args (argparse.Namespace): the parsed command-line options
+
+    Returns:
+        int: the process exit status - 0 on success, 1 when the delete was refused
     """
     try:
         with open(args.manifest, encoding="utf-8") as handle:
@@ -789,6 +831,12 @@ def read_credential(args):
 
     Never from settings.yaml, on any install type - see the module docstring. Accepts
     ``user:password`` for v1 or a bare token for v2.
+
+    Args:
+        args (argparse.Namespace): the parsed command-line options
+
+    Returns:
+        str or None: the credential, or None when none is needed
     """
     if args.no_auth:
         return None
@@ -798,7 +846,14 @@ def read_credential(args):
 
 
 def main(argv=None):
-    """Parse arguments and run the requested phase."""
+    """Parse arguments and run the requested phase.
+
+    Args:
+        argv (list or None): the command-line arguments, or None to read sys.argv
+
+    Returns:
+        int: the process exit status
+    """
     parser = argparse.ArgumentParser(
         description="Migrate pre-5.3 Nuki data to the per-lock device tag. Read UPGRADING.md first.",
     )
