@@ -274,50 +274,23 @@ Each has been raised before and declined with reasons recorded.
 
 ## Docstrings
 
-**Google style** - `Args:` and `Returns:` sections, capitalised, with the type in the entry
-because this code carries no annotations. `flake8-docstrings` enforces it, and the convention
-and the exemptions live in `tox.ini`. There is no second dialect: the Sphinx `:param:` /
-`:return:` form this code used to carry is gone.
+**Google style**, with the type in each `Args:` and `Returns:` entry, because this code carries
+no annotations. The convention and its exemptions live in `tox.ini`. No Sphinx `:param:` form.
 
-**No pydocstyle rule is ignored**, so nothing is parked there. Two things are exempt by name
-rather than by rule, both covered below: tool docstrings, and tests.
+- A procedure needs `-> None` on its signature, not `Returns: None`. A bare `return` counts as
+  returning something to pydoclint; the annotation is what stops it asking.
+- **Tool docstrings are exempt and must stay exempt** (CS.6.14): the docstring is the advertised
+  description and the schema beside it already carries the types. That takes two mechanisms -
+  `ignore-decorators` for the `D` codes, a per-tool `# noqa` for the `DOC` codes - because
+  pydoclint has no decorator exemption. `tests/test_repo_hygiene.py` asserts both; do not remove
+  a marker to make a run green.
+- Prompts and resources are **not** exempt: both pass `description=` at registration, so their
+  docstrings reach no client.
+- Tests are exempt: a test's name is its documentation.
 
-**`pydoclint` answers the question pydocstyle cannot**: does the docstring agree with the
-signature? D417 only checks the parameters of a section a docstring already has, so a function
-documenting none of its parameters passes it, silently, in every dialect this repository has
-used. `pydoclint` runs as a flake8 plugin in the same job.
+pydoclint runs in the flake8 job because D417 only checks the parameters of a section a
+docstring already has, so a function documenting none of them passes pydocstyle clean.
 
-**There is no docstring backlog.** Every `DOC` code is enforced except `DOC502` and `DOC503`,
-and those two are a decision rather than deferred work: this package documents what a caller can
-catch, which includes what its callees raise, and `pydoclint` only sees exceptions constructed
-literally in the body. `tox.ini` says the same beside the setting.
-
-One of its judgements is worth knowing before it surprises you, because it is finer than
-"document what you return": a **bare `return`** counts as returning something, so a procedure
-using one as a guard clause trips DOC201 even though it returns nothing. Writing
-`Returns: None` is not the answer - that is what `Returns:` sections were deliberately stripped
-of. **Annotate the signature `-> None` instead**, and `pydoclint` stops asking. A function with
-no `return` statement at all needs neither.
-
-**Tool docstrings are exempt, and must stay exempt.** A tool's docstring *is* its advertised
-description, and the schema beside it already carries every parameter's type - so CS.6.14 hands
-it to the AI-consumer rules instead, where D417 would otherwise demand an `Args:` block
-duplicating the schema on every session that loads the surface.
-
-That takes two mechanisms, because `pydoclint` has no decorator-based exemption at all.
-`ignore-decorators` in `tox.ini` is a `flake8-docstrings` option and covers only the `D` codes;
-the `DOC` half is a `# noqa` marker on each tool naming the codes that apply to it. Two tests
-hold both halves, so neither can quietly stop meaning anything:
-`tests/test_repo_hygiene.py::test_the_docstring_exemption_matches_the_decorators_in_use` and
-`::test_every_tool_with_signature_hints_is_exempted_from_doc108`.
-
-**Prompts and resources are not exempt.** Both pass `description=` explicitly at registration,
-so their docstrings reach no client at all and there is nothing to trade off. They follow the
-ordinary convention, and the same guard fails if either is added back to the pattern.
-
-Tests are exempt too: a test's name is its documentation.
-
-<!-- BEGIN GENERATED -->
 ## Read these when they apply
 
 - Read `.agents/policy/review-context.md` always - these apply to every activity.
