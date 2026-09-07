@@ -67,6 +67,13 @@ class MqttDataHandler(DataHandler):
     on to take that path (``stream_source_data``) instead of the poll-then-sleep loop;
     it's a property of the transport, not a per-source option (there's no reason a
     subscribed source would not want it, and no compatibility reason to make it optional).
+
+    Attributes:
+        STREAMING (bool): True for every MQTT source - the flag the worker branches on to
+            hold the subscription open rather than poll on a timer.
+        STREAM_TOPIC_FILTER (str or None): the topic filter a streaming subclass subscribes
+            to. None here, because only a concrete source knows its own topics; the worker
+            refuses to stream a source that has not set it.
     """
 
     STREAMING = True
@@ -402,8 +409,8 @@ class MqttDataHandler(DataHandler):
 
         Args:
             mqtt_settings (dict): the shared ``mqtt`` settings block
-            host: broker host (for logging on an unexpected disconnect)
-            port: broker port (for logging on an unexpected disconnect)
+            host (str): broker host (for logging on an unexpected disconnect)
+            port (int): broker port (for logging on an unexpected disconnect)
             topic_filter (str): filter the on_connect callback (re)subscribes to
             message_queue (queue.Queue): queue the message callback puts (topic, payload) onto
 
@@ -473,8 +480,8 @@ class MqttDataHandler(DataHandler):
         completed).
 
         Args:
-            host: broker host (for the error message)
-            port: broker port (for the error message)
+            host (str): broker host (for the error message)
+            port (int): broker port (for the error message)
             failures (list): accumulator the on_connect callback records a rejection into
             connected (list): accumulator the on_connect callback marks on success
 
@@ -501,8 +508,8 @@ class MqttDataHandler(DataHandler):
         which is the failure mode this transport exists to avoid everywhere else.
 
         Args:
-            client: the paho client the callback fired on
-            reason_code: CONNACK reason code
+            client (paho.mqtt.client.Client): the client the callback fired on
+            reason_code (paho.mqtt.reasoncodes.ReasonCode): CONNACK reason code
             topic_filter (str): filter to subscribe to
             failures (list): accumulator for the reason this window cannot proceed
             connected (list): accumulator marking a usable, subscribed connection
@@ -529,11 +536,11 @@ class MqttDataHandler(DataHandler):
         per-interval snapshot still covers the source until the next reconnect succeeds.
 
         Args:
-            client: the paho client the callback fired on
-            reason_code: CONNACK reason code
+            client (paho.mqtt.client.Client): the client the callback fired on
+            reason_code (paho.mqtt.reasoncodes.ReasonCode): CONNACK reason code
             topic_filter (str): filter to re-subscribe to
-            host: broker host, for the log message
-            port: broker port, for the log message
+            host (str): broker host, for the log message
+            port (int): broker port, for the log message
         """
         if reason_code.is_failure:
             logging.warning(
@@ -562,9 +569,9 @@ class MqttDataHandler(DataHandler):
         masking a connection failure as "no data".
 
         Args:
-            host: broker host (for the error message)
-            port: broker port (for the error message)
-            timeout: the collection window length (for the error message)
+            host (str): broker host (for the error message)
+            port (int): broker port (for the error message)
+            timeout (int or float): the collection window length (for the error message)
             failures (list): reasons recorded by on_connect (a rejected CONNACK, or a failed subscribe) - the first is
                 reported verbatim, so the message carries the specific cause rather than a guess at it
             connected (list): truthy entries recorded by on_connect on success

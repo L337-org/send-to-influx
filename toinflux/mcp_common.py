@@ -53,12 +53,12 @@ def register_tool(server, **kwargs):
     ``tests/test_mcp_surface.py`` asserts that nothing bypasses this function.
 
     Args:
-        server: the MCPServer instance
-        kwargs: passed to ``server.tool()`` (title, annotations, ...); a ``description`` given explicitly wins, as it
-            does in the SDK
+        server (MCPServer): the server to register the tool on
+        **kwargs (object): passed to ``server.tool()`` (title, annotations, ...) - heterogeneous,
+            so no single type; a ``description`` given explicitly wins, as it does in the SDK
 
     Returns:
-        a decorator registering the function as a tool
+        collections.abc.Callable: a decorator registering the function it wraps as a tool
     """
 
     def decorator(fn):
@@ -99,12 +99,14 @@ def translate_failures(fn, error_cls):
     to be remembered, and the one time it was not, a whole class of failures went silent.
 
     Args:
-        fn: the tool or resource function, sync or async
-        error_cls: the SDK error to re-raise as - ``ToolError`` for a tool, ``ResourceError`` for a resource; these are
-            the only two types the SDK reads as deliberate rather than as a crash
+        fn (collections.abc.Callable): the tool or resource function, sync or async
+        error_cls (type): the SDK error to re-raise as - ``ToolError`` for a tool,
+            ``ResourceError`` for a resource; these are the only two types the SDK reads as
+            deliberate rather than as a crash
 
     Returns:
-        a wrapper of the same sync/async-ness and signature, which the SDK needs to build the tool's schema and to
+        collections.abc.Callable: a wrapper of the same sync/async-ness and signature, which
+            the SDK needs to build the tool's schema and to
             decide whether to await it, carrying ``TRANSLATES_FAILURES`` so the surface guard can see it
     """
     if inspect.iscoroutinefunction(fn):
@@ -139,10 +141,10 @@ def configured_sources(settings):
     nothing is configured.
 
     Args:
-        settings: parsed settings dict
+        settings (dict): parsed settings dict
 
     Returns:
-        list of lowercased source names
+        list: lowercased source names
     """
     raw = settings.get("sources")
     if isinstance(raw, list):
@@ -166,12 +168,12 @@ def resolve_handlers(source, settings, settings_file):
     through the list still leaves earlier sessions open.
 
     Args:
-        source: source name from a tool argument
-        settings: parsed settings dict
-        settings_file: settings path, threaded to each handler's own load
+        source (str): source name from a tool argument
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
 
     Returns:
-        list of ``(instance, handler)``, instance None for a single-target source
+        list: ``(instance, handler)`` pairs, instance None for a single-target source
 
     Raises:
         ToolParamError: source is missing/non-string, unknown, unusable, or - for an instanced source - has no usable
@@ -210,14 +212,14 @@ def resolve_handler(source, settings, settings_file, instance=None):
     handler's session and must close it (see :func:`close_session`).
 
     Args:
-        source: source name from a tool argument
-        settings: parsed settings dict
-        settings_file: settings path, threaded to the handler's own load
-        instance: which instance of the source to construct for - a Hue bridge host, or None for a single-target source
-            (and, for Hue, the first configured bridge)
+        source (str): source name from a tool argument
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to the handler's own load
+        instance (str or None): which instance of the source to construct for - a Hue bridge
+            host, or None for a single-target source (and, for Hue, the first configured bridge)
 
     Returns:
-        a constructed DataHandler subclass instance
+        DataHandler: a constructed subclass instance for that source
 
     Raises:
         ToolParamError: source is missing/non-string, unknown, unusable, or named an instance that is not configured
@@ -267,7 +269,7 @@ def close_session(session):
     This runs in cleanup paths and must never mask the real result or exception.
 
     Args:
-        session: the handler's requests.Session
+        session (requests.Session): the handler's session
     """
     try:
         session.close()
