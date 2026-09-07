@@ -1,4 +1,4 @@
-"""Functions to get Octopus Energy data ready to send to InfluxDB"""
+"""Functions to get Octopus Energy data ready to send to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -14,7 +14,15 @@ OCTOPUS_BASE_URL = "https://api.octopus.energy/v1"
 
 
 class Octopus(DataHandler):
-    """Child class of DataHandler to get data from Octopus Energy"""
+    """Child class of DataHandler to get data from Octopus Energy.
+
+    Attributes:
+        MCP_DESCRIPTION (str): what this source advertises to an MCP client.
+        MCP_LIVE_STATE (bool): False - readings arrive up to 24 h late, so a live API call is
+            no fresher than InfluxDB and current-state reads the latest recorded point instead.
+        MCP_FIELD_METADATA (dict): units and aggregation kinds for the three fields; both
+            consumption fields are per-interval rather than meter totals.
+    """
 
     MCP_DESCRIPTION = "Octopus Energy smart meter: latest electricity/gas consumption and unit rate."
     # ~24 h delayed, so a live API read is no fresher than InfluxDB - current-state
@@ -44,10 +52,14 @@ class Octopus(DataHandler):
     def _get(self, path):
         """Make an authenticated GET request to the Octopus Energy API.
 
-        :param path: API path relative to the base URL (without leading slash)
-        :type path: str
-        :return: parsed JSON response
-        :rtype: dict
+        Args:
+            path (str): API path relative to the base URL (without leading slash)
+
+        Returns:
+            dict: parsed JSON response
+
+        Raises:
+            SourceConnectionError: the API could not be reached, or answered with an error
         """
         url = f"{OCTOPUS_BASE_URL}/{path}"
         try:
@@ -66,10 +78,14 @@ class Octopus(DataHandler):
     def _parse_interval_start(interval_start):
         """Convert an Octopus API ISO-8601 ``interval_start`` string to unix epoch seconds.
 
-        :param interval_start: ISO-8601 timestamp, e.g. "2026-07-06T10:00:00+01:00", or None
-        :type interval_start: str or None
-        :return: unix epoch seconds, or None if interval_start was not provided
-        :rtype: int or None
+        Args:
+            interval_start (str or None): ISO-8601 timestamp, e.g. "2026-07-06T10:00:00+01:00", or None
+
+        Returns:
+            int or None: unix epoch seconds, or None if interval_start was not provided
+
+        Raises:
+            ValueError: ``interval_start`` was given but is not an ISO-8601 timestamp
         """
         if not interval_start:
             return None
@@ -85,8 +101,19 @@ class Octopus(DataHandler):
         unconverted as ``gas_consumption``. If ``product_code`` and ``tariff_code`` are
         configured in settings, the current electricity unit rate for that tariff is also collected.
 
-        :return: data
-        :rtype: dict
+        Also sets ``self.timestamp`` to the reading's own interval start, so that re-reading the
+        same latest reading overwrites its point rather than adding a duplicate.
+
+        Returns:
+            dict: ``consumption_kwh`` for the most recent half hour, plus ``gas_consumption``
+                and ``unit_rate_p_per_kwh`` when the settings for each are present. A field the
+                API had no result for is absent rather than None.
+
+        Raises:
+            SourceConnectionError: propagated from ``_get`` when the API could not be reached,
+                or answered with an error
+            ValueError: propagated from ``_parse_interval_start`` when the API returned an
+                ``interval_start`` that is not an ISO-8601 timestamp
         """
         self.influx_header = "octopus,source=octopus_energy "
         self.data = {}

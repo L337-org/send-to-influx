@@ -153,6 +153,18 @@ class ReadSchema:
     :data:`FIELD_KINDS`) and ``description`` (str). A key is absent rather than
     empty where a source has nothing to say, so read it with ``.get()`` - a flag
     has no unit, and most fields need no description at all.
+
+    Attributes:
+        source (str): the source name this schema describes.
+        measurement (str): the InfluxDB measurement it writes to.
+        db (str): the database or bucket holding it.
+        tag_filters (dict): tags that pick this source out of a shared measurement.
+        allowed_fields (set): every field the measurement has recorded.
+        field_metadata (dict): per-field unit, codes, kind and description.
+        field_types (dict): per-field InfluxDB type, where the server reports one.
+        tag_keys (set): the tag keys available to group by.
+        instance_tag (str or None): the tag naming which instance produced a point.
+        instance_values (set): the instance values actually recorded.
     """
 
     source: str
@@ -181,6 +193,12 @@ class ReadSchema:
         """Return the metadata dict for a field in this schema.
 
         See the module-level :func:`metadata_for`.
+
+        Args:
+            field (str): the field key to look up
+
+        Returns:
+            dict: the field's metadata, empty when it has none
         """
         return metadata_for(self.field_metadata, field)
 
@@ -195,9 +213,12 @@ def resolve_db(source_settings, influx_settings):
     a stale ``bucket`` left after switching v2->v1 - and picking ``bucket`` in v1
     mode would send reads to a different database than the collectors write to.
 
-    :param source_settings: the source's own settings block
-    :param influx_settings: the ``influx`` block (its ``token`` selects the mode)
-    :return: the db/bucket name (or None if unset)
+    Args:
+        source_settings (dict): the source's own settings block
+        influx_settings (dict): the ``influx`` block (its ``token`` selects the mode)
+
+    Returns:
+        str or None: the db or bucket name, or None when neither is set
     """
     if influx_settings.get("token"):
         return source_settings.get("bucket", source_settings.get("db"))
@@ -217,12 +238,15 @@ def build_schema(handler, discovered, db, instance_values=None):
     simply returns no points (the device tag filter excludes it). Every other
     source owns its measurement, so this only affects the MyEnergi trio.
 
-    :param handler: a constructed DataHandler subclass instance
-    :param discovered: the measurement's keys, from discover_measurement_keys()
-    :param db: the resolved database/bucket name (from resolve_db)
-    :param instance_values: values of the source's instance tag found via
-        discover_tag_values(), or None when it has no instance tag
-    :return: ReadSchema
+    Args:
+        handler (DataHandler): a constructed DataHandler subclass instance
+        discovered (MeasurementKeys): the measurement's keys, from discover_measurement_keys()
+        db (str): the resolved database/bucket name (from resolve_db)
+        instance_values (set or None): values of the source's instance tag found via
+            discover_tag_values(), or None when it has no instance tag
+
+    Returns:
+        ReadSchema: the assembled schema for that handler
     """
     measurement = handler.MCP_MEASUREMENT or handler.source
     return ReadSchema(
@@ -265,9 +289,12 @@ def metadata_for(field_metadata, field):
     path can annotate a source's raw ``get_data()`` fields straight from the
     handler's ``MCP_FIELD_METADATA``, without building an InfluxDB-backed schema.
 
-    :param field_metadata: a source's ``MCP_FIELD_METADATA`` mapping
-    :param field: the field key to look up
-    :return: the metadata dict (``{"unit"...}``/``{"codes"...}``) or ``{}``
+    Args:
+        field_metadata (dict): a source's ``MCP_FIELD_METADATA`` mapping
+        field (str): the field key to look up
+
+    Returns:
+        dict: the field's metadata (``{"unit"...}``/``{"codes"...}``), or ``{}`` when it has none
     """
     if field in field_metadata:
         return field_metadata[field]
@@ -286,9 +313,12 @@ def field_kind(meta, influx_type=None):
     *numeric* field with nothing declared is left unanswered instead of assumed to
     be a gauge.
 
-    :param meta: the field's metadata dict (from :func:`metadata_for`)
-    :param influx_type: the field's InfluxDB type, where discovery reported one
-    :return: one of ``FIELD_KINDS``, or None
+    Args:
+        meta (dict): the field's metadata dict (from :func:`metadata_for`)
+        influx_type (str or None): the field's InfluxDB type, where discovery reported one
+
+    Returns:
+        str or None: one of ``FIELD_KINDS``, or None when the kind is not known
     """
     if meta.get("kind"):
         return meta["kind"]
@@ -304,6 +334,13 @@ def _decode_code(value, codes):
     collector writes every numeric field as a float, so a lock state arrives as
     1.0). A non-integer float (1.5) or a bool is never truncated to a code; it
     gets a null label rather than a wrong one.
+
+    Args:
+        value (object): the raw field value
+        codes (dict or None): the field's ``{int: str}`` code map
+
+    Returns:
+        str or None: the decoded label, or None when there is no code for it
     """
     if isinstance(value, bool):
         return None
@@ -322,7 +359,14 @@ def annotate_rows(schema, field, columns, values):
     passed through with a null label rather than dropped, matching the collector's
     raw-passthrough rule.
 
-    :return: {"field", "unit", "points": [{"time", "value"[, "label"]}], ...}
+    Args:
+        schema (ReadSchema): the source's schema
+        field (str): the field the rows are for
+        columns (list): the result's column names
+        values (list): one list per row
+
+    Returns:
+        dict: ``{"field", "unit", "points": [{"time", "value"[, "label"]}], ...}``
     """
     meta = schema.metadata_for(field)
     codes = meta.get("codes") or {}
@@ -351,10 +395,13 @@ def _annotate_state_field(field_metadata, name, value):
     Reuses the same per-field metadata (unit, coded-value labels) as the history tool.
     An undocumented coded value passes through with a null label.
 
-    :param field_metadata: the source's ``MCP_FIELD_METADATA``
-    :param name: the field key (possibly device-prefixed)
-    :param value: the field's current value
-    :return: the annotated entry dict
+    Args:
+        field_metadata (dict): the source's ``MCP_FIELD_METADATA``
+        name (str): the field key (possibly device-prefixed)
+        value (object): the field's current value
+
+    Returns:
+        dict: the annotated entry
     """
     meta = metadata_for(field_metadata, name)
     entry = {"value": value}
@@ -369,9 +416,15 @@ def _annotate_state_field(field_metadata, name, value):
 def _validate_identifier(value, kind):
     """Return ``value`` if it is a safe InfluxDB identifier, else raise.
 
-    :param value: candidate identifier
-    :param kind: what it is, for the error message (e.g. "field")
-    :raises ToolParamError: if the value isn't a safe identifier
+    Args:
+        value (str): candidate identifier
+        kind (str): what it is, for the error message (e.g. "field")
+
+    Returns:
+        str: the same value, once accepted
+
+    Raises:
+        ToolParamError: if the value isn't a safe identifier
     """
     if not isinstance(value, str) or not value or _CONTROL_CHAR_RE.search(value):
         raise ToolParamError(f"invalid {kind} name: {value!r}")
@@ -379,13 +432,27 @@ def _validate_identifier(value, kind):
 
 
 def _quote_identifier(value):
-    """Double-quote an InfluxDB identifier, escaping backslashes and quotes."""
+    """Double-quote an InfluxDB identifier, escaping backslashes and quotes.
+
+    Args:
+        value (str): the identifier to quote
+
+    Returns:
+        str: the value, double-quoted and escaped for InfluxQL
+    """
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 
 
 def _quote_string_literal(value):
-    """Single-quote an InfluxQL string literal (used for tag values)."""
+    """Single-quote an InfluxQL string literal (used for tag values).
+
+    Args:
+        value (str): the literal to quote
+
+    Returns:
+        str: the value, single-quoted and escaped for InfluxQL
+    """
     escaped = value.replace("\\", "\\\\").replace("'", "\\'")
     return f"'{escaped}'"
 
@@ -397,11 +464,16 @@ def parse_time_bound(value, *, now=None):
     an ISO 8601 / RFC 3339 timestamp. A naive timestamp is assumed UTC. Only the
     parsed value is ever re-emitted into a query, never the raw input string.
 
-    :param value: the time expression
-    :param now: reference time for ``now``/relative offsets (defaults to
-        the current UTC time); injected for testability
-    :return: timezone-aware UTC datetime
-    :raises ToolParamError: if the value can't be parsed
+    Args:
+        value (str or None): the time expression
+        now (datetime.datetime or None): reference time for ``now``/relative offsets (defaults to the current UTC time);
+            injected for testability
+
+    Returns:
+        datetime.datetime: the bound as a timezone-aware UTC datetime
+
+    Raises:
+        ToolParamError: if the value can't be parsed
     """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -428,14 +500,28 @@ def parse_time_bound(value, *, now=None):
 
 
 def _rfc3339(dt):
-    """Format an aware datetime as an RFC3339 string InfluxQL accepts."""
+    """Format an aware datetime as an RFC3339 string InfluxQL accepts.
+
+    Args:
+        dt (datetime.datetime): the moment to render
+
+    Returns:
+        str: the same moment as an RFC 3339 UTC timestamp
+    """
     return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _clamp_limit(limit):
     """Validate and clamp a requested point limit into [1, MAX_RESULT_POINTS].
 
-    :raises ToolParamError: if the value isn't an integer
+    Args:
+        limit (int or None): the requested row limit, or None for the default
+
+    Returns:
+        int: the limit, held between 1 and MAX_RESULT_POINTS
+
+    Raises:
+        ToolParamError: if the value isn't an integer
     """
     try:
         value = int(limit)
@@ -454,21 +540,25 @@ def build_query(
     group_by against the duration grammar. Identifiers are charset-checked and
     double-quoted.
 
-    :param schema: a ReadSchema (measurement, tag filters, allowed fields)
-    :type schema: ReadSchema
-    :param field: the field key to query (must be in schema.allowed_fields)
-    :param start: start time bound (see parse_time_bound)
-    :param end: end time bound (see parse_time_bound)
-    :param aggregation: one of AGGREGATIONS, or "raw" for un-aggregated points
-    :param group_by: GROUP BY time interval (required when aggregating), e.g. "1h"
-    :param limit: maximum points to return (clamped to MAX_RESULT_POINTS). When the
-        query groups by the instance tag this is divided across the known instances,
-        because InfluxDB applies LIMIT per series
-    :param instance: restrict to one value of the source's instance tag; None leaves
-        the query unscoped, which groups by that tag so producers stay distinguishable
-        rather than being merged into one series
-    :return: the InfluxQL query string
-    :raises ToolParamError: on any invalid parameter
+    Args:
+        schema (ReadSchema): a ReadSchema (measurement, tag filters, allowed fields)
+        field (str): the field key to query (must be in schema.allowed_fields)
+        start (str or None): start time bound (see parse_time_bound)
+        end (str or None): end time bound (see parse_time_bound)
+        aggregation (str or None): one of AGGREGATIONS, or "raw" for un-aggregated points
+        group_by (str or None): GROUP BY time interval (required when aggregating), e.g. "1h"
+        limit (int or None): maximum points to return (clamped to MAX_RESULT_POINTS). When
+            the query groups by the instance tag this is divided across the known instances,
+            because InfluxDB applies LIMIT per series
+        instance (str or None): restrict to one value of the source's instance tag; None
+            leaves the query unscoped, which groups by that tag so producers stay
+            distinguishable rather than being merged into one series
+
+    Returns:
+        str: the InfluxQL query
+
+    Raises:
+        ToolParamError: on any invalid parameter
     """
     if field not in schema.allowed_fields:
         raise ToolParamError(
@@ -544,11 +634,19 @@ def _select_and_group(field, aggregation, group_by, instance_clause):
     Extracted from build_query to keep it within the project's complexity limit once
     instance grouping had to compose with time bucketing.
 
-    :param instance_clause: the tag to group by, **already prefixed with a comma and a
-        space** so it can be spliced straight after ``time(...)`` - literally
-        ``, "host"`` - or an empty string when the query does not separate producers
-    :return: (select expression, group-by clause including its leading space)
-    :raises ToolParamError: for an unknown aggregation, or a missing/malformed group_by
+    Args:
+        field (str): the field key to select; already validated against the live allowlist.
+        aggregation (str): the aggregation name, looked up in the fixed map - never interpolated.
+        group_by (str or None): the time bucket width, or None for raw points.
+        instance_clause (str): the tag to group by, **already prefixed with a comma and a space** so it can be spliced
+            straight after ``time(...)`` - literally ``, "host"`` - or an empty string when the query does not separate
+            producers
+
+    Returns:
+        tuple: ``(select expression, group-by clause including its leading space)``
+
+    Raises:
+        ToolParamError: for an unknown aggregation, or a missing/malformed group_by
     """
     if aggregation == "raw":
         # A raw query still needs the tag in a GROUP BY to keep producers apart; there
@@ -588,13 +686,18 @@ def build_panel_query(schema, field, aggregation, group_by_tags=()):
     same charset validation and quoting as every other query, so the injection defence
     cannot drift between the two builders.
 
-    :param schema: a ReadSchema (measurement, tag filters, allowed fields)
-    :param field: the field key (must be in the schema's live allowlist)
-    :param aggregation: one of AGGREGATIONS - never "raw", since a panel bucketed by
-        ``$__interval`` always aggregates
-    :param group_by_tags: tag keys to separate into their own series
-    :return: the InfluxQL query string
-    :raises ToolParamError: for an unknown field or aggregation
+    Args:
+        schema (ReadSchema): a ReadSchema (measurement, tag filters, allowed fields)
+        field (str): the field key (must be in the schema's live allowlist)
+        aggregation (str or None): one of AGGREGATIONS - never "raw", since a panel bucketed
+            by ``$__interval`` always aggregates
+        group_by_tags (list): tag keys to separate into their own series
+
+    Returns:
+        str: the InfluxQL query
+
+    Raises:
+        ToolParamError: for an unknown field or aggregation
     """
     if field not in schema.allowed_fields:
         raise ToolParamError(
@@ -630,15 +733,25 @@ def _build_single_point_query(measurement, tag_filters, fields, order, group_by_
     the value read and the timestamp-only reads.
 
     Selects each field explicitly (not ``*``) so tag columns are excluded, and applies the
-    source's static tag filters. Measurement, field and tag keys are charset-validated and
+    source's static tag filters. ``fields=None`` selects ``*`` instead, for a caller that
+    reads only the timestamp - excluding tag columns protects a *value* read, and no value
+    is read there. Measurement, field and tag keys are charset-validated and
     double-quoted, tag values quoted string literals - the same layered defence as
     build_query. Fields come from key discovery (the live allowlist), never model input.
 
-    :param measurement: the InfluxDB measurement name
-    :param tag_filters: static tag key/value filters (may be empty)
-    :param fields: the field keys to select (non-empty)
-    :param order: ``"DESC"`` for the newest point, ``"ASC"`` for the oldest
-    :return: the InfluxQL query string
+    Args:
+        measurement (str): the InfluxDB measurement name
+        tag_filters (dict): static tag key/value filters (may be empty)
+        fields (list): the field keys to select, or None to select ``*`` for a timestamp-only read
+        order (str): ``"DESC"`` for the newest point, ``"ASC"`` for the oldest
+        group_by_tag (str or None): a tag key to return one point per value of, or None for a
+            single point across the whole measurement
+
+    Returns:
+        str: the InfluxQL query
+
+    Raises:
+        ValueError: ``order`` is neither ``"ASC"`` nor ``"DESC"``
     """
     if order not in ("ASC", "DESC"):
         raise ValueError(f"order must be ASC or DESC, got {order!r}")
@@ -671,10 +784,15 @@ def build_latest_query(measurement, tag_filters, fields, group_by_tag=None):
 
     The current-state read for a non-live source (see MCP_LIVE_STATE).
 
-    :param measurement: the InfluxDB measurement name
-    :param tag_filters: static tag key/value filters (may be empty)
-    :param fields: the field keys to select (non-empty)
-    :return: the InfluxQL query string
+    Args:
+        measurement (str): the InfluxDB measurement name
+        tag_filters (dict): static tag key/value filters (may be empty)
+        fields (list): the field keys to select (non-empty)
+        group_by_tag (str or None): a tag key to return one point per value of, or None for a
+            single point across the whole measurement
+
+    Returns:
+        str: the InfluxQL query
     """
     return _build_single_point_query(measurement, tag_filters, fields, "DESC", group_by_tag)
 
@@ -695,10 +813,15 @@ def build_edge_time_query(measurement, tag_filters, order, group_by_tag=None):
     no need of the width. Tag columns coming back in the row are harmless when no value is
     read from it.
 
-    :param measurement: the InfluxDB measurement name
-    :param tag_filters: static tag key/value filters (may be empty)
-    :param order: ``"ASC"`` for the oldest point, ``"DESC"`` for the newest
-    :return: the InfluxQL query string
+    Args:
+        measurement (str): the InfluxDB measurement name
+        tag_filters (dict): static tag key/value filters (may be empty)
+        order (str): ``"ASC"`` for the oldest point, ``"DESC"`` for the newest
+        group_by_tag (str or None): a tag key to return one point per value of, or None for a
+            single point across the whole measurement
+
+    Returns:
+        str: the InfluxQL query
     """
     return _build_single_point_query(measurement, tag_filters, None, order, group_by_tag)
 
@@ -710,10 +833,13 @@ def _influx_read_request(influx_settings, db, query):
     compatibility endpoint (Token header), else v1 /query with HTTP basic auth.
     ``epoch=s`` returns numeric unix timestamps rather than RFC3339 strings.
 
-    :param influx_settings: the ``influx`` settings block
-    :param db: the database/bucket name to query
-    :param query: the InfluxQL query string
-    :return: (url, requests kwargs)
+    Args:
+        influx_settings (dict): the ``influx`` settings block
+        db (str): the database/bucket name to query
+        query (str): the InfluxQL query string
+
+    Returns:
+        tuple: ``(url, requests kwargs)``
     """
     timeout = influx_settings.get("timeout", 5)
     params = {"db": db, "q": query, "epoch": "s"}
@@ -737,6 +863,18 @@ def _get(session, url, kwargs, description):
     """Issue a GET and return parsed JSON.
 
     Maps failures to SourceConnectionError with a message naming what was attempted.
+
+    Args:
+        session (requests.Session): the handler's session
+        url (str): the read endpoint to call
+        kwargs (dict): extra requests kwargs (auth, headers, verify, timeout)
+        description (str): what was being read, for the error message
+
+    Returns:
+        dict: the parsed JSON response
+
+    Raises:
+        SourceConnectionError: the InfluxDB query could not be issued or returned unusable JSON
     """
     try:
         with warnings.catch_warnings():
@@ -778,6 +916,10 @@ class MeasurementKeys:
     one tag a source declares as its instance axis was reachable before; the rest
     (a MyEnergi ``device``, a Nuki lock) existed in the data and nowhere in the
     schema a caller could see.
+
+    Attributes:
+        field_types (dict): field key to InfluxDB type, as reported by SHOW FIELD KEYS.
+        tag_keys (frozenset): the measurement's tag keys.
     """
 
     field_types: dict
@@ -804,10 +946,15 @@ def _statement_results(payload, description):
     ``statement_id`` is present on both versions; positional order is the fallback
     so a response without it degrades to the same reading rather than to nothing.
 
-    :param payload: the parsed response body
-    :param description: what was being discovered, for the error message
-    :return: {statement id: list of series dicts}
-    :raises SourceConnectionError: if any statement reported an error
+    Args:
+        payload (dict): the parsed response body
+        description (str): what was being discovered, for the error message
+
+    Returns:
+        dict: statement id to its list of series dicts
+
+    Raises:
+        SourceConnectionError: if any statement reported an error
     """
     out = {}
     for index, result in enumerate(payload.get("results", [])):
@@ -817,17 +964,20 @@ def _statement_results(payload, description):
     return out
 
 
-def _key_column(all_series, column):
+def _key_column(all_series, column):  # noqa: DOC403 - a generator, but unannotated
     """Yield each row's value from a named column across a statement's series.
 
     Skips a series that has no such column, with a warning, rather than falling
     back to a positional guess: a wrong key list would put fields in the tag list
     or invent dimensions that cannot be grouped by, and both read as authoritative.
 
-    :param all_series: the series list for one statement
-    :param column: the column name to read (e.g. "fieldKey")
-    :return: iterator of (series, row, value) triples, the value always a string,
-        so a caller can read a second column of the same row
+    Args:
+        all_series (list): the series list for one statement
+        column (str): the column name to read (e.g. "fieldKey")
+
+    Yields:
+        tuple: (series, row, value) triples, the value always a string, so a caller can read a second column of the
+            same row
     """
     for series in all_series:
         columns = series.get("columns", [])
@@ -853,9 +1003,17 @@ def discover_measurement_keys(session, influx_settings, db, measurement):
     against. The measurement is charset-validated (it comes from the source class's
     static schema, but validating is cheap) before interpolation.
 
-    :return: MeasurementKeys, both halves possibly empty
-    :raises SourceConnectionError: on a transport/parse failure, or a statement the
-        server rejected
+    Args:
+        session (requests.Session): the handler's session
+        influx_settings (dict): the shared ``influx`` settings block
+        db (str): the database or bucket to query
+        measurement (str): the measurement whose keys are wanted
+
+    Returns:
+        MeasurementKeys: the field types and tag keys, either half possibly empty
+
+    Raises:
+        SourceConnectionError: on a transport/parse failure, or a statement the server rejected
     """
     _validate_identifier(measurement, "measurement")
     quoted = _quote_identifier(measurement)
@@ -880,6 +1038,11 @@ class QuerySeries:
 
     ``tags`` is empty for an ungrouped query. A ``GROUP BY`` on a tag returns one
     of these per tag value, which is what makes a per-instance answer possible.
+
+    Attributes:
+        tags (dict): the tag values identifying this series, empty when not grouped.
+        columns (list): the column names, in the order the values use.
+        values (list): one list per row.
     """
 
     tags: dict
@@ -902,9 +1065,18 @@ def discover_tag_values(session, influx_settings, db, measurement, tag):
     rather than assumed - that same endpoint reports a bucket's retention as ``0s``,
     so its answers are not interchangeable with v1's by default.
 
-    :param tag: the tag key to enumerate (from the source class, never model input)
-    :return: set of tag-value strings (possibly empty)
-    :raises SourceConnectionError: on a transport/parse failure
+    Args:
+        session (requests.Session): the requests session to query through; the caller owns its lifetime.
+        influx_settings (dict): the parsed ``influx:`` block, for the URL and credentials.
+        db (str): the database or bucket to query.
+        measurement (str): the measurement whose tag values to enumerate.
+        tag (str): the tag key to enumerate (from the source class, never model input)
+
+    Returns:
+        set: the tag-value strings, possibly empty
+
+    Raises:
+        SourceConnectionError: on a transport/parse failure
     """
     _validate_identifier(measurement, "measurement")
     _validate_identifier(tag, "tag")
@@ -948,8 +1120,17 @@ def run_query(session, influx_settings, db, query):
     Callers that genuinely cannot produce more than one series use
     :func:`single_series` to say so explicitly.
 
-    :return: list of QuerySeries, empty when the query matched nothing
-    :raises SourceConnectionError: on a transport/parse failure
+    Args:
+        session (requests.Session): the handler's session
+        influx_settings (dict): the shared ``influx`` settings block
+        db (str): the database or bucket to query
+        query (str): the InfluxQL to run
+
+    Returns:
+        list: QuerySeries, empty when the query matched nothing
+
+    Raises:
+        SourceConnectionError: on a transport/parse failure
     """
     url, kwargs = _influx_read_request(influx_settings, db, query)
     payload = _get(session, url, kwargs, "query")
@@ -989,9 +1170,14 @@ def single_series(series):
     idiom; it is not a caller- or transport-level failure and must not be mapped to
     ToolParamError or SourceConnectionError.
 
-    :param series: list of QuerySeries from run_query
-    :return: (columns, values), or ([], []) when there is no series
-    :raises ValueError: if given more than one series
+    Args:
+        series (list): list of QuerySeries from run_query
+
+    Returns:
+        tuple: ``(columns, values)``, or ``([], [])`` when there is no series
+
+    Raises:
+        ValueError: if given more than one series
     """
     if not series:
         return [], []
@@ -1021,10 +1207,13 @@ def _cell(row, index, name):
     written to expect. One reader for every row access in this module so the guard cannot be
     present at some sites and missing at others.
 
-    :param row: one row from a result series
-    :param index: column name -> position mapping
-    :param name: the column wanted
-    :return: the value, or None when the column is absent or the row is too short
+    Args:
+        row (list): one row from a result series
+        index (int): column name -> position mapping
+        name (str): the column wanted
+
+    Returns:
+        object or None: the value, or None when the column is absent or the row is too short
     """
     position = index.get(name)
     if position is None or position >= len(row):
@@ -1041,8 +1230,11 @@ def _influx_duration_seconds(duration):
     forever, and is returned as 0 rather than None: that is a known answer, not a failure
     to parse, and the two must stay distinguishable.
 
-    :param duration: an InfluxDB duration string, or None
-    :return: seconds as int, or None when there is nothing parseable
+    Args:
+        duration (str or None): an InfluxDB duration string, or None
+
+    Returns:
+        int or None: whole seconds, or None when there is nothing parseable
     """
     if not isinstance(duration, str) or not _DURATION_RE.fullmatch(duration.strip()):
         return None
@@ -1058,8 +1250,11 @@ def _seconds_as_duration(seconds):
     which InfluxDB version produced it. Zero means keep forever and says so in words, since
     ``0s`` is easy to misread as "no data kept".
 
-    :param seconds: a whole number of seconds, or None
-    :return: a duration string, "infinite" for 0, or None when not a number
+    Args:
+        seconds (int or None): a whole number of seconds, or None
+
+    Returns:
+        str or None: a duration string, "infinite" for 0, or None when not a number
     """
     if not isinstance(seconds, int) or isinstance(seconds, bool):
         return None
@@ -1080,9 +1275,12 @@ def _influx_buckets_request(influx_settings, bucket):
     token that can query can read the bucket's retention. Verified against InfluxDB 2.7
     with a token scoped to read exactly one bucket.
 
-    :param influx_settings: the ``influx`` settings block (must have a token)
-    :param bucket: the bucket name to filter to
-    :return: (url, requests kwargs)
+    Args:
+        influx_settings (dict): the ``influx`` settings block (must have a token)
+        bucket (str): the bucket name to filter to
+
+    Returns:
+        tuple: ``(url, requests kwargs)``
     """
     params = {"name": bucket}
     # Pass org when configured, as the query path does: it disambiguates a token with
@@ -1105,8 +1303,16 @@ def _v1_retention(session, influx_settings, db):
     Prefers the policy flagged ``default``, since that is the one a write with no explicit
     policy lands in - which is every write this project makes.
 
-    :return: dict describing the retention, for the ``retention`` key of the payload
-    :raises SourceConnectionError: transport, parse, or an InfluxDB-reported error
+    Args:
+        session (requests.Session): the handler's session
+        influx_settings (dict): the shared ``influx`` settings block
+        db (str): the database or bucket to query
+
+    Returns:
+        dict: the retention, for the ``retention`` key of the payload
+
+    Raises:
+        SourceConnectionError: transport, parse, or an InfluxDB-reported error
     """
     _validate_identifier(db, "database")
     columns, values = single_series(
@@ -1145,8 +1351,16 @@ def _v2_retention(session, influx_settings, bucket):
     would tell an operator their data is never deleted when it expires in 30 days, and be
     wrong in the reassuring direction. The management API returns the real values.
 
-    :return: dict describing the retention, for the ``retention`` key of the payload
-    :raises SourceConnectionError: transport, parse, or no such bucket
+    Args:
+        session (requests.Session): the handler's session
+        influx_settings (dict): the shared ``influx`` settings block
+        bucket (str): the bucket whose retention is wanted
+
+    Returns:
+        dict: the retention, for the ``retention`` key of the payload
+
+    Raises:
+        SourceConnectionError: transport, parse, or no such bucket
     """
     url, kwargs = _influx_buckets_request(influx_settings, bucket)
     payload = _get(session, url, kwargs, f"read retention for bucket {bucket}")
@@ -1185,7 +1399,13 @@ def _retention_for(session, influx_settings, db):
     retention configured", i.e. kept forever, which is the same misleading direction as
     v2's ``0s``.
 
-    :return: dict for the payload's ``retention`` key, always with a ``known`` flag
+    Args:
+        session (requests.Session): the handler's session
+        influx_settings (dict): the shared ``influx`` settings block
+        db (str): the database or bucket to query
+
+    Returns:
+        dict: the payload's ``retention`` key, always carrying a ``known`` flag
     """
     try:
         if influx_settings.get("token"):
@@ -1204,9 +1424,12 @@ def configured_instances(source, settings):
     cannot disagree about which targets exist. A source with no separate targets expands to
     a single ``None`` instance, which is not a value and is filtered out.
 
-    :param source: source name (already validated as configured)
-    :param settings: parsed settings dict
-    :return: list of configured instance values, empty for a single-target source
+    Args:
+        source (str): source name (already validated as configured)
+        settings (dict): parsed settings dict
+
+    Returns:
+        list: the configured instance values, empty for a single-target source
     """
     if source.lower() not in INSTANCED_SOURCES:
         return []
@@ -1225,10 +1448,18 @@ def resolve_schema(source, settings, settings_file, instance=None):
     ``None`` leaves the read unscoped, spanning every target, which is the right answer when
     the caller did not name one.
 
-    :param instance: the instance to scope to, or None for all of them
-    :raises ToolParamError: for an unknown/unusable source, or an instance that is not
-        configured
-    :raises SourceConnectionError: if field discovery fails
+    Args:
+        source (str): the configured source name.
+        settings (dict): the parsed settings document.
+        settings_file (str or None): the settings path, for constructing the handler.
+        instance (str or None): the instance to scope to, or None for all of them
+
+    Returns:
+        tuple: ``(handler, schema)`` - the caller closes the handler's session
+
+    Raises:
+        ToolParamError: for an unknown/unusable source, or an instance that is not configured
+        SourceConnectionError: if field discovery fails
     """
     handler = resolve_handler(source, settings, settings_file, instance=instance)
     measurement = handler.MCP_MEASUREMENT or handler.source
@@ -1289,7 +1520,15 @@ def resolve_schema(source, settings, settings_file, instance=None):
 
 
 def _list_sources_result(settings, settings_file):
-    """Build the list_sources tool payload (runs in a worker thread)."""
+    """Build the list_sources tool payload (runs in a worker thread).
+
+    Args:
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to the handler's own load
+
+    Returns:
+        dict: the ``list_sources`` payload
+    """
     out = []
     for source in configured_sources(settings):
         try:
@@ -1324,10 +1563,13 @@ def _field_entry(schema, name, detail=False):
     can tell "no unit" from "unit unknown" the only way that is honest - by the key
     not being there at all.
 
-    :param schema: the source's ReadSchema
-    :param name: the field key
-    :param detail: include the prose description, where the field has one
-    :return: the entry dict
+    Args:
+        schema (ReadSchema): the source's ReadSchema
+        name (str): the field key
+        detail (bool): include the prose description, where the field has one
+
+    Returns:
+        dict: the field's entry for the payload
     """
     meta = schema.metadata_for(name)
     entry = {"field": name}
@@ -1355,7 +1597,15 @@ def list_fields_result(source, settings, settings_file, detail=False):
     one bulky part - see the ``detail`` flag, which adds it to this same call rather
     than to a second one.
 
-    :param detail: include each field's description where it has one
+    Args:
+        source (str): the configured source name whose fields to list.
+        settings (dict): the parsed settings document.
+        settings_file (str): the settings path, for re-resolving the handler.
+        detail (bool): include each field's description where it has one
+
+    Returns:
+        dict: the list_fields payload - the source's database, measurement, tag keys and
+            one entry per field
     """
     handler, schema = resolve_schema(source, settings, settings_file)
     try:
@@ -1385,7 +1635,7 @@ def list_fields_result(source, settings, settings_file, detail=False):
         close_session(handler.session)
 
 
-def _validate_instance(schema, instance):
+def _validate_instance(schema, instance) -> None:
     """Check an ``instance`` argument against the source's live tag values.
 
     Two separate refusals, and both matter. A source with no instance axis is told so
@@ -1398,8 +1648,12 @@ def _validate_instance(schema, instance):
     The allowlist is the live discovered set, which is also what keeps the value safe to
     interpolate - the same layering as a queried field name.
 
-    :raises ToolParamError: if the source has no axis, or the value is not one of its
-        discovered values
+    Args:
+        schema (ReadSchema): the source's schema
+        instance (str or None): the instance the caller asked for
+
+    Raises:
+        ToolParamError: if the source has no axis, or the value is not one of its discovered values
     """
     if instance is None:
         return
@@ -1435,6 +1689,21 @@ def _query_history_result(
     added the tag through ``Hue.mcp_tag_filters()`` - so the same idea had two
     implementations that could drift. The handler is now resolved unscoped and the filter
     applied at the query, which is also why the Hue-specific branch here is gone.
+
+    Args:
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to the handler's own load
+        source (str): the source to query
+        field (str): the field to return
+        start (str or None): inclusive lower time bound
+        end (str or None): exclusive upper time bound
+        aggregation (str or None): how to aggregate, or None for raw points
+        group_by (str or None): the interval to group into
+        limit (int or None): the maximum rows to return
+        instance (str or None): which instance to scope to
+
+    Returns:
+        dict: the ``query_history`` payload
     """
     handler, schema = resolve_schema(source, settings, settings_file)
     try:
@@ -1472,6 +1741,20 @@ def _run_query_history(handler, schema, field, start, end, aggregation, group_by
 
     Never a merged series: two hosts' ping interleaved in one unlabelled list is not a
     partial answer, it is a wrong one.
+
+    Args:
+        handler (DataHandler): a constructed handler for the source
+        schema (ReadSchema): the source's schema
+        field (str): the field to return
+        start (str or None): inclusive lower time bound
+        end (str or None): exclusive upper time bound
+        aggregation (str or None): how to aggregate, or None for raw points
+        group_by (str or None): the interval to group into
+        limit (int or None): the maximum rows to return
+        instance (str or None): which instance to scope to
+
+    Returns:
+        dict: the ``query_history`` payload
     """
     # handler.settings["influx"], not the startup snapshot, so the query runs
     # against the same (possibly freshly-edited) InfluxDB the schema was
@@ -1562,9 +1845,11 @@ def _run_query_history(handler, schema, field, start, end, aggregation, group_by
 def _latest_recorded(handler):
     """Read the most recent recorded point for a non-live source from InfluxDB.
 
-    :param handler: a constructed DataHandler (caller owns its session)
-    :return: (``{field: value}`` dict, ``as_of`` unix-seconds or None). Empty dict
-        when the measurement has no fields or no points recorded yet.
+    Args:
+        handler (DataHandler): a constructed DataHandler (caller owns its session)
+
+    Returns:
+        tuple: ``({field: value}, as_of)`` with as_of in unix seconds or None; empty dict when nothing is recorded
     """
     influx_settings = handler.settings["influx"]
     db = resolve_db(handler.source_settings, influx_settings)
@@ -1580,7 +1865,13 @@ def _latest_recorded(handler):
 def _row_to_state(fields, columns, values):
     """Turn a single-point result row into ``({field: value}, as_of)``.
 
-    :return: empty dict and None when there is no row
+    Args:
+        fields (list): the field names wanted
+        columns (list): the result's column names
+        values (list): the single result row
+
+    Returns:
+        tuple: ``({field: value}, as_of)``, or ``({}, None)`` when there is no row
     """
     if not values:
         return {}, None
@@ -1603,9 +1894,14 @@ def _latest_recorded_per_instance(handler):
     the wrong question. Grouping by the tag gets every host's own latest in one round
     trip, because InfluxDB applies LIMIT 1 per series once grouped.
 
-    :param handler: a constructed DataHandler whose MCP_INSTANCE_TAG is set
-    :return: ``{tag value: (fields, as_of)}``, empty when nothing is recorded yet
-    :raises SourceConnectionError: on a transport/parse failure
+    Args:
+        handler (DataHandler): a constructed DataHandler whose MCP_INSTANCE_TAG is set
+
+    Returns:
+        dict: ``{tag value: (fields, as_of)}``, empty when nothing is recorded yet
+
+    Raises:
+        SourceConnectionError: on a transport/parse failure
     """
     influx_settings = handler.settings["influx"]
     db = resolve_db(handler.source_settings, influx_settings)
@@ -1650,9 +1946,17 @@ def current_state_result(source, settings, settings_file):
     every instance fails is a ``SourceConnectionError`` raised, since then there is nothing
     useful to return.
 
-    :raises ToolParamError: unknown/unusable source
-    :raises SourceConnectionError: a live get_data() or InfluxDB read failed for every
-        instance
+    Args:
+        source (str): the source to read
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to the handler's own load
+
+    Returns:
+        dict: the ``get_current_state`` payload
+
+    Raises:
+        ToolParamError: unknown/unusable source
+        SourceConnectionError: a live get_data() or InfluxDB read failed for every instance
     """
     handlers = resolve_handlers(source, settings, settings_file)
     try:
@@ -1721,10 +2025,14 @@ def _instance_state(handler):
     Live sources report from their own ``get_data()``; a non-live source (Speedtest,
     Octopus) reads the latest recorded point instead and never calls ``get_data()``.
 
-    :param handler: a constructed DataHandler subclass instance
-    :return: (field name -> annotated value, unix seconds the state is as of)
-    :rtype: tuple
-    :raises SourceConnectionError: the live read or the InfluxDB read failed
+    Args:
+        handler (DataHandler): a constructed DataHandler subclass instance
+
+    Returns:
+        tuple: (field name -> annotated value, unix seconds the state is as of)
+
+    Raises:
+        SourceConnectionError: the live read or the InfluxDB read failed
     """
     if handler.MCP_LIVE_STATE:
         data = handler.get_data() or {}
@@ -1741,9 +2049,12 @@ def _annotate_state(handler, data):
     back as its label in both - a second copy would eventually annotate one and not the
     other.
 
-    :param handler: the source's DataHandler, for its field metadata
-    :param data: raw field name -> value
-    :return: field name -> annotated value
+    Args:
+        handler (DataHandler): the source's DataHandler, for its field metadata
+        data (dict): raw field name -> value
+
+    Returns:
+        dict: field name to annotated value
     """
     # The hook, so a live current-state read is annotated with the same units list_fields
     # reports. For Hue that costs an InfluxDB lookup on a call that has just read the
@@ -1761,12 +2072,16 @@ def _edge_time(handler, schema, order_query):
     transport failure or a server-side error still raises, because that is not the same thing
     as "there is no data" and must not be reported as an empty range.
 
-    :param handler: constructed DataHandler (caller owns its session)
-    :param schema: the ReadSchema for the source
-    :param order_query: the built query (see :func:`build_edge_time_query`)
-    :return: unix seconds as int, or None
-    :raises SourceConnectionError: transport failure, unparseable response, or an
-        InfluxDB-reported query error
+    Args:
+        handler (DataHandler): constructed DataHandler (caller owns its session)
+        schema (ReadSchema): the ReadSchema for the source
+        order_query (str): the built query (see :func:`build_edge_time_query`)
+
+    Returns:
+        int or None: unix seconds, or None when there is no usable time
+
+    Raises:
+        SourceConnectionError: transport failure, unparseable response, or an InfluxDB-reported query error
     """
     columns, values = single_series(run_query(handler.session, handler.settings["influx"], schema.db, order_query))
     if not values:
@@ -1783,9 +2098,16 @@ def _edge_times_per_instance(handler, schema, order):
     "how far back does this go" gets an answer that is true of the measurement and false
     of every host in it.
 
-    :param order: ``"ASC"`` for each producer's oldest point, ``"DESC"`` for its newest
-    :return: dict of tag value to unix seconds, omitting a producer with no usable time
-    :raises SourceConnectionError: transport failure or an InfluxDB-reported query error
+    Args:
+        handler (DataHandler): the source's DataHandler, for the session and settings.
+        schema (ReadSchema): the source's resolved ReadSchema.
+        order (str): ``"ASC"`` for each producer's oldest point, ``"DESC"`` for its newest
+
+    Returns:
+        dict: tag value to unix seconds, omitting a producer with no usable time
+
+    Raises:
+        SourceConnectionError: transport failure or an InfluxDB-reported query error
     """
     query = build_edge_time_query(schema.measurement, schema.tag_filters, order, group_by_tag=schema.instance_tag)
     out = {}
@@ -1825,13 +2147,18 @@ def data_range_result(source, settings, settings_file):
     false of both. The overall figures stay alongside, because retention bounds the
     database rather than any one producer and the two are read together.
 
-    :param source: source name from a tool argument
-    :param settings: parsed settings dict
-    :param settings_file: settings path, threaded to the handler's own load
-    :return: dict payload
-    :raises ToolParamError: unknown or unusable source
-    :raises SourceConnectionError: the InfluxDB range read failed (retention failure alone
-        degrades to ``retention.known = false`` instead)
+    Args:
+        source (str): source name from a tool argument
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to the handler's own load
+
+    Returns:
+        dict: the ``get_data_range`` payload
+
+    Raises:
+        ToolParamError: unknown or unusable source
+        SourceConnectionError: the InfluxDB range read failed (retention failure alone degrades to ``retention.known =
+            false`` instead)
     """
     handler, schema = resolve_schema(source, settings, settings_file)
     try:
@@ -1901,9 +2228,12 @@ def _documentation_field_line(key, meta):
     Kept out of :func:`build_documentation` so that function stays within the
     project's complexity limit as the metadata grows more keys.
 
-    :param key: the field key (or the ``_``-suffix that stands for a family of them)
-    :param meta: the field's metadata dict
-    :return: the bullet line
+    Args:
+        key (str): the field key (or the ``_``-suffix that stands for a family of them)
+        meta (dict): the field's metadata dict
+
+    Returns:
+        str: the bullet line for that field
     """
     bits = []
     if meta.get("unit"):
@@ -1936,9 +2266,12 @@ def build_documentation(settings, settings_file):
     InfluxDB round trip) doesn't provide in one place, and the place the per-field
     prose is available for every source at once rather than one at a time.
 
-    :param settings: parsed settings dict
-    :param settings_file: settings path, for constructing handlers
-    :return: the Markdown document as a string
+    Args:
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, for constructing handlers
+
+    Returns:
+        str: the Markdown document
     """
     lines = [
         "# send-to-influx data reference",
@@ -1978,7 +2311,15 @@ def build_documentation(settings, settings_file):
 
 
 def _documentation_result(settings, settings_file):
-    """Build the get_documentation tool payload (runs in a worker thread)."""
+    """Build the get_documentation tool payload (runs in a worker thread).
+
+    Args:
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to the handler's own load
+
+    Returns:
+        dict: the ``get_documentation`` payload
+    """
     return {"format": "markdown", "content": build_documentation(settings, settings_file)}
 
 
@@ -1995,14 +2336,18 @@ def register_read_tools(server, settings, settings_file=None):
     than leaving them to the annotation fields (which clients are told to treat as
     untrusted hints). ``tests/test_mcp_surface.py`` is the guard.
 
-    :param server: the MCPServer instance
-    :param settings: the parsed settings dict
-    :param settings_file: settings path, for re-resolving handlers per call
+    Args:
+        server (MCPServer): the MCPServer instance
+        settings (dict): the parsed settings dict
+        settings_file (str or None): settings path, for re-resolving handlers per call
+
+    Returns:
+        MCPServer: the same server, for chaining
     """
     import anyio
 
     @register_tool(server, title="List Data Sources", annotations=_READ_ONLY)
-    async def list_sources() -> dict:
+    async def list_sources() -> dict:  # noqa: DOC201
         """List the configured collector sources whose data can be read, each with
         its InfluxDB measurement and a line on what it reports.
 
@@ -2024,7 +2369,7 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(_list_sources_result, settings, settings_file)
 
     @register_tool(server, title="List Source Fields", annotations=_READ_ONLY)
-    async def list_fields(source: str, detail: bool = False) -> dict:
+    async def list_fields(source: str, detail: bool = False) -> dict:  # noqa: DOC101,DOC103,DOC108,DOC201
         """Describe one source well enough to query it and chart the result: its
         `database` and `measurement`, its `tag_keys` to group by, and every field with
         its InfluxDB `type`, any `unit`, any coded values, and its `kind`. Every
@@ -2059,7 +2404,7 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file, detail)
 
     @register_tool(server, title="Query Historical Data", annotations=_READ_ONLY)
-    async def query_history(
+    async def query_history(  # noqa: DOC101,DOC103,DOC108,DOC201
         source: str,
         field: str,
         start: str = "-24h",
@@ -2118,7 +2463,7 @@ def register_read_tools(server, settings, settings_file=None):
         )
 
     @register_tool(server, title="Get Current State", annotations=_READ_ONLY)
-    async def get_current_state(source: str) -> dict:
+    async def get_current_state(source: str) -> dict:  # noqa: DOC101,DOC103,DOC108,DOC201
         """Read a source's state *now* - is the light on, is the door locked, what is
         the power draw at this moment.
 
@@ -2144,7 +2489,7 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(current_state_result, source, settings, settings_file)
 
     @register_tool(server, title="Get Data Range & Retention", annotations=_READ_ONLY)
-    async def get_data_range(source: str) -> dict:
+    async def get_data_range(source: str) -> dict:  # noqa: DOC101,DOC103,DOC108,DOC201
         """Report how far back a source's data goes, and how long InfluxDB keeps it.
 
         Answers "when did collection start", "how far back can I query", "how long is
@@ -2179,7 +2524,7 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(data_range_result, source, settings, settings_file)
 
     @register_tool(server, title="Get Field Documentation", annotations=_READ_ONLY)
-    async def get_documentation() -> dict:
+    async def get_documentation() -> dict:  # noqa: DOC201
         """Return a Markdown reference of what every configured source reports and
         what its values mean: units, the meaning of coded values (e.g. Nuki lock and
         door state codes), how each field may be aggregated, and a description where

@@ -57,10 +57,13 @@ def _register_resource(server, *args, **kwargs):
     ``translate_failures()``: a bug must stay a crash, logged with its traceback and
     its text kept off the wire.
 
-    :param server: the MCPServer instance
-    :param args: passed to ``server.resource()`` (the URI)
-    :param kwargs: passed to ``server.resource()`` (name, title, description, ...)
-    :return: a decorator registering the function as a resource
+    Args:
+        server (MCPServer): the server to register the resource on
+        *args (str): passed to ``server.resource()`` - the resource URI
+        **kwargs (str): passed to ``server.resource()`` (name, title, description, mime_type)
+
+    Returns:
+        collections.abc.Callable: a decorator registering the function it wraps as a resource
     """
 
     def decorator(fn):
@@ -75,10 +78,13 @@ def register_resources(server, settings, settings_file=None):
     The documentation reference, plus a schema and a current-state resource per
     configured source. Blocking work runs in a worker thread, mirroring the read tools.
 
-    :param server: the MCPServer instance
-    :param settings: parsed settings dict
-    :param settings_file: settings path, for re-resolving handlers per read
-    :return: the server
+    Args:
+        server (MCPServer): the server to register the resources on
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, for re-resolving handlers per read
+
+    Returns:
+        MCPServer: the same server, for chaining
     """
     import anyio
 
@@ -109,6 +115,14 @@ def _register_source_resources(server, anyio, source, settings, settings_file):
     A factory (not an inline loop body) so each resource closure binds its own
     ``source`` - a closure over the loop variable would make every resource read
     the last source.
+
+    Args:
+        server (MCPServer): the server to register the two resources on
+        anyio (module): the ``anyio`` module, passed down rather than imported here because
+            the MCP extra is optional and the caller has already paid for the import
+        source (str): the configured source name these resources describe
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, for re-resolving handlers per read
     """
 
     @_register_resource(

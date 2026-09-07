@@ -274,25 +274,22 @@ Each has been raised before and declined with reasons recorded.
 
 ## Docstrings
 
-**Google style** - `Args:` and `Returns:` sections, capitalised, with the type in the entry
-because this code carries no annotations. `flake8-docstrings` enforces it; the convention, the
-backlog and the exemptions all live in `tox.ini`.
+**Google style**, with the type in each `Args:` and `Returns:` entry, because this code carries
+no annotations. The convention and its exemptions live in `tox.ini`. No Sphinx `:param:` form.
 
-**Most of this repository is not there yet**, and that is deliberate rather than overlooked.
-The `extend-ignore` list in `tox.ini` holds exactly the rules that still fail - D415, D212,
-D205 and D209, largest first. Everything else is enforced today, so no passing rule can
-regress while the backlog is worked through. Take one entry off that list at a time and fix
-what it names in the same change; do not add to it.
+- A procedure needs `-> None` on its signature, not `Returns: None`. A bare `return` counts as
+  returning something to pydoclint; the annotation is what stops it asking.
+- **Tool docstrings are exempt and must stay exempt** (CS.6.14): the docstring is the advertised
+  description and the schema beside it already carries the types. That takes two mechanisms -
+  `ignore-decorators` for the `D` codes, a per-tool `# noqa` for the `DOC` codes - because
+  pydoclint has no decorator exemption. `tests/test_repo_hygiene.py` asserts both; do not remove
+  a marker to make a run green.
+- Prompts and resources are **not** exempt: both pass `description=` at registration, so their
+  docstrings reach no client.
+- Tests are exempt: a test's name is its documentation.
 
-**The MCP surface is exempt, and must stay exempt.** A tool, prompt or resource docstring is
-the advertised interface a client loads and a model reads, so CS.6.14 hands it to the
-AI-consumer rules instead: it wants what the schema cannot already carry, and a structured
-parameter block duplicates what the schema has - paid for on every session that loads it.
-`ignore-decorators` in `tox.ini` does that, and
-`tests/test_repo_hygiene.py::test_the_docstring_exemption_matches_the_decorators_in_use`
-fails if a rename ever makes the pattern stop matching.
-
-Tests are exempt too: a test's name is its documentation.
+pydoclint runs in the flake8 job because D417 only checks the parameters of a section a
+docstring already has, so a function documenting none of them passes pydocstyle clean.
 
 <!-- BEGIN GENERATED -->
 ## Read these when they apply

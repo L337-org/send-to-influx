@@ -1,4 +1,4 @@
-"""Speedtest class to send data to InfluxDB"""
+"""Speedtest class to send data to InfluxDB."""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
@@ -28,7 +28,17 @@ MAX_PLAUSIBLE_PING_MS = 5000
 
 
 class Speedtest(DataHandler):
-    """Child class of DataHandler to run a speed test and send the results to InfluxDB"""
+    """Child class of DataHandler to run a speed test and send the results to InfluxDB.
+
+    Attributes:
+        MCP_DESCRIPTION (str): what this source advertises to an MCP client.
+        MCP_LIVE_STATE (bool): False - a run takes minutes and saturates the link, so
+            current-state reads the latest recorded run rather than triggering one.
+        MCP_WRITABLE (bool): True - a run can be triggered on demand, opt-in per install.
+        MCP_INSTANCE_TAG (str): "host" - every point names the machine that measured, so
+            several collectors into one database stay comparable rather than merged.
+        MCP_FIELD_METADATA (dict): units and aggregation kinds for throughput and latency.
+    """
 
     MCP_DESCRIPTION = "Internet speed test: download/upload throughput and latency."
     # get_data() runs a full download/upload test (minutes, saturates the link),
@@ -67,10 +77,11 @@ class Speedtest(DataHandler):
         ``SourceConnectionError`` rather than starting a second, overlapping test
         that would skew both.
 
-        :return: data
-        :rtype: dict
-        :raises SourceConnectionError: a run is already in progress, the test
-            failed, or it returned an implausible result
+        Returns:
+            dict: data
+
+        Raises:
+            SourceConnectionError: a run is already in progress, the test failed, or it returned an implausible result
         """
         if not Speedtest._run_lock.acquire(blocking=False):
             raise SourceConnectionError("a Speedtest run is already in progress on this host")
@@ -85,8 +96,11 @@ class Speedtest(DataHandler):
         The caller (``get_data``) holds ``_run_lock``. Split out so ``get_data`` is just
         the lock guard around it.
 
-        :return: data
-        :rtype: dict
+        Returns:
+            dict: data
+
+        Raises:
+            SourceConnectionError: the test could not run, or reported an implausible result
         """
         try:
             st = speedtest.Speedtest(timeout=self.settings["speedtest"].get("timeout", 120))
@@ -140,8 +154,8 @@ class Speedtest(DataHandler):
         One implementation for the data and the heartbeat: the two must agree, or a
         health series and its measurement would disagree about which machine wrote what.
 
-        :return: the local hostname up to the first dot
-        :rtype: str
+        Returns:
+            str: the local hostname up to the first dot
         """
         return gethostname().split(".")[0]
 
@@ -153,8 +167,8 @@ class Speedtest(DataHandler):
         writing ``collector_status,source=speedtest`` and overwriting each other, so one
         host dying looked exactly like a healthy estate.
 
-        :return: ``{"host": <this machine>}``
-        :rtype: dict
+        Returns:
+            dict: ``{"host": <this machine>}``
         """
         return {"host": self.collector_host()}
 
@@ -178,12 +192,16 @@ class Speedtest(DataHandler):
         Silently answering the wrong question is worse than refusing, especially when the
         number looks entirely plausible.
 
-        :param host: optionally assert which machine should run it; must be this one
-        :return: ``{"source", "host", "recorded", "result": {field: {"value"[, "unit"]}}}``
-        :rtype: dict
-        :raises ToolParamError: ``host`` names a machine other than this one
-        :raises SourceConnectionError: a run is already in progress, or the test
-            failed
+        Args:
+            host (str or None): optionally assert which machine should run it; must be this
+                one. None runs it here without asserting.
+
+        Returns:
+            dict: ``{"source", "host", "recorded", "result": {field: {"value"[, "unit"]}}}``
+
+        Raises:
+            ToolParamError: ``host`` names a machine other than this one
+            SourceConnectionError: a run is already in progress, or the test failed
         """
         this_host = self.collector_host()
         if host is not None and host != this_host:

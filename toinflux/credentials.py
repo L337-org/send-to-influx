@@ -70,6 +70,14 @@ def _slot_suffix(text, prefix):
 
     None covers both "does not start with the prefix" and "the suffix is not canonical", so
     a caller cannot accidentally treat ``hue-user1`` or ``hue-user02`` as a valid slot.
+
+    Args:
+        text (str): the candidate name or field
+        prefix (str): the prefix a slot name or field must start with
+
+    Returns:
+        str or None: the canonical suffix, or None if the text does not start with the prefix
+            or the suffix is not canonical
     """
     if not isinstance(text, str) or not text.startswith(prefix):
         return None
@@ -87,9 +95,11 @@ def credential_field(name):
     separation is what let ``--set-field hue.user2`` write a real token into settings.yaml in
     plaintext while ``_contains_real_secret`` stayed blind to it.
 
-    :param name: credential name, e.g. "influx-token", "hue-user", "hue-user3"
-    :return: (section, field) or None
-    :rtype: tuple or None
+    Args:
+        name (str): credential name, e.g. "influx-token", "hue-user", "hue-user3"
+
+    Returns:
+        tuple or None: (section, field) or None
     """
     if name in CREDENTIAL_FIELDS:
         return CREDENTIAL_FIELDS[name]
@@ -98,7 +108,14 @@ def credential_field(name):
 
 
 def is_credential_name(name):
-    """Whether ``name`` is a credential this tool manages (static or a numbered slot)."""
+    """Whether ``name`` is a credential this tool manages (static or a numbered slot).
+
+    Args:
+        name (str): the candidate credential name
+
+    Returns:
+        bool: True when this tool manages it
+    """
     return credential_field(name) is not None
 
 
@@ -108,10 +125,12 @@ def credential_name_for(section, field):
     The inverse of :func:`credential_field`. Used to refuse a plaintext write to a secret
     field and to name the right command in the refusal.
 
-    :param section: top-level settings key, e.g. "hue"
-    :param field: field within it, e.g. "user2"
-    :return: credential name, or None
-    :rtype: str or None
+    Args:
+        section (str): top-level settings key, e.g. "hue"
+        field (str): field within it, e.g. "user2"
+
+    Returns:
+        str or None: credential name, or None
     """
     for name, path in CREDENTIAL_FIELDS.items():
         if (section, field) == path:
@@ -124,7 +143,15 @@ def credential_name_for(section, field):
 
 
 def is_credential_field(section, field):
-    """Whether a settings path holds a secret - see :func:`credential_name_for`."""
+    """Whether a settings path holds a secret - see :func:`credential_name_for`.
+
+    Args:
+        section (str): top-level settings key
+        field (str): field within it
+
+    Returns:
+        bool: True when that path holds a secret
+    """
     return credential_name_for(section, field) is not None
 
 
@@ -135,9 +162,11 @@ def placeholder_for(name):
     text. Returns None rather than raising for an unknown name - ``--remove`` indexed
     ``PLACEHOLDER_VALUES`` directly and would have died with a KeyError on a slot.
 
-    :param name: credential name
-    :return: placeholder text, or None
-    :rtype: str or None
+    Args:
+        name (str): credential name
+
+    Returns:
+        str or None: placeholder text, or None
     """
     if name in PLACEHOLDER_VALUES:
         return PLACEHOLDER_VALUES[name]
@@ -153,10 +182,11 @@ def slot_credential_names(settings):
     any ``hue.userN`` present is a credential this tool manages. Slot 1's ``hue-user`` is
     excluded - it is already a static entry.
 
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :return: credential names like ["hue-user2", "hue-user3"]
-    :rtype: list
+    Args:
+        settings (dict): parsed settings dictionary
+
+    Returns:
+        list: credential names like ["hue-user2", "hue-user3"]
     """
     section = settings.get(_SLOT_SECTION) if isinstance(settings, dict) else None
     if not isinstance(section, dict):
@@ -175,10 +205,11 @@ def sentinel_for(name):
     Cosmetic only, and never read back for real use - the actual value comes from
     apply_credential_substitution(). It is there to inform a human reading the file.
 
-    :param name: systemd-creds credential name, e.g. "influx-token"
-    :type name: str
-    :return: sentinel string
-    :rtype: str
+    Args:
+        name (str): systemd-creds credential name, e.g. "influx-token"
+
+    Returns:
+        str: sentinel string
     """
     return f"{SENTINEL_PREFIX} - run 'send-to-influx-set-credential {name}' to modify>"
 
@@ -199,10 +230,11 @@ def apply_credential_substitution(settings):
     iterate. Anything present that is not a credential name this tool manages is ignored -
     LoadCredentialEncrypted= is not exclusive to us.
 
-    :param settings: parsed settings dictionary, mutated in place and returned
-    :type settings: dict
-    :return: the same dict, with any found credentials overlaid
-    :rtype: dict
+    Args:
+        settings (dict): parsed settings dictionary, mutated in place and returned
+
+    Returns:
+        dict: the same dict, with any found credentials overlaid
     """
     creds_dir = os.environ.get("CREDENTIALS_DIRECTORY")
     if not creds_dir:
@@ -232,10 +264,12 @@ def _read_credential(cred_path, name):
     bytes with no guarantee of being valid UTF-8 - this project's own CLI always writes
     UTF-8, but LoadCredentialEncrypted= is not exclusive to it.
 
-    :param cred_path: path to the decrypted credential file
-    :param name: credential name, for the log message
-    :return: the value, or None
-    :rtype: str or None
+    Args:
+        cred_path (str): path to the decrypted credential file
+        name (str): credential name, for the log message
+
+    Returns:
+        str or None: the value, or None
     """
     if not os.path.isfile(cred_path):
         return None
@@ -250,7 +284,7 @@ def _read_credential(cred_path, name):
         return None
 
 
-def _overlay_credential(settings, name, path, value):
+def _overlay_credential(settings, name, path, value) -> None:
     """Write one credential value into its settings section, creating the section if absent.
 
     A malformed section (``influx: []``, ``hue: "oops"``) is logged and skipped rather than
@@ -258,10 +292,11 @@ def _overlay_credential(settings, name, path, value):
     then reports it as a ``ConfigError`` naming the section and its type, so a bad section is
     skipped here and explained there rather than reaching a collector half-applied.
 
-    :param settings: parsed settings dict, mutated in place
-    :param name: credential name, for the log message
-    :param path: the ``(section, field)`` this credential overlays
-    :param value: the decrypted value
+    Args:
+        settings (dict): parsed settings dict, mutated in place
+        name (str): credential name, for the log message
+        path (tuple): the ``(section, field)`` this credential overlays
+        value (str): the decrypted value
     """
     top_key, field = path
     block = settings.get(top_key)

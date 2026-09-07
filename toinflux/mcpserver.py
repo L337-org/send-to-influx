@@ -89,9 +89,11 @@ def _hash_token(token):
     The only form a refresh token is ever persisted in, so the state file never contains
     a replayable value.
 
-    :param token: token string
-    :type token: str
-    :rtype: str
+    Args:
+        token (str): token string
+
+    Returns:
+        str: the token's SHA-256 hex digest, so the token itself is never stored
     """
     return hashlib.sha256(token.encode("utf8")).hexdigest()
 
@@ -107,10 +109,13 @@ def _refresh_entry_expired(entry, now):
     "never expires" and is honoured. ``bool`` is excluded explicitly because it
     is an ``int`` subclass and a stray ``true`` should not read as epoch 1.
 
-    :param entry: the persisted entry (any JSON-decoded value)
-    :param now: current unix time
-    :type now: float
-    :rtype: bool
+    Args:
+        entry (object): the persisted entry, whatever JSON decoded to - a non-mapping
+            counts as expired
+        now (float): current unix time
+
+    Returns:
+        bool: True when the entry has expired, or carries no usable expiry
     """
     if not isinstance(entry, dict):
         return True
@@ -135,8 +140,8 @@ class OAuthStateStore:
     def __init__(self, state_path):
         """Bind the store to the file its clients and refresh tokens persist in.
 
-        :param state_path: path of the JSON state file (created on first save)
-        :type state_path: str
+        Args:
+            state_path (str): path of the JSON state file (created on first save)
         """
         self.state_path = state_path
         self._lock = threading.Lock()
@@ -144,7 +149,7 @@ class OAuthStateStore:
         self.refresh_tokens = {}
         self._load()
 
-    def _tighten_permissions(self):
+    def _tighten_permissions(self) -> None:
         """Best-effort: force an existing state file to owner-only (0600).
 
         save() writes 0600, but a file laid down out of band - a manual
@@ -169,7 +174,7 @@ class OAuthStateStore:
                     exc,
                 )
 
-    def _load(self):
+    def _load(self) -> None:
         """Load existing state.
 
         A missing file is a normal first run. A corrupt one is logged and treated as
@@ -230,6 +235,9 @@ class OAuthStateStore:
         as expired - same recoverable-state contract as the provider's load
         paths, and pruning is the one place every entry gets touched, so a bad
         one must not be able to break token issuance (see _refresh_entry_expired).
+
+        Returns:
+            bool: True when at least one token was pruned, so the caller knows to persist
         """
         now = time.time()
         expired = [key for key, entry in self.refresh_tokens.items() if _refresh_entry_expired(entry, now)]
@@ -257,7 +265,14 @@ class LoginThrottle:
         self._failures = {}
 
     def locked_out(self, address):
-        """Return the remaining lockout seconds for an address (0 if allowed)."""
+        """Return the remaining lockout seconds for an address (0 if allowed).
+
+        Args:
+            address (str): the client address to check
+
+        Returns:
+            int: seconds still to wait, 0 when the address is not locked out
+        """
         entry = self._failures.get(address)
         if not entry:
             return 0
@@ -271,13 +286,24 @@ class LoginThrottle:
         return remaining
 
     def record_failure(self, address):
-        """Record a failed attempt; returns the new consecutive-failure count."""
+        """Record a failed attempt; returns the new consecutive-failure count.
+
+        Args:
+            address (str): the client address that failed
+
+        Returns:
+            int: the consecutive failure count for that address
+        """
         count = self._failures.get(address, (0, 0.0))[0] + 1
         self._failures[address] = (count, time.time())
         return count
 
     def record_success(self, address):
-        """Clear the failure history for an address after a successful login."""
+        """Clear the failure history for an address after a successful login.
+
+        Args:
+            address (str): the client address that succeeded
+        """
         self._failures.pop(address, None)
 
 
@@ -293,12 +319,13 @@ def resolve_state_path(settings, settings_file=None):
     still apply, and ``/etc/send-to-influx`` is root-owned while the service runs as
     ``send-to-influx``. Nothing there was ever writable by it, so the state never persisted.
 
-    :param settings: parsed settings dictionary
-    :type settings: dict
-    :param settings_file: the settings path the process was started with, used
-        to anchor the default; None means the project-root default
-    :type settings_file: str or None
-    :rtype: str
+    Args:
+        settings (dict): parsed settings dictionary
+        settings_file (str or None): the settings path the process was started with, used to anchor the default; None
+            means the project-root default
+
+    Returns:
+        str: the path the OAuth state file is read from and written to
     """
     configured = (settings.get("mcp") or {}).get("state_file")
     if isinstance(configured, str) and configured.strip():
@@ -336,10 +363,11 @@ def _transport_security_settings(public_url):
     hostname: behind the reverse proxy every request arrives with the public Host
     header, which the SDK's localhost-only default would reject.
 
-    :param public_url: the external HTTPS address, trailing slash already stripped
-    :type public_url: str
-    :return: transport security settings for the streamable-http app
-    :rtype: mcp.server.transport_security.TransportSecuritySettings
+    Args:
+        public_url (str): the external HTTPS address, trailing slash already stripped
+
+    Returns:
+        mcp.server.transport_security.TransportSecuritySettings: transport security settings for the streamable-http app
     """
     from mcp.server.transport_security import TransportSecuritySettings
 
@@ -366,7 +394,7 @@ def _transport_security_settings(public_url):
     )
 
 
-def app_options(settings):
+def app_options(settings):  # noqa: DOC502 - ConfigError propagates from parse_mcp_bind_address, not raised here
     """Build the keyword arguments for ``MCPServer.streamable_http_app()``.
 
     The single canonical source of the transport options, because mcp 2.x takes
@@ -375,11 +403,14 @@ def app_options(settings):
     SDK's localhost-only DNS-rebinding default, which rejects every
     reverse-proxied request - so every call site derives them from here.
 
-    :param settings: parsed settings dictionary (validated, post-substitution)
-    :type settings: dict
-    :return: keyword arguments accepted by ``streamable_http_app()``
-    :rtype: dict
-    :raises ConfigError: if ``mcp.bind_address`` is unusable
+    Args:
+        settings (dict): parsed settings dictionary (validated, post-substitution)
+
+    Returns:
+        dict: keyword arguments accepted by ``streamable_http_app()``
+
+    Raises:
+        ConfigError: if ``mcp.bind_address`` is unusable
     """
     host, _ = parse_mcp_bind_address((settings.get("mcp") or {}).get("bind_address"))
     public_url = settings["mcp"]["public_url"].strip().rstrip("/")
@@ -390,16 +421,19 @@ def app_options(settings):
     }
 
 
-def run_options(settings):
+def run_options(settings):  # noqa: DOC502 - ConfigError propagates from parse_mcp_bind_address, not raised here
     """Build the keyword arguments for ``MCPServer.run(transport="streamable-http")``.
 
     The app options plus the bind port, which only the run path needs.
 
-    :param settings: parsed settings dictionary (validated, post-substitution)
-    :type settings: dict
-    :return: keyword arguments accepted by ``run()`` for the streamable-http transport
-    :rtype: dict
-    :raises ConfigError: if ``mcp.bind_address`` is unusable
+    Args:
+        settings (dict): parsed settings dictionary (validated, post-substitution)
+
+    Returns:
+        dict: keyword arguments accepted by ``run()`` for the streamable-http transport
+
+    Raises:
+        ConfigError: if ``mcp.bind_address`` is unusable
     """
     _, port = parse_mcp_bind_address((settings.get("mcp") or {}).get("bind_address"))
     return {**app_options(settings), "port": port}
@@ -418,13 +452,15 @@ def build_mcp_server(settings, settings_file=None):
     ``run()``/``streamable_http_app()`` instead of the constructor. See
     ``app_options()``/``run_options()``.
 
-    :param settings: parsed settings dictionary (validated, post-substitution)
-    :type settings: dict
-    :param settings_file: settings path, for anchoring the default state file
-    :type settings_file: str or None
-    :return: a configured MCPServer instance
-    :rtype: mcp.server.mcpserver.MCPServer
-    :raises ConfigError: if the mcp SDK is unavailable or settings are unusable
+    Args:
+        settings (dict): parsed settings dictionary (validated, post-substitution)
+        settings_file (str or None): settings path, for anchoring the default state file
+
+    Returns:
+        mcp.server.mcpserver.MCPServer: a configured MCPServer instance
+
+    Raises:
+        ConfigError: if the mcp SDK is unavailable or settings are unusable
     """
     try:
         from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
@@ -545,15 +581,11 @@ class SendToInfluxOAuthProvider:
     def __init__(self, public_url, expected_user, expected_password, state_store):
         """Bind the provider to the URL it issues against and the single account it accepts.
 
-        :param public_url: external https URL (no trailing slash) the login page
-            and redirects are built against
-        :type public_url: str
-        :param expected_user: the configured mcp.user
-        :type expected_user: str
-        :param expected_password: the configured mcp.password
-        :type expected_password: str
-        :param state_store: persistence for clients and refresh tokens
-        :type state_store: OAuthStateStore
+        Args:
+            public_url (str): external https URL (no trailing slash) the login page and redirects are built against
+            expected_user (str): the configured mcp.user
+            expected_password (str): the configured mcp.password
+            state_store (OAuthStateStore): persistence for clients and refresh tokens
         """
         self.public_url = public_url
         self._expected_user = expected_user
@@ -568,13 +600,28 @@ class SendToInfluxOAuthProvider:
     # -- login-page support (called from the custom routes) --
 
     def check_credentials(self, username, password):
-        """Constant-time comparison of both halves of the login."""
+        """Constant-time comparison of both halves of the login.
+
+        Args:
+            username (str): the submitted username
+            password (str): the submitted password
+
+        Returns:
+            bool: True only when both match, compared so that neither comparison short-circuits
+        """
         user_ok = hmac.compare_digest(username.encode("utf8"), self._expected_user.encode("utf8"))
         password_ok = hmac.compare_digest(password.encode("utf8"), self._expected_password.encode("utf8"))
         return user_ok and password_ok
 
     def transaction_valid(self, txn_id):
-        """Return True if a login transaction exists and hasn't expired."""
+        """Return True if a login transaction exists and hasn't expired.
+
+        Args:
+            txn_id (str): the login transaction id from the form
+
+        Returns:
+            bool: True when the transaction exists and has not expired
+        """
         entry = self._transactions.get(txn_id)
         if not entry:
             return False
@@ -588,11 +635,12 @@ class SendToInfluxOAuthProvider:
 
         Mints the authorization code and returns the client redirect URL carrying it.
 
-        :param txn_id: the (validated) transaction id from the login form
-        :type txn_id: str
-        :param subject: the authenticated username, propagated to issued tokens
-        :type subject: str
-        :rtype: str
+        Args:
+            txn_id (str): the (validated) transaction id from the login form
+            subject (str): the authenticated username, propagated to issued tokens
+
+        Returns:
+            str: the redirect URI to send the user agent to
         """
         from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
 
@@ -622,6 +670,12 @@ class SendToInfluxOAuthProvider:
         dropped and treated as an unknown client rather than raised - the state
         file's whole contract is that bad state is recoverable (the connector
         just re-registers), never something that breaks requests.
+
+        Args:
+            client_id (str): the client id to look up
+
+        Returns:
+            OAuthClientInformationFull or None: the registered client, or None if unknown
         """
         from mcp.shared.auth import OAuthClientInformationFull
         from pydantic import ValidationError
@@ -643,7 +697,11 @@ class SendToInfluxOAuthProvider:
             return None
 
     async def register_client(self, client_info):
-        """Persist a dynamic client registration (RFC 7591, initiated by Claude)."""
+        """Persist a dynamic client registration (RFC 7591, initiated by Claude).
+
+        Args:
+            client_info (OAuthClientInformationFull): the client registration to store
+        """
         self.state.clients[client_info.client_id] = client_info.model_dump(mode="json")
         self.state.save()
         logging.info("MCP OAuth client registered: %s (%s)", client_info.client_id, client_info.client_name)
@@ -653,6 +711,13 @@ class SendToInfluxOAuthProvider:
 
         Stashes the request as a single-use transaction and sends the browser to the
         login page.
+
+        Args:
+            client (OAuthClientInformationFull): the registered client making the request
+            params (AuthorizationParams): the authorization request parameters
+
+        Returns:
+            str: the login URL to redirect the user agent to
         """
         txn_id = secrets.token_urlsafe(32)
         self._prune_transactions()
@@ -664,11 +729,27 @@ class SendToInfluxOAuthProvider:
         return f"{self.public_url}/login?txn={txn_id}"
 
     async def load_authorization_code(self, client, authorization_code):
-        """Return a stored auth code; the SDK checks client binding and expiry."""
+        """Return a stored auth code; the SDK checks client binding and expiry.
+
+        Args:
+            client (OAuthClientInformationFull): the registered client making the request
+            authorization_code (str): the code as presented by the client
+
+        Returns:
+            AuthorizationCode or None: the stored code, or None if unknown or already used
+        """
         return self._auth_codes.get(authorization_code)
 
     async def exchange_authorization_code(self, client, authorization_code):
-        """Single-use exchange of an auth code for a fresh token pair."""
+        """Single-use exchange of an auth code for a fresh token pair.
+
+        Args:
+            client (OAuthClientInformationFull): the registered client making the request
+            authorization_code (AuthorizationCode): the code being redeemed
+
+        Returns:
+            OAuthToken: a fresh access and refresh token pair
+        """
         self._auth_codes.pop(authorization_code.code, None)
         return self._issue_tokens(client, authorization_code.scopes, authorization_code.subject)
 
@@ -678,6 +759,13 @@ class SendToInfluxOAuthProvider:
         Same recoverable-state contract as get_client(): a malformed entry is
         dropped and treated as an invalid token (the client falls back to a full
         re-authorization), never raised into the token endpoint.
+
+        Args:
+            client (OAuthClientInformationFull): the registered client making the request
+            refresh_token (str): the token as presented by the client
+
+        Returns:
+            RefreshToken or None: the stored token, or None if unknown or expired
         """
         from mcp.server.auth.provider import RefreshToken
 
@@ -699,12 +787,28 @@ class SendToInfluxOAuthProvider:
         )
 
     async def exchange_refresh_token(self, client, refresh_token, scopes):
-        """Rotate: revoke the presented refresh token, issue a fresh pair."""
+        """Rotate: revoke the presented refresh token, issue a fresh pair.
+
+        Args:
+            client (OAuthClientInformationFull): the registered client making the request
+            refresh_token (RefreshToken): the token being redeemed
+            scopes (list): the scopes requested, or empty to keep the token's own
+
+        Returns:
+            OAuthToken: a fresh access and refresh token pair
+        """
         self.state.refresh_tokens.pop(_hash_token(refresh_token.token), None)
         return self._issue_tokens(client, scopes or refresh_token.scopes, refresh_token.subject)
 
     async def load_access_token(self, token):
-        """Return a live in-memory access token, dropping it if expired."""
+        """Return a live in-memory access token, dropping it if expired.
+
+        Args:
+            token (str): the bearer token from the request
+
+        Returns:
+            AccessToken or None: the token's record, or None if unknown or expired
+        """
         access = self._access_tokens.get(token)
         if access is None:
             return None
@@ -720,6 +824,9 @@ class SendToInfluxOAuthProvider:
         so a raw-string token (or any future representation without a .token
         attribute) revokes cleanly instead of raising AttributeError into the
         revocation endpoint.
+
+        Args:
+            token (AccessToken or RefreshToken): the token record to revoke
         """
         from mcp.server.auth.provider import RefreshToken
 
@@ -733,7 +840,16 @@ class SendToInfluxOAuthProvider:
     # -- internals --
 
     def _issue_tokens(self, client, scopes, subject):
-        """Mint an access token (memory) and refresh token (persisted as a hash)."""
+        """Mint an access token (memory) and refresh token (persisted as a hash).
+
+        Args:
+            client (OAuthClientInformationFull): the registered client making the request
+            scopes (list): the scopes to grant
+            subject (str): the authenticated user the tokens are issued for
+
+        Returns:
+            OAuthToken: the issued access and refresh token pair
+        """
         from mcp.server.auth.provider import AccessToken
         from mcp.shared.auth import OAuthToken
 
@@ -803,11 +919,12 @@ def start_mcp_server_thread(settings, settings_file=None):
     else (a bind failure, a crash inside the SDK) is logged and retried after a
     flat delay, since the server exiting means nobody can query it.
 
-    :param settings: parsed settings dictionary (validated)
-    :type settings: dict
-    :param settings_file: settings path, threaded through for the state file default
-    :type settings_file: str or None
-    :rtype: threading.Thread
+    Args:
+        settings (dict): parsed settings dictionary (validated)
+        settings_file (str or None): settings path, threaded through for the state file default
+
+    Returns:
+        threading.Thread: the started daemon thread running the server
     """
     host, port = parse_mcp_bind_address((settings.get("mcp") or {}).get("bind_address"))
 

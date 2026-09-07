@@ -45,9 +45,12 @@ def writable_enabled_sources(settings, settings_file=None):
     check, then its session closed - this runs once at server-build time to decide
     whether to register write tools at all.
 
-    :param settings: parsed settings dict
-    :param settings_file: settings path, for constructing handlers
-    :return: list of source names enabled for writes
+    Args:
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, for constructing handlers
+
+    Returns:
+        list: the source names with writes enabled
     """
     enabled = []
     for source in configured_sources(settings):
@@ -70,7 +73,16 @@ def _resolve_writable_handlers(source, settings, settings_file):
     setting covers every bridge, since they are one estate behind one settings block. The
     caller owns every session and must close them all.
 
-    :raises ToolParamError: unknown source, no usable target, or not opted in for writes
+    Args:
+        source (str): the source name to resolve
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+
+    Returns:
+        list: ``(instance, handler)`` pairs for every writable target of that source
+
+    Raises:
+        ToolParamError: unknown source, no usable target, or not opted in for writes
     """
     handlers = resolve_handlers(source, settings, settings_file)
     if not handlers[0][1].mcp_write_enabled():
@@ -88,7 +100,16 @@ def _resolve_writable_handler(source, settings, settings_file):
     Raises ToolParamError otherwise. The caller owns the returned handler's session and
     must close it.
 
-    :raises ToolParamError: unknown source, or a source not opted in for writes
+    Args:
+        source (str): the source name to resolve
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+
+    Returns:
+        DataHandler: the single writable handler for that source
+
+    Raises:
+        ToolParamError: unknown source, or a source not opted in for writes
     """
     handler = resolve_handler(source, settings, settings_file)
     if not handler.mcp_write_enabled():
@@ -110,6 +131,14 @@ def _hue_list_devices_result(settings, settings_file):
     A bridge that cannot be reached does not suppress the others: its devices are absent
     and the failure is reported in ``unreachable``, so the model sees a partial list *and*
     knows it is partial rather than concluding those lights do not exist.
+
+    Args:
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+
+    Returns:
+        dict: the ``hue_list_devices`` payload - every writable light with its id, name,
+            bridge and supported controls
     """
     handlers = _resolve_writable_handlers("hue", settings, settings_file)
     try:
@@ -145,11 +174,16 @@ def _hue_matches_across_bridges(handlers, device, bridge):
     construction what ``hue_list_devices`` advertises, instead of two paths that happen to
     derive the same answer.
 
-    :param handlers: ``[(instance, handler), ...]`` to search
-    :param device: light id or exact name to match
-    :param bridge: the bridge the caller named, or None
-    :return: ``([(instance, handler, light_id, name), ...], [(instance, exc), ...])``
-    :raises SourceConnectionError: the named or only bridge could not be reached
+    Args:
+        handlers (list): ``[(instance, handler), ...]`` to search
+        device (str): light id or exact name to match
+        bridge (str or None): the bridge the caller named, or None
+
+    Returns:
+        tuple: ``([(instance, handler, light_id, name), ...], [(instance, exc), ...])``
+
+    Raises:
+        SourceConnectionError: the named or only bridge could not be reached
     """
     matches, unreachable = [], []
     for instance, handler in handlers:
@@ -187,14 +221,19 @@ def _resolve_hue_target(handlers, device, bridge):
     an identical retry. Acting on a lone match found elsewhere is deliberately *not* the
     behaviour: the silent bridge may carry the same name.
 
-    :param handlers: ``[(instance, handler), ...]`` from _resolve_writable_handlers
-    :param device: light id or exact name, from the tool call
-    :param bridge: bridge host to restrict to, or None to search every bridge
-    :return: ``(instance, handler, light_id, name)`` for the single match
-    :raises ToolParamError: unknown bridge, unknown device, an ambiguous device, or a bridge
-        that could not be reached while arbitrating across several
-    :raises SourceConnectionError: the bridge named in ``bridge`` is unreachable, or the only
-        configured bridge is
+    Args:
+        handlers (list): ``[(instance, handler), ...]`` from _resolve_writable_handlers
+        device (str): light id or exact name, from the tool call
+        bridge (str or None): bridge host to restrict to, or None to search every bridge
+
+    Returns:
+        tuple: ``(instance, handler, light_id, name)`` for the single match
+
+    Raises:
+        ToolParamError: unknown bridge, unknown device, an ambiguous device, or a bridge that could not be reached while
+            arbitrating across several
+        SourceConnectionError: the bridge named in ``bridge`` is unreachable, or the only configured bridge
+            is unreachable
     """
     if not isinstance(device, str) or not device.strip():
         raise ToolParamError(f"device must be a non-empty light id or name (got {device!r})")
@@ -249,7 +288,24 @@ def _resolve_hue_target(handlers, device, bridge):
 
 
 def _hue_set_light_result(settings, settings_file, *, device, on, brightness_pct, color_temp_k, color, bridge=None):
-    """Build the hue_set_light payload (runs in a worker thread)."""
+    """Build the hue_set_light payload (runs in a worker thread).
+
+    Args:
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+        device (str): the light id, or its exact name
+        on (bool or None): turn on or off; None leaves it unchanged
+        brightness_pct (float or None): 0-100 for a dimmable light, where 0 is the lowest
+            on-brightness rather than off; None leaves it unchanged
+        color_temp_k (float or None): white colour temperature in kelvin, clamped to the
+            light's range; None leaves it unchanged
+        color (str or None): a colour as ``#rrggbb`` or a name; None leaves it unchanged
+        bridge (str or None): which bridge the light is on, needed only when ``device`` is
+            not unique across the configured bridges
+
+    Returns:
+        dict: the resolved device and the state actually applied
+    """
     handlers = _resolve_writable_handlers("hue", settings, settings_file)
     try:
         instance, handler, light_id, _ = _resolve_hue_target(handlers, device, bridge)
@@ -272,7 +328,16 @@ def _hue_set_light_result(settings, settings_file, *, device, on, brightness_pct
 
 
 def _speedtest_run_result(settings, settings_file, host=None):
-    """Build the speedtest_run payload (runs in a worker thread)."""
+    """Build the speedtest_run payload (runs in a worker thread).
+
+    Args:
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+        host (str or None): assert which machine should run it; None does not assert
+
+    Returns:
+        dict: the ``speedtest_run`` payload
+    """
     handler = _resolve_writable_handler("speedtest", settings, settings_file)
     try:
         return handler.mcp_trigger_run(host=host)
@@ -281,7 +346,16 @@ def _speedtest_run_result(settings, settings_file, host=None):
 
 
 def _register_hue_write_tools(server, settings, settings_file):
-    """Register Hue's write tools (light/plug control)."""
+    """Register Hue's write tools (light/plug control).
+
+    Args:
+        server (MCPServer): the server to register the tools on
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+
+    Returns:
+        MCPServer: the same server, for chaining
+    """
     import anyio
 
     # A read despite living in the write registrar: it only lists devices and
@@ -292,7 +366,7 @@ def _register_hue_write_tools(server, settings, settings_file):
         title="List Hue Devices",
         annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
     )
-    async def hue_list_devices() -> dict:
+    async def hue_list_devices() -> dict:  # noqa: DOC201
         """List the controllable Hue lights and plugs across every configured bridge,
         each with its id, name, the bridge it is on, and the controls it supports
         (on/off, brightness, colour temperature, colour), plus the kelvin range for
@@ -324,7 +398,7 @@ def _register_hue_write_tools(server, settings, settings_file):
             read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
         ),
     )
-    async def hue_set_light(
+    async def hue_set_light(  # noqa: DOC101,DOC103,DOC108,DOC201
         device: str,
         on: "bool | None" = None,
         brightness_pct: "float | None" = None,
@@ -376,7 +450,16 @@ def _register_hue_write_tools(server, settings, settings_file):
 
 
 def _register_speedtest_write_tools(server, settings, settings_file):
-    """Register Speedtest's write tool (trigger a run)."""
+    """Register Speedtest's write tool (trigger a run).
+
+    Args:
+        server (MCPServer): the server to register the tools on
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+
+    Returns:
+        MCPServer: the same server, for chaining
+    """
     import anyio
 
     # Not idempotent - each call runs a fresh test and can return a different
@@ -390,7 +473,7 @@ def _register_speedtest_write_tools(server, settings, settings_file):
             read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
         ),
     )
-    async def speedtest_run(host: "str | None" = None) -> dict:
+    async def speedtest_run(host: "str | None" = None) -> dict:  # noqa: DOC101,DOC103,DOC108,DOC201
         """Run an internet speed test now, on the host this server runs on, and
         return the result (download/upload throughput and latency). Use this for an
         on-demand check; `get_current_state`/`query_history` report the last recorded
@@ -430,14 +513,17 @@ def register_write_tools(server, settings, settings_file=None, enabled_sources=N
     When no source is enabled for writes, nothing is registered - the write capability is
     entirely absent from the server.
 
-    :param server: the MCPServer instance
-    :param settings: parsed settings dict
-    :param settings_file: settings path, for re-resolving handlers per call
-    :param enabled_sources: the pre-computed write-enabled source list, if the
-        caller already has it (build_mcp_server shares one computation with
-        register_prompts); ``None`` computes it here (constructing a handler per
-        source), so the function still stands alone.
-    :return: the server
+    Args:
+        server (MCPServer): the MCPServer instance
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, for re-resolving handlers per call
+        enabled_sources (list or None): the pre-computed write-enabled source list, if the
+            caller already has it (build_mcp_server shares one computation with
+            register_prompts); ``None`` computes it here (constructing a handler per source),
+            so the function still stands alone.
+
+    Returns:
+        MCPServer: the same server, for chaining
     """
     enabled = writable_enabled_sources(settings, settings_file) if enabled_sources is None else enabled_sources
     if not enabled:
