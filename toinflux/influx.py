@@ -442,7 +442,7 @@ class DataHandler:
         """
         return worker_label(self.source, self.instance)
 
-    def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True):
+    def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True) -> None:
         """Sends data to influxDB.
 
         Before sending the new point, first tries to flush any points buffered from
@@ -600,7 +600,7 @@ class DataHandler:
             for _ in chunk:
                 buffer.popleft()
 
-    def _flush_head(self, buffer, url, kwargs):
+    def _flush_head(self, buffer, url, kwargs) -> None:
         """POST the single point at the head of the buffer.
 
         Removes it on success, or drops it with a warning after MAX_POINT_REJECTIONS
@@ -688,7 +688,7 @@ class DataHandler:
             exc.status_code = getattr(e.response, "status_code", None)
             raise exc from e
 
-    def _buffer_point(self, buffer, line):
+    def _buffer_point(self, buffer, line) -> None:
         """Append a failed point to a source's write buffer.
 
         Added as a fresh ``[line, rejection_count]`` entry, warning if this evicts the

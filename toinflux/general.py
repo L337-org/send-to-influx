@@ -643,7 +643,7 @@ def parse_mcp_bind_address(bind_address):
     return host, port
 
 
-def _reject_public_bind_host(host, bind_address):
+def _reject_public_bind_host(host, bind_address) -> None:
     """Refuse a bind host that would expose the plain-HTTP MCP server publicly.
 
     Refuses the any-interface wildcards (0.0.0.0/::) and any globally-routable IP
@@ -887,7 +887,7 @@ def _validate_source_block(source, settings, is_v2):
     return errors
 
 
-def _log_config_warnings(warnings_found, settings_path, warn):
+def _log_config_warnings(warnings_found, settings_path, warn) -> None:
     """Log non-fatal configuration warnings, but only when the caller asked for them.
 
     Opt-in because ``validate_settings()`` runs inside ``load_settings()`` and therefore
@@ -1060,7 +1060,7 @@ def _contains_real_secret(settings):
     return False
 
 
-def _enforce_settings_file_permissions(settings_path, raw_settings):
+def _enforce_settings_file_permissions(settings_path, raw_settings) -> None:
     """Warn, and optionally refuse, on a world-readable settings file holding a secret.
 
     Warns always; refuses when enforce_permissions is true. Applies when settings_path is

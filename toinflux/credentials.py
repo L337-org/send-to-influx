@@ -284,7 +284,7 @@ def _read_credential(cred_path, name):
         return None
 
 
-def _overlay_credential(settings, name, path, value):
+def _overlay_credential(settings, name, path, value) -> None:
     """Write one credential value into its settings section, creating the section if absent.
 
     A malformed section (``influx: []``, ``hue: "oops"``) is logged and skipped rather than

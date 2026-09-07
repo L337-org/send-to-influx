@@ -348,7 +348,7 @@ class Influx:
                 rows.extend(series.get("values", []) or [])
         return columns, rows
 
-    def write(self, lines):
+    def write(self, lines) -> None:
         """Write a batch of line protocol points at nanosecond precision.
 
         Args:

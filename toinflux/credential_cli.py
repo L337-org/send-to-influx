@@ -195,7 +195,7 @@ def _cred_path(name, credstore_dir=None):
     return os.path.join(credstore_dir, f"{name}.cred")
 
 
-def _regenerate_dropin(credstore_dir=None, dropin_path=None, exclude=None):
+def _regenerate_dropin(credstore_dir=None, dropin_path=None, exclude=None) -> None:
     """Rewrite the systemd drop-in from a fresh directory listing of credstore_dir.
 
     Idempotent and self-healing if a prior run was interrupted, with no separate state
@@ -552,7 +552,7 @@ def _locate_rewritable_value(settings_path, text, top_node, top_key, field, new_
     )
 
 
-def _rewrite_settings_field(settings_path, top_key, field, new_value):
+def _rewrite_settings_field(settings_path, top_key, field, new_value) -> None:
     """Replace a single scalar field's value in place.
 
     Preserves every other byte of the file (comments, ordering, blank lines) by locating
@@ -864,7 +864,7 @@ def _resolve_credential_value(name, influx, credstore_dir):
     return plain_value
 
 
-def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
+def _ensure_influx_storage(name, settings_path=None, credstore_dir=None) -> None:
     """Best-effort create the InfluxDB database (v1) or bucket (v2) named `name`.
 
     Never raises on failure (permissions, auth, unreachable) - logs and returns, since
@@ -1169,7 +1169,7 @@ def _extract_section(text, name):
     return "".join(lines[first:end])
 
 
-def _require_mapping_document(root, settings_path):
+def _require_mapping_document(root, settings_path) -> None:
     r"""Refuse a settings file whose top-level YAML document isn't a mapping.
 
     An empty file (``root is None``) is fine to append to - the appended section

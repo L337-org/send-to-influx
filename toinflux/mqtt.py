@@ -342,7 +342,7 @@ class MqttDataHandler(DataHandler):
             logging.warning("Error handling MQTT message on topic '%s': %s", topic, exc, exc_info=True)
 
     @staticmethod
-    def _drop_oldest_and_enqueue(message_queue, item, topic):
+    def _drop_oldest_and_enqueue(message_queue, item, topic) -> None:
         """Enqueue onto a (was-)full stream queue, dropping the oldest entry only if needed.
 
         The caller (paho's network thread) reaches here after its own ``put_nowait``
@@ -494,7 +494,7 @@ class MqttDataHandler(DataHandler):
         self._raise_for_failed_connection(host, port, STREAM_CONNECT_TIMEOUT, failures, connected)
 
     @staticmethod
-    def _subscribe_on_connect(client, reason_code, topic_filter, failures, connected):
+    def _subscribe_on_connect(client, reason_code, topic_filter, failures, connected) -> None:
         """Handle a CONNACK: subscribe if it succeeded, otherwise record why not.
 
         Both outcomes are recorded rather than raised - paho runs this inside its own
@@ -524,7 +524,7 @@ class MqttDataHandler(DataHandler):
         connected.append(True)
 
     @staticmethod
-    def _resubscribe_on_reconnect(client, reason_code, topic_filter, host, port):
+    def _resubscribe_on_reconnect(client, reason_code, topic_filter, host, port) -> None:
         """Re-subscribe after a reconnect once the stream is past its initial handshake.
 
         paho drops subscriptions on a reconnect, so this re-issues the subscribe (which is
@@ -559,7 +559,7 @@ class MqttDataHandler(DataHandler):
             )
 
     @staticmethod
-    def _raise_for_failed_connection(host, port, timeout, failures, connected):
+    def _raise_for_failed_connection(host, port, timeout, failures, connected) -> None:
         """Raise SourceConnectionError if the window ended without a usable connection.
 
         Either the broker refused the CONNACK (e.g. bad credentials), or it accepted TCP

@@ -659,7 +659,7 @@ class Hue(DataHandler):
         if data is None:
             self._write_device_classes(timestamp)
 
-    def _write_device_classes(self, timestamp=None):
+    def _write_device_classes(self, timestamp=None) -> None:
         """Write one ``SCHEMA_MEASUREMENT`` point per device, saying which class it is.
 
         Uses the header-swap idiom ``send_heartbeat()`` established, so buffering, escaping

@@ -149,7 +149,7 @@ class OAuthStateStore:
         self.refresh_tokens = {}
         self._load()
 
-    def _tighten_permissions(self):
+    def _tighten_permissions(self) -> None:
         """Best-effort: force an existing state file to owner-only (0600).
 
         save() writes 0600, but a file laid down out of band - a manual
@@ -174,7 +174,7 @@ class OAuthStateStore:
                     exc,
                 )
 
-    def _load(self):
+    def _load(self) -> None:
         """Load existing state.
 
         A missing file is a normal first run. A corrupt one is logged and treated as

@@ -1635,7 +1635,7 @@ def list_fields_result(source, settings, settings_file, detail=False):
         close_session(handler.session)
 
 
-def _validate_instance(schema, instance):
+def _validate_instance(schema, instance) -> None:
     """Check an ``instance`` argument against the source's live tag values.
 
     Two separate refusals, and both matter. A source with no instance axis is told so
@@ -2347,7 +2347,7 @@ def register_read_tools(server, settings, settings_file=None):
     import anyio
 
     @register_tool(server, title="List Data Sources", annotations=_READ_ONLY)
-    async def list_sources() -> dict:
+    async def list_sources() -> dict:  # noqa: DOC201
         """List the configured collector sources whose data can be read, each with
         its InfluxDB measurement and a line on what it reports.
 
@@ -2369,7 +2369,7 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(_list_sources_result, settings, settings_file)
 
     @register_tool(server, title="List Source Fields", annotations=_READ_ONLY)
-    async def list_fields(source: str, detail: bool = False) -> dict:  # noqa: DOC101,DOC103,DOC108
+    async def list_fields(source: str, detail: bool = False) -> dict:  # noqa: DOC101,DOC103,DOC108,DOC201
         """Describe one source well enough to query it and chart the result: its
         `database` and `measurement`, its `tag_keys` to group by, and every field with
         its InfluxDB `type`, any `unit`, any coded values, and its `kind`. Every
@@ -2404,7 +2404,7 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file, detail)
 
     @register_tool(server, title="Query Historical Data", annotations=_READ_ONLY)
-    async def query_history(  # noqa: DOC101,DOC103,DOC108
+    async def query_history(  # noqa: DOC101,DOC103,DOC108,DOC201
         source: str,
         field: str,
         start: str = "-24h",
@@ -2463,7 +2463,7 @@ def register_read_tools(server, settings, settings_file=None):
         )
 
     @register_tool(server, title="Get Current State", annotations=_READ_ONLY)
-    async def get_current_state(source: str) -> dict:  # noqa: DOC101,DOC103,DOC108
+    async def get_current_state(source: str) -> dict:  # noqa: DOC101,DOC103,DOC108,DOC201
         """Read a source's state *now* - is the light on, is the door locked, what is
         the power draw at this moment.
 
@@ -2489,7 +2489,7 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(current_state_result, source, settings, settings_file)
 
     @register_tool(server, title="Get Data Range & Retention", annotations=_READ_ONLY)
-    async def get_data_range(source: str) -> dict:  # noqa: DOC101,DOC103,DOC108
+    async def get_data_range(source: str) -> dict:  # noqa: DOC101,DOC103,DOC108,DOC201
         """Report how far back a source's data goes, and how long InfluxDB keeps it.
 
         Answers "when did collection start", "how far back can I query", "how long is
@@ -2524,7 +2524,7 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(data_range_result, source, settings, settings_file)
 
     @register_tool(server, title="Get Field Documentation", annotations=_READ_ONLY)
-    async def get_documentation() -> dict:
+    async def get_documentation() -> dict:  # noqa: DOC201
         """Return a Markdown reference of what every configured source reports and
         what its values mean: units, the meaning of coded values (e.g. Nuki lock and
         door state codes), how each field may be aggregated, and a description where

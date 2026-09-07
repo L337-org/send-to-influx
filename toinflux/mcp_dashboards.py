@@ -306,7 +306,7 @@ def register_dashboard_tools(server, settings, settings_file=None):
     import anyio
 
     @register_tool(server, title="Suggest Dashboard Panels", annotations=_READ_ONLY)
-    async def suggest_dashboard_panels(  # noqa: DOC101,DOC103,DOC108
+    async def suggest_dashboard_panels(  # noqa: DOC101,DOC103,DOC108,DOC201
         source: str,
         fields: "list[str] | None" = None,
     ) -> dict:

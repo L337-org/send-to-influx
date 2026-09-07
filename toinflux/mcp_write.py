@@ -366,7 +366,7 @@ def _register_hue_write_tools(server, settings, settings_file):
         title="List Hue Devices",
         annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
     )
-    async def hue_list_devices() -> dict:
+    async def hue_list_devices() -> dict:  # noqa: DOC201
         """List the controllable Hue lights and plugs across every configured bridge,
         each with its id, name, the bridge it is on, and the controls it supports
         (on/off, brightness, colour temperature, colour), plus the kelvin range for
@@ -398,7 +398,7 @@ def _register_hue_write_tools(server, settings, settings_file):
             read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
         ),
     )
-    async def hue_set_light(  # noqa: DOC101,DOC103,DOC108
+    async def hue_set_light(  # noqa: DOC101,DOC103,DOC108,DOC201
         device: str,
         on: "bool | None" = None,
         brightness_pct: "float | None" = None,
@@ -473,7 +473,7 @@ def _register_speedtest_write_tools(server, settings, settings_file):
             read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
         ),
     )
-    async def speedtest_run(host: "str | None" = None) -> dict:  # noqa: DOC101,DOC103,DOC108
+    async def speedtest_run(host: "str | None" = None) -> dict:  # noqa: DOC101,DOC103,DOC108,DOC201
         """Run an internet speed test now, on the host this server runs on, and
         return the result (download/upload throughput and latency). Use this for an
         on-demand check; `get_current_state`/`query_history` report the last recorded

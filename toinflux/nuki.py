@@ -211,7 +211,7 @@ class Nuki(MqttDataHandler):
         # anything, and changing broker should not change the data.
         return self.data
 
-    def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True):
+    def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True) -> None:
         """Write one point per lock, rather than one point carrying every lock's fields.
 
         ``self.data`` is ``{device: {field: value}}``, so this walks it and delegates each
