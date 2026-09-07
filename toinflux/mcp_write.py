@@ -46,8 +46,8 @@ def writable_enabled_sources(settings, settings_file=None):
     whether to register write tools at all.
 
     Args:
-        settings: parsed settings dict
-        settings_file: settings path, for constructing handlers
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, for constructing handlers
 
     Returns:
         list of source names enabled for writes
@@ -75,6 +75,14 @@ def _resolve_writable_handlers(source, settings, settings_file):
 
     Raises:
         ToolParamError: unknown source, no usable target, or not opted in for writes
+
+    Args:
+        source (str): the source name to resolve
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+
+    Returns:
+        list: ``(instance, handler)`` pairs for every writable target of that source
     """
     handlers = resolve_handlers(source, settings, settings_file)
     if not handlers[0][1].mcp_write_enabled():
@@ -94,6 +102,14 @@ def _resolve_writable_handler(source, settings, settings_file):
 
     Raises:
         ToolParamError: unknown source, or a source not opted in for writes
+
+    Args:
+        source (str): the source name to resolve
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+
+    Returns:
+        DataHandler: the single writable handler for that source
     """
     handler = resolve_handler(source, settings, settings_file)
     if not handler.mcp_write_enabled():
@@ -115,6 +131,14 @@ def _hue_list_devices_result(settings, settings_file):
     A bridge that cannot be reached does not suppress the others: its devices are absent
     and the failure is reported in ``unreachable``, so the model sees a partial list *and*
     knows it is partial rather than concluding those lights do not exist.
+
+    Args:
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+
+    Returns:
+        dict: the ``hue_list_devices`` payload - every writable light with its id, name,
+            bridge and supported controls
     """
     handlers = _resolve_writable_handlers("hue", settings, settings_file)
     try:
@@ -151,9 +175,9 @@ def _hue_matches_across_bridges(handlers, device, bridge):
     derive the same answer.
 
     Args:
-        handlers: ``[(instance, handler), ...]`` to search
-        device: light id or exact name to match
-        bridge: the bridge the caller named, or None
+        handlers (list): ``[(instance, handler), ...]`` to search
+        device (str): light id or exact name to match
+        bridge (str or None): the bridge the caller named, or None
 
     Returns:
         ``([(instance, handler, light_id, name), ...], [(instance, exc), ...])``
@@ -198,9 +222,9 @@ def _resolve_hue_target(handlers, device, bridge):
     behaviour: the silent bridge may carry the same name.
 
     Args:
-        handlers: ``[(instance, handler), ...]`` from _resolve_writable_handlers
-        device: light id or exact name, from the tool call
-        bridge: bridge host to restrict to, or None to search every bridge
+        handlers (list): ``[(instance, handler), ...]`` from _resolve_writable_handlers
+        device (str): light id or exact name, from the tool call
+        bridge (str or None): bridge host to restrict to, or None to search every bridge
 
     Returns:
         ``(instance, handler, light_id, name)`` for the single match
@@ -264,7 +288,24 @@ def _resolve_hue_target(handlers, device, bridge):
 
 
 def _hue_set_light_result(settings, settings_file, *, device, on, brightness_pct, color_temp_k, color, bridge=None):
-    """Build the hue_set_light payload (runs in a worker thread)."""
+    """Build the hue_set_light payload (runs in a worker thread).
+
+    Args:
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+        device (str): the light id, or its exact name
+        on (bool or None): turn on or off; None leaves it unchanged
+        brightness_pct (float or None): 0-100 for a dimmable light, where 0 is the lowest
+            on-brightness rather than off; None leaves it unchanged
+        color_temp_k (float or None): white colour temperature in kelvin, clamped to the
+            light's range; None leaves it unchanged
+        color (str or None): a colour as ``#rrggbb`` or a name; None leaves it unchanged
+        bridge (str or None): which bridge the light is on, needed only when ``device`` is
+            not unique across the configured bridges
+
+    Returns:
+        dict: the resolved device and the state actually applied
+    """
     handlers = _resolve_writable_handlers("hue", settings, settings_file)
     try:
         instance, handler, light_id, _ = _resolve_hue_target(handlers, device, bridge)
@@ -287,7 +328,16 @@ def _hue_set_light_result(settings, settings_file, *, device, on, brightness_pct
 
 
 def _speedtest_run_result(settings, settings_file, host=None):
-    """Build the speedtest_run payload (runs in a worker thread)."""
+    """Build the speedtest_run payload (runs in a worker thread).
+
+    Args:
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+        host (str or None): assert which machine should run it; None does not assert
+
+    Returns:
+        dict: the ``speedtest_run`` payload
+    """
     handler = _resolve_writable_handler("speedtest", settings, settings_file)
     try:
         return handler.mcp_trigger_run(host=host)
@@ -296,7 +346,16 @@ def _speedtest_run_result(settings, settings_file, host=None):
 
 
 def _register_hue_write_tools(server, settings, settings_file):
-    """Register Hue's write tools (light/plug control)."""
+    """Register Hue's write tools (light/plug control).
+
+    Args:
+        server (MCPServer): the server to register the tools on
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+
+    Returns:
+        MCPServer: the same server, for chaining
+    """
     import anyio
 
     # A read despite living in the write registrar: it only lists devices and
@@ -391,7 +450,16 @@ def _register_hue_write_tools(server, settings, settings_file):
 
 
 def _register_speedtest_write_tools(server, settings, settings_file):
-    """Register Speedtest's write tool (trigger a run)."""
+    """Register Speedtest's write tool (trigger a run).
+
+    Args:
+        server (MCPServer): the server to register the tools on
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, threaded to each handler's own load
+
+    Returns:
+        MCPServer: the same server, for chaining
+    """
     import anyio
 
     # Not idempotent - each call runs a fresh test and can return a different
@@ -446,12 +514,13 @@ def register_write_tools(server, settings, settings_file=None, enabled_sources=N
     entirely absent from the server.
 
     Args:
-        server: the MCPServer instance
-        settings: parsed settings dict
-        settings_file: settings path, for re-resolving handlers per call
-        enabled_sources: the pre-computed write-enabled source list, if the caller already has it (build_mcp_server
-            shares one computation with register_prompts); ``None`` computes it here (constructing a handler per
-            source), so the function still stands alone.
+        server (MCPServer): the MCPServer instance
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, for re-resolving handlers per call
+        enabled_sources (list or None): the pre-computed write-enabled source list, if the
+            caller already has it (build_mcp_server shares one computation with
+            register_prompts); ``None`` computes it here (constructing a handler per source),
+            so the function still stands alone.
 
     Returns:
         the server
