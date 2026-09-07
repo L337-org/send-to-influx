@@ -242,7 +242,7 @@ def build_schema(handler, discovered, db, instance_values=None):
         handler (DataHandler): a constructed DataHandler subclass instance
         discovered (MeasurementKeys): the measurement's keys, from discover_measurement_keys()
         db (str): the resolved database/bucket name (from resolve_db)
-        instance_values (set): values of the source's instance tag found via
+        instance_values (set or None): values of the source's instance tag found via
             discover_tag_values(), or None when it has no instance tag
 
     Returns:
@@ -466,7 +466,7 @@ def parse_time_bound(value, *, now=None):
 
     Args:
         value (str or None): the time expression
-        now (datetime.datetime): reference time for ``now``/relative offsets (defaults to the current UTC time);
+        now (datetime.datetime or None): reference time for ``now``/relative offsets (defaults to the current UTC time);
             injected for testability
 
     Returns:

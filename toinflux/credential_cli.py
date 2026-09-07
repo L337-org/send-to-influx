@@ -248,7 +248,7 @@ def _encrypt_credential(name, value, credstore_dir=None):
     Args:
         name (str): the credential name
         value (str): the plaintext to encrypt
-        credstore_dir (str): the systemd credential store directory
+        credstore_dir (str or None): the systemd credential store directory
 
     Raises:
         CredentialCliError: if credstore_dir can't be created/secured, if systemd-creds encrypt fails, or if the written
@@ -293,7 +293,7 @@ def _decrypt_credential(name, credstore_dir=None):
 
     Args:
         name (str): the credential name
-        credstore_dir (str): the systemd credential store directory
+        credstore_dir (str or None): the systemd credential store directory
 
     Returns:
         str: the decrypted value, with any trailing newline stripped
@@ -726,7 +726,7 @@ def _enable_source(name, settings_path=None):
 
     Args:
         name (str): the source to enable
-        settings_path (str): path to the settings file
+        settings_path (str or None): path to the settings file
 
     Returns:
         bool: True if the file was actually changed, False if `name` was already present (so callers - e.g. the CLI -
@@ -878,8 +878,8 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None) -> None
 
     Args:
         name (str): the credential name
-        settings_path (str): path to the settings file
-        credstore_dir (str): the systemd credential store directory
+        settings_path (str or None): path to the settings file
+        credstore_dir (str or None): the systemd credential store directory
     """
     if settings_path is None:
         settings_path = DEFAULT_SETTINGS_PATH
@@ -1064,8 +1064,8 @@ def _cmd_list(credstore_dir=None, settings_path=None):
     a stored secret is not something to do as a side effect of a listing.
 
     Args:
-        credstore_dir (str): the systemd credential store directory
-        settings_path (str): path to the settings file
+        credstore_dir (str or None): the systemd credential store directory
+        settings_path (str or None): path to the settings file
     """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR

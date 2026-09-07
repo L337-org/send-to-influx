@@ -700,11 +700,12 @@ def _check_config_and_exit(settings, args):
     sys.exit(0)
 
 
-def main():
+def main() -> None:
     """Run the collector until it is asked to stop.
 
-    Returns:
-        nothing; the process exits through ``sys.exit`` on every path
+    Most paths end in ``sys.exit`` - a configuration error, ``--check-config``, ``--version``,
+    or a signal - but a single-worker run returns normally when its worker stops, and the
+    module entrypoint calls this directly rather than wrapping it in ``sys.exit``.
     """
     # register the signal handler for ctrl-c and termination
     signal.signal(signal.SIGINT, signal_handler)
