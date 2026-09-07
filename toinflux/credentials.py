@@ -70,6 +70,14 @@ def _slot_suffix(text, prefix):
 
     None covers both "does not start with the prefix" and "the suffix is not canonical", so
     a caller cannot accidentally treat ``hue-user1`` or ``hue-user02`` as a valid slot.
+
+    Args:
+        text (str): the candidate name or field
+        prefix (str): the prefix a slot name or field must start with
+
+    Returns:
+        str or None: the canonical suffix, or None if the text does not start with the prefix
+            or the suffix is not canonical
     """
     if not isinstance(text, str) or not text.startswith(prefix):
         return None
@@ -88,7 +96,7 @@ def credential_field(name):
     plaintext while ``_contains_real_secret`` stayed blind to it.
 
     Args:
-        name: credential name, e.g. "influx-token", "hue-user", "hue-user3"
+        name (str): credential name, e.g. "influx-token", "hue-user", "hue-user3"
 
     Returns:
         tuple or None: (section, field) or None
@@ -100,7 +108,14 @@ def credential_field(name):
 
 
 def is_credential_name(name):
-    """Whether ``name`` is a credential this tool manages (static or a numbered slot)."""
+    """Whether ``name`` is a credential this tool manages (static or a numbered slot).
+
+    Args:
+        name (str): the candidate credential name
+
+    Returns:
+        bool: True when this tool manages it
+    """
     return credential_field(name) is not None
 
 
@@ -111,8 +126,8 @@ def credential_name_for(section, field):
     field and to name the right command in the refusal.
 
     Args:
-        section: top-level settings key, e.g. "hue"
-        field: field within it, e.g. "user2"
+        section (str): top-level settings key, e.g. "hue"
+        field (str): field within it, e.g. "user2"
 
     Returns:
         str or None: credential name, or None
@@ -128,7 +143,15 @@ def credential_name_for(section, field):
 
 
 def is_credential_field(section, field):
-    """Whether a settings path holds a secret - see :func:`credential_name_for`."""
+    """Whether a settings path holds a secret - see :func:`credential_name_for`.
+
+    Args:
+        section (str): top-level settings key
+        field (str): field within it
+
+    Returns:
+        bool: True when that path holds a secret
+    """
     return credential_name_for(section, field) is not None
 
 
@@ -140,7 +163,7 @@ def placeholder_for(name):
     ``PLACEHOLDER_VALUES`` directly and would have died with a KeyError on a slot.
 
     Args:
-        name: credential name
+        name (str): credential name
 
     Returns:
         str or None: placeholder text, or None
@@ -242,8 +265,8 @@ def _read_credential(cred_path, name):
     UTF-8, but LoadCredentialEncrypted= is not exclusive to it.
 
     Args:
-        cred_path: path to the decrypted credential file
-        name: credential name, for the log message
+        cred_path (str): path to the decrypted credential file
+        name (str): credential name, for the log message
 
     Returns:
         str or None: the value, or None
@@ -270,10 +293,10 @@ def _overlay_credential(settings, name, path, value):
     skipped here and explained there rather than reaching a collector half-applied.
 
     Args:
-        settings: parsed settings dict, mutated in place
-        name: credential name, for the log message
-        path: the ``(section, field)`` this credential overlays
-        value: the decrypted value
+        settings (dict): parsed settings dict, mutated in place
+        name (str): credential name, for the log message
+        path (tuple): the ``(section, field)`` this credential overlays
+        value (str): the decrypted value
     """
     top_key, field = path
     block = settings.get(top_key)

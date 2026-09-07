@@ -51,6 +51,11 @@ class MyEnergiDevice:
     ``label`` is the emitted ``device`` tag value, not a display name - see
     ``enumerate_devices``. ``fields`` is None when everything the API returns should be
     written.
+
+    Attributes:
+        serial (str): the device serial the API identifies it by.
+        label (str): the value written as the ``device`` tag.
+        fields (list or None): which fields to collect, or None for everything the API returns.
     """
 
     serial: str
@@ -138,7 +143,7 @@ def _checked_label(position, label, what="label"):
 
     Args:
         position (str): what to name in the message
-        label: the configured value
+        label (object): the configured value
         what (str): the key name, for the message
 
     Returns:
@@ -198,8 +203,8 @@ def _device_from_entry(position, entry, block_fields):
 
     Args:
         position (str): what to name in messages, e.g. "zappi.devices[0]"
-        entry: the list entry as parsed from YAML
-        block_fields: the block-level fields list, used when the entry names none
+        entry (object): the list entry as parsed from YAML
+        block_fields (list or None): the block-level fields list, used when the entry names none
 
     Returns:
         tuple: (device, errors); device is None when there are errors
@@ -234,7 +239,7 @@ def _checked_serial(position, value):
 
     Args:
         position (str): what to name in the message, e.g. "zappi" or "zappi.devices[0]"
-        value: the configured value
+        value (object): the configured value
 
     Returns:
         tuple: (serial, errors); serial is None when there are errors
@@ -256,7 +261,7 @@ def _checked_fields(position, value):
 
     Args:
         position (str): what to name in the message
-        value: the configured value, or None
+        value (object): the configured value, or None
 
     Returns:
         tuple: (fields, errors); fields is None both on error and when nothing was configured, the latter meaning
@@ -339,7 +344,13 @@ def duplicate_label_errors(settings):
 
 
 class MyEnergi(DataHandler):
-    """Child class of DataHandler to get data from MyEnergi."""
+    """Child class of DataHandler to get data from MyEnergi.
+
+    Attributes:
+        MCP_INSTANCE_TAG (str): "device" - the trio share one measurement, so each point names
+            which device produced it.
+        MCP_TAG_FILTERS (dict): empty on this shared parent; each concrete device sets its own.
+    """
 
     # All three types share the `myenergi` measurement, and `device` is the tag that tells
     # them apart - now carrying the operator's label rather than the type name. Naming it as
@@ -516,6 +527,7 @@ class MyEnergi(DataHandler):
         Args:
             myenergi_data (dict): the parsed API response
             device_key (str): the response key for this device type, e.g. "zappi"
+            device (str or None): the serial to select, or None for this handler's configured one
 
         Returns:
             dict: the matching device's data
@@ -566,7 +578,7 @@ class MyEnergi(DataHandler):
         default never fires. It can only turn a miss into a hit.
 
         Args:
-            item: one entry from the day/hour response
+            item (dict): one entry from the day/hour response
 
         Returns:
             int: the hour the entry describes
@@ -628,7 +640,14 @@ class MyEnergi(DataHandler):
 
 
 class Zappi(MyEnergi):
-    """Child class of MyEnergi (which is in turn a child of DataHandler) to get data from a Zappi."""
+    """Child class of MyEnergi (which is in turn a child of DataHandler) to get data from a Zappi.
+
+    Attributes:
+        MCP_DESCRIPTION (str): what this source advertises to an MCP client.
+        MCP_MEASUREMENT (str): "myenergi" - the charger shares one measurement with its
+            siblings, told apart by the ``device`` tag rather than by measurement.
+        MCP_FIELD_METADATA (dict): units and aggregation kinds for this device's fields.
+    """
 
     MCP_DESCRIPTION = "MyEnergi Zappi EV charger: charge and session energy, grid/generation power, and status."
 
@@ -704,7 +723,14 @@ class Zappi(MyEnergi):
 
 
 class Eddi(MyEnergi):
-    """Child class of MyEnergi to get data from an Eddi hot water diverter."""
+    """Child class of MyEnergi to get data from an Eddi hot water diverter.
+
+    Attributes:
+        MCP_DESCRIPTION (str): what this source advertises to an MCP client.
+        MCP_MEASUREMENT (str): "myenergi" - the diverter shares one measurement with its
+            siblings, told apart by the ``device`` tag rather than by measurement.
+        MCP_FIELD_METADATA (dict): units and aggregation kinds for this device's fields.
+    """
 
     MCP_DESCRIPTION = "MyEnergi Eddi hot-water diverter: diversion power, tank temperatures, and status."
     MCP_MEASUREMENT = "myenergi"
@@ -747,7 +773,14 @@ class Eddi(MyEnergi):
 
 
 class Harvi(MyEnergi):
-    """Child class of MyEnergi to get data from a Harvi CT clamp energy monitor."""
+    """Child class of MyEnergi to get data from a Harvi CT clamp energy monitor.
+
+    Attributes:
+        MCP_DESCRIPTION (str): what this source advertises to an MCP client.
+        MCP_MEASUREMENT (str): "myenergi" - the monitor shares one measurement with its
+            siblings, told apart by the ``device`` tag rather than by measurement.
+        MCP_FIELD_METADATA (dict): units and aggregation kinds for this device's fields.
+    """
 
     MCP_DESCRIPTION = "MyEnergi Harvi energy monitor: CT-clamp power readings per channel."
     MCP_MEASUREMENT = "myenergi"
