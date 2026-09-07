@@ -15,7 +15,14 @@ DEFAULT_FIELDS = ["temperature_2m"]
 
 
 class OpenMeteo(DataHandler):
-    """Child class of DataHandler to get weather data from Open-Meteo."""
+    """Child class of DataHandler to get weather data from Open-Meteo.
+
+    Attributes:
+        MCP_DESCRIPTION (str): what this source advertises to an MCP client.
+        MCP_MEASUREMENT (str): "weather" - this source's measurement is not its own name.
+        MCP_FIELD_METADATA (dict): units and aggregation kinds for the example-settings
+            fields; any other Open-Meteo variable a user configures carries none.
+    """
 
     MCP_DESCRIPTION = "Open-Meteo weather: temperature, humidity, precipitation, cloud, wind and radiation."
     # Writes to the "weather" measurement, not "openmeteo".
@@ -53,7 +60,8 @@ class OpenMeteo(DataHandler):
         """Get current weather observations from Open-Meteo.
 
         Returns:
-            dict: data
+            dict: one entry per configured field, taken from the API's ``current`` block.
+                A field the API did not report is absent rather than None.
 
         Raises:
             SourceConnectionError: the API could not be reached, or answered with an error

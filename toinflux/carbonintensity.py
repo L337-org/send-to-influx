@@ -14,7 +14,13 @@ ACCEPT_JSON = {"Accept": "application/json"}
 
 
 class CarbonIntensity(DataHandler):
-    """Child class of DataHandler to get National Grid carbon intensity data."""
+    """Child class of DataHandler to get National Grid carbon intensity data.
+
+    Attributes:
+        MCP_DESCRIPTION (str): what this source advertises to an MCP client.
+        MCP_FIELD_METADATA (dict): unit and aggregation kind for the two intensity
+            fields; the ``gen_<fuel>`` fields carry none, and UNITS.md documents them.
+    """
 
     MCP_DESCRIPTION = "UK carbon intensity (actual/forecast gCO2/kWh) and the generation fuel mix."
     # Only the two intensity fields carry a unit here. The gen_<fuel>
@@ -69,7 +75,13 @@ class CarbonIntensity(DataHandler):
         are also collected from the ``/generation`` endpoint.
 
         Returns:
-            dict: data
+            dict: ``intensity_actual`` and ``intensity_forecast`` in gCO2/kWh, each present
+                only when the API reported it, plus a ``gen_<fuel>`` percentage per fuel when
+                ``include_generation`` is set.
+
+        Raises:
+            SourceConnectionError: propagated from ``_get`` when the API could not be reached,
+                or answered with an error
         """
         self.influx_header = "carbonintensity,source=national_grid "
         self.data = {}

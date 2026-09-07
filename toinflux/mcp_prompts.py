@@ -35,15 +35,15 @@ def register_prompts(server, settings, settings_file=None, enabled_sources=None)
     when a source has writes enabled, so it is not offered on a read-only install.
 
     Args:
-        server: the MCPServer instance
-        settings: parsed settings dict
-        settings_file: settings path, for the write-enabled check
-        enabled_sources: the pre-computed write-enabled source list, if the caller already has it (build_mcp_server
-            shares one computation with register_write_tools); ``None`` computes it here, so the function still stands
-            alone.
+        server (MCPServer): the server to register the prompts on
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, for the write-enabled check
+        enabled_sources (list or None): the pre-computed write-enabled source list, if the caller
+            already has it (build_mcp_server shares one computation with register_write_tools);
+            ``None`` computes it here, so the function still stands alone.
 
     Returns:
-        the server
+        MCPServer: the same server, for chaining
     """
     if enabled_sources is None:
         enabled_sources = writable_enabled_sources(settings, settings_file)

@@ -14,7 +14,15 @@ OCTOPUS_BASE_URL = "https://api.octopus.energy/v1"
 
 
 class Octopus(DataHandler):
-    """Child class of DataHandler to get data from Octopus Energy."""
+    """Child class of DataHandler to get data from Octopus Energy.
+
+    Attributes:
+        MCP_DESCRIPTION (str): what this source advertises to an MCP client.
+        MCP_LIVE_STATE (bool): False - readings arrive up to 24 h late, so a live API call is
+            no fresher than InfluxDB and current-state reads the latest recorded point instead.
+        MCP_FIELD_METADATA (dict): units and aggregation kinds for the three fields; both
+            consumption fields are per-interval rather than meter totals.
+    """
 
     MCP_DESCRIPTION = "Octopus Energy smart meter: latest electricity/gas consumption and unit rate."
     # ~24 h delayed, so a live API read is no fresher than InfluxDB - current-state
@@ -75,6 +83,9 @@ class Octopus(DataHandler):
 
         Returns:
             int or None: unix epoch seconds, or None if interval_start was not provided
+
+        Raises:
+            ValueError: ``interval_start`` was given but is not an ISO-8601 timestamp
         """
         if not interval_start:
             return None
@@ -90,8 +101,19 @@ class Octopus(DataHandler):
         unconverted as ``gas_consumption``. If ``product_code`` and ``tariff_code`` are
         configured in settings, the current electricity unit rate for that tariff is also collected.
 
+        Also sets ``self.timestamp`` to the reading's own interval start, so that re-reading the
+        same latest reading overwrites its point rather than adding a duplicate.
+
         Returns:
-            dict: data
+            dict: ``consumption_kwh`` for the most recent half hour, plus ``gas_consumption``
+                and ``unit_rate_p_per_kwh`` when the settings for each are present. A field the
+                API had no result for is absent rather than None.
+
+        Raises:
+            SourceConnectionError: propagated from ``_get`` when the API could not be reached,
+                or answered with an error
+            ValueError: propagated from ``_parse_interval_start`` when the API returned an
+                ``interval_start`` that is not an ISO-8601 timestamp
         """
         self.influx_header = "octopus,source=octopus_energy "
         self.data = {}
