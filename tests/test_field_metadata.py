@@ -67,7 +67,7 @@ def _sections():
     """Split UNITS.md into ``{source name: [lines]}`` by its ``## `` headings.
 
     Returns:
-        dict of source name to the lines under its heading
+        dict: source name to the lines under its heading
     """
     sections = {}
     current = None
@@ -92,7 +92,7 @@ def _rows(lines):
         lines: the section's lines
 
     Returns:
-        iterator of cell lists
+        collections.abc.Iterator: one list of stripped cells per row
     """
     for line in lines:
         stripped = line.strip()
@@ -111,7 +111,7 @@ def _unit_cells(lines):
         lines: the section's lines
 
     Returns:
-        {field key: [unit cell text]}
+        dict: ``{field key: [unit cell text]}``
     """
     out = {}
     for cells in _rows(lines):
@@ -140,7 +140,7 @@ def _code_table(lines, field):
         field: the field key whose codes are wanted
 
     Returns:
-        {code: label}, empty when no such table is documented
+        dict: ``{code: label}``, empty when no such table is documented
     """
     marker = f"`{field}` codes"
     start = next((i for i, line in enumerate(lines) if marker in line), None)
@@ -164,7 +164,7 @@ def _declared():
     """Every declared field metadata entry, as ``(source, field, meta)`` triples.
 
     Returns:
-        list of triples, sorted for a stable failure order
+        list: ``(source, field, meta)`` triples, sorted for a stable failure order
     """
     out = []
     for source in known_sources():

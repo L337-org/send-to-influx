@@ -562,7 +562,7 @@ def _every_python_file():
     docstrings were part of the conversion these guards protect.
 
     Returns:
-        sorted list of tracked .py paths under toinflux/, scripts/ and tests/
+        list: tracked .py paths under toinflux/, scripts/ and tests/, sorted
     """
     roots = ("toinflux", "scripts", "tests")
     tracked = {
@@ -632,6 +632,40 @@ def test_every_docstring_orders_its_sections_conventionally():
     )
 
 
+def test_every_returns_entry_carries_a_type():
+    """Every `Returns:` entry starts with a type, as this project's convention requires.
+
+    The code is largely unannotated, so the docstring is the only place a return type is
+    written down - which is why `arg-type-hints-in-docstring` is True in tox.ini. pydoclint
+    enforces that for *arguments* (DOC109, DOC110) but has no equivalent for the return, so a
+    `Returns:` entry with no type passes every gate.
+
+    It went unnoticed until a reviewer read one: twelve entries under tests/ had prose where a
+    type belonged, and two of those had a type mangled into the prose - "str the correct
+    nodeid" and "str, the nodeid" - which reads as a type to a human and as neither to a parser.
+    """
+    import ast
+
+    typed = re.compile(r"^[\w\.\[\], |]+(\s+or\s+[\w\.]+)*:\s+\S")
+    wrong = []
+    for path in _every_python_file():
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            docstring = ast.get_docstring(node) or ""
+            section = re.search(r"^Returns:\n((?:    .*\n?)+)", docstring, re.MULTILINE)
+            if not section:
+                continue
+            first = section.group(1).splitlines()[0].strip()
+            if not typed.match(first):
+                wrong.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno} {node.name}: {first[:60]!r}")
+
+    assert not wrong, (
+        "these Returns entries do not start with a type, which for unannotated code is the only "
+        "place the return type is recorded:\n  " + "\n  ".join(wrong)
+    )
+
+
 def test_no_docstring_repeats_a_section_header():
     """No docstring carries the same Google section header twice.
 
@@ -675,7 +709,7 @@ def _module_constant(relative, name):
         name (str): the constant's name
 
     Returns:
-        the constant's literal value
+        object: the constant's literal value
     """
     import ast
 
@@ -808,7 +842,7 @@ def _test_index():
     reference to a helper class would be this check certifying something it cannot run.
 
     Returns:
-        tuple of (bare test names, complete nodeids, {nodeid missing its class: class})
+        tuple: ``(bare test names, complete nodeids, {nodeid missing its class: class})``
     """
     import ast
 
@@ -845,7 +879,7 @@ def _recovered_nodeid(token, nodeids):
         nodeids (set): every complete nodeid, relative to `tests/`
 
     Returns:
-        str the correct nodeid, or None where no single file carries that test
+        str or None: the correct nodeid, or None where no single file carries that test
     """
     filename, _, rest = token.partition("::")
     tail = f"{filename.split('/')[-1]}::{rest}"
@@ -869,7 +903,7 @@ def _suggested_nodeid(token, nodeids, owner):
         owner (dict): class owning each nodeid written without one
 
     Returns:
-        str, the nodeid to suggest
+        str: the nodeid to suggest
     """
     recovered = _recovered_nodeid(token, nodeids)
     if recovered:
@@ -897,7 +931,7 @@ def _classify(token, where, bare, nodeids, owner):
         owner (dict): class owning each nodeid written without one
 
     Returns:
-        tuple of (None|"missing"|"unrunnable", message)
+        tuple: ``(None | "missing" | "unrunnable", message)``
     """
     if "::" not in token:
         # A bare name claims only that the test exists, so there is no path to get wrong.

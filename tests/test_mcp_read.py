@@ -349,7 +349,7 @@ def _keys(field_names, tag_keys=(), types=None):
         types: {field: influx type}, overriding the untyped default
 
     Returns:
-        MeasurementKeys
+        MeasurementKeys: the field types and tag keys for one measurement
     """
     field_types = dict(types) if types else {name: None for name in field_names}
     return MeasurementKeys(field_types=field_types, tag_keys=frozenset(tag_keys))
