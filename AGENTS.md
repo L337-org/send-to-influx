@@ -291,6 +291,7 @@ no annotations. The convention and its exemptions live in `tox.ini`. No Sphinx `
 pydoclint runs in the flake8 job because D417 only checks the parameters of a section a
 docstring already has, so a function documenting none of them passes pydocstyle clean.
 
+<!-- BEGIN GENERATED -->
 ## Read these when they apply
 
 - Read `.agents/policy/review-context.md` always - these apply to every activity.
