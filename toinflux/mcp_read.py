@@ -742,7 +742,9 @@ def _build_single_point_query(measurement, tag_filters, fields, order, group_by_
     Args:
         measurement (str): the InfluxDB measurement name
         tag_filters (dict): static tag key/value filters (may be empty)
-        fields (list): the field keys to select, or None to select ``*`` for a timestamp-only read
+        fields (set or None): the field keys to select, or None to select ``*`` for a
+            timestamp-only read. Sorted here, so the iteration order of the caller's
+            collection does not reach the query.
         order (str): ``"DESC"`` for the newest point, ``"ASC"`` for the oldest
         group_by_tag (str or None): a tag key to return one point per value of, or None for a
             single point across the whole measurement
@@ -787,7 +789,7 @@ def build_latest_query(measurement, tag_filters, fields, group_by_tag=None):
     Args:
         measurement (str): the InfluxDB measurement name
         tag_filters (dict): static tag key/value filters (may be empty)
-        fields (list): the field keys to select (non-empty)
+        fields (set): the field keys to select, non-empty
         group_by_tag (str or None): a tag key to return one point per value of, or None for a
             single point across the whole measurement
 
@@ -1866,7 +1868,7 @@ def _row_to_state(fields, columns, values):
     """Turn a single-point result row into ``({field: value}, as_of)``.
 
     Args:
-        fields (list): the field names wanted
+        fields (set): the field names wanted
         columns (list): the result's column names
         values (list): the single result row
 
