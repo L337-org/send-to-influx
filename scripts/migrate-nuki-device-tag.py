@@ -193,14 +193,14 @@ def line_protocol_value(field, value):
 def escape_tag(value):
     """Escape a tag value for line protocol, refusing what cannot be escaped.
 
-    Raises:
-        MigrationError: the value contains a newline, which separates points and so cannot appear in a tag
-
     Args:
         value (str): the tag value to escape
 
     Returns:
         str: the value, escaped for line protocol
+
+    Raises:
+        MigrationError: the value contains a newline, which separates points and so cannot appear in a tag
     """
     if any(char in value for char in (chr(10), chr(13))):
         raise MigrationError(
@@ -351,11 +351,11 @@ class Influx:
     def write(self, lines):
         """Write a batch of line protocol points at nanosecond precision.
 
-        Raises:
-            MigrationError: InfluxDB rejected the write, or could not be reached
-
         Args:
             lines (list): the line-protocol points to write
+
+        Raises:
+            MigrationError: InfluxDB rejected the write, or could not be reached
         """
         if not lines:
             return
@@ -621,16 +621,16 @@ def phase_rewrite(influx, args):
     Re-running it rewrites identical points over themselves, which InfluxDB treats as an
     overwrite, so it is idempotent.
 
-    Raises:
-        MigrationError: the points migrated but the manifest could not be written, leaving the delete phase with nothing
-            to drive it
-
     Args:
         influx (Influx): the connection wrapper for the database being migrated
         args (argparse.Namespace): the parsed command-line options
 
     Returns:
         int: the process exit status - 0 on success
+
+    Raises:
+        MigrationError: the points migrated but the manifest could not be written, leaving the delete phase with nothing
+            to drive it
     """
     keys = old_field_keys(influx)
     if not keys:
@@ -777,15 +777,15 @@ def phase_delete(influx, args):
     new points live in the same measurement, and dropping it would destroy the migration's
     own output along with the history.
 
-    Raises:
-        MigrationError: the manifest is unreadable, names a different database, or lists no series to drop
-
     Args:
         influx (Influx): the connection wrapper for the database being migrated
         args (argparse.Namespace): the parsed command-line options
 
     Returns:
         int: the process exit status - 0 on success, 1 when the delete was refused
+
+    Raises:
+        MigrationError: the manifest is unreadable, names a different database, or lists no series to drop
     """
     try:
         with open(args.manifest, encoding="utf-8") as handle:

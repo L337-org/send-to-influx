@@ -599,6 +599,36 @@ def test_no_docstring_uses_the_reStructuredText_field_syntax():
     )
 
 
+def test_every_docstring_orders_its_sections_conventionally():
+    """Sections appear in Google's own order: Args, Returns, Yields, Raises, Attributes.
+
+    Neither pydocstyle nor pydoclint checks section order, so a docstring listing what it
+    raises before what it takes passes every gate while reading backwards. That is not
+    hypothetical: adding a missing `Args:` to a docstring that already had `Raises:` appends
+    it, and 44 docstrings ended up that way in one pass before this test existed.
+    """
+    import ast
+
+    order = ["Args", "Returns", "Yields", "Raises", "Attributes"]
+    wrong = []
+    for path in _every_python_file():
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            docstring = ast.get_docstring(node) or ""
+            found = [m.group(1) for m in re.finditer(r"^(\w+):\s*$", docstring, re.MULTILINE) if m.group(1) in order]
+            if found != sorted(found, key=order.index):
+                name = getattr(node, "name", "<module>")
+                wrong.append(f"{path.relative_to(REPO_ROOT)}:{getattr(node, 'lineno', 0)} {name}: {found}")
+
+    assert not wrong, (
+        "these docstrings list their sections out of order; the convention is "
+        + ", ".join(order)
+        + ":\n  "
+        + "\n  ".join(wrong)
+    )
+
+
 def test_no_docstring_repeats_a_section_header():
     """No docstring carries the same Google section header twice.
 

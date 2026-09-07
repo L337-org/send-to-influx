@@ -359,14 +359,14 @@ def annotate_rows(schema, field, columns, values):
     passed through with a null label rather than dropped, matching the collector's
     raw-passthrough rule.
 
-    Returns:
-        {"field", "unit", "points": [{"time", "value"[, "label"]}], ...}
-
     Args:
         schema (ReadSchema): the source's schema
         field (str): the field the rows are for
         columns (list): the result's column names
         values (list): one list per row
+
+    Returns:
+        {"field", "unit", "points": [{"time", "value"[, "label"]}], ...}
     """
     meta = schema.metadata_for(field)
     codes = meta.get("codes") or {}
@@ -420,11 +420,11 @@ def _validate_identifier(value, kind):
         value (str): candidate identifier
         kind (str): what it is, for the error message (e.g. "field")
 
-    Raises:
-        ToolParamError: if the value isn't a safe identifier
-
     Returns:
         str: the same value, once accepted
+
+    Raises:
+        ToolParamError: if the value isn't a safe identifier
     """
     if not isinstance(value, str) or not value or _CONTROL_CHAR_RE.search(value):
         raise ToolParamError(f"invalid {kind} name: {value!r}")
@@ -514,14 +514,14 @@ def _rfc3339(dt):
 def _clamp_limit(limit):
     """Validate and clamp a requested point limit into [1, MAX_RESULT_POINTS].
 
-    Raises:
-        ToolParamError: if the value isn't an integer
-
     Args:
         limit (int or None): the requested row limit, or None for the default
 
     Returns:
         int: the limit, held between 1 and MAX_RESULT_POINTS
+
+    Raises:
+        ToolParamError: if the value isn't an integer
     """
     try:
         value = int(limit)
@@ -864,9 +864,6 @@ def _get(session, url, kwargs, description):
 
     Maps failures to SourceConnectionError with a message naming what was attempted.
 
-    Raises:
-        SourceConnectionError: the InfluxDB query could not be issued or returned unusable JSON
-
     Args:
         session (requests.Session): the handler's session
         url (str): the read endpoint to call
@@ -875,6 +872,9 @@ def _get(session, url, kwargs, description):
 
     Returns:
         dict: the parsed JSON response
+
+    Raises:
+        SourceConnectionError: the InfluxDB query could not be issued or returned unusable JSON
     """
     try:
         with warnings.catch_warnings():
@@ -1003,17 +1003,17 @@ def discover_measurement_keys(session, influx_settings, db, measurement):
     against. The measurement is charset-validated (it comes from the source class's
     static schema, but validating is cheap) before interpolation.
 
-    Returns:
-        MeasurementKeys, both halves possibly empty
-
-    Raises:
-        SourceConnectionError: on a transport/parse failure, or a statement the server rejected
-
     Args:
         session (requests.Session): the handler's session
         influx_settings (dict): the shared ``influx`` settings block
         db (str): the database or bucket to query
         measurement (str): the measurement whose keys are wanted
+
+    Returns:
+        MeasurementKeys, both halves possibly empty
+
+    Raises:
+        SourceConnectionError: on a transport/parse failure, or a statement the server rejected
     """
     _validate_identifier(measurement, "measurement")
     quoted = _quote_identifier(measurement)
@@ -1120,17 +1120,17 @@ def run_query(session, influx_settings, db, query):
     Callers that genuinely cannot produce more than one series use
     :func:`single_series` to say so explicitly.
 
-    Returns:
-        list of QuerySeries, empty when the query matched nothing
-
-    Raises:
-        SourceConnectionError: on a transport/parse failure
-
     Args:
         session (requests.Session): the handler's session
         influx_settings (dict): the shared ``influx`` settings block
         db (str): the database or bucket to query
         query (str): the InfluxQL to run
+
+    Returns:
+        list of QuerySeries, empty when the query matched nothing
+
+    Raises:
+        SourceConnectionError: on a transport/parse failure
     """
     url, kwargs = _influx_read_request(influx_settings, db, query)
     payload = _get(session, url, kwargs, "query")
@@ -1303,16 +1303,16 @@ def _v1_retention(session, influx_settings, db):
     Prefers the policy flagged ``default``, since that is the one a write with no explicit
     policy lands in - which is every write this project makes.
 
+    Args:
+        session (requests.Session): the handler's session
+        influx_settings (dict): the shared ``influx`` settings block
+        db (str): the database or bucket to query
+
     Returns:
         dict describing the retention, for the ``retention`` key of the payload
 
     Raises:
         SourceConnectionError: transport, parse, or an InfluxDB-reported error
-
-    Args:
-        session (requests.Session): the handler's session
-        influx_settings (dict): the shared ``influx`` settings block
-        db (str): the database or bucket to query
     """
     _validate_identifier(db, "database")
     columns, values = single_series(
@@ -1351,16 +1351,16 @@ def _v2_retention(session, influx_settings, bucket):
     would tell an operator their data is never deleted when it expires in 30 days, and be
     wrong in the reassuring direction. The management API returns the real values.
 
+    Args:
+        session (requests.Session): the handler's session
+        influx_settings (dict): the shared ``influx`` settings block
+        bucket (str): the bucket whose retention is wanted
+
     Returns:
         dict describing the retention, for the ``retention`` key of the payload
 
     Raises:
         SourceConnectionError: transport, parse, or no such bucket
-
-    Args:
-        session (requests.Session): the handler's session
-        influx_settings (dict): the shared ``influx`` settings block
-        bucket (str): the bucket whose retention is wanted
     """
     url, kwargs = _influx_buckets_request(influx_settings, bucket)
     payload = _get(session, url, kwargs, f"read retention for bucket {bucket}")
@@ -1399,13 +1399,13 @@ def _retention_for(session, influx_settings, db):
     retention configured", i.e. kept forever, which is the same misleading direction as
     v2's ``0s``.
 
-    Returns:
-        dict for the payload's ``retention`` key, always with a ``known`` flag
-
     Args:
         session (requests.Session): the handler's session
         influx_settings (dict): the shared ``influx`` settings block
         db (str): the database or bucket to query
+
+    Returns:
+        dict for the payload's ``retention`` key, always with a ``known`` flag
     """
     try:
         if influx_settings.get("token"):
@@ -1454,12 +1454,12 @@ def resolve_schema(source, settings, settings_file, instance=None):
         settings_file (str or None): the settings path, for constructing the handler.
         instance (str or None): the instance to scope to, or None for all of them
 
+    Returns:
+        tuple: ``(handler, schema)`` - the caller closes the handler's session
+
     Raises:
         ToolParamError: for an unknown/unusable source, or an instance that is not configured
         SourceConnectionError: if field discovery fails
-
-    Returns:
-        tuple: ``(handler, schema)`` - the caller closes the handler's session
     """
     handler = resolve_handler(source, settings, settings_file, instance=instance)
     measurement = handler.MCP_MEASUREMENT or handler.source
@@ -1648,12 +1648,12 @@ def _validate_instance(schema, instance):
     The allowlist is the live discovered set, which is also what keeps the value safe to
     interpolate - the same layering as a queried field name.
 
-    Raises:
-        ToolParamError: if the source has no axis, or the value is not one of its discovered values
-
     Args:
         schema (ReadSchema): the source's schema
         instance (str or None): the instance the caller asked for
+
+    Raises:
+        ToolParamError: if the source has no axis, or the value is not one of its discovered values
     """
     if instance is None:
         return
@@ -1866,13 +1866,13 @@ def _latest_recorded(handler):
 def _row_to_state(fields, columns, values):
     """Turn a single-point result row into ``({field: value}, as_of)``.
 
-    Returns:
-        empty dict and None when there is no row
-
     Args:
         fields (list): the field names wanted
         columns (list): the result's column names
         values (list): the single result row
+
+    Returns:
+        empty dict and None when there is no row
     """
     if not values:
         return {}, None
@@ -1947,10 +1947,6 @@ def current_state_result(source, settings, settings_file):
     every instance fails is a ``SourceConnectionError`` raised, since then there is nothing
     useful to return.
 
-    Raises:
-        ToolParamError: unknown/unusable source
-        SourceConnectionError: a live get_data() or InfluxDB read failed for every instance
-
     Args:
         source (str): the source to read
         settings (dict): parsed settings dict
@@ -1958,6 +1954,10 @@ def current_state_result(source, settings, settings_file):
 
     Returns:
         dict: the ``get_current_state`` payload
+
+    Raises:
+        ToolParamError: unknown/unusable source
+        SourceConnectionError: a live get_data() or InfluxDB read failed for every instance
     """
     handlers = resolve_handlers(source, settings, settings_file)
     try:

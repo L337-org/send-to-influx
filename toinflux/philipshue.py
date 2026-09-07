@@ -916,11 +916,11 @@ class Hue(DataHandler):
         ``state``, ``type`` and ``capabilities`` used to resolve a target and check what
         it can do.
 
-        Raises:
-            SourceConnectionError: if the bridge can't be reached
-
         Returns:
             dict: every light the bridge reports, keyed by its id as a string
+
+        Raises:
+            SourceConnectionError: if the bridge can't be reached
         """
         hue_data = self.get_data_from_hue_bridge()
         return {str(lid): light for lid, light in hue_data.get("lights", {}).items() if isinstance(light, dict)}
@@ -952,11 +952,11 @@ class Hue(DataHandler):
         the ``ct`` mired range comes from ``capabilities.control.ct`` when present,
         else the standard range.
 
-        Returns:
-            dict: ``{"brightness","color_temp","color": bool, "ct_range": (min,max)|None}``
-
         Args:
             light (dict): one light's entry from the bridge
+
+        Returns:
+            dict: ``{"brightness","color_temp","color": bool, "ct_range": (min,max)|None}``
         """
         state = light.get("state") if isinstance(light.get("state"), dict) else {}
         state = state or {}
@@ -1009,14 +1009,14 @@ class Hue(DataHandler):
 
         Accepts an ``#rrggbb`` or ``rrggbb`` hex value, or a known colour name.
 
-        Raises:
-            ToolParamError: the value isn't a hex colour or a known name
-
         Args:
             color (str or None): an ``#rrggbb`` or ``rrggbb`` hex value, or a known colour name
 
         Returns:
             list: the CIE ``[x, y]`` pair
+
+        Raises:
+            ToolParamError: the value isn't a hex colour or a known name
         """
         if isinstance(color, str) and color.strip():
             hex_str = cls._HUE_COLOR_NAMES.get(color.strip().lower(), color.strip()).lstrip("#").lower()
@@ -1168,9 +1168,6 @@ class Hue(DataHandler):
     def _brightness_state(self, name, caps, brightness_pct):
         """Validate a brightness request against the light and return ``{"bri": ...}``.
 
-        Raises:
-            ToolParamError: the light isn't dimmable, or the value is invalid
-
         Args:
             name (str): the light's name, for the error message
             caps (dict): that light's capabilities, so an unsupported control is refused
@@ -1178,6 +1175,9 @@ class Hue(DataHandler):
 
         Returns:
             dict: the bridge state fragment, ``{'bri': ...}``
+
+        Raises:
+            ToolParamError: the light isn't dimmable, or the value is invalid
         """
         if not caps["brightness"]:
             raise ToolParamError(f"device {name!r} does not support brightness (it is on/off only)")
@@ -1192,9 +1192,6 @@ class Hue(DataHandler):
 
         Kelvin is converted to mirek and clamped to the light's supported range.
 
-        Raises:
-            ToolParamError: the light lacks colour temperature, or the value is invalid
-
         Args:
             name (str): the light's name, for the error message
             caps (dict): that light's capabilities, so an unsupported control is refused
@@ -1202,6 +1199,9 @@ class Hue(DataHandler):
 
         Returns:
             dict: the bridge state fragment, ``{'ct': ...}``
+
+        Raises:
+            ToolParamError: the light lacks colour temperature, or the value is invalid
         """
         if not caps["color_temp"]:
             raise ToolParamError(f"device {name!r} does not support colour temperature")
@@ -1213,9 +1213,6 @@ class Hue(DataHandler):
     def _color_state(self, name, caps, color):
         """Validate a colour request and return ``{"xy": [...]}``.
 
-        Raises:
-            ToolParamError: the light lacks colour, or the colour is invalid
-
         Args:
             name (str): the light's name, for the error message
             caps (dict): that light's capabilities, so an unsupported control is refused
@@ -1223,6 +1220,9 @@ class Hue(DataHandler):
 
         Returns:
             dict: the bridge state fragment, ``{'xy': ...}``
+
+        Raises:
+            ToolParamError: the light lacks colour, or the colour is invalid
         """
         if not caps["color"]:
             raise ToolParamError(f"device {name!r} does not support colour")
@@ -1236,15 +1236,15 @@ class Hue(DataHandler):
         rather than guessed at, since actuating the wrong light is not a
         recoverable mistake.
 
-        Raises:
-            ToolParamError: the device is empty, unknown, or an ambiguous name
-
         Args:
             device (str): the light id, or its exact name
             devices (dict): light id to name, from _names_by_id
 
         Returns:
             str: the resolved light id
+
+        Raises:
+            ToolParamError: the device is empty, unknown, or an ambiguous name
         """
         if not isinstance(device, str) or not device.strip():
             raise ToolParamError(f"device must be a non-empty light id or name (got {device!r})")
@@ -1265,16 +1265,16 @@ class Hue(DataHandler):
         policy as the reads (``hue.insecure``, default true for a local
         self-signed bridge cert).
 
-        Raises:
-            SourceConnectionError: on a transport failure or a bridge error (the CLIP API returns 200 with a list of
-                per-key success/error items)
-
         Args:
             light_id (str): the light to change
             state (dict): the bridge state fragment to apply
 
         Returns:
             dict: the bridge's response
+
+        Raises:
+            SourceConnectionError: on a transport failure or a bridge error (the CLIP API returns 200 with a list of
+                per-key success/error items)
         """
         insecure = self.settings["hue"].get("insecure", True)
         url = f"{self._api_base()}/lights/{light_id}/state"

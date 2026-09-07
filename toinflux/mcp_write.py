@@ -73,9 +73,6 @@ def _resolve_writable_handlers(source, settings, settings_file):
     setting covers every bridge, since they are one estate behind one settings block. The
     caller owns every session and must close them all.
 
-    Raises:
-        ToolParamError: unknown source, no usable target, or not opted in for writes
-
     Args:
         source (str): the source name to resolve
         settings (dict): parsed settings dict
@@ -83,6 +80,9 @@ def _resolve_writable_handlers(source, settings, settings_file):
 
     Returns:
         list: ``(instance, handler)`` pairs for every writable target of that source
+
+    Raises:
+        ToolParamError: unknown source, no usable target, or not opted in for writes
     """
     handlers = resolve_handlers(source, settings, settings_file)
     if not handlers[0][1].mcp_write_enabled():
@@ -100,9 +100,6 @@ def _resolve_writable_handler(source, settings, settings_file):
     Raises ToolParamError otherwise. The caller owns the returned handler's session and
     must close it.
 
-    Raises:
-        ToolParamError: unknown source, or a source not opted in for writes
-
     Args:
         source (str): the source name to resolve
         settings (dict): parsed settings dict
@@ -110,6 +107,9 @@ def _resolve_writable_handler(source, settings, settings_file):
 
     Returns:
         DataHandler: the single writable handler for that source
+
+    Raises:
+        ToolParamError: unknown source, or a source not opted in for writes
     """
     handler = resolve_handler(source, settings, settings_file)
     if not handler.mcp_write_enabled():

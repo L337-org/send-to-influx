@@ -581,9 +581,6 @@ def _split_bind_address(value, original):
 
     Handles both ``host:port`` and bracketed IPv6 ``[addr]:port``.
 
-    Raises:
-        ConfigError: if the shape is not one of those two forms
-
     Args:
         value (str): the bind address to split
         original (str): the value as the operator wrote it, quoted back in the error so the
@@ -591,6 +588,9 @@ def _split_bind_address(value, original):
 
     Returns:
         tuple: ``(host, port_text)``, both unvalidated strings
+
+    Raises:
+        ConfigError: if the shape is not one of those two forms
     """
     if value.startswith("["):
         closing = value.find("]")
@@ -653,12 +653,12 @@ def _reject_public_bind_host(host, bind_address):
     can't be classified without a DNS lookup (fragile, and it may resolve
     differently at bind time), so it is allowed with a warning.
 
-    Raises:
-        ConfigError: for an any-interface or globally-routable bind host
-
     Args:
         host (str): the host part of the bind address, already split out
         bind_address (str): the whole configured value, for the error message
+
+    Raises:
+        ConfigError: for an any-interface or globally-routable bind host
     """
     if host in MCP_DISALLOWED_BIND_HOSTS:
         raise ConfigError(
