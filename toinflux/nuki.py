@@ -91,7 +91,7 @@ def _is_per_device(payload):
     caller set instead of overwriting it with a lock's).
 
     Args:
-        payload: the data handed to ``send_data()``
+        payload (dict or None): the data handed to ``send_data()``
 
     Returns:
         bool: True if it should be written as one point per lock
@@ -112,6 +112,16 @@ class Nuki(MqttDataHandler):
     with bare field keys, so multiple locks need no per-lock configuration. Before 5.3 the
     name was built into each field key instead (``Front_Door_stateValue``), which is why the
     lock could not be queried as a dimension - see ``UPGRADING.md`` for the migration.
+
+    Attributes:
+        MCP_DESCRIPTION (str): what this source advertises to an MCP client.
+        MCP_INSTANCE_TAG (str): "device" - each lock is its own point, tagged with its
+            Nuki-app name, so the lock is queryable as a dimension.
+        MCP_LIVE_STATE_COVERS_ALL_INSTANCES (bool): True - one subscribe window returns
+            every provisioned lock, so a single live read covers them all.
+        MCP_FIELD_METADATA (dict): coded values and aggregation kinds for the lock and
+            door-sensor state fields, plus the battery levels.
+        STREAM_TOPIC_FILTER (str): the MQTT topic pattern the streaming path subscribes to.
     """
 
     MCP_DESCRIPTION = "Nuki smart locks and door sensors: lock state, door state and battery levels."
@@ -174,8 +184,9 @@ class Nuki(MqttDataHandler):
         """Build the handler, adding the per-device name memory the stream path needs.
 
         Args:
-            *args: Passed to the base handler.
-            **kwargs: Passed to the base handler.
+            *args (str or None): positional arguments for the base handler - ``source``,
+                ``settings_file``, ``instance``
+            **kwargs (str or None): the same three, by keyword
         """
         super().__init__(*args, **kwargs)
         # Per-device name memory for the streaming path. Retained `name` topics arrive as

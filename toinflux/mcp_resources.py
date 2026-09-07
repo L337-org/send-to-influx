@@ -58,12 +58,12 @@ def _register_resource(server, *args, **kwargs):
     its text kept off the wire.
 
     Args:
-        server: the MCPServer instance
-        args: passed to ``server.resource()`` (the URI)
-        kwargs: passed to ``server.resource()`` (name, title, description, ...)
+        server (MCPServer): the server to register the resource on
+        *args (str): passed to ``server.resource()`` - the resource URI
+        **kwargs (str): passed to ``server.resource()`` (name, title, description, mime_type)
 
     Returns:
-        a decorator registering the function as a resource
+        collections.abc.Callable: a decorator registering the function it wraps as a resource
     """
 
     def decorator(fn):
@@ -79,12 +79,12 @@ def register_resources(server, settings, settings_file=None):
     configured source. Blocking work runs in a worker thread, mirroring the read tools.
 
     Args:
-        server: the MCPServer instance
-        settings: parsed settings dict
-        settings_file: settings path, for re-resolving handlers per read
+        server (MCPServer): the server to register the resources on
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, for re-resolving handlers per read
 
     Returns:
-        the server
+        MCPServer: the same server, for chaining
     """
     import anyio
 
@@ -115,6 +115,14 @@ def _register_source_resources(server, anyio, source, settings, settings_file):
     A factory (not an inline loop body) so each resource closure binds its own
     ``source`` - a closure over the loop variable would make every resource read
     the last source.
+
+    Args:
+        server (MCPServer): the server to register the two resources on
+        anyio (module): the ``anyio`` module, passed down rather than imported here because
+            the MCP extra is optional and the caller has already paid for the import
+        source (str): the configured source name these resources describe
+        settings (dict): parsed settings dict
+        settings_file (str or None): settings path, for re-resolving handlers per read
     """
 
     @_register_resource(

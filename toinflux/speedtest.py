@@ -28,7 +28,17 @@ MAX_PLAUSIBLE_PING_MS = 5000
 
 
 class Speedtest(DataHandler):
-    """Child class of DataHandler to run a speed test and send the results to InfluxDB."""
+    """Child class of DataHandler to run a speed test and send the results to InfluxDB.
+
+    Attributes:
+        MCP_DESCRIPTION (str): what this source advertises to an MCP client.
+        MCP_LIVE_STATE (bool): False - a run takes minutes and saturates the link, so
+            current-state reads the latest recorded run rather than triggering one.
+        MCP_WRITABLE (bool): True - a run can be triggered on demand, opt-in per install.
+        MCP_INSTANCE_TAG (str): "host" - every point names the machine that measured, so
+            several collectors into one database stay comparable rather than merged.
+        MCP_FIELD_METADATA (dict): units and aggregation kinds for throughput and latency.
+    """
 
     MCP_DESCRIPTION = "Internet speed test: download/upload throughput and latency."
     # get_data() runs a full download/upload test (minutes, saturates the link),
@@ -183,7 +193,8 @@ class Speedtest(DataHandler):
         number looks entirely plausible.
 
         Args:
-            host: optionally assert which machine should run it; must be this one
+            host (str or None): optionally assert which machine should run it; must be this
+                one. None runs it here without asserting.
 
         Returns:
             dict: ``{"source", "host", "recorded", "result": {field: {"value"[, "unit"]}}}``
