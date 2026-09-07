@@ -564,7 +564,7 @@ def mcp_enabled(settings):
         settings (dict): parsed settings dictionary (after credential substitution)
 
     Returns:
-        bool
+        bool: True when the MCP server is configured and enabled
     """
     mcp = settings.get("mcp")
     if not isinstance(mcp, dict):
@@ -1032,7 +1032,7 @@ def _contains_real_secret(settings):
         settings (dict): settings dictionary to inspect
 
     Returns:
-        bool
+        bool: True when the settings hold a credential rather than only placeholders
     """
     # Slot credentials are included, not just the static table: a real token hand-written
     # into hue.user2 must count, or the group/other-readable check below would pass a file

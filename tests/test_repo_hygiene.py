@@ -525,7 +525,9 @@ def test_every_tool_with_signature_hints_is_exempted_from_doc108():
     """
     import ast
 
-    marker = "# noqa: DOC108"
+    # Matched as a code within the marker, not as an exact string: the same markers carry
+    # DOC101 and DOC103 too, and will carry DOC201 when that comes off the ignore list.
+    marker = "DOC108"
     wrong = []
     for module in ("mcp_read.py", "mcp_write.py", "mcp_dashboards.py"):
         path = REPO_ROOT / "toinflux" / module
@@ -537,7 +539,8 @@ def test_every_tool_with_signature_hints_is_exempted_from_doc108():
                 continue
             args = node.args
             hinted = any(a.annotation for a in args.args + args.posonlyargs + args.kwonlyargs)
-            marked = marker in lines[node.lineno - 1]
+            noqa = re.search(r"#\s*noqa:\s*([\w,\s]+)", lines[node.lineno - 1])
+            marked = marker in [c.strip() for c in noqa.group(1).split(",")] if noqa else False
             if hinted and not marked:
                 wrong.append(f"{module}:{node.lineno} {node.name}: has signature type hints but no {marker!r}")
             if marked and not hinted:

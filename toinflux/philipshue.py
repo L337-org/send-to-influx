@@ -604,7 +604,7 @@ class Hue(DataHandler):
             device_class (str): the bridge's own type string, e.g. "ZLLTemperature"
 
         Returns:
-            {"unit", "kind"} for a known class, else None
+            dict or None: ``{"unit", "kind"}`` for a known class, else None
         """
         declared = HUE_DEVICE_CLASSES.get(device_class)
         if not declared:

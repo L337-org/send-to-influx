@@ -50,7 +50,7 @@ def writable_enabled_sources(settings, settings_file=None):
         settings_file (str or None): settings path, for constructing handlers
 
     Returns:
-        list of source names enabled for writes
+        list: the source names with writes enabled
     """
     enabled = []
     for source in configured_sources(settings):
@@ -180,7 +180,7 @@ def _hue_matches_across_bridges(handlers, device, bridge):
         bridge (str or None): the bridge the caller named, or None
 
     Returns:
-        ``([(instance, handler, light_id, name), ...], [(instance, exc), ...])``
+        tuple: ``([(instance, handler, light_id, name), ...], [(instance, exc), ...])``
 
     Raises:
         SourceConnectionError: the named or only bridge could not be reached
@@ -227,7 +227,7 @@ def _resolve_hue_target(handlers, device, bridge):
         bridge (str or None): bridge host to restrict to, or None to search every bridge
 
     Returns:
-        ``(instance, handler, light_id, name)`` for the single match
+        tuple: ``(instance, handler, light_id, name)`` for the single match
 
     Raises:
         ToolParamError: unknown bridge, unknown device, an ambiguous device, or a bridge that could not be reached while
@@ -398,7 +398,7 @@ def _register_hue_write_tools(server, settings, settings_file):
             read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
         ),
     )
-    async def hue_set_light(  # noqa: DOC108
+    async def hue_set_light(  # noqa: DOC101,DOC103,DOC108
         device: str,
         on: "bool | None" = None,
         brightness_pct: "float | None" = None,
@@ -473,7 +473,7 @@ def _register_speedtest_write_tools(server, settings, settings_file):
             read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
         ),
     )
-    async def speedtest_run(host: "str | None" = None) -> dict:  # noqa: DOC108
+    async def speedtest_run(host: "str | None" = None) -> dict:  # noqa: DOC101,DOC103,DOC108
         """Run an internet speed test now, on the host this server runs on, and
         return the result (download/upload throughput and latency). Use this for an
         on-demand check; `get_current_state`/`query_history` report the last recorded
@@ -523,7 +523,7 @@ def register_write_tools(server, settings, settings_file=None, enabled_sources=N
             so the function still stands alone.
 
     Returns:
-        the server
+        MCPServer: the same server, for chaining
     """
     enabled = writable_enabled_sources(settings, settings_file) if enabled_sources is None else enabled_sources
     if not enabled:

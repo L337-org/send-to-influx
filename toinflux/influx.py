@@ -156,7 +156,7 @@ def worker_label(source, instance=None):
         instance (str or None): the worker's instance, or None for a single-target source
 
     Returns:
-        str: label for log output
+        str: this handler's label for log output
     """
     if instance is None or instance == source:
         return f"{source}"
@@ -438,7 +438,7 @@ class DataHandler:
         handler exists, formats it identically.
 
         Returns:
-            str
+            str: this worker's label for log output
         """
         return worker_label(self.source, self.instance)
 

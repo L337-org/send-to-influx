@@ -257,7 +257,8 @@ class Nuki(MqttDataHandler):
             # Either nothing collected - hand it to the base so the empty-reading logging and
             # the buffer flush still happen exactly as for any other source - or a flat point
             # from a caller that set its own header, which is the base's contract, not ours.
-            return super().send_data(data=per_device, timestamp=timestamp, use_buffer=use_buffer, flush=flush)
+            super().send_data(data=per_device, timestamp=timestamp, use_buffer=use_buffer, flush=flush)
+            return
         if timestamp is None:
             timestamp = self.timestamp if self.timestamp is not None else int(time.time())
         original_header = self.influx_header
@@ -299,7 +300,7 @@ class Nuki(MqttDataHandler):
             self.influx_header = original_header
         if failures:
             raise InfluxWriteError("; ".join(failures))
-        return None
+        return
 
     def parse_nuki_data(self):
         """Collect retained MQTT messages and parse them into per-lock InfluxDB fields.
@@ -476,7 +477,7 @@ class Nuki(MqttDataHandler):
             raw (str): the payload as received (UTF-8 decoded)
 
         Returns:
-            bool, int, float, or the original string
+            bool, int, float or str: the decoded value, or the original string when none of those fit
         """
         if raw in ("true", "false"):
             return raw == "true"

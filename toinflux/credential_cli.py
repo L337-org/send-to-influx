@@ -125,7 +125,7 @@ def _read_secret_value(name):
         name (str): credential name, used only in the interactive prompt
 
     Returns:
-        str
+        str: the value, read from stdin when piped and prompted for otherwise
     """
     if sys.stdin.isatty():
         return getpass.getpass(f"Value for {name}: ")

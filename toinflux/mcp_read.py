@@ -218,7 +218,7 @@ def resolve_db(source_settings, influx_settings):
         influx_settings (dict): the ``influx`` block (its ``token`` selects the mode)
 
     Returns:
-        the db/bucket name (or None if unset)
+        str or None: the db or bucket name, or None when neither is set
     """
     if influx_settings.get("token"):
         return source_settings.get("bucket", source_settings.get("db"))
@@ -246,7 +246,7 @@ def build_schema(handler, discovered, db, instance_values=None):
             discover_tag_values(), or None when it has no instance tag
 
     Returns:
-        ReadSchema
+        ReadSchema: the assembled schema for that handler
     """
     measurement = handler.MCP_MEASUREMENT or handler.source
     return ReadSchema(
@@ -294,7 +294,7 @@ def metadata_for(field_metadata, field):
         field (str): the field key to look up
 
     Returns:
-        the metadata dict (``{"unit"...}``/``{"codes"...}``) or ``{}``
+        dict: the field's metadata (``{"unit"...}``/``{"codes"...}``), or ``{}`` when it has none
     """
     if field in field_metadata:
         return field_metadata[field]
@@ -318,7 +318,7 @@ def field_kind(meta, influx_type=None):
         influx_type (str or None): the field's InfluxDB type, where discovery reported one
 
     Returns:
-        one of ``FIELD_KINDS``, or None
+        str or None: one of ``FIELD_KINDS``, or None when the kind is not known
     """
     if meta.get("kind"):
         return meta["kind"]
@@ -366,7 +366,7 @@ def annotate_rows(schema, field, columns, values):
         values (list): one list per row
 
     Returns:
-        {"field", "unit", "points": [{"time", "value"[, "label"]}], ...}
+        dict: ``{"field", "unit", "points": [{"time", "value"[, "label"]}], ...}``
     """
     meta = schema.metadata_for(field)
     codes = meta.get("codes") or {}
@@ -401,7 +401,7 @@ def _annotate_state_field(field_metadata, name, value):
         value (object): the field's current value
 
     Returns:
-        the annotated entry dict
+        dict: the annotated entry
     """
     meta = metadata_for(field_metadata, name)
     entry = {"value": value}
@@ -470,7 +470,7 @@ def parse_time_bound(value, *, now=None):
             injected for testability
 
     Returns:
-        timezone-aware UTC datetime
+        datetime.datetime: the bound as a timezone-aware UTC datetime
 
     Raises:
         ToolParamError: if the value can't be parsed
@@ -555,7 +555,7 @@ def build_query(
             distinguishable rather than being merged into one series
 
     Returns:
-        the InfluxQL query string
+        str: the InfluxQL query
 
     Raises:
         ToolParamError: on any invalid parameter
@@ -643,7 +643,7 @@ def _select_and_group(field, aggregation, group_by, instance_clause):
             producers
 
     Returns:
-        (select expression, group-by clause including its leading space)
+        tuple: ``(select expression, group-by clause including its leading space)``
 
     Raises:
         ToolParamError: for an unknown aggregation, or a missing/malformed group_by
@@ -694,7 +694,7 @@ def build_panel_query(schema, field, aggregation, group_by_tags=()):
         group_by_tags (list): tag keys to separate into their own series
 
     Returns:
-        the InfluxQL query string
+        str: the InfluxQL query
 
     Raises:
         ToolParamError: for an unknown field or aggregation
@@ -748,7 +748,7 @@ def _build_single_point_query(measurement, tag_filters, fields, order, group_by_
             single point across the whole measurement
 
     Returns:
-        the InfluxQL query string
+        str: the InfluxQL query
 
     Raises:
         ValueError: ``order`` is neither ``"ASC"`` nor ``"DESC"``
@@ -792,7 +792,7 @@ def build_latest_query(measurement, tag_filters, fields, group_by_tag=None):
             single point across the whole measurement
 
     Returns:
-        the InfluxQL query string
+        str: the InfluxQL query
     """
     return _build_single_point_query(measurement, tag_filters, fields, "DESC", group_by_tag)
 
@@ -821,7 +821,7 @@ def build_edge_time_query(measurement, tag_filters, order, group_by_tag=None):
             single point across the whole measurement
 
     Returns:
-        the InfluxQL query string
+        str: the InfluxQL query
     """
     return _build_single_point_query(measurement, tag_filters, None, order, group_by_tag)
 
@@ -839,7 +839,7 @@ def _influx_read_request(influx_settings, db, query):
         query (str): the InfluxQL query string
 
     Returns:
-        (url, requests kwargs)
+        tuple: ``(url, requests kwargs)``
     """
     timeout = influx_settings.get("timeout", 5)
     params = {"db": db, "q": query, "epoch": "s"}
@@ -951,7 +951,7 @@ def _statement_results(payload, description):
         description (str): what was being discovered, for the error message
 
     Returns:
-        {statement id: list of series dicts}
+        dict: statement id to its list of series dicts
 
     Raises:
         SourceConnectionError: if any statement reported an error
@@ -1010,7 +1010,7 @@ def discover_measurement_keys(session, influx_settings, db, measurement):
         measurement (str): the measurement whose keys are wanted
 
     Returns:
-        MeasurementKeys, both halves possibly empty
+        MeasurementKeys: the field types and tag keys, either half possibly empty
 
     Raises:
         SourceConnectionError: on a transport/parse failure, or a statement the server rejected
@@ -1073,7 +1073,7 @@ def discover_tag_values(session, influx_settings, db, measurement, tag):
         tag (str): the tag key to enumerate (from the source class, never model input)
 
     Returns:
-        set of tag-value strings (possibly empty)
+        set: the tag-value strings, possibly empty
 
     Raises:
         SourceConnectionError: on a transport/parse failure
@@ -1127,7 +1127,7 @@ def run_query(session, influx_settings, db, query):
         query (str): the InfluxQL to run
 
     Returns:
-        list of QuerySeries, empty when the query matched nothing
+        list: QuerySeries, empty when the query matched nothing
 
     Raises:
         SourceConnectionError: on a transport/parse failure
@@ -1174,7 +1174,7 @@ def single_series(series):
         series (list): list of QuerySeries from run_query
 
     Returns:
-        (columns, values), or ([], []) when there is no series
+        tuple: ``(columns, values)``, or ``([], [])`` when there is no series
 
     Raises:
         ValueError: if given more than one series
@@ -1213,7 +1213,7 @@ def _cell(row, index, name):
         name (str): the column wanted
 
     Returns:
-        the value, or None when the column is absent or the row is too short
+        object or None: the value, or None when the column is absent or the row is too short
     """
     position = index.get(name)
     if position is None or position >= len(row):
@@ -1234,7 +1234,7 @@ def _influx_duration_seconds(duration):
         duration (str or None): an InfluxDB duration string, or None
 
     Returns:
-        seconds as int, or None when there is nothing parseable
+        int or None: whole seconds, or None when there is nothing parseable
     """
     if not isinstance(duration, str) or not _DURATION_RE.fullmatch(duration.strip()):
         return None
@@ -1254,7 +1254,7 @@ def _seconds_as_duration(seconds):
         seconds (int or None): a whole number of seconds, or None
 
     Returns:
-        a duration string, "infinite" for 0, or None when not a number
+        str or None: a duration string, "infinite" for 0, or None when not a number
     """
     if not isinstance(seconds, int) or isinstance(seconds, bool):
         return None
@@ -1280,7 +1280,7 @@ def _influx_buckets_request(influx_settings, bucket):
         bucket (str): the bucket name to filter to
 
     Returns:
-        (url, requests kwargs)
+        tuple: ``(url, requests kwargs)``
     """
     params = {"name": bucket}
     # Pass org when configured, as the query path does: it disambiguates a token with
@@ -1309,7 +1309,7 @@ def _v1_retention(session, influx_settings, db):
         db (str): the database or bucket to query
 
     Returns:
-        dict describing the retention, for the ``retention`` key of the payload
+        dict: the retention, for the ``retention`` key of the payload
 
     Raises:
         SourceConnectionError: transport, parse, or an InfluxDB-reported error
@@ -1357,7 +1357,7 @@ def _v2_retention(session, influx_settings, bucket):
         bucket (str): the bucket whose retention is wanted
 
     Returns:
-        dict describing the retention, for the ``retention`` key of the payload
+        dict: the retention, for the ``retention`` key of the payload
 
     Raises:
         SourceConnectionError: transport, parse, or no such bucket
@@ -1405,7 +1405,7 @@ def _retention_for(session, influx_settings, db):
         db (str): the database or bucket to query
 
     Returns:
-        dict for the payload's ``retention`` key, always with a ``known`` flag
+        dict: the payload's ``retention`` key, always carrying a ``known`` flag
     """
     try:
         if influx_settings.get("token"):
@@ -1429,7 +1429,7 @@ def configured_instances(source, settings):
         settings (dict): parsed settings dict
 
     Returns:
-        list of configured instance values, empty for a single-target source
+        list: the configured instance values, empty for a single-target source
     """
     if source.lower() not in INSTANCED_SOURCES:
         return []
@@ -1569,7 +1569,7 @@ def _field_entry(schema, name, detail=False):
         detail (bool): include the prose description, where the field has one
 
     Returns:
-        the entry dict
+        dict: the field's entry for the payload
     """
     meta = schema.metadata_for(name)
     entry = {"field": name}
@@ -1849,8 +1849,7 @@ def _latest_recorded(handler):
         handler (DataHandler): a constructed DataHandler (caller owns its session)
 
     Returns:
-        (``{field: value}`` dict, ``as_of`` unix-seconds or None). Empty dict when the measurement has no fields or no
-            points recorded yet.
+        tuple: ``({field: value}, as_of)`` with as_of in unix seconds or None; empty dict when nothing is recorded
     """
     influx_settings = handler.settings["influx"]
     db = resolve_db(handler.source_settings, influx_settings)
@@ -1872,7 +1871,7 @@ def _row_to_state(fields, columns, values):
         values (list): the single result row
 
     Returns:
-        empty dict and None when there is no row
+        tuple: ``({field: value}, as_of)``, or ``({}, None)`` when there is no row
     """
     if not values:
         return {}, None
@@ -1899,7 +1898,7 @@ def _latest_recorded_per_instance(handler):
         handler (DataHandler): a constructed DataHandler whose MCP_INSTANCE_TAG is set
 
     Returns:
-        ``{tag value: (fields, as_of)}``, empty when nothing is recorded yet
+        dict: ``{tag value: (fields, as_of)}``, empty when nothing is recorded yet
 
     Raises:
         SourceConnectionError: on a transport/parse failure
@@ -2055,7 +2054,7 @@ def _annotate_state(handler, data):
         data (dict): raw field name -> value
 
     Returns:
-        field name -> annotated value
+        dict: field name to annotated value
     """
     # The hook, so a live current-state read is annotated with the same units list_fields
     # reports. For Hue that costs an InfluxDB lookup on a call that has just read the
@@ -2079,7 +2078,7 @@ def _edge_time(handler, schema, order_query):
         order_query (str): the built query (see :func:`build_edge_time_query`)
 
     Returns:
-        unix seconds as int, or None
+        int or None: unix seconds, or None when there is no usable time
 
     Raises:
         SourceConnectionError: transport failure, unparseable response, or an InfluxDB-reported query error
@@ -2105,7 +2104,7 @@ def _edge_times_per_instance(handler, schema, order):
         order (str): ``"ASC"`` for each producer's oldest point, ``"DESC"`` for its newest
 
     Returns:
-        dict of tag value to unix seconds, omitting a producer with no usable time
+        dict: tag value to unix seconds, omitting a producer with no usable time
 
     Raises:
         SourceConnectionError: transport failure or an InfluxDB-reported query error
@@ -2154,7 +2153,7 @@ def data_range_result(source, settings, settings_file):
         settings_file (str or None): settings path, threaded to the handler's own load
 
     Returns:
-        dict payload
+        dict: the ``get_data_range`` payload
 
     Raises:
         ToolParamError: unknown or unusable source
@@ -2234,7 +2233,7 @@ def _documentation_field_line(key, meta):
         meta (dict): the field's metadata dict
 
     Returns:
-        the bullet line
+        str: the bullet line for that field
     """
     bits = []
     if meta.get("unit"):
@@ -2272,7 +2271,7 @@ def build_documentation(settings, settings_file):
         settings_file (str or None): settings path, for constructing handlers
 
     Returns:
-        the Markdown document as a string
+        str: the Markdown document
     """
     lines = [
         "# send-to-influx data reference",
@@ -2370,7 +2369,7 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(_list_sources_result, settings, settings_file)
 
     @register_tool(server, title="List Source Fields", annotations=_READ_ONLY)
-    async def list_fields(source: str, detail: bool = False) -> dict:  # noqa: DOC108
+    async def list_fields(source: str, detail: bool = False) -> dict:  # noqa: DOC101,DOC103,DOC108
         """Describe one source well enough to query it and chart the result: its
         `database` and `measurement`, its `tag_keys` to group by, and every field with
         its InfluxDB `type`, any `unit`, any coded values, and its `kind`. Every
@@ -2405,7 +2404,7 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file, detail)
 
     @register_tool(server, title="Query Historical Data", annotations=_READ_ONLY)
-    async def query_history(  # noqa: DOC108
+    async def query_history(  # noqa: DOC101,DOC103,DOC108
         source: str,
         field: str,
         start: str = "-24h",
@@ -2464,7 +2463,7 @@ def register_read_tools(server, settings, settings_file=None):
         )
 
     @register_tool(server, title="Get Current State", annotations=_READ_ONLY)
-    async def get_current_state(source: str) -> dict:  # noqa: DOC108
+    async def get_current_state(source: str) -> dict:  # noqa: DOC101,DOC103,DOC108
         """Read a source's state *now* - is the light on, is the door locked, what is
         the power draw at this moment.
 
@@ -2490,7 +2489,7 @@ def register_read_tools(server, settings, settings_file=None):
         return await anyio.to_thread.run_sync(current_state_result, source, settings, settings_file)
 
     @register_tool(server, title="Get Data Range & Retention", annotations=_READ_ONLY)
-    async def get_data_range(source: str) -> dict:  # noqa: DOC108
+    async def get_data_range(source: str) -> dict:  # noqa: DOC101,DOC103,DOC108
         """Report how far back a source's data goes, and how long InfluxDB keeps it.
 
         Answers "when did collection start", "how far back can I query", "how long is

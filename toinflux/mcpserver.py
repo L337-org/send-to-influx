@@ -93,7 +93,7 @@ def _hash_token(token):
         token (str): token string
 
     Returns:
-        str
+        str: the token's SHA-256 hex digest, so the token itself is never stored
     """
     return hashlib.sha256(token.encode("utf8")).hexdigest()
 
@@ -110,11 +110,12 @@ def _refresh_entry_expired(entry, now):
     is an ``int`` subclass and a stray ``true`` should not read as epoch 1.
 
     Args:
-        entry (dict): the persisted entry (any JSON-decoded value)
+        entry (object): the persisted entry, whatever JSON decoded to - a non-mapping
+            counts as expired
         now (float): current unix time
 
     Returns:
-        bool
+        bool: True when the entry has expired, or carries no usable expiry
     """
     if not isinstance(entry, dict):
         return True
@@ -324,7 +325,7 @@ def resolve_state_path(settings, settings_file=None):
             means the project-root default
 
     Returns:
-        str
+        str: the path the OAuth state file is read from and written to
     """
     configured = (settings.get("mcp") or {}).get("state_file")
     if isinstance(configured, str) and configured.strip():
@@ -639,7 +640,7 @@ class SendToInfluxOAuthProvider:
             subject (str): the authenticated username, propagated to issued tokens
 
         Returns:
-            str
+            str: the redirect URI to send the user agent to
         """
         from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
 
@@ -923,7 +924,7 @@ def start_mcp_server_thread(settings, settings_file=None):
         settings_file (str or None): settings path, threaded through for the state file default
 
     Returns:
-        threading.Thread
+        threading.Thread: the started daemon thread running the server
     """
     host, port = parse_mcp_bind_address((settings.get("mcp") or {}).get("bind_address"))
 
