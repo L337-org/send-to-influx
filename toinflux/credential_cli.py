@@ -137,6 +137,10 @@ def _validate_secret_value(name, value):
 
     Raises:
         CredentialCliError: if the value looks invalid
+
+    Args:
+        name (str): the credential name, for the message
+        value (str): the submitted value
     """
     if not value.strip():
         raise CredentialCliError("Value must not be empty.")
@@ -160,6 +164,9 @@ def _validate_storage_name(name):
 
     Raises:
         CredentialCliError: if name isn't letters/digits/underscore/hyphen
+
+    Args:
+        name (str): the credential name to check
     """
     if not re.match(r"^[A-Za-z0-9_-]+$", name):
         raise CredentialCliError(
@@ -241,6 +248,11 @@ def _encrypt_credential(name, value, credstore_dir=None):
     Raises:
         CredentialCliError: if credstore_dir can't be created/secured, if systemd-creds encrypt fails, or if the written
             .cred file can't be secured
+
+    Args:
+        name (str): the credential name
+        value (str): the plaintext to encrypt
+        credstore_dir (str): the systemd credential store directory
     """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
@@ -281,6 +293,13 @@ def _decrypt_credential(name, credstore_dir=None):
 
     Raises:
         CredentialCliError: if the credential doesn't exist or decryption fails
+
+    Args:
+        name (str): the credential name
+        credstore_dir (str): the systemd credential store directory
+
+    Returns:
+        str: the decrypted value, with any trailing newline stripped
     """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
@@ -335,6 +354,10 @@ def _atomic_write(path, content):
     Raises:
         OSError: the write, the ownership fix-up or the rename failed; the temporary file is removed before the original
             error propagates
+
+    Args:
+        path (str): the file to write, followed through if it is a symlink
+        content (str): the complete new contents
     """
     target = os.path.realpath(path) if os.path.islink(path) else path
     directory = os.path.dirname(target) or "."
@@ -355,7 +378,15 @@ def _atomic_write(path, content):
 
 
 def _find_mapping_value(node, key):
-    """Walk one level of a yaml.compose() MappingNode looking for a scalar key."""
+    """Walk one level of a yaml.compose() MappingNode looking for a scalar key.
+
+    Args:
+        node (yaml.MappingNode or None): the mapping to search one level of
+        key (str): the scalar key to look for
+
+    Returns:
+        yaml.Node or None: the value node, or None if the key is absent
+    """
     if node is None or not isinstance(node, yaml.MappingNode):
         return None
     for key_node, value_node in node.value:
@@ -374,6 +405,12 @@ def _yaml_double_quoted_escape(value):
     literal newline/carriage return in value becomes an escaped, single-line
     representation rather than splitting the quoted scalar across multiple
     lines - which would otherwise write invalid YAML.
+
+    Args:
+        value (str): the value to escape
+
+    Returns:
+        str: the value, escaped for a YAML double-quoted scalar
     """
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "\\r").replace("\n", "\\n")
 
@@ -390,6 +427,13 @@ def _is_creatable_field(top_key, field):
     Slot 1's unnumbered ``host``/``user`` are deliberately absent: they ship in
     example_settings.yaml, so a config without them is not a slot to add but a file to look
     at by hand.
+
+    Args:
+        top_key (str): the top-level settings key
+        field (str): the field within it
+
+    Returns:
+        bool: True when this tool may create that field if it is absent
     """
     if top_key != "hue":
         return False
@@ -406,6 +450,12 @@ def _last_scalar_line(node):
     token, which in a comment-dense file is past the blank line and the following section's
     leading comment. Inserting there would put the new field under the wrong section's
     comment - or outside the section entirely.
+
+    Args:
+        node (yaml.Node): the node whose extent is wanted
+
+    Returns:
+        int: the last source line the node covers, zero-based
     """
     if isinstance(node, yaml.ScalarNode):
         return node.end_mark.line
@@ -433,6 +483,13 @@ def _append_field_to_section(settings_path, text, section_node, field, new_value
     Raises:
         CredentialCliError: the section is empty or flow-style, so there is no sibling key to copy indentation from and
             no safe place to insert
+
+    Args:
+        settings_path (str): path to the settings file
+        text (str): the settings file's full source, so an edit can be made by line rather than by reserialising
+        section_node (yaml.MappingNode): the section to append to
+        field (str): the field name to add
+        new_value (str): its value
     """
     if not isinstance(section_node, yaml.MappingNode) or not section_node.value:
         raise CredentialCliError(
@@ -468,6 +525,18 @@ def _locate_rewritable_value(settings_path, text, top_node, top_key, field, new_
 
     Raises:
         CredentialCliError: the field is absent and not creatable, or is not a plain single-line scalar
+
+    Args:
+        settings_path (str): path to the settings file
+        text (str): the settings file's full source, so an edit can be made by line rather than by reserialising
+        top_node (yaml.MappingNode): the document root
+        top_key (str): the top-level key holding the field
+        field (str): the field to rewrite
+        new_value (str): the value it will be given, for the error message
+
+    Returns:
+        yaml.Node or None: the value node to overwrite, or None when the field
+            is absent and may be created
     """
     value_node = _find_mapping_value(top_node, field)
     if value_node is not None and value_node.start_mark.line == value_node.end_mark.line:
@@ -496,6 +565,12 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value):
             hand-edited into a block scalar) - refuses rather than corrupting the file; also raised (rather than an
             unhandled OSError escaping main()'s exception handling) if settings_path can't be read or written, e.g.
             missing file or a permissions problem
+
+    Args:
+        settings_path (str): path to the settings file
+        top_key (str): the top-level key holding the field
+        field (str): the field to rewrite
+        new_value (str): its new value
     """
     try:
         with open(settings_path, encoding="utf8") as f:
@@ -562,6 +637,12 @@ def _compose_settings_mapping(settings_path):
             top-level mapping (e.g. an empty file, or a bare sequence/scalar document like "- a\\n- b\\n") - neither is
             a valid settings.yaml, and without this check the caller's own (key, value) iteration would raise a raw
             AttributeError/TypeError instead
+
+    Args:
+        settings_path (str): path to the settings file
+
+    Returns:
+        tuple: ``(text, root)`` - the file's source and its composed node tree
     """
     try:
         with open(settings_path, encoding="utf8") as f:
@@ -595,6 +676,13 @@ def _load_sources_sequence(settings_path):
         CredentialCliError: see _compose_settings_mapping(), plus if `sources:` is missing entirely, or is a populated
             flow-style sequence (e.g. `sources: [a, b]`) - there's no safe way to turn that into a block sequence by
             inserting a line after it without producing invalid YAML
+
+    Args:
+        settings_path (str): path to the settings file
+
+    Returns:
+        tuple: ``(text, sources_key, sources_node)``; the node is None when the
+            file has no sources list yet
     """
     text, root = _compose_settings_mapping(settings_path)
 
@@ -642,6 +730,10 @@ def _enable_source(name, settings_path=None):
 
     Raises:
         CredentialCliError: see _load_sources_sequence(), plus if settings_path can't be written back
+
+    Args:
+        name (str): the source to enable
+        settings_path (str): path to the settings file
     """
     if settings_path is None:
         settings_path = DEFAULT_SETTINGS_PATH
@@ -716,6 +808,9 @@ def _detect_influx_version(url):
 
     Returns:
         str: "v1", "v2", or "unknown" (unreachable/ambiguous - never raises)
+
+    Args:
+        url (str): the InfluxDB base URL to probe
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
@@ -754,6 +849,10 @@ def _resolve_credential_value(name, influx, credstore_dir):
         influx (dict): the parsed `influx:` settings block
         credstore_dir (pathlib.Path or None): directory holding the ``.cred`` files; None uses the
             packaged default.
+
+    Returns:
+        str: the credential's value, taken from settings if present there and
+            decrypted from the credstore otherwise
     """
     # Only ever called for the influx credentials, which are static - but routed through the
     # shared mapping regardless, so no credential lookup in this file can be the one that
@@ -776,6 +875,11 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None):
     plain if never migrated to systemd-creds, or decrypted if it has been (opt-in,
     per-field, so a real install could have any mix of the two). Any decrypted value
     is held only in memory for this one call and never written back to disk.
+
+    Args:
+        name (str): the credential name
+        settings_path (str): path to the settings file
+        credstore_dir (str): the systemd credential store directory
     """
     if settings_path is None:
         settings_path = DEFAULT_SETTINGS_PATH
@@ -864,6 +968,15 @@ def _resolve_org_id(url, headers, org_name, verify=True):
 
     Raises:
         CredentialCliError: the org is unknown, or the API rejected the lookup
+
+    Args:
+        url (str): the InfluxDB base URL
+        headers (dict): the request headers, carrying the token
+        org_name (str): the organisation to look up
+        verify (bool or str): the TLS verification setting to pass through
+
+    Returns:
+        str: the organisation's id
     """
     resp = requests.get(
         f"{url}/api/v2/orgs", params={"org": org_name}, headers=headers, verify=verify, timeout=HTTP_TIMEOUT_SECONDS
@@ -949,6 +1062,10 @@ def _cmd_list(credstore_dir=None, settings_path=None):
     already in the credstore. The second half is what surfaces an orphan, a credential left
     behind after its bridge was removed; it is reported rather than cleaned up, since removing
     a stored secret is not something to do as a side effect of a listing.
+
+    Args:
+        credstore_dir (str): the systemd credential store directory
+        settings_path (str): path to the settings file
     """
     if credstore_dir is None:
         credstore_dir = CREDSTORE_DIR
@@ -969,6 +1086,12 @@ def _read_settings_or_empty(settings_path):
     Used only to discover which slot credentials a config implies. A missing or malformed
     file must not stop ``--list`` from reporting the static credentials, which is exactly
     what someone diagnosing a broken config needs to see.
+
+    Args:
+        settings_path (str): path to the settings file
+
+    Returns:
+        dict: the parsed settings, or an empty dict if absent or unparseable
     """
     try:
         with open(settings_path, encoding="utf8") as handle:
@@ -983,6 +1106,12 @@ def _stored_credential_names(credstore_dir):
 
     Anything in the directory that is not a credential name this tool manages is ignored -
     ``LoadCredentialEncrypted=`` is not exclusive to us.
+
+    Args:
+        credstore_dir (str): the systemd credential store directory
+
+    Returns:
+        list: the credential names present in the store, empty if it does not exist
     """
     try:
         entries = sorted(os.listdir(credstore_dir))
@@ -1002,6 +1131,13 @@ def _extract_section(text, name):
     Deliberately textual rather than a YAML round trip: the point is to copy the
     shipped example's *documentation* (its comments explain every field) into the
     user's file verbatim, which a load+dump would discard.
+
+    Args:
+        text (str): the example settings source to take a section from
+        name (str): the top-level section name
+
+    Returns:
+        str or None: the section's lines, or None when it is not in the example
     """
     lines = text.splitlines(keepends=True)
     start = None
@@ -1043,7 +1179,7 @@ def _require_mapping_document(root, settings_path):
     service cannot load. Refusing leaves the damage where the admin left it.
 
     Args:
-        root: composed YAML root node, or None for an empty document
+        root (yaml.Node or None): composed YAML root node, or None for an empty document
         settings_path (str): path, for the error message
 
     Raises:
@@ -1073,6 +1209,14 @@ def _ensure_section(settings_path, name, example_path):
 
     Raises:
         CredentialCliError: if either file can't be read/written, or the example doesn't contain the requested section
+
+    Args:
+        settings_path (str): path to the settings file
+        name (str): the section to ensure is present
+        example_path (str): the example settings file to copy the section from
+
+    Returns:
+        bool: True when the section was added, False when it was already there
     """
     try:
         with open(settings_path, encoding="utf8") as f:
@@ -1163,6 +1307,12 @@ def _credential_name_arg(value):
     Raises:
         argparse.ArgumentTypeError: the name is neither a known credential field nor a
             numbered Hue bridge username
+
+    Args:
+        value (str): the name as typed on the command line
+
+    Returns:
+        str: the same name, once accepted
     """
     if is_credential_name(value):
         return value
