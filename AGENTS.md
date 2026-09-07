@@ -285,29 +285,31 @@ rather than by rule, both covered below: tool docstrings, and tests.
 **`pydoclint` answers the question pydocstyle cannot**: does the docstring agree with the
 signature? D417 only checks the parameters of a section a docstring already has, so a function
 documenting none of its parameters passes it, silently, in every dialect this repository has
-used. `pydoclint` runs as a flake8 plugin in the same job. Its
-backlog is the `DOC` entries in `tox.ini`: an entry comes off with the change that fixes
-everything it names, nothing is added to it, and every code absent from the list is enforced.
+used. `pydoclint` runs as a flake8 plugin in the same job.
 
-One of its judgements is worth knowing before it surprises you: a bare `return` counts as
-returning something, so a function that exits early without a value still wants a `Returns:`
-section by DOC201 - even though writing `Returns: None` is DOC202. Both are in the backlog.
+**There is no docstring backlog.** Every `DOC` code is enforced except `DOC502` and `DOC503`,
+and those two are a decision rather than deferred work: this package documents what a caller can
+catch, which includes what its callees raise, and `pydoclint` only sees exceptions constructed
+literally in the body. `tox.ini` says the same beside the setting.
 
-Two of its judgements are worth knowing before they surprise you, because they are finer than
-"document what you return":
-
-* A function with **no `return` statement at all** omits `Returns:` - writing `Returns: None`
-  there is DOC202.
-* A function with a **bare `return`** as an early exit must *have* a `Returns:` section -
-  omitting it is DOC201 - even though it returns nothing either. Say what the caller gets;
-  `check-return-types = False` is what stops the absent annotation making that a type mismatch.
+One of its judgements is worth knowing before it surprises you, because it is finer than
+"document what you return": a **bare `return`** counts as returning something, so a procedure
+using one as a guard clause trips DOC201 even though it returns nothing. Writing
+`Returns: None` is not the answer - that is what `Returns:` sections were deliberately stripped
+of. **Annotate the signature `-> None` instead**, and `pydoclint` stops asking. A function with
+no `return` statement at all needs neither.
 
 **Tool docstrings are exempt, and must stay exempt.** A tool's docstring *is* its advertised
 description, and the schema beside it already carries every parameter's type - so CS.6.14 hands
 it to the AI-consumer rules instead, where D417 would otherwise demand an `Args:` block
-duplicating the schema on every session that loads the surface. `ignore-decorators` in `tox.ini`
-does that, and `tests/test_repo_hygiene.py::test_the_docstring_exemption_matches_the_decorators_in_use`
-fails if a rename ever makes the pattern stop matching.
+duplicating the schema on every session that loads the surface.
+
+That takes two mechanisms, because `pydoclint` has no decorator-based exemption at all.
+`ignore-decorators` in `tox.ini` is a `flake8-docstrings` option and covers only the `D` codes;
+the `DOC` half is a `# noqa` marker on each tool naming the codes that apply to it. Two tests
+hold both halves, so neither can quietly stop meaning anything:
+`tests/test_repo_hygiene.py::test_the_docstring_exemption_matches_the_decorators_in_use` and
+`::test_every_tool_with_signature_hints_is_exempted_from_doc108`.
 
 **Prompts and resources are not exempt.** Both pass `description=` explicitly at registration,
 so their docstrings reach no client at all and there is nothing to trade off. They follow the
