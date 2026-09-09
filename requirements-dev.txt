@@ -19,6 +19,6 @@ mypy~=2.3.1
 # For the SPDX licence-list check in tests/test_repo_hygiene.py. pytest already pulls
 # packaging in, but only at >=22, and packaging.licenses arrived in 24.2 - so a floor
 # that actually has the module is declared here rather than inherited by luck.
-packaging~=26.2.0
+packaging~=26.3.0
 types-PyYAML~=6.0.12
 types-requests~=2.33.0
