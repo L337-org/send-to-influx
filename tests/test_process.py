@@ -25,6 +25,14 @@ from toinflux.process import (
     run_command,
 )
 
+# How long a deliberately orphaned grandchild holds an inherited pipe. Long enough that
+# a call which waited for it would blow the assertion below, short enough not to leave a
+# sleeping interpreter around for half a minute after the suite has moved on. The two
+# numbers are a pair: PROMPT_RETURN_SECONDS must stay comfortably under it, or the test
+# stops proving that the pipe was abandoned rather than waited on.
+GRANDCHILD_SECONDS = 6
+PROMPT_RETURN_SECONDS = 4
+
 
 def python_c(script):
     """Build an argv that runs a snippet under this interpreter.
@@ -370,16 +378,16 @@ class TestAnInheritedPipeDoesNotStallTheCall:
         result = run_command(
             python_c(
                 "import subprocess, sys; "
-                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                f"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep({GRANDCHILD_SECONDS})']); "
                 "sys.exit(0)"
             ),
             timeout=30,
         )
         elapsed = time.monotonic() - started
         assert result.ok
-        # The grandchild lives for 30s. Anything close to that means the call waited for
-        # a pipe nothing was going to close.
-        assert elapsed < 10, f"the call took {elapsed:.1f}s, so it waited on the inherited pipe"
+        # A call that waited on the inherited pipe could not finish before the grandchild
+        # released it, so returning inside this bound is the proof that it did not.
+        assert elapsed < PROMPT_RETURN_SECONDS, f"the call took {elapsed:.1f}s, so it waited on the inherited pipe"
 
     def test_no_threads_are_left_behind(self, monkeypatch):
         # Trivially true while the pump stays single-threaded, and that is the point: it
@@ -389,7 +397,7 @@ class TestAnInheritedPipeDoesNotStallTheCall:
         run_command(
             python_c(
                 "import subprocess, sys; "
-                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                f"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep({GRANDCHILD_SECONDS})']); "
                 "sys.exit(0)"
             ),
             timeout=30,
@@ -404,7 +412,7 @@ class TestAnInheritedPipeDoesNotStallTheCall:
             python_c(
                 "import subprocess, sys; "
                 "sys.stdout.write('said this first'); sys.stdout.flush(); "
-                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                f"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep({GRANDCHILD_SECONDS})']); "
                 "sys.exit(0)"
             ),
             timeout=30,
