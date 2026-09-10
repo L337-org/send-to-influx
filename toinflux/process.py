@@ -209,13 +209,6 @@ def _resolve_executable(name, search_path):
     if search_path is None:
         search_path = os.defpath
     resolved = shutil.which(name, path=search_path)
-    if resolved is not None:
-        # which() returns the entry as it appeared on PATH, so a relative PATH entry
-        # yields a relative path - and argv[0] would then resolve against whatever the
-        # caller's working directory happened to be. Made absolute here so the returned
-        # path means the same thing wherever it is used, which is what this function
-        # documents and what a control process launched from a service depends on.
-        return os.path.abspath(resolved)
     if resolved is None:
         # The path actually searched, not a stand-in for it. An empty PATH searches
         # nothing and is a different fault from an absent one, and reporting the default
@@ -224,7 +217,12 @@ def _resolve_executable(name, search_path):
             f"cannot run {name!r}: not found on PATH ({search_path!r}). "
             f"Install it, or put it on the PATH this service runs with"
         )
-    return resolved
+    # which() returns the entry as it appeared on PATH, so a relative PATH entry yields a
+    # relative path - and argv[0] would then resolve against whatever working directory
+    # the caller happened to have. Made absolute so the returned path means the same thing
+    # wherever it is used, which is what this function documents and what a control
+    # process launched from a service depends on.
+    return os.path.abspath(resolved)
 
 
 class _Capture:
