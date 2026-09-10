@@ -459,3 +459,18 @@ class TestSpuriousReadiness:
             result = run_command(python_c("print('survived')"), timeout=30)
         assert state["raised"], "the guard was never reached, so this asserts nothing"
         assert result.stdout.strip() == b"survived"
+
+
+class TestTheTruncationMarkerNamesTheRealLimit:
+    def test_a_smaller_output_limit_is_reported_rather_than_the_default(self):
+        # The marker used to name the module default whatever cap was in force, so a
+        # caller passing a smaller limit was told a figure that was never applied. The
+        # existing cap tests asserted only that the word "truncated" appeared, which is
+        # why this went unnoticed.
+        result = run_command(python_c("import sys; sys.stdout.write('x' * 5000)"), timeout=30, output_limit=1000)
+        assert "1000" in result.stdout_text
+        assert str(process_module.MAX_CAPTURED_BYTES) not in result.stdout_text
+
+    def test_the_default_limit_is_still_reported_when_it_is_the_one_in_force(self):
+        result = CommandResult(argv=["x"], returncode=0, stdout=b"cut", stderr=b"", stdout_truncated=True)
+        assert str(process_module.MAX_CAPTURED_BYTES) in result.stdout_text

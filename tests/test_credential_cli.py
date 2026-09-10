@@ -1614,3 +1614,25 @@ class TestEveryFailureArrivesAsCredentialCliError:
         with patch("toinflux.credential_cli.run_command", return_value=truncated):
             with pytest.raises(CredentialCliError, match="truncated"):
                 _decrypt_credential("influx-token", credstore_dir=str(credstore))
+
+
+class TestSpawnFailuresAlsoArriveAsCredentialCliError:
+    """run_command raises ConfigError when systemd-creds cannot be executed at all.
+
+    _require_systemd_creds() checks for it up front, but that check and the encrypt or
+    decrypt that follows are separate moments: a package removed, a permission changed,
+    or a caller reaching these helpers directly all land here instead.
+    """
+
+    def test_an_unexecutable_systemd_creds_is_reported_on_encrypt(self, tmp_path):
+        with patch("toinflux.credential_cli.run_command", side_effect=ConfigError("not found on PATH")):
+            with pytest.raises(CredentialCliError, match="influx-token"):
+                _encrypt_credential("influx-token", "a-secret", credstore_dir=str(tmp_path / "credstore"))
+
+    def test_an_unexecutable_systemd_creds_is_reported_on_decrypt(self, tmp_path):
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+        with patch("toinflux.credential_cli.run_command", side_effect=ConfigError("not found on PATH")):
+            with pytest.raises(CredentialCliError, match="influx-token"):
+                _decrypt_credential("influx-token", credstore_dir=str(credstore))

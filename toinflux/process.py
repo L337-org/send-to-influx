@@ -107,6 +107,8 @@ class CommandResult:
         stderr (bytes): captured standard error, at most ``MAX_CAPTURED_BYTES``
         stdout_truncated (bool): True when stdout exceeded the cap and was cut
         stderr_truncated (bool): True when stderr exceeded the cap and was cut
+        output_limit (int): the cap that was applied, so a truncation marker can name the
+            figure actually in force rather than the module default
     """
 
     argv: list
@@ -115,6 +117,7 @@ class CommandResult:
     stderr: bytes
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+    output_limit: int = MAX_CAPTURED_BYTES
 
     @property
     def ok(self):
@@ -133,7 +136,7 @@ class CommandResult:
             str: stdout decoded as UTF-8 with undecodable bytes replaced, marked as
                 truncated when the cap was hit
         """
-        return _as_text(self.stdout, self.stdout_truncated)
+        return _as_text(self.stdout, self.stdout_truncated, self.output_limit)
 
     @property
     def stderr_text(self):
@@ -143,22 +146,25 @@ class CommandResult:
             str: stderr decoded as UTF-8 with undecodable bytes replaced, marked as
                 truncated when the cap was hit
         """
-        return _as_text(self.stderr, self.stderr_truncated)
+        return _as_text(self.stderr, self.stderr_truncated, self.output_limit)
 
 
-def _as_text(raw, truncated):
+def _as_text(raw, truncated, limit):
     """Decode captured output for display, saying so when it was cut short.
 
     Args:
         raw (bytes): the captured bytes
         truncated (bool): whether the cap was reached
+        limit (int): the cap that was actually applied, which is not necessarily the
+            module default: a caller can pass a smaller ``output_limit``, and naming the
+            default there would state a figure that was never in force
 
     Returns:
         str: the decoded text, with a truncation marker appended where it applies
     """
     text = raw.decode("utf-8", errors="replace")
     if truncated:
-        text += f" [truncated at {MAX_CAPTURED_BYTES} bytes]"
+        text += f" [truncated at {limit} bytes]"
     return text
 
 
@@ -258,14 +264,13 @@ class _Capture:
         return bytes(self.data), self.truncated
 
 
-def _register(selector, process, stdin_bytes, captures):
+def _register(selector, process, stdin_bytes):
     """Put the child's pipes into non-blocking mode and register them.
 
     Args:
         selector (selectors.BaseSelector): the selector to register with
         process (subprocess.Popen): the running child
         stdin_bytes (bytes or None): what will be written, or None
-        captures (dict): stream name to :class:`_Capture`
 
     Returns:
         bytes: what still has to be written to standard input
@@ -354,7 +359,7 @@ def _pump(process, stdin_bytes, captures, timeout):
     abandon_at = None
     selector = selectors.DefaultSelector()
     try:
-        pending = _register(selector, process, stdin_bytes, captures)
+        pending = _register(selector, process, stdin_bytes)
         while True:
             still_running = process.poll() is None
             # The only clean finish: the child has gone and both pipes have closed.
@@ -453,7 +458,7 @@ def run_command(argv, *, timeout, stdin_bytes=None, env_extra=None, output_limit
         # stderr was empty is exactly the case where that happens.
         raise ProcessError(
             f"{argv[0]!r} did not finish within {timeout}s and was killed. "
-            f"Standard error: {_as_text(stderr, stderr_truncated) or 'none'}"
+            f"Standard error: {_as_text(stderr, stderr_truncated, output_limit) or 'none'}"
         )
 
     logging.debug("ran %s -> exit %s", argv[0], returncode)
@@ -464,4 +469,5 @@ def run_command(argv, *, timeout, stdin_bytes=None, env_extra=None, output_limit
         stderr=stderr,
         stdout_truncated=stdout_truncated,
         stderr_truncated=stderr_truncated,
+        output_limit=output_limit,
     )

@@ -305,10 +305,12 @@ def _encrypt_credential(name, value, credstore_dir=None):
             timeout=CREDS_TIMEOUT_SECONDS,
             stdin_bytes=value.encode(),
         )
-    except ProcessError as exc:
+    except (ConfigError, ProcessError) as exc:
         # Every failure out of this CLI has to arrive as a CredentialCliError: that is the
         # one type main() catches, and anything else reaches the operator as a traceback
-        # with no indication of what to do about it.
+        # with no indication of what to do about it. Both of run_command's exceptions are
+        # caught, not just the timeout - systemd-creds can also be absent or unexecutable
+        # by the time this runs, whatever the earlier version check found.
         raise CredentialCliError(f"storing '{name}' in systemd-creds: {exc}") from exc
     if not result.ok:
         raise CredentialCliError(
@@ -356,7 +358,7 @@ def _decrypt_credential(name, credstore_dir=None):
             ["systemd-creds", "decrypt", f"--name={name}", cred_path, "-"],
             timeout=CREDS_TIMEOUT_SECONDS,
         )
-    except ProcessError as exc:
+    except (ConfigError, ProcessError) as exc:
         raise CredentialCliError(f"reading '{name}' back from systemd-creds: {exc}") from exc
     if not result.ok:
         raise CredentialCliError(
