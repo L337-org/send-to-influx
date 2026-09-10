@@ -100,6 +100,10 @@ What it guarantees, and why each one is there rather than left to the caller:
 - **A cap on what is kept** from each output stream, which keeps draining past the limit
   rather than stopping. A reader that stopped would leave the child blocked writing into a
   full pipe, turning a large output into a hang.
+- **Standard error only in the timeout message.** Standard output is the data channel:
+  `systemd-creds decrypt` writes the plaintext credential there, so a decrypt that hung
+  after emitting part of it would put the secret into an exception message and from there
+  into the journal.
 
 Two shapes of failure, and the split matters:
 
@@ -117,3 +121,24 @@ characters that still look like a password.
 
 **Nothing here logs captured output**, because a command's stdout can be a decrypted secret.
 Whether any of it is safe to log is a question only the caller can answer.
+
+### The pump is single-threaded, and has to be
+
+`_pump()` feeds standard input and drains both outputs from the calling thread, using a
+selector over non-blocking pipes. The obvious design - a reader thread per pipe - was tried
+first and does not work, for a reason worth recording because it is invisible until it bites:
+
+- A grandchild that inherits a pipe holds its write end open, so the read never reaches EOF
+  however long the wait. The direct child can have exited long before.
+- A blocked reader thread cannot be cleaned up from outside. Closing the stream from another
+  thread waits on the same lock the blocked read holds rather than interrupting it - measured,
+  not assumed: a `close()` took as long as the reader stayed blocked.
+
+So the threaded version could only leak a reader per call or block the caller past its own
+timeout, and a supervisor launching control processes on a loop would do both. With no
+threads there is nothing to leak, the deadline covers the whole interaction rather than only
+the wait, and abandoning an inherited pipe is a decision the loop can simply take.
+
+Once the child has exited, draining continues for `_DRAIN_GRACE_SECONDS` and then stops:
+whatever still holds that pipe is not going to close it. Output the command produced before
+that point is still returned.

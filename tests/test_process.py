@@ -12,9 +12,11 @@ behave the same on every platform CI runs on.
 import os
 import subprocess
 import sys
+import threading
 import time
 from unittest.mock import patch
 import pytest
+from toinflux import process as process_module
 from toinflux.exceptions import ConfigError
 from toinflux.process import (
     INHERITED_ENV_KEYS,
@@ -122,13 +124,50 @@ class TestExecutableResolution:
         not_a_binary.write_text("not a program")
         with pytest.raises(ConfigError) as exc:
             run_command([str(not_a_binary)], timeout=30)
-        assert str(not_a_binary) in str(exc.value)
+        message = str(exc.value)
+        assert str(not_a_binary) in message
+        # The specific wording matters, not just the type. Dropping the pre-spawn check
+        # entirely still produces a ConfigError naming the path, because exec then fails
+        # with EACCES and that is caught too - so asserting only the type and the path
+        # passes against code that does no checking at all. This phrase can only come
+        # from the check that runs before the spawn.
+        assert "not an executable file" in message
+
+    def test_an_absent_path_is_reported_as_the_default_searched_not_as_nothing(self, monkeypatch):
+        # With PATH unset, shutil.which(path=None) would fall back to the parent's PATH,
+        # which is the coupling this module exists to avoid; the default is substituted
+        # explicitly instead. The two happen to resolve identically today, so the message
+        # is what distinguishes them - and "not found on PATH (None)" tells an operator
+        # nothing about where to put the binary.
+        monkeypatch.delenv("PATH", raising=False)
+        with pytest.raises(ConfigError) as exc:
+            run_command(["definitely-not-a-real-binary-zzz"], timeout=30)
+        message = str(exc.value)
+        assert repr(os.defpath) in message
+        assert "None" not in message
 
     def test_an_explicit_path_is_run_as_given(self):
         # A control process is started from the packaged venv, whose bin directory is on
         # nobody's PATH, so a path has to be usable as argv[0].
         result = run_command([os.path.abspath(sys.executable), "-c", "print('ok')"], timeout=30)
         assert result.stdout.strip() == b"ok"
+
+    def test_resolution_follows_the_childs_path_not_the_parents(self, tmp_path):
+        # The direct form of the guarantee. env_extra is the only way the two PATHs can
+        # actually differ, so it is the only way to prove which one is consulted: the
+        # interpreter is on the parent's PATH and not in this empty directory, so a lookup
+        # against the parent's would succeed and the child's must not.
+        with pytest.raises(ConfigError) as exc:
+            run_command(["python3"], timeout=30, env_extra={"PATH": str(tmp_path)})
+        assert str(tmp_path) in str(exc.value)
+
+    def test_an_empty_path_is_reported_as_itself_not_as_the_default(self, tmp_path):
+        # An empty PATH searches nothing, which is a different fault from an absent one.
+        # Reporting the system default for both sends an operator looking in a directory
+        # nothing consulted.
+        with pytest.raises(ConfigError) as exc:
+            run_command(["python3"], timeout=30, env_extra={"PATH": ""})
+        assert os.defpath not in str(exc.value)
 
     def test_lookup_uses_the_childs_own_path(self, tmp_path):
         # Resolution and execution must agree. If which() searched the parent's PATH
@@ -224,6 +263,21 @@ class TestTimeout:
             )
         assert "stuck on step 2" in str(exc.value)
 
+    def test_standard_output_never_reaches_the_timeout_message(self):
+        # stdout is the data channel: `systemd-creds decrypt` writes the plaintext
+        # credential there. A decrypt that hung after emitting part of it would put the
+        # secret into an exception message, and from there into the journal and the CLI's
+        # own output. An earlier version fell back to stdout when stderr was empty, which
+        # is precisely the case where the secret is all there is to fall back to.
+        with pytest.raises(ProcessError) as exc:
+            run_command(
+                python_c(
+                    "import sys, time; sys.stdout.write('super-secret-value'); sys.stdout.flush(); time.sleep(30)"
+                ),
+                timeout=0.5,
+            )
+        assert "super-secret-value" not in str(exc.value)
+
 
 class TestOutputCap:
     def test_output_beyond_the_limit_is_dropped_and_flagged(self):
@@ -279,3 +333,64 @@ class TestDecoding:
             timeout=30,
         )
         assert result.stdout_text == "��"
+
+
+class TestAnInheritedPipeDoesNotStallTheCall:
+    """A grandchild that inherits a pipe holds its write end open, so the read never
+    reaches EOF however long the wait.
+
+    This was a real defect in the first version of this module, which gave each pipe a
+    reader thread. Such a thread cannot be cleaned up: closing the stream from another
+    thread waits on the same lock the blocked read holds rather than interrupting it
+    (measured - a close took as long as the reader stayed blocked). The choice was
+    therefore between leaking a thread per call and blocking the caller past its own
+    timeout, and a supervisor launching control processes on a loop would do both. The
+    pump is single-threaded for this reason.
+    """
+
+    def test_the_call_returns_promptly_instead_of_waiting_for_the_grandchild(self, monkeypatch):
+        monkeypatch.setattr(process_module, "_DRAIN_GRACE_SECONDS", 0.5)
+        started = time.monotonic()
+        result = run_command(
+            python_c(
+                "import subprocess, sys; "
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                "sys.exit(0)"
+            ),
+            timeout=30,
+        )
+        elapsed = time.monotonic() - started
+        assert result.ok
+        # The grandchild lives for 30s. Anything close to that means the call waited for
+        # a pipe nothing was going to close.
+        assert elapsed < 10, f"the call took {elapsed:.1f}s, so it waited on the inherited pipe"
+
+    def test_no_threads_are_left_behind(self, monkeypatch):
+        # Trivially true while the pump stays single-threaded, and that is the point: it
+        # fails the moment someone reintroduces a reader thread that cannot be joined.
+        monkeypatch.setattr(process_module, "_DRAIN_GRACE_SECONDS", 0.5)
+        before = {thread.ident for thread in threading.enumerate()}
+        run_command(
+            python_c(
+                "import subprocess, sys; "
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                "sys.exit(0)"
+            ),
+            timeout=30,
+        )
+        leaked = {t.ident for t in threading.enumerate() if t.is_alive()} - before
+        assert not leaked, f"{len(leaked)} thread(s) outlived the call"
+
+    def test_output_written_before_the_pipe_was_inherited_is_still_returned(self, monkeypatch):
+        # Abandoning the pipe must not cost the output the command actually produced.
+        monkeypatch.setattr(process_module, "_DRAIN_GRACE_SECONDS", 0.5)
+        result = run_command(
+            python_c(
+                "import subprocess, sys; "
+                "sys.stdout.write('said this first'); sys.stdout.flush(); "
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                "sys.exit(0)"
+            ),
+            timeout=30,
+        )
+        assert result.stdout == b"said this first"

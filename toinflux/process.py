@@ -21,9 +21,10 @@ __license__ = "MIT"
 
 import logging
 import os
+import selectors
 import shutil
 import subprocess
-import threading
+import time
 from dataclasses import dataclass
 from toinflux.exceptions import ConfigError, ToInfluxError
 
@@ -60,16 +61,20 @@ INHERITED_ENV_KEYS = (
 
 # Ceiling on what is kept from each of stdout and stderr. Generous for a command
 # this project runs on purpose, and small enough that a process stuck emitting
-# output cannot exhaust memory. Reading continues past it (see _drain) so the cap
-# never turns into a deadlock.
+# output cannot exhaust memory. Reading continues past it (the pump keeps draining
+# and discarding) so the cap never turns into a deadlock: a reader that stopped at
+# the limit would leave the child blocked writing into a full pipe.
 MAX_CAPTURED_BYTES = 1024 * 1024
 
-# How long to wait for a reader thread after the process has gone. A grandchild
-# holding the inherited pipe open keeps it from reaching EOF, so this bounds the
-# wait rather than trusting the pipe to close.
+# How long to keep draining after the child has exited. A grandchild that inherited
+# a pipe holds the write end open, so EOF never arrives; this bounds the wait rather
+# than trusting a stream nothing is going to close.
 _DRAIN_GRACE_SECONDS = 5.0
 
 _READ_CHUNK = 65536
+
+# How often the pump wakes to re-check the deadline and whether the child has gone.
+_POLL_SECONDS = 0.1
 
 
 class ProcessError(ToInfluxError):
@@ -178,8 +183,9 @@ def _resolve_executable(name, search_path):
 
     Args:
         name (str): argv[0]: a bare command name to look up, or a path to use as given
-        search_path (str or None): the PATH the child will run with, so that lookup
-            and execution cannot disagree; None means the system default
+        search_path (str or None): the PATH the child will run with, so that lookup and
+            execution cannot disagree; None means the child has none, and the system
+            default is substituted here rather than left to the lookup
 
     Returns:
         str: an absolute path to the executable
@@ -195,76 +201,157 @@ def _resolve_executable(name, search_path):
         if not os.path.isfile(name) or not os.access(name, os.X_OK):
             raise ConfigError(f"cannot run {name!r}: not an executable file")
         return os.path.abspath(name)
+    # Substituted here rather than passed as None: shutil.which(path=None) reads
+    # os.environ["PATH"], so the lookup would silently consult the *parent's* PATH while
+    # the child runs with the allow-listed one. Those agree today only because the child's
+    # PATH is copied from the parent's, which makes it a coincidence rather than the
+    # guarantee this function's whole reason for existing claims.
+    if search_path is None:
+        search_path = os.defpath
     resolved = shutil.which(name, path=search_path)
     if resolved is None:
+        # The path actually searched, not a stand-in for it. An empty PATH searches
+        # nothing and is a different fault from an absent one, and reporting the default
+        # for both sends an operator looking in a directory nothing consulted.
         raise ConfigError(
-            f"cannot run {name!r}: not found on PATH ({search_path or os.defpath!r}). "
+            f"cannot run {name!r}: not found on PATH ({search_path!r}). "
             f"Install it, or put it on the PATH this service runs with"
         )
     return resolved
 
 
-def _drain(stream, limit, sink) -> None:
-    """Read a pipe to EOF, keeping only the first ``limit`` bytes.
-
-    Reading continues after the cap is reached rather than stopping. A child that
-    fills the pipe blocks on write, so a reader that stopped early would deadlock
-    with a child that never exits, and the cap would have converted a large output
-    into a hang.
+class _Capture:
+    """One output stream's accumulated bytes and whether the cap was reached.
 
     Args:
-        stream (io.BufferedReader): the pipe to read
         limit (int): how many bytes to keep
-        sink (list): appended with a single ``(bytes, truncated)`` tuple
     """
-    kept = bytearray()
-    truncated = False
-    while True:
-        chunk = stream.read1(_READ_CHUNK)
-        if not chunk:
-            break
-        room = limit - len(kept)
+
+    def __init__(self, limit):
+        self.limit = limit
+        self.data = bytearray()
+        self.truncated = False
+
+    def add(self, chunk) -> None:
+        """Keep what fits and remember if anything did not.
+
+        Args:
+            chunk (bytes): freshly read bytes
+        """
+        room = self.limit - len(self.data)
         if room > 0:
-            kept += chunk[:room]
+            self.data += chunk[:room]
         if len(chunk) > max(room, 0):
-            truncated = True
-    sink.append((bytes(kept), truncated))
+            self.truncated = True
+
+    def result(self):
+        """The captured bytes and the truncation flag.
+
+        Returns:
+            tuple: ``(bytes, truncated)``
+        """
+        return bytes(self.data), self.truncated
 
 
-def _feed(stream, data) -> None:
-    """Write the child's standard input and close it.
-
-    Args:
-        stream (io.BufferedWriter): the child's stdin pipe
-        data (bytes or None): what to write; None writes nothing
-    """
-    try:
-        if data:
-            stream.write(data)
-        stream.close()
-    except OSError:
-        # A child that exits before reading its input breaks the pipe. That is not a
-        # separate failure to report: the exit status already says the command did not
-        # do what was asked, and it says it more usefully than "broken pipe" would.
-        pass
-
-
-def _collect(sink):
-    """Take a drained stream's result, tolerating a reader that never finished.
+def _register(selector, process, stdin_bytes, captures):
+    """Put the child's pipes into non-blocking mode and register them.
 
     Args:
-        sink (list): the list a :func:`_drain` thread appends to
+        selector (selectors.BaseSelector): the selector to register with
+        process (subprocess.Popen): the running child
+        stdin_bytes (bytes or None): what will be written, or None
+        captures (dict): stream name to :class:`_Capture`
 
     Returns:
-        tuple: ``(bytes, truncated)``, empty and marked truncated if the reader is
-            still running
+        bytes: what still has to be written to standard input
     """
-    if sink:
-        return sink[0]
-    # The reader outlived its grace period, which means something still holds the
-    # pipe. Report what that cost - nothing captured - rather than an empty string a
-    # caller would read as "the command said nothing".
-    return b"", True
+    for name in ("stdout", "stderr"):
+        stream = getattr(process, name)
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, name)
+    if stdin_bytes:
+        os.set_blocking(process.stdin.fileno(), False)
+        selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+        return stdin_bytes
+    # No input to send. Close it now rather than leaving the child waiting on a pipe
+    # that will never carry anything.
+    process.stdin.close()
+    return b""
+
+
+def _drain_ready(selector, events, captures, pending):
+    """Service whichever pipes are ready, once.
+
+    Args:
+        selector (selectors.BaseSelector): the selector the pipes are registered with
+        events (list): what :meth:`select` returned
+        captures (dict): stream name to :class:`_Capture`
+        pending (bytes): input still to be written
+
+    Returns:
+        bytes: input still to be written after this pass
+    """
+    for key, _ in events:
+        if key.data == "stdin":
+            try:
+                written = os.write(key.fileobj.fileno(), pending)
+                pending = pending[written:]
+            except BrokenPipeError:
+                # The child exited without reading its input. Its exit status says more
+                # about that than a pipe error would, so stop writing and let it stand.
+                pending = b""
+            if not pending:
+                selector.unregister(key.fileobj)
+                key.fileobj.close()
+            continue
+        chunk = os.read(key.fileobj.fileno(), _READ_CHUNK)
+        if chunk:
+            captures[key.data].add(chunk)
+            continue
+        selector.unregister(key.fileobj)
+    return pending
+
+
+def _pump(process, stdin_bytes, captures, timeout):
+    """Feed standard input and drain both outputs under one deadline.
+
+    Single-threaded on purpose. An earlier version gave each pipe a reader thread, which
+    cannot clean up after itself: a grandchild that inherits a pipe holds the write end
+    open, so the read never reaches EOF, and closing the stream from another thread waits
+    on the same lock the blocked read holds rather than interrupting it (measured: a close
+    took as long as the reader stayed blocked). Threads therefore either leaked one per
+    call or blocked the caller past its own timeout. With no threads there is nothing to
+    leak, and the deadline covers the whole interaction rather than only the wait.
+
+    Args:
+        process (subprocess.Popen): the running child
+        stdin_bytes (bytes or None): what to write to standard input
+        captures (dict): stream name to :class:`_Capture`, filled in place
+        timeout (int or float): seconds allowed before the child is deemed overrunning
+
+    Returns:
+        bool: True if the deadline passed while the child was still running
+    """
+    deadline = time.monotonic() + timeout
+    abandon_at = None
+    selector = selectors.DefaultSelector()
+    try:
+        pending = _register(selector, process, stdin_bytes, captures)
+        while selector.get_map():
+            if process.poll() is None:
+                if time.monotonic() >= deadline:
+                    return True
+            elif abandon_at is None:
+                # The child is gone but a pipe is still open, which means something that
+                # inherited it holds the write end. Give it a moment to flush, then stop
+                # waiting on a stream nothing is going to close.
+                abandon_at = time.monotonic() + _DRAIN_GRACE_SECONDS
+            if abandon_at is not None and time.monotonic() >= abandon_at:
+                return False
+            pending = _drain_ready(selector, selector.select(timeout=_POLL_SECONDS), captures, pending)
+    finally:
+        selector.close()
+    return False
 
 
 def run_command(argv, *, timeout, stdin_bytes=None, env_extra=None, output_limit=MAX_CAPTURED_BYTES):
@@ -311,41 +398,33 @@ def run_command(argv, *, timeout, stdin_bytes=None, env_extra=None, output_limit
             stderr=subprocess.PIPE,
             env=env,
             shell=False,
+            bufsize=0,
         )
     except OSError as exc:
         # Permission denied, an unusable interpreter line, a directory where a binary
         # was expected. None of these resolve by waiting, so they are configuration.
         raise ConfigError(f"could not start {argv[0]!r}: {exc}") from exc
 
-    out_sink, err_sink = [], []
-    readers = [
-        threading.Thread(target=_drain, args=(process.stdout, output_limit, out_sink), daemon=True),
-        threading.Thread(target=_drain, args=(process.stderr, output_limit, err_sink), daemon=True),
-    ]
-    writer = threading.Thread(target=_feed, args=(process.stdin, stdin_bytes), daemon=True)
-    for thread in (*readers, writer):
-        thread.start()
-
-    timed_out = False
-    try:
-        returncode = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        process.kill()
+    captures = {"stdout": _Capture(output_limit), "stderr": _Capture(output_limit)}
+    with process:
+        timed_out = _pump(process, stdin_bytes, captures, timeout)
+        if timed_out:
+            process.kill()
         returncode = process.wait()
-
-    for thread in readers:
-        thread.join(_DRAIN_GRACE_SECONDS)
-    stdout, stdout_truncated = _collect(out_sink)
-    stderr, stderr_truncated = _collect(err_sink)
+    stdout, stdout_truncated = captures["stdout"].result()
+    stderr, stderr_truncated = captures["stderr"].result()
 
     if timed_out:
-        # The captured output goes in the message: a command killed mid-run has
-        # usually already said what it was stuck on, and this is the only place that
-        # text survives.
+        # Standard error only, never standard output. A command killed mid-run has
+        # usually already said on stderr what it was stuck on, and this message is the
+        # only place that survives. Standard output is the data channel: `systemd-creds
+        # decrypt` writes the plaintext credential there, so a decrypt that hung after
+        # emitting part of it would put the secret into an exception message, and from
+        # there into the journal and the CLI's own output. Falling back to stdout when
+        # stderr was empty is exactly the case where that happens.
         raise ProcessError(
             f"{argv[0]!r} did not finish within {timeout}s and was killed. "
-            f"Output so far: {_as_text(stderr, stderr_truncated) or _as_text(stdout, stdout_truncated) or 'none'}"
+            f"Standard error: {_as_text(stderr, stderr_truncated) or 'none'}"
         )
 
     logging.debug("ran %s -> exit %s", argv[0], returncode)
