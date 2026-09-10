@@ -1,0 +1,281 @@
+"""Unit tests for toinflux.process (run_command and its guarantees).
+
+These run real child processes rather than mocking ``subprocess``. The whole point of
+this module is what happens at the boundary - an environment that is not inherited, a
+pipe that fills, a process that will not exit - and a mocked Popen asserts only that we
+called ourselves the way we expected to.
+
+The child is always ``sys.executable -c ...``, so the tests need no fixture binary and
+behave the same on every platform CI runs on.
+"""
+
+import os
+import subprocess
+import sys
+import time
+from unittest.mock import patch
+import pytest
+from toinflux.exceptions import ConfigError
+from toinflux.process import (
+    INHERITED_ENV_KEYS,
+    CommandResult,
+    ProcessError,
+    run_command,
+)
+
+
+def python_c(script):
+    """Build an argv that runs a snippet under this interpreter.
+
+    Args:
+        script (str): the Python source to run
+
+    Returns:
+        list: an argv suitable for run_command
+    """
+    return [sys.executable, "-c", script]
+
+
+def _platform_injected_env():
+    """Variables the operating system puts in a child regardless of what we pass.
+
+    macOS adds ``__CF_USER_TEXT_ENCODING`` (and ``LC_CTYPE``) to every process it
+    spawns, so an allow-list assertion that treats any unexpected name as a leak from
+    ``run_command`` fails there for a reason that has nothing to do with this project.
+    Measured rather than hardcoded: spawning with an explicitly empty environment shows
+    exactly what the platform contributes, which keeps the guard strict on Linux, where
+    the answer is nothing at all.
+
+    Returns:
+        set: variable names present in a child given no environment
+    """
+    probe = subprocess.run(
+        [sys.executable, "-c", "import os; print('\\n'.join(os.environ))"],
+        env={},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    return set(probe.stdout.split())
+
+
+class TestSuccessfulCommands:
+    def test_captures_stdout_and_reports_success(self):
+        result = run_command(python_c("print('hello')"), timeout=30)
+        assert result.ok
+        assert result.returncode == 0
+        assert result.stdout.strip() == b"hello"
+        assert result.stderr == b""
+
+    def test_argv_records_the_resolved_executable(self):
+        result = run_command(python_c("pass"), timeout=30)
+        assert os.path.isabs(result.argv[0])
+        assert result.argv[1:] == ["-c", "pass"]
+
+    def test_stdin_bytes_reach_the_child(self):
+        # The credential path passes a secret this way precisely so it never appears in
+        # argv, where it would be world-readable in /proc and in any error message.
+        result = run_command(
+            python_c("import sys; sys.stdout.write(sys.stdin.read().upper())"),
+            timeout=30,
+            stdin_bytes=b"a secret",
+        )
+        assert result.stdout == b"A SECRET"
+
+    def test_stdin_is_empty_rather_than_inherited_when_none_is_given(self):
+        result = run_command(python_c("import sys; print(len(sys.stdin.read()))"), timeout=30)
+        assert result.stdout.strip() == b"0"
+
+
+class TestFailingCommands:
+    def test_a_non_zero_exit_is_returned_not_raised(self):
+        # The distinction this module rests on: a command that ran and failed still
+        # produced the output explaining why, so throwing it away to raise would
+        # destroy what the caller needs.
+        result = run_command(python_c("import sys; sys.exit(3)"), timeout=30)
+        assert isinstance(result, CommandResult)
+        assert not result.ok
+        assert result.returncode == 3
+
+    def test_stderr_is_captured_alongside_a_failure(self):
+        result = run_command(
+            python_c("import sys; sys.stderr.write('it went wrong'); sys.exit(1)"),
+            timeout=30,
+        )
+        assert not result.ok
+        assert result.stderr_text == "it went wrong"
+
+
+class TestExecutableResolution:
+    def test_an_unknown_command_raises_config_error_naming_it(self):
+        with pytest.raises(ConfigError) as exc:
+            run_command(["definitely-not-a-real-binary-zzz"], timeout=30)
+        message = str(exc.value)
+        # An operator reading this in the journal has to learn both what was missing and
+        # where it was looked for, or the next step is guesswork.
+        assert "definitely-not-a-real-binary-zzz" in message
+        assert "PATH" in message
+
+    def test_a_path_that_is_not_executable_raises_config_error(self, tmp_path):
+        not_a_binary = tmp_path / "data.txt"
+        not_a_binary.write_text("not a program")
+        with pytest.raises(ConfigError) as exc:
+            run_command([str(not_a_binary)], timeout=30)
+        assert str(not_a_binary) in str(exc.value)
+
+    def test_an_explicit_path_is_run_as_given(self):
+        # A control process is started from the packaged venv, whose bin directory is on
+        # nobody's PATH, so a path has to be usable as argv[0].
+        result = run_command([os.path.abspath(sys.executable), "-c", "print('ok')"], timeout=30)
+        assert result.stdout.strip() == b"ok"
+
+    def test_lookup_uses_the_childs_own_path(self, tmp_path):
+        # Resolution and execution must agree. If which() searched the parent's PATH
+        # while the child ran with the allow-listed one, a binary could resolve here and
+        # be unfindable there.
+        with patch.dict(os.environ, {"PATH": str(tmp_path)}, clear=False):
+            with pytest.raises(ConfigError) as exc:
+                run_command(["python3"], timeout=30)
+        assert str(tmp_path) in str(exc.value)
+
+
+class TestEnvironmentAllowList:
+    def test_a_variable_outside_the_allow_list_does_not_reach_the_child(self):
+        with patch.dict(os.environ, {"SEND_TO_INFLUX_TEST_LEAK": "leaked"}, clear=False):
+            result = run_command(
+                python_c("import os; print(os.environ.get('SEND_TO_INFLUX_TEST_LEAK', 'absent'))"),
+                timeout=30,
+            )
+        assert result.stdout.strip() == b"absent"
+
+    def test_credentials_directory_is_passed_through(self):
+        # Named explicitly rather than looped over the whole allow-list: this is the one
+        # whose absence looks like a permissions bug rather than a missing variable, and
+        # a control process reads its own secrets from it.
+        with patch.dict(os.environ, {"CREDENTIALS_DIRECTORY": "/run/credentials/test"}, clear=False):
+            result = run_command(
+                python_c("import os; print(os.environ.get('CREDENTIALS_DIRECTORY', 'absent'))"),
+                timeout=30,
+            )
+        assert result.stdout.strip() == b"/run/credentials/test"
+
+    def test_state_directory_is_passed_through(self):
+        with patch.dict(os.environ, {"STATE_DIRECTORY": "/var/lib/send-to-influx"}, clear=False):
+            result = run_command(
+                python_c("import os; print(os.environ.get('STATE_DIRECTORY', 'absent'))"),
+                timeout=30,
+            )
+        assert result.stdout.strip() == b"/var/lib/send-to-influx"
+
+    def test_env_extra_overrides_an_inherited_value(self):
+        with patch.dict(os.environ, {"TZ": "Europe/London"}, clear=False):
+            result = run_command(
+                python_c("import os; print(os.environ['TZ'])"),
+                timeout=30,
+                env_extra={"TZ": "UTC"},
+            )
+        assert result.stdout.strip() == b"UTC"
+
+    def test_the_child_environment_holds_nothing_but_the_allow_list(self):
+        # The broad guard: a future edit reaching for os.environ.copy() passes every
+        # targeted test above and fails this one.
+        result = run_command(
+            python_c("import os; print('\\n'.join(sorted(os.environ)))"),
+            timeout=30,
+            env_extra={"EXTRA_FOR_THIS_TEST": "1"},
+        )
+        seen = set(result.stdout.decode().split())
+        assert seen <= set(INHERITED_ENV_KEYS) | {"EXTRA_FOR_THIS_TEST"} | _platform_injected_env()
+
+
+class TestNoShell:
+    def test_shell_metacharacters_are_passed_through_literally(self):
+        # If this ever ran through a shell, the semicolon would start a second command
+        # and the argument would not arrive intact.
+        payload = "; echo pwned"
+        result = run_command(python_c("import sys; sys.stdout.write(sys.argv[1])") + [payload], timeout=30)
+        assert result.stdout.decode() == payload
+
+
+class TestTimeout:
+    def test_a_command_that_overruns_raises_process_error(self):
+        with pytest.raises(ProcessError) as exc:
+            run_command(python_c("import time; time.sleep(30)"), timeout=0.5)
+        message = str(exc.value)
+        assert "0.5" in message
+        assert "killed" in message
+
+    def test_the_overrunning_process_is_actually_killed(self):
+        # Raising while leaving the child running would leak a process per failure, which
+        # on a retry loop is unbounded.
+        started = time.monotonic()
+        with pytest.raises(ProcessError):
+            run_command(python_c("import time; time.sleep(30)"), timeout=0.5)
+        # A surviving child would hold the pipe open and stall the drain until its grace
+        # period expired, so finishing promptly is the observable proof it died.
+        assert time.monotonic() - started < 10
+
+    def test_output_written_before_the_timeout_is_reported(self):
+        with pytest.raises(ProcessError) as exc:
+            run_command(
+                python_c("import sys, time; sys.stderr.write('stuck on step 2'); sys.stderr.flush(); time.sleep(30)"),
+                timeout=0.5,
+            )
+        assert "stuck on step 2" in str(exc.value)
+
+
+class TestOutputCap:
+    def test_output_beyond_the_limit_is_dropped_and_flagged(self):
+        result = run_command(
+            python_c("import sys; sys.stdout.write('x' * 5000)"),
+            timeout=30,
+            output_limit=1000,
+        )
+        assert len(result.stdout) == 1000
+        assert result.stdout_truncated
+
+    def test_a_truncated_result_says_so_rather_than_looking_complete(self):
+        result = run_command(
+            python_c("import sys; sys.stdout.write('x' * 5000)"),
+            timeout=30,
+            output_limit=1000,
+        )
+        assert "truncated" in result.stdout_text
+
+    def test_output_within_the_limit_is_not_flagged(self):
+        result = run_command(python_c("print('small')"), timeout=30, output_limit=1000)
+        assert not result.stdout_truncated
+        assert "truncated" not in result.stdout_text
+
+    def test_a_child_exceeding_the_cap_still_runs_to_completion(self):
+        # The cap must not become a deadlock. A reader that stopped at the limit would
+        # leave the child blocked writing into a full pipe, and this test would hit its
+        # timeout instead of returning - which is exactly the bug the drain-past-the-cap
+        # loop exists to prevent. The payload is far larger than a pipe buffer.
+        result = run_command(
+            python_c("import sys; sys.stdout.write('y' * 2_000_000); sys.exit(0)"),
+            timeout=60,
+            output_limit=1000,
+        )
+        assert result.ok
+        assert len(result.stdout) == 1000
+        assert result.stdout_truncated
+
+
+class TestDecoding:
+    def test_raw_bytes_survive_verbatim(self):
+        # A caller holding a credential decodes strictly itself, so the bytes it decodes
+        # have to be exactly what the command emitted.
+        result = run_command(
+            python_c("import sys; sys.stdout.buffer.write(b'\\xff\\xfe')"),
+            timeout=30,
+        )
+        assert result.stdout == b"\xff\xfe"
+
+    def test_text_access_replaces_undecodable_bytes_rather_than_raising(self):
+        result = run_command(
+            python_c("import sys; sys.stdout.buffer.write(b'\\xff\\xfe')"),
+            timeout=30,
+        )
+        assert result.stdout_text == "��"
