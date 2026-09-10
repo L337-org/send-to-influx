@@ -25,10 +25,17 @@ isn't covered here, look in `architecture/`.
 ├── toinflux/                # the package
 │   ├── __init__.py         # re-exports the public factory/settings functions and all source classes
 │   ├── general.py          # load_settings(), validate_settings(), get_class() (factory), configure_logging()
-│   ├── exceptions.py       # ConfigError (fatal) / SourceConnectionError (retryable)
+│   ├── exceptions.py       # ConfigError (fatal) / SourceConnectionError (retryable) / ToolParamError
+│   ├── process.py          # run_command() - the only place this project starts a process
+│   ├── credentials.py      # systemd-creds substitution into loaded settings
+│   ├── credential_cli.py   # send-to-influx-set-credential
 │   ├── influx.py           # DataHandler base class - owns send_data() (line protocol + InfluxDB HTTP POST)
+│   ├── mcpserver.py        # MCP server lifecycle, OAuth state, bind address
+│   ├── mcp_*.py            # the MCP surface: common registrars, read, write, resources, prompts, dashboards
+│   ├── mqtt.py             # MqttDataHandler - MQTT transport for interrupt-driven sources
 │   ├── philipshue.py       # Hue
 │   ├── myenergi.py         # MyEnergi (shared auth) + Zappi / Eddi / Harvi
+│   ├── nuki.py             # Nuki
 │   ├── carbonintensity.py  # CarbonIntensity
 │   ├── openmeteo.py        # OpenMeteo
 │   ├── octopus.py          # Octopus
@@ -49,7 +56,9 @@ POSTing to InfluxDB are all handled once, in one place.
 ## Conventions
 
 - Line length is 120 characters (enforced by `flake8`/`black`).
-- Docstrings follow the existing `:param:`/`:type:`/`:return:`/`:rtype:` style.
+- Docstrings are Google style, with a type in each `Args:` and `Returns:` entry, because this
+  code carries no annotations. The convention and its exemptions live in `tox.ini`, and
+  `flake8` enforces them. The Sphinx `:param:`/`:rtype:` form is rejected.
 - Raise `SourceConnectionError` for a transient problem talking to a source's API (network error,
   bad auth, bad response) - the worker loop retries these with backoff. Raise `ConfigError` for a
   fatal, non-retryable problem (missing/invalid settings, unknown source) - these exit immediately
@@ -205,6 +214,25 @@ Mechanical, not a judgment call: every rule below is an existing tested conventi
 
 If you are only adding a field or fixing a bug in an *existing* source, steps 2, 3 and 16-22 do not
 apply, but the rest still do wherever relevant.
+
+## Checklist when adding a module under `toinflux/`
+
+Most new functionality belongs in the module that already owns that area; a new file is for a
+genuinely new one. When it is, do all of these in the same change:
+
+1. Give it the licence header block (`__author__`, `__copyright__`, `__license__`) above the first
+   import, and a module docstring saying what it owns.
+2. Add `tests/test_<module>.py`. The suite mirrors `toinflux/` one-to-one, so a missing test module
+   is visible at a glance.
+3. Export from `toinflux/__init__.py` only what callers outside the package use. Anything internal
+   stays reachable by its module path, and private helpers keep a leading underscore.
+4. Add it to the layout tree above.
+5. Add a routing row to **AGENTS.md** pointing at the architecture file that carries its detail,
+   and put the detail there rather than in `AGENTS.md` itself. Every path the router names must
+   exist, and every file in `architecture/` must be reachable from it.
+6. Where the module establishes an invariant that can be checked mechanically, write the test that
+   fails CI and name it in AGENTS.md's guarded list rather than describing the invariant in prose.
+7. Update **README.md** only if the module changes something a user does.
 
 ## Local development
 

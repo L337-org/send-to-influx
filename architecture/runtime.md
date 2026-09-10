@@ -76,3 +76,44 @@ validated, constructed, and then died with `AttributeError: 'MyEnergi' object ha
 'get_data'` on every cycle. It is simply absent now, like `DataHandler`, and `known_sources()`
 needs no filter. `measurement_for()`/`shares_measurement()` are unaffected - they iterate
 `known_sources()`, which never included it.
+
+## Running an external command (`toinflux/process.py`)
+
+`run_command()` is the only place this project starts a process. Read this before adding a
+call site; `tests/test_repo_hygiene.py::test_only_the_process_helper_starts_a_process` fails a
+module under `toinflux/` that imports `subprocess` instead.
+
+What it guarantees, and why each one is there rather than left to the caller:
+
+- **No shell, ever.** The argument list is passed as a list, so a value that reaches argv
+  cannot become a second command.
+- **An allow-listed environment**, not the inherited one. `INHERITED_ENV_KEYS` names what
+  passes through. `CREDENTIALS_DIRECTORY` and `STATE_DIRECTORY` are on it because a control
+  process reads its own secrets and its own configuration from them: dropping either produces
+  a child that reports a missing file or a permissions error a long way from the cause.
+- **argv[0] resolved before the spawn**, by `shutil.which()` against the *child's* PATH so
+  lookup and execution cannot disagree, or used as given when it is a path. A path is
+  legitimate: a console script inside the packaged venv is on nobody's PATH. Failure is
+  `ConfigError`, which no amount of retrying fixes.
+- **A mandatory timeout.** No default, because no default fits both a version banner and a
+  TPM-backed decrypt. Overrunning raises `ProcessError` after killing the child.
+- **A cap on what is kept** from each output stream, which keeps draining past the limit
+  rather than stopping. A reader that stopped would leave the child blocked writing into a
+  full pipe, turning a large output into a hang.
+
+Two shapes of failure, and the split matters:
+
+- **A command that ran and exited non-zero is returned**, not raised. Its output is usually the
+  only explanation of why it failed, and some callers legitimately ignore the status. Check
+  `CommandResult.ok`.
+- **A command that never finished raises.** There is no exit status to report, and returning
+  partial output invites a caller to use it as though the command had completed.
+
+**Captured output is bytes, deliberately.** `stdout_text`/`stderr_text` decode with replacement
+for a message or a log line. A caller holding something that must be exactly what the command
+emitted decodes strictly itself: `_decrypt_credential()` does, and treats invalid UTF-8 as the
+failure it is, which decoding centrally with replacement would have turned into replacement
+characters that still look like a password.
+
+**Nothing here logs captured output**, because a command's stdout can be a decrypted secret.
+Whether any of it is safe to log is a question only the caller can answer.
