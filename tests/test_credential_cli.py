@@ -30,7 +30,7 @@ from toinflux.credential_cli import (
     main,
 )
 from toinflux.exceptions import ConfigError
-from toinflux.process import CommandResult
+from toinflux.process import CommandResult, ProcessError
 
 
 def command_result(stdout=b"", stderr=b"", returncode=0):
@@ -1573,3 +1573,44 @@ class TestSlotFieldCreation:
         assert "hue-user2: configured" in out
         assert "hue-user7: configured, but no matching field" in out
         assert "influx-token: not set" in out
+
+
+class TestEveryFailureArrivesAsCredentialCliError:
+    """main() catches CredentialCliError and nothing else.
+
+    run_command raises ProcessError when a command has to be killed, so a hung
+    systemd-creds would otherwise reach the operator as a traceback with no indication
+    of what to do about it, and with an exit status nothing chose.
+    """
+
+    def test_a_hung_version_check_is_reported_not_raised_raw(self):
+        with patch("toinflux.credential_cli.run_command", side_effect=ProcessError("killed after 10s")):
+            with pytest.raises(CredentialCliError, match="systemd-creds version"):
+                _require_systemd_creds()
+
+    def test_a_hung_encrypt_is_reported_not_raised_raw(self, tmp_path):
+        with patch("toinflux.credential_cli.run_command", side_effect=ProcessError("killed after 30s")):
+            with pytest.raises(CredentialCliError, match="influx-token"):
+                _encrypt_credential("influx-token", "a-secret", credstore_dir=str(tmp_path / "credstore"))
+
+    def test_a_hung_decrypt_is_reported_not_raised_raw(self, tmp_path):
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+        with patch("toinflux.credential_cli.run_command", side_effect=ProcessError("killed after 30s")):
+            with pytest.raises(CredentialCliError, match="influx-token"):
+                _decrypt_credential("influx-token", credstore_dir=str(credstore))
+
+    def test_a_truncated_credential_is_refused_rather_than_returned_short(self, tmp_path):
+        # Returning the first megabyte of an over-long value would authenticate against
+        # nothing and give no clue why, which is the silent-partial-result failure the
+        # capture cap is required to report rather than hide.
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+        truncated = CommandResult(
+            argv=["/usr/bin/systemd-creds"], returncode=0, stdout=b"partial", stderr=b"", stdout_truncated=True
+        )
+        with patch("toinflux.credential_cli.run_command", return_value=truncated):
+            with pytest.raises(CredentialCliError, match="truncated"):
+                _decrypt_credential("influx-token", credstore_dir=str(credstore))

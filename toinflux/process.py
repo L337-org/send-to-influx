@@ -209,6 +209,13 @@ def _resolve_executable(name, search_path):
     if search_path is None:
         search_path = os.defpath
     resolved = shutil.which(name, path=search_path)
+    if resolved is not None:
+        # which() returns the entry as it appeared on PATH, so a relative PATH entry
+        # yields a relative path - and argv[0] would then resolve against whatever the
+        # caller's working directory happened to be. Made absolute here so the returned
+        # path means the same thing wherever it is used, which is what this function
+        # documents and what a control process launched from a service depends on.
+        return os.path.abspath(resolved)
     if resolved is None:
         # The path actually searched, not a stand-in for it. An empty PATH searches
         # nothing and is a different fault from an absent one, and reporting the default
@@ -338,6 +345,10 @@ def _pump(process, stdin_bytes, captures, timeout):
         captures (dict): stream name to :class:`_Capture`, filled in place
         timeout (int or float): seconds allowed before the child is deemed overrunning
 
+    Returns a verdict rather than raising so the caller owns the kill and the message.
+    A False return also carries a post-condition the caller relies on: the child has
+    exited, so the ``wait()`` that follows returns immediately.
+
     Returns:
         bool: True if the deadline passed while the child was still running
     """
@@ -346,8 +357,12 @@ def _pump(process, stdin_bytes, captures, timeout):
     selector = selectors.DefaultSelector()
     try:
         pending = _register(selector, process, stdin_bytes, captures)
-        while selector.get_map():
-            if process.poll() is None:
+        while True:
+            still_running = process.poll() is None
+            # The only clean finish: the child has gone and both pipes have closed.
+            if not still_running and not selector.get_map():
+                return False
+            if still_running:
                 if time.monotonic() >= deadline:
                     return True
             elif abandon_at is None:
@@ -357,10 +372,17 @@ def _pump(process, stdin_bytes, captures, timeout):
                 abandon_at = time.monotonic() + _DRAIN_GRACE_SECONDS
             if abandon_at is not None and time.monotonic() >= abandon_at:
                 return False
-            pending = _drain_ready(selector, selector.select(timeout=_POLL_SECONDS), captures, pending)
+            if selector.get_map():
+                pending = _drain_ready(selector, selector.select(timeout=_POLL_SECONDS), captures, pending)
+            else:
+                # Both pipes are closed but the child is still running - it closed its own
+                # output and carried on, or daemonised. Keep the deadline ticking here
+                # rather than dropping out of the loop, because the caller would otherwise
+                # go straight into an unbounded wait() and the mandatory timeout, which is
+                # this module's headline guarantee, would simply not apply.
+                time.sleep(_POLL_SECONDS)
     finally:
         selector.close()
-    return False
 
 
 def run_command(argv, *, timeout, stdin_bytes=None, env_extra=None, output_limit=MAX_CAPTURED_BYTES):

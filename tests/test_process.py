@@ -146,6 +146,22 @@ class TestExecutableResolution:
         assert repr(os.defpath) in message
         assert "None" not in message
 
+    def test_a_relative_path_entry_still_resolves_to_an_absolute_path(self, tmp_path, monkeypatch):
+        # shutil.which returns the PATH entry as it was written, so a relative entry gives
+        # back a relative path and argv[0] would then depend on the caller's working
+        # directory. A service's cwd is not the operator's, so "the binary it found" and
+        # "the binary it runs" could differ.
+        binaries = tmp_path / "bin"
+        binaries.mkdir()
+        tool = binaries / "faketool"
+        tool.write_text("#!/bin/sh\nprintf ran\n")
+        tool.chmod(0o755)
+        monkeypatch.chdir(tmp_path)
+
+        result = run_command(["faketool"], timeout=30, env_extra={"PATH": "bin"})
+        assert os.path.isabs(result.argv[0]), f"argv[0] is relative: {result.argv[0]!r}"
+        assert result.stdout == b"ran"
+
     def test_an_explicit_path_is_run_as_given(self):
         # A control process is started from the packaged venv, whose bin directory is on
         # nobody's PATH, so a path has to be usable as argv[0].
@@ -394,3 +410,52 @@ class TestAnInheritedPipeDoesNotStallTheCall:
             timeout=30,
         )
         assert result.stdout == b"said this first"
+
+
+class TestTheTimeoutAlwaysApplies:
+    """The mandatory timeout is this module's headline guarantee, and the pump is where
+    it is actually enforced - `wait()` afterwards is unbounded by design, because the
+    pump only returns normally once the child has gone."""
+
+    def test_a_child_that_closes_its_pipes_and_keeps_running_still_times_out(self):
+        # The hole this covers: with both pipes at EOF the selector map empties, so a loop
+        # written as `while selector.get_map()` falls out while the child is still alive,
+        # and the caller goes straight into an unbounded wait. Measured at 20s against a
+        # 1s timeout before the fix.
+        started = time.monotonic()
+        with pytest.raises(ProcessError):
+            run_command(python_c("import os, time; os.close(1); os.close(2); time.sleep(20)"), timeout=1.0)
+        elapsed = time.monotonic() - started
+        assert elapsed < 10, f"the call took {elapsed:.1f}s, so the timeout was not enforced"
+
+    def test_a_child_that_closes_only_stdout_still_times_out(self):
+        # Half the case above: one pipe gone, one still open. The loop must not treat a
+        # partially-empty selector map as a reason to stop counting.
+        started = time.monotonic()
+        with pytest.raises(ProcessError):
+            run_command(python_c("import os, time; os.close(1); time.sleep(20)"), timeout=1.0)
+        assert time.monotonic() - started < 10
+
+
+class TestSpuriousReadiness:
+    def test_a_pipe_that_reports_ready_and_then_refuses_is_retried(self):
+        # A selector reporting readiness is a hint, not a promise. Impossible to provoke
+        # with a real pipe, so the guard is exercised directly: without it the
+        # BlockingIOError escapes run_command and takes down the caller for a condition
+        # that means only "nothing to do yet".
+        real_read = process_module.os.read
+        state = {"raised": False}
+
+        def flaky_read(fd, size):
+            # Only the pump reads a whole chunk at a time. Popen does its own os.read on
+            # the exec-status pipe while spawning, and failing that one turns this into a
+            # spawn error instead of exercising the guard under test.
+            if size == process_module._READ_CHUNK and not state["raised"]:
+                state["raised"] = True
+                raise BlockingIOError("resource temporarily unavailable")
+            return real_read(fd, size)
+
+        with patch.object(process_module.os, "read", flaky_read):
+            result = run_command(python_c("print('survived')"), timeout=30)
+        assert state["raised"], "the guard was never reached, so this asserts nothing"
+        assert result.stdout.strip() == b"survived"

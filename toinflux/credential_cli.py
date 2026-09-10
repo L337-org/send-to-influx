@@ -29,7 +29,7 @@ import urllib3
 import yaml
 
 from toinflux.exceptions import ConfigError
-from toinflux.process import ProcessError, run_command
+from toinflux.process import MAX_CAPTURED_BYTES, ProcessError, run_command
 from toinflux.credentials import (
     CANONICAL_SLOT_SUFFIX_RE,
     CREDENTIAL_FIELDS,
@@ -105,6 +105,8 @@ def _require_systemd_creds():
             f"{MIN_SYSTEMD_CREDS_VERSION}; credential storage isn't available on this "
             "host - edit settings.yaml directly instead."
         ) from exc
+    except ProcessError as exc:
+        raise CredentialCliError(f"checking the systemd-creds version: {exc}") from exc
     if not result.ok:
         raise CredentialCliError(f"'systemd-creds --version' failed: {result.stderr_text or result.returncode}")
 
@@ -297,11 +299,17 @@ def _encrypt_credential(name, value, credstore_dir=None):
     cred_path = _cred_path(name, credstore_dir)
     # The plaintext goes in on stdin, never in argv, where it would be readable from
     # /proc by any local user for as long as the process lives.
-    result = run_command(
-        ["systemd-creds", "encrypt", f"--name={name}", "-", cred_path],
-        timeout=CREDS_TIMEOUT_SECONDS,
-        stdin_bytes=value.encode(),
-    )
+    try:
+        result = run_command(
+            ["systemd-creds", "encrypt", f"--name={name}", "-", cred_path],
+            timeout=CREDS_TIMEOUT_SECONDS,
+            stdin_bytes=value.encode(),
+        )
+    except ProcessError as exc:
+        # Every failure out of this CLI has to arrive as a CredentialCliError: that is the
+        # one type main() catches, and anything else reaches the operator as a traceback
+        # with no indication of what to do about it.
+        raise CredentialCliError(f"storing '{name}' in systemd-creds: {exc}") from exc
     if not result.ok:
         raise CredentialCliError(
             f"systemd-creds encrypt failed for '{name}': {result.stderr_text or result.returncode}"
@@ -343,13 +351,24 @@ def _decrypt_credential(name, credstore_dir=None):
     # refuses with "Embedded credential name ... does not match filename".
     # The systemd service itself was never affected (LoadCredentialEncrypted=
     # NAME:PATH supplies the name) - only this CLI-side decrypt path.
-    result = run_command(
-        ["systemd-creds", "decrypt", f"--name={name}", cred_path, "-"],
-        timeout=CREDS_TIMEOUT_SECONDS,
-    )
+    try:
+        result = run_command(
+            ["systemd-creds", "decrypt", f"--name={name}", cred_path, "-"],
+            timeout=CREDS_TIMEOUT_SECONDS,
+        )
+    except ProcessError as exc:
+        raise CredentialCliError(f"reading '{name}' back from systemd-creds: {exc}") from exc
     if not result.ok:
         raise CredentialCliError(
             f"systemd-creds decrypt failed for '{name}': {result.stderr_text or result.returncode}"
+        )
+    if result.stdout_truncated:
+        # A credential this large is not a credential, but returning the first megabyte of
+        # one as though it were the whole thing would authenticate against nothing and give
+        # no clue why. Refuse rather than hand back a silently short secret.
+        raise CredentialCliError(
+            f"the stored value for '{name}' exceeds the {MAX_CAPTURED_BYTES}-byte read limit, "
+            "so it could only be returned truncated - the credential store may be corrupt."
         )
     try:
         decoded = result.stdout.decode()
