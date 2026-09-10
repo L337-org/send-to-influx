@@ -296,6 +296,10 @@ def _drain_ready(selector, events, captures, pending):
             try:
                 written = os.write(key.fileobj.fileno(), pending)
                 pending = pending[written:]
+            except BlockingIOError:
+                # Readiness is a hint, not a promise: the pipe can report writable and
+                # still refuse the write. Nothing is wrong - come back on the next pass.
+                continue
             except BrokenPipeError:
                 # The child exited without reading its input. Its exit status says more
                 # about that than a pipe error would, so stop writing and let it stand.
@@ -304,7 +308,12 @@ def _drain_ready(selector, events, captures, pending):
                 selector.unregister(key.fileobj)
                 key.fileobj.close()
             continue
-        chunk = os.read(key.fileobj.fileno(), _READ_CHUNK)
+        try:
+            chunk = os.read(key.fileobj.fileno(), _READ_CHUNK)
+        except BlockingIOError:
+            # As above. Without this the spurious wakeup escapes run_command as an
+            # unhandled error and takes down whatever was running the command.
+            continue
         if chunk:
             captures[key.data].add(chunk)
             continue
