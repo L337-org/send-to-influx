@@ -19,7 +19,6 @@ import getpass
 import logging
 import os
 import re
-import subprocess
 import sys
 import tempfile
 import warnings
@@ -29,6 +28,8 @@ import requests
 import urllib3
 import yaml
 
+from toinflux.exceptions import ConfigError
+from toinflux.process import ProcessError, run_command
 from toinflux.credentials import (
     CANONICAL_SLOT_SUFFIX_RE,
     CREDENTIAL_FIELDS,
@@ -46,6 +47,14 @@ DEFAULT_SETTINGS_PATH = "/etc/send-to-influx/settings.yaml"
 # install and --ensure-section below back-fills individual sections from it on an
 # upgrade (settings.yaml itself is never rewritten wholesale - see build-deb.sh).
 DEFAULT_EXAMPLE_PATH = "/usr/share/send-to-influx/example_settings.yaml"
+# Timeouts for the commands this CLI runs. Sized to the work rather than shared:
+# a version banner is immediate, a TPM-backed encrypt or decrypt is not, and a
+# daemon-reload on a busy machine is the slowest of the three. None of these existed
+# before the calls moved onto run_command, which requires one.
+VERSION_TIMEOUT_SECONDS = 10
+CREDS_TIMEOUT_SECONDS = 30
+DAEMON_RELOAD_TIMEOUT_SECONDS = 60
+
 CREDSTORE_DIR = "/etc/send-to-influx/credstore.encrypted"
 DROPIN_DIR = "/etc/systemd/system/send-to-influx.service.d"
 DROPIN_PATH = os.path.join(DROPIN_DIR, "50-credentials.conf")
@@ -86,17 +95,20 @@ def _require_systemd_creds():
         CredentialCliError: if systemd-creds is missing or older than MIN_SYSTEMD_CREDS_VERSION
     """
     try:
-        result = subprocess.run(["systemd-creds", "--version"], capture_output=True, text=True, check=True)
-    except FileNotFoundError as exc:
+        result = run_command(["systemd-creds", "--version"], timeout=VERSION_TIMEOUT_SECONDS)
+    except ConfigError as exc:
+        # run_command raises ConfigError when argv[0] is not on the PATH, which here means
+        # exactly one thing: this host has no systemd-creds. The message stays as it was,
+        # because "not found on PATH" is the mechanism and this says what to do instead.
         raise CredentialCliError(
             "systemd-creds not found. It requires systemd >= "
             f"{MIN_SYSTEMD_CREDS_VERSION}; credential storage isn't available on this "
             "host - edit settings.yaml directly instead."
         ) from exc
-    except subprocess.CalledProcessError as exc:
-        raise CredentialCliError(f"'systemd-creds --version' failed: {exc}") from exc
+    if not result.ok:
+        raise CredentialCliError(f"'systemd-creds --version' failed: {result.stderr_text or result.returncode}")
 
-    version = _parse_systemd_creds_version(result.stdout)
+    version = _parse_systemd_creds_version(result.stdout_text)
     if version is None or version < MIN_SYSTEMD_CREDS_VERSION:
         found = version if version is not None else "an unrecognised version"
         raise CredentialCliError(
@@ -238,8 +250,23 @@ def _regenerate_dropin(credstore_dir=None, dropin_path=None, exclude=None) -> No
 
 
 def _reload_systemd():
-    if os.path.isdir("/run/systemd/system"):
-        subprocess.run(["systemctl", "daemon-reload"], check=False)
+    if not os.path.isdir("/run/systemd/system"):
+        return
+    try:
+        result = run_command(["systemctl", "daemon-reload"], timeout=DAEMON_RELOAD_TIMEOUT_SECONDS)
+    except (ConfigError, ProcessError) as exc:
+        # Deliberately tolerated: the drop-in has already been written, and systemd picks
+        # it up at the next reload or boot whether or not this one worked. Logged rather
+        # than swallowed, because the symptom otherwise is a credential that only starts
+        # working after an unrelated restart, with nothing saying why.
+        logging.warning("Could not reload systemd, so the new drop-in takes effect later: %s", exc)
+        return
+    if not result.ok:
+        logging.warning(
+            "'systemctl daemon-reload' exited %s, so the new drop-in takes effect later: %s",
+            result.returncode,
+            result.stderr_text,
+        )
 
 
 def _encrypt_credential(name, value, credstore_dir=None):
@@ -268,16 +295,17 @@ def _encrypt_credential(name, value, credstore_dir=None):
     except OSError as exc:
         raise CredentialCliError(f"could not create/secure {credstore_dir}: {exc}") from exc
     cred_path = _cred_path(name, credstore_dir)
-    try:
-        subprocess.run(
-            ["systemd-creds", "encrypt", f"--name={name}", "-", cred_path],
-            input=value.encode(),
-            check=True,
-            capture_output=True,
+    # The plaintext goes in on stdin, never in argv, where it would be readable from
+    # /proc by any local user for as long as the process lives.
+    result = run_command(
+        ["systemd-creds", "encrypt", f"--name={name}", "-", cred_path],
+        timeout=CREDS_TIMEOUT_SECONDS,
+        stdin_bytes=value.encode(),
+    )
+    if not result.ok:
+        raise CredentialCliError(
+            f"systemd-creds encrypt failed for '{name}': {result.stderr_text or result.returncode}"
         )
-    except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr.decode(errors="replace") if exc.stderr else str(exc)
-        raise CredentialCliError(f"systemd-creds encrypt failed for '{name}': {stderr}") from exc
     try:
         os.chmod(cred_path, stat_module.S_IRUSR | stat_module.S_IWUSR)
     except OSError as exc:
@@ -306,22 +334,23 @@ def _decrypt_credential(name, credstore_dir=None):
     cred_path = _cred_path(name, credstore_dir)
     if not os.path.isfile(cred_path):
         raise CredentialCliError(f"No stored credential for '{name}' at {cred_path}.")
-    try:
-        # --name= must be passed explicitly, mirroring _encrypt_credential():
-        # without it, systemd-creds derives the expected name from the *input
-        # filename* and validates the embedded name against that - and only
-        # systemd >= 254 strips the ".cred" suffix when deriving. On 252/253
-        # (e.g. Debian/Raspberry Pi OS bookworm) the derived name is
-        # "influx-user.cred", the embedded name is "influx-user", and decrypt
-        # refuses with "Embedded credential name ... does not match filename".
-        # The systemd service itself was never affected (LoadCredentialEncrypted=
-        # NAME:PATH supplies the name) - only this CLI-side decrypt path.
-        result = subprocess.run(
-            ["systemd-creds", "decrypt", f"--name={name}", cred_path, "-"], check=True, capture_output=True
+    # --name= must be passed explicitly, mirroring _encrypt_credential():
+    # without it, systemd-creds derives the expected name from the *input
+    # filename* and validates the embedded name against that - and only
+    # systemd >= 254 strips the ".cred" suffix when deriving. On 252/253
+    # (e.g. Debian/Raspberry Pi OS bookworm) the derived name is
+    # "influx-user.cred", the embedded name is "influx-user", and decrypt
+    # refuses with "Embedded credential name ... does not match filename".
+    # The systemd service itself was never affected (LoadCredentialEncrypted=
+    # NAME:PATH supplies the name) - only this CLI-side decrypt path.
+    result = run_command(
+        ["systemd-creds", "decrypt", f"--name={name}", cred_path, "-"],
+        timeout=CREDS_TIMEOUT_SECONDS,
+    )
+    if not result.ok:
+        raise CredentialCliError(
+            f"systemd-creds decrypt failed for '{name}': {result.stderr_text or result.returncode}"
         )
-    except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr.decode(errors="replace") if exc.stderr else str(exc)
-        raise CredentialCliError(f"systemd-creds decrypt failed for '{name}': {stderr}") from exc
     try:
         decoded = result.stdout.decode()
     except UnicodeDecodeError as exc:

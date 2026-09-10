@@ -1010,3 +1010,50 @@ def test_every_named_guard_exists():
         "these references are not nodeids you can run from the repository root, so a reader "
         "following one gets a collection error:\n  " + "\n  ".join(unrunnable)
     )
+
+
+# The one module allowed to import subprocess. Everything else goes through
+# toinflux.process.run_command, whose protections (no shell, an allow-listed
+# environment, a mandatory timeout, a capped read) are worth nothing if a single call
+# site opts out.
+PROCESS_HELPER = Path("toinflux") / "process.py"
+
+# The rule covers feature code: the package and the entry point. scripts/ is out of
+# scope deliberately rather than by oversight - check-repo-hygiene.py is vendored
+# byte-identically across the organisation's repositories, so it cannot import a
+# module that exists only here, and rewriting it locally would break the property
+# that makes it worth vendoring.
+PRODUCT_CODE_ROOTS = ("toinflux", "sendtoinflux.py")
+
+_IMPORTS_SUBPROCESS_RE = re.compile(r"^\s*(?:import\s+subprocess|from\s+subprocess\s+import)\b", re.MULTILINE)
+
+
+def test_only_the_process_helper_starts_a_process():
+    """Shipped code reaches subprocess through toinflux.process, never directly.
+
+    This is the guard that makes the helper real. Before it existed the credential CLI
+    called ``subprocess.run`` four times, each inheriting the caller's whole environment
+    with no timeout, and the next author would have copied the nearest example. Prose
+    saying "use the helper" fails silently the first time someone does not read it.
+
+    Tests are excluded: they legitimately spawn processes to probe what the platform
+    does, and ``tests/test_process.py`` in particular has to, because what it asserts
+    only exists at the boundary.
+    """
+    candidates = [
+        path
+        for path in _modules_that_carry_a_header()
+        if path.relative_to(REPO_ROOT).parts[0] in PRODUCT_CODE_ROOTS and path.relative_to(REPO_ROOT) != PROCESS_HELPER
+    ]
+    # A guard that searched nothing looks identical to a clean tree.
+    assert len(candidates) >= 15, f"only found {len(candidates)} module(s) to check, so discovery is broken"
+
+    offenders = [
+        str(path.relative_to(REPO_ROOT))
+        for path in candidates
+        if _IMPORTS_SUBPROCESS_RE.search(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "these modules import subprocess directly instead of using "
+        f"toinflux.process.run_command: {', '.join(offenders)}"
+    )
