@@ -85,7 +85,9 @@ def _as_seconds(value, setting):
 
     Args:
         value (object): the raw value from the settings document
-        setting (str): the dotted setting name, for the message
+        setting (str): what to call it in a message. Every duration this module reads comes
+            through here - the floor, an input's max_age, the lock budget - so the caller
+            names the one it is checking and the messages stay true for all three.
 
     Returns:
         float: the value in seconds
@@ -98,7 +100,7 @@ def _as_seconds(value, setting):
     # names bare, matching every message around it, where they come from the operator's own
     # sources: list instead - a different provenance rather than an inconsistency.
     if value is None:
-        raise ConfigError(f"{setting!r} is required to resolve the live-fetch floor, and is missing")
+        raise ConfigError(f"{setting!r} is required, and is missing")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"{setting!r} must be a number of seconds (got {value!r})")
     # YAML .nan and .inf parse to floats and survive every check above. Neither fails
@@ -449,7 +451,9 @@ def read_input(session, settings, spec, settings_file=None, now=None):
     Args:
         session (requests.Session): the session to read through; the caller owns its lifetime
         settings (dict): the whole parsed settings document
-        spec (dict): one input declaration - ``source``, ``field``, ``max_age``, optional ``instance``
+        spec (dict): one input declaration. ``source`` and ``field`` are required;
+            ``max_age`` and ``instance`` are optional, matching what the control store
+            validates. An absent ``max_age`` leaves the source's floor as the trigger.
         settings_file (str or None): the settings path, for resolving the state directory
         now (float or None): the clock, for tests; defaults to time.time()
 
