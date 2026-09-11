@@ -267,7 +267,7 @@ class TestStructuralValidation:
     def test_a_non_numeric_parameter_is_reported(self):
         document = a_valid_control()
         document["parameters"]["target"] = "eighteen"
-        assert any("parameters.target" in error for error in validate_control("conservatory", document))
+        assert any("parameters['target']" in error for error in validate_control("conservatory", document))
 
 
 class TestTheStageLadder:
@@ -312,12 +312,12 @@ class TestInputsAndDevices:
     def test_an_input_without_a_field_is_refused(self):
         document = a_valid_control()
         del document["inputs"]["dew"]["field"]
-        assert any("inputs.dew" in error for error in validate_control("conservatory", document))
+        assert any("inputs['dew']" in error for error in validate_control("conservatory", document))
 
     def test_a_device_without_a_source_is_refused(self):
         document = a_valid_control()
         del document["devices"]["heater_far"]["source"]
-        assert any("devices.heater_far" in error for error in validate_control("conservatory", document))
+        assert any("devices['heater_far']" in error for error in validate_control("conservatory", document))
 
     def test_a_negative_max_age_is_refused(self):
         document = a_valid_control()
@@ -373,3 +373,59 @@ class TestValidatingTheWholeStore:
             yaml.safe_dump(["not", "a", "mapping"], handle)
         with pytest.raises(ConfigError, match="must be a mapping"):
             validate_stored_controls()
+
+
+class TestDocumentsWrittenToBreakTheValidator:
+    """A control document is external input: an MCP client writes one, and YAML permits
+    shapes a hand-written example never shows. Validation has to report on those, not
+    fall over on them - a validator that crashes tells the operator nothing about the
+    document that caused it."""
+
+    def test_non_string_keys_are_reported_rather_than_crashing_the_check(self):
+        # YAML mapping keys need not be strings. Sorting a mixed set raises TypeError and
+        # joining non-strings raises too, so validation used to die here instead of
+        # describing the document.
+        document = yaml.safe_load(
+            "1: stray\n"
+            "inputs: {}\n"
+            "pid: {input: a, setpoint: b}\n"
+            "devices:\n"
+            "  2: {source: hue, device: x}\n"
+            "  heater: {source: hue, device: y}\n"
+            "output:\n"
+            "  stages:\n"
+            "    - level: 0\n"
+            "      set: {3: false, heater: false}\n"
+        )
+        errors = validate_control("conservatory", document)
+        assert any("unknown key" in error for error in errors)
+        assert any("entry names must be strings" in error for error in errors)
+
+    def test_a_mix_of_string_and_numeric_keys_still_sorts(self):
+        # The specific crash: sorted() over {1, 'heater'} has no total order in Python 3.
+        document = a_valid_control()
+        document["output"]["stages"][0]["set"] = {1: False, "heater_far": False, "heater_near": False}
+        assert any("no such device" in error for error in validate_control("conservatory", document))
+
+    def test_a_newline_in_a_stage_device_name_cannot_forge_a_line_either(self):
+        # The list-rendering path, which is separate from the per-entry one below: an
+        # unknown device in a stage is reported as a joined list, and that join is where
+        # a raw str() would let the newline through.
+        document = a_valid_control()
+        document["output"]["stages"][0]["set"]["ghost\nWARNING forged"] = False
+        offending = [error for error in validate_control("conservatory", document) if "forged" in error]
+        assert offending, "the unknown device was not reported at all"
+        assert "\n" not in offending[0]
+        assert "\\n" in offending[0]
+
+    def test_a_newline_in_a_key_cannot_forge_a_second_diagnostic_line(self):
+        # The same rule the collectors follow for a lock name arriving over MQTT: an
+        # external value goes into a message quoted, or one containing a newline writes
+        # its own line into the journal and into any connected MCP client's output.
+        document = a_valid_control()
+        document["inputs"]["bad\nWARNING forged"] = {"source": "hue"}
+        errors = validate_control("conservatory", document)
+        offending = [error for error in errors if "forged" in error]
+        assert offending, "the malformed input was not reported at all"
+        assert "\n" not in offending[0]
+        assert "\\n" in offending[0]

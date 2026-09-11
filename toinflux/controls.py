@@ -267,6 +267,28 @@ def delete_control(name, settings_file=None) -> None:
         raise ConfigError(f"cannot delete control {name!r} at {path!r}: {exc}") from exc
 
 
+def _render_names(values):
+    """Render a set of document keys for a message, whatever they turn out to be.
+
+    Two problems in one place. YAML keys are not necessarily strings - ``1:`` is a
+    perfectly legal mapping key - so sorting them directly raises ``TypeError`` on mixed
+    types and joining them raises on anything that is not a string, which would crash
+    validation instead of reporting the document that caused it. And a key is external
+    input: one containing a newline would forge a second line in the diagnostic, which
+    reaches the journal and any connected MCP client.
+
+    Sorting by ``repr`` gives a total order across mixed types, and rendering each as
+    ``repr`` escapes a newline rather than obeying it.
+
+    Args:
+        values (collections.abc.Iterable): keys taken from a parsed document
+
+    Returns:
+        str: a comma-separated, quoted, safely-ordered list
+    """
+    return ", ".join(repr(value) for value in sorted(values, key=repr))
+
+
 def _is_number(value):
     """Whether a value is a number rather than something YAML merely allows.
 
@@ -302,7 +324,12 @@ def _check_mapping_of(document, key, errors, required_fields, optional_numbers=(
         errors.append(f"{key}: must be a mapping, got {type(section).__name__}")
         return {}
     for entry_name, entry in section.items():
-        where = f"{key}.{entry_name}"
+        if not isinstance(entry_name, str):
+            # Reported rather than rendered: an operator who wrote `1:` needs telling
+            # that the name is the problem, not shown a message about a key called 1.
+            errors.append(f"{key}: entry names must be strings, got {entry_name!r}")
+            continue
+        where = f"{key}[{entry_name!r}]"
         if not isinstance(entry, dict):
             errors.append(f"{where}: must be a mapping, got {type(entry).__name__}")
             continue
@@ -389,13 +416,14 @@ def _check_one_stage(where, stage, device_names, errors) -> None:
     if not isinstance(assignments, dict):
         errors.append(f"{where}.set: is required and must be a mapping of device to state")
         return
-    unknown = sorted(set(assignments) - device_names)
+    unknown = set(assignments) - device_names
     if unknown:
-        errors.append(f"{where}.set: names no such device: {', '.join(unknown)}")
-    missing = sorted(device_names - set(assignments))
+        errors.append(f"{where}.set: names no such device: {_render_names(unknown)}")
+    missing = device_names - set(assignments)
     if missing:
         errors.append(
-            f"{where}.set: does not say what to do with {', '.join(missing)} - " f"every stage must assign every device"
+            f"{where}.set: does not say what to do with {_render_names(missing)} - "
+            f"every stage must assign every device"
         )
 
 
@@ -447,7 +475,7 @@ def _check_timezone_and_parameters(document, errors) -> None:
         return
     for parameter, value in parameters.items():
         if not _is_number(value):
-            errors.append(f"parameters.{parameter}: must be a number, got {value!r}")
+            errors.append(f"parameters[{parameter!r}]: must be a number, got {value!r}")
 
 
 def _check_scalars(name, document, errors) -> None:
@@ -493,9 +521,9 @@ def validate_control(name, document):
     """
     errors = []
 
-    unknown = sorted(set(document) - CONTROL_KEYS)
+    unknown = set(document) - CONTROL_KEYS
     if unknown:
-        errors.append(f"unknown key(s): {', '.join(unknown)}")
+        errors.append(f"unknown key(s): {_render_names(unknown)}")
     for key in REQUIRED_CONTROL_KEYS:
         if key not in document:
             errors.append(f"{key}: is required")
