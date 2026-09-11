@@ -1102,6 +1102,13 @@ class TestTheCollectionGuardActuallyDetects:
     detector that never matches anything. These exercise the detector directly, on source
     written for the purpose, so a broken matcher fails here rather than silently
     approving the tree for ever.
+
+    **Fixture source must parse on the oldest supported interpreter**, which means an
+    f-string here may not reuse its own quote character: ``f"{" AND ".join(w)}"`` is PEP
+    701 and legal only from 3.12, so the outer and inner quotes always differ below. This
+    cannot be caught locally - a newer interpreter accepts it, and ``ast.parse``'s
+    ``feature_version`` does not reject it either - so the version matrix in CI is the
+    only thing that sees it. It has already caught it once.
     """
 
     def test_a_bare_join_in_a_raise_is_found(self):
@@ -1115,12 +1122,12 @@ class TestTheCollectionGuardActuallyDetects:
     def test_a_join_outside_a_raise_is_left_alone(self):
         # The query builders do this and must keep doing it: ' AND '.join(where) assembles
         # InfluxQL, and quoting the pieces would break the query rather than protect it.
-        assert _joins_inside_raises('def f(w):\n    return f"WHERE {" AND ".join(w)}"\n') == []
+        assert _joins_inside_raises("def f(w):\n    return f'WHERE {\" AND \".join(w)}'\n") == []
 
     def test_a_join_in_a_log_call_is_left_alone(self):
         # Deliberately out of scope: logging takes deferred arguments rather than a
         # formatted string, so the shape that caused both real defects does not arise.
-        assert _joins_inside_raises('def f(xs):\n    logging.warning(f"{", ".join(xs)}")\n') == []
+        assert _joins_inside_raises("def f(xs):\n    logging.warning(f'{\", \".join(xs)}')\n") == []
 
     def test_the_sanctioned_renderer_is_not_flagged(self):
         assert _joins_inside_raises("def f(xs):\n    raise ValueError(f'bad: {render_values(xs)}')\n") == []
