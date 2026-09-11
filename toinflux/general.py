@@ -92,11 +92,15 @@ def configure_logging(
 def render_values(values, separator=", ", empty="none"):
     """Render a collection into an error message, quoted and safely ordered.
 
-    The one sanctioned way to put a collection into a message a user or an MCP client
-    will see. ``tests/test_repo_hygiene.py::test_every_collection_interpolated_into_an_error_is_rendered_safely``
-    fails any ``raise`` that joins a collection into its message without coming through
-    here, because two distinct bugs of this shape were written in two days despite the
-    rule being documented.
+    The sanctioned way to put a collection of values into a message a user or an MCP
+    client will see, because two distinct bugs of that shape were written in two days
+    despite the rule being documented.
+
+    ``tests/test_repo_hygiene.py::test_every_collection_interpolated_into_an_error_is_rendered_safely``
+    enforces it for one specific shape: a collection interpolated into an f-string inside
+    a ``raise``, which is where both bugs were. It deliberately does not cover joining
+    prose fragments we wrote, and it does not cover logging; that test's own docstring is
+    the record of what it leaves alone and why.
 
     Two problems, one place:
 

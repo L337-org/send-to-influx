@@ -1157,8 +1157,13 @@ class TestTheCollectionGuardActuallyDetects:
         assert _joins_inside_raises("def f(w):\n    return f'WHERE {\" AND \".join(w)}'\n") == []
 
     def test_a_join_in_a_log_call_is_left_alone(self):
-        # Deliberately out of scope: logging takes deferred arguments rather than a
-        # formatted string, so the shape that caused both real defects does not arise.
+        # Out of scope, and not because logging is inherently safe - the example below
+        # proves it is not, since the join happens before the argument is ever deferred.
+        # It is out of scope because logging call sites were not measured or converted in
+        # this change, so guarding them would fail on correct code. One genuinely unsafe
+        # log site was found by review and fixed by hand (philipshue's write failure,
+        # which joins strings the bridge wrote); the rest were left, and widening the
+        # guard to logging needs that measurement doing first.
         assert _joins_inside_raises("def f(xs):\n    logging.warning(f'{\", \".join(xs)}')\n") == []
 
     def test_the_sanctioned_renderer_is_not_flagged(self):
