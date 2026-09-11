@@ -23,7 +23,11 @@ from toinflux.mcp_dashboards import (
     suggest_panels_result,
     value_mappings,
 )
-from toinflux.mcp_read import MeasurementKeys, ReadSchema, build_panel_query
+from toinflux.mcp_read import (
+    ReadSchema,
+    build_panel_query,
+)
+from toinflux.influx import MeasurementKeys
 
 
 def _schema(**kwargs):

@@ -352,3 +352,27 @@ forever logging only "list index out of range".
 - Note `sno` is written as a field on any install with no `fields` list configured, since the whole
   device dict is returned then. Long-standing behaviour, not introduced here, but worth knowing
   before adding a `fields` list changes what a dashboard sees.
+
+## Reading back (`toinflux/influx.py`)
+
+`influx.py` owns both directions: `DataHandler.send_data()` writes, and the second half of
+the module answers "what is in the database" - `resolve_db`, `run_query`, the query
+builders, `discover_measurement_keys`, `discover_tag_values` and the identifier validation
+and quoting they rest on.
+
+The read half lived in `toinflux/mcp_read.py` until the control work needed it. A control
+process reads its inputs from InfluxDB and is meant to run with the MCP server absent
+entirely, so importing that module would have pulled the MCP SDK - `mcp`, `anyio`,
+`pydantic`, `starlette` and `uvicorn` - into every control process just to ask what the
+last temperature reading was. Reading from InfluxDB was never an MCP concern; it was
+simply needed there first.
+
+**The injection defence is here and is not optional.** A measurement and its tags come
+from the static schema, a field must match a live-discovered key, every identifier is
+charset-validated and quoted, and times are re-emitted as RFC3339. Never add a query path
+that goes around it - a second way to build a query is how the first one stops being the
+only one.
+
+Two things deliberately stayed in `mcp_read.py`, because both are about what the MCP tools
+advertise rather than about talking to InfluxDB: the aggregation map, and the schema
+objects that describe a source to a model.

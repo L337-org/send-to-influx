@@ -27,6 +27,7 @@ background.
 |---|---|
 | `toinflux/mcp*.py`, `toinflux/mcpserver.py` | [architecture/mcp-server.md](architecture/mcp-server.md) |
 | any collector under `toinflux/` (not the MCP modules) | [architecture/collectors.md](architecture/collectors.md) |
+| reading from InfluxDB, or any query construction | `toinflux/influx.py`'s read half, and [architecture/collectors.md](architecture/collectors.md) |
 | `sendtoinflux.py`, `toinflux/general.py`, `toinflux/process.py`, `toinflux/controls.py`, `toinflux/rules.py` | [architecture/runtime.md](architecture/runtime.md) |
 | running an external command from anywhere | `toinflux.process.run_command`, and [architecture/runtime.md](architecture/runtime.md) |
 | `packaging/`, `toinflux/credentials.py`, `toinflux/credential_cli.py`, or adding a settings section | [architecture/packaging.md](architecture/packaging.md) |
@@ -177,9 +178,12 @@ disabled capability is not registered at all rather than registered-and-refusing
   registrars, because a bypass returns the right payload and passes every behaviour test.
 - **Grafana vocabulary stays in `toinflux/mcp_dashboards.py`.** `mcp_read` does not import it, so the
   leak is structurally impossible rather than merely avoided.
-- **Injection defence:** measurement and tags come from the static schema, a field must match a
-  live-discovered key, every identifier is charset-validated and quoted, times are re-emitted as
-  RFC3339, aggregations come from a fixed map. Never add a query path that bypasses this.
+- **Injection defence lives in `toinflux/influx.py`**, not here: measurement and tags come from the
+  static schema, a field must match a live-discovered key, every identifier is charset-validated
+  and quoted, times are re-emitted as RFC3339, aggregations come from a fixed map. Never add a
+  query path that bypasses it. It moved out of `mcp_read` so a control process can read from
+  InfluxDB without importing the MCP SDK; the aggregation map stays here because it is part of
+  what the read tools advertise.
 - **The advertised surface is held to the AI-consumer standard** in full by
   `tests/test_mcp_surface.py` - descriptions, titles, siblings, dangling references, byte budget.
   Read it, not this file, before changing a description: all of it fails CI on its own.
