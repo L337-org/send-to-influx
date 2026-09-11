@@ -1,4 +1,16 @@
-"""Parent class for data handlers to send data to InfluxDB."""
+"""Parent class for data handlers, and the InfluxDB write and read primitives.
+
+``DataHandler`` is the base every collector subclasses. It owns the write side: line
+protocol encoding, the write request, and the per-source buffering that keeps points
+alive across an outage rather than dropping them. The polling that drives it lives in
+sendtoinflux.py's worker rather than here.
+
+The module also owns reading back - the query builders, the live field and tag
+discovery, and the identifier validation and quoting they rest on - so that code with
+no interest in the MCP server can ask what is in the database without importing one.
+The "Reading back" banner below says why that half lives here and what must never be
+routed around.
+"""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
