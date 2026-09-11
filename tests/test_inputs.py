@@ -328,6 +328,19 @@ class TestStoredReading:
         with pytest.raises(ConfigError, match="unusable field"):
             stored_reading(None, SETTINGS, "hue", "temp\nDROP MEASUREMENT hue")
 
+    def test_a_field_named_time_is_refused_rather_than_guessed(self):
+        """A result carries its timestamp in a column called "time", so a field of that name
+        gives two columns with one name and nothing to tell them apart. Reading the wrong
+        one yields an age rather than an error, and a wrong age is the single thing a
+        control must not be handed quietly.
+
+        The project already assumes this cannot happen - annotate_rows lands on the field
+        column by its fallback rather than by choosing it - so this makes the assumption
+        loud instead of leaving it implicit.
+        """
+        with pytest.raises(ConfigError, match="cannot read a field named 'time'"):
+            stored_reading(None, SETTINGS, "hue", "time")
+
     def test_the_settings_file_reaches_the_handler(self, monkeypatch):
         """Otherwise the handler loads the default settings.yaml while the caller passes a
         different document, and the two disagree about which database to read - invisible

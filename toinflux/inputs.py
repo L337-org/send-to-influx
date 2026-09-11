@@ -211,8 +211,23 @@ def handler_reading(session, settings, handler, field, now=None):
 
     Raises:
         SourceConnectionError: on a transport or parse failure
-        ConfigError: where the field name cannot go into a query at all
+        ConfigError: where the field name cannot go into a query, or collides with the
+            timestamp column
     """
+    if field == TIME_COLUMN:
+        # A result carries its timestamp in a column of this name, so a field of the same
+        # name gives two columns called "time" and nothing in the response says which is
+        # which. Reading the wrong one produces an age rather than an error, and a wrong
+        # age is the one thing a control must not be handed quietly.
+        #
+        # Whether InfluxDB will even store such a field is not something this checkout can
+        # answer - there is no instance here to ask - and the question does not change the
+        # answer: if it cannot, this is unreachable and costs nothing; if it can, the value
+        # is unreadable here and saying so is better than guessing a column.
+        raise ConfigError(
+            f"control input cannot read a field named {TIME_COLUMN!r}: a result's timestamp "
+            f"column has that name too, so the two cannot be told apart"
+        )
     measurement = handler.MCP_MEASUREMENT or handler.source
     try:
         query = build_latest_query(measurement, handler.mcp_tag_filters(), {field})
@@ -229,7 +244,7 @@ def handler_reading(session, settings, handler, field, now=None):
         return None
     row = values[0]
     index = {name: position for position, name in enumerate(columns)}
-    stamp, value = _cell(row, index, "time"), _cell(row, index, field)
+    stamp, value = _cell(row, index, TIME_COLUMN), _cell(row, index, field)
     if stamp is None or value is None:
         # A row that carries no time, or no value for the field asked for, is not a
         # reading. Returning it with a substituted age would make a point that does not
@@ -271,6 +286,10 @@ MAX_LOCK_BACKOFF = 0.5
 # is the repository root, and loose fetch-<source>.lock files landing there are easy to
 # commit by accident. One directory also makes one ignore rule enough.
 LOCK_DIR_NAME = "locks"
+
+# The column InfluxDB returns a point's timestamp in. Named because a field key equal to it
+# is ambiguous rather than merely awkward, and handler_reading refuses one.
+TIME_COLUMN = "time"
 
 
 def fetch_lock_path(source, settings_file=None):
