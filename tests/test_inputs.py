@@ -517,7 +517,21 @@ class TestReadInput:
         assert (reading.value, reading.live) == (21.0, True)
         assert "write back" in caplog.text
 
-    @pytest.mark.parametrize("bad", [float("inf"), float("nan"), True, "900", None])
+    def test_an_input_without_a_max_age_falls_back_to_the_source_floor(self, monkeypatch):
+        """max_age is optional in a control document, so requiring it here would make
+        --check-config pass a control that then failed at runtime. An input declaring no
+        tolerance of its own gets the source's floor, which is as fresh as anything can ask
+        for."""
+        stored = InputReading(value=19.5, timestamp=0.0, age=120.0, live=False)
+        handler = _handler()
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        spec = {key: value for key, value in SPEC.items() if key != "max_age"}
+        # 120s old against hue's 300s interval as the floor: inside it, so no live read.
+        assert read_input(None, SETTINGS, spec) is stored
+        handler.get_data.assert_not_called()
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("nan"), True, "900"])
     def test_a_non_finite_max_age_cannot_make_an_input_permanently_fresh(self, monkeypatch, bad):
         """The third duration in the same expression, and the one left bare. An .inf max_age
         makes the trigger infinite, so the input reads as perpetually fresh and is never

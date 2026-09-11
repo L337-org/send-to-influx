@@ -378,8 +378,13 @@ def fetch_lock(  # noqa: DOC403 - a generator, but unannotated
         bool: True where the lock is held for the duration of the block
 
     Raises:
-        ConfigError: where the lock directory cannot be created
+        ConfigError: where the budget is not a finite number of seconds, or the lock
+            directory cannot be created
     """
+    # Validated here as well as by read_input, because this is a public helper and the
+    # failure it prevents is a hang: a non-finite budget makes the deadline non-finite, and
+    # monotonic() >= nan is False for ever, so the wait loop can never exit.
+    budget = _as_seconds(budget, "fetch lock budget")
     rng = random.Random() if rng is None else rng
     sleep = time.sleep if sleep is None else sleep
     monotonic = time.monotonic if monotonic is None else monotonic
@@ -459,7 +464,11 @@ def read_input(session, settings, spec, settings_file=None, now=None):
     # max_age through the same door as the floor and the timeout. It is the third duration
     # in this expression and the one I left bare: an .inf max_age makes the trigger infinite,
     # so the input reads as perpetually fresh and is never refreshed however old it gets.
-    max_age = _as_seconds(spec.get("max_age"), f"max_age for input {field}")
+    # max_age is optional in a control document, so an absent one means "no tolerance of my
+    # own": the trigger falls back to the source's floor, which is as fresh as anything can
+    # ask for anyway. Required here instead would make --check-config pass documents that
+    # then failed at runtime, and the validator is the contract.
+    max_age = _as_seconds(spec.get("max_age", 0), f"max_age for input {field}")
     trigger = max(max_age, resolve_poll_floor(source, settings))
     # One handler for the whole call, closed on the way out. Every path here needs one -
     # even the stored read, for the measurement, tags and database - and each build opens a
