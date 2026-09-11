@@ -1087,10 +1087,13 @@ def test_every_collection_interpolated_into_an_error_is_rendered_safely():
     keeps going wrong, so the rule here needs none: every collection is rendered the same
     way whether it came from InfluxDB or from a constant two lines up.
     """
+    # general.py is scanned like every other module. An earlier version excluded the
+    # whole file because it defines the renderer, which would have left a permanent
+    # hole: a collection interpolated into a raise there would never have been checked.
+    # The helper needs no exemption anyway - its own join is not inside a raise, so the
+    # detector never looks at it.
     candidates = [
-        path
-        for path in _modules_that_carry_a_header()
-        if path.relative_to(REPO_ROOT).parts[0] in PRODUCT_CODE_ROOTS and path.relative_to(REPO_ROOT) != RENDERER_HOME
+        path for path in _modules_that_carry_a_header() if path.relative_to(REPO_ROOT).parts[0] in PRODUCT_CODE_ROOTS
     ]
     # A guard that searched nothing looks identical to a clean tree.
     assert len(candidates) >= 15, f"only found {len(candidates)} module(s) to check, so discovery is broken"
