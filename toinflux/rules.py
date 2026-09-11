@@ -491,6 +491,28 @@ class _Call:
         return set().union(*(argument.names() for argument in self.arguments)) if self.arguments else set()
 
 
+def _arity_phrase(minimum, maximum):
+    """Describe how many arguments a function wants, for an error message.
+
+    Split out and covering the bounded-range case, which no current function has: the
+    previous version emitted a literal "..." for it, so the first function added with a
+    range like 1-3 would have told an operator it "takes ... argument(s)". Cheaper to
+    write the branch now than to leave a placeholder waiting in a message.
+
+    Args:
+        minimum (int): the fewest arguments accepted
+        maximum (int or None): the most accepted, or None when unbounded
+
+    Returns:
+        str: a phrase reading naturally after the function name
+    """
+    if maximum is None:
+        return f"{minimum} or more arguments"
+    if maximum == minimum:
+        return f"{minimum} argument{'' if minimum == 1 else 's'}"
+    return f"{minimum} to {maximum} arguments"
+
+
 class _Parser:
     """Recursive descent over a rule's tokens.
 
@@ -801,9 +823,8 @@ class _Parser:
 
         minimum, maximum = FUNCTION_ARITY[token.text]
         if len(arguments) < minimum or (maximum is not None and len(arguments) > maximum):
-            wanted = f"{minimum}" if maximum == minimum else f"{minimum} or more" if maximum is None else "..."
             raise _syntax_error(
-                f"{token.text}() takes {wanted} argument(s), got {len(arguments)}",
+                f"{token.text}() takes {_arity_phrase(minimum, maximum)}, got {len(arguments)}",
                 token.offset,
             )
         return _Call(token.text, tuple(arguments), token.offset)

@@ -13,6 +13,7 @@ import pytest
 from toinflux.exceptions import ConfigError
 from toinflux.rules import (
     FUNCTION_ARITY,
+    _arity_phrase,
     MAX_NESTING_DEPTH,
     MAX_RULE_LENGTH,
     Rule,
@@ -473,3 +474,33 @@ def test_a_recursion_error_is_translated_rather_than_escaping(monkeypatch):
             parse_rule("(" * (MAX_NESTING_DEPTH - 1) + "1" + ")" * (MAX_NESTING_DEPTH - 1), NAMES)
     finally:
         sys.setrecursionlimit(original)
+
+
+class TestArityWording:
+    """The message a caller gets when a function is given the wrong number of arguments.
+
+    The bounded-range case is not reachable through any current function - every entry in
+    FUNCTION_ARITY is exact or unbounded - so it is tested directly rather than through a
+    rule. It existed as a literal "..." placeholder until review found it, which is how a
+    message stays broken until the day someone adds the function that needs it.
+    """
+
+    @pytest.mark.parametrize(
+        "minimum,maximum,expected",
+        [
+            (1, 1, "1 argument"),
+            (3, 3, "3 arguments"),
+            (2, None, "2 or more arguments"),
+            (1, 3, "1 to 3 arguments"),
+        ],
+    )
+    def test_each_shape_reads_naturally(self, minimum, maximum, expected):
+        assert _arity_phrase(minimum, maximum) == expected
+
+    def test_no_shape_produces_a_placeholder(self):
+        for minimum, maximum in [(1, 1), (2, None), (1, 3), (0, 5)]:
+            assert "..." not in _arity_phrase(minimum, maximum)
+
+    def test_the_real_message_uses_it(self):
+        with pytest.raises(RuleSyntaxError, match="abs\\(\\) takes 1 argument, got 2"):
+            parse_rule("abs(1, 2)", NAMES)
