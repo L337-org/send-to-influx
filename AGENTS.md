@@ -134,6 +134,8 @@ keeps these names honest, and each guard's docstring carries the reasoning.
   *prose fragments* we wrote is a different thing and is left alone; see the guard's docstring
 - `tests/test_repo_hygiene.py::test_only_the_process_helper_starts_a_process` - every external
   command goes through `toinflux.process.run_command`
+- `tests/test_repo_hygiene.py::test_no_module_binds_a_top_level_name_twice` - a second definition
+  silently replaces the first, and both read correctly in isolation, so review cannot see it
 - `tests/test_controls.py::TestControlNames::test_refuses_anything_that_could_choose_a_different_file`
   - a control name becomes a filename and arrives from an MCP client
 - `tests/test_controls.py::TestTheStageLadder::test_a_stage_that_forgets_a_device_is_refused`
@@ -181,8 +183,11 @@ disabled capability is not registered at all rather than registered-and-refusing
 - **The injection defence is split, and the split is the thing to get right.** Query construction
   is in `toinflux/influx.py`: measurement and tags come from the static schema, a field must match
   a live-discovered key, and every identifier is charset-validated and quoted. What a tool
-  *accepts* stays here: `parse_time_bound` re-emits times as RFC3339, and aggregations come from a
-  fixed map. Never add a query path that bypasses either half. Construction moved out of
+  *accepts* stays here: `parse_time_bound` re-emits times as RFC3339, aggregations come from a
+  fixed map, and `group_by` is `fullmatch`ed against a duration pattern. That last one is the
+  only accepted value interpolated into a query as written rather than rebuilt, so it is checked
+  whole: `match()` accepts a prefix, and `$` matches before a trailing newline, so anchors alone
+  do not make it a whole-string test. Never add a query path that bypasses either half. Construction moved out of
   `mcp_read` so a control process can read from InfluxDB without importing the MCP SDK.
 - **The advertised surface is held to the AI-consumer standard** in full by
   `tests/test_mcp_surface.py` - descriptions, titles, siblings, dangling references, byte budget.

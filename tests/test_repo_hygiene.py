@@ -1262,3 +1262,93 @@ def test_the_subprocess_guard_does_not_fire_on_unrelated_imports():
     """Guards the guard: something matching everything would pass the check above while
     reporting every module in the tree as an offender."""
     assert not _imports_subprocess("import os\nfrom pathlib import Path\nsubprocess = None\n")
+
+
+def _module_level_rebindings(source):
+    """Return every module-level name that this source binds more than once.
+
+    Only the module's own top-level statements, so a name defined once in each arm of an
+    `if TYPE_CHECKING:` or a `try/except ImportError` is not reported: those are one
+    binding chosen at runtime, which is the normal way to write them.
+
+    Args:
+        source (str): the module's source text
+
+    Returns:
+        set: the rebound names, empty when every top-level name is bound once
+    """
+    names = []
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign):
+            names += [target.id for target in node.targets if isinstance(target, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.append(node.target.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(node.name)
+    return {name for name in names if names.count(name) > 1}
+
+
+def test_no_module_binds_a_top_level_name_twice():
+    """A shadowed module-level name is invisible in review and can disable a check.
+
+    `_DURATION_RE` was defined twice in toinflux/mcp_read.py: a `^\\d+[smhdw]$` validator for
+    the `group_by` interval, and 500 lines later a `(?:\\d+[wdhms])+` parser for retention
+    strings. The second won at import time, so the validator silently became a prefix match
+    on a value interpolated into `GROUP BY time(...)`, and `1h);DROP MEASUREMENT x` passed it.
+
+    Neither definition is wrong to read. That is the whole problem: review sees two correct
+    constants, never the pair, and the test suite went on passing because every case it
+    checked failed at the first character rather than at the prefix. A machine comparing
+    names across the file is the only reader that sees it.
+
+    Covers tests too, where a redefined `def test_...` replaces the first one and takes it
+    out of the run without failing anything.
+    """
+    offenders = {}
+    for path in _every_python_file():
+        rebound = _module_level_rebindings(path.read_text(encoding="utf-8"))
+        if rebound:
+            offenders[path] = rebound
+    assert not offenders, "module-level names bound twice: " + "; ".join(
+        f"{path}: {', '.join(sorted(names))}" for path, names in sorted(offenders.items())
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "X = 1\nX = 2\n",
+        "def f():\n    pass\n\n\ndef f():\n    pass\n",
+        "class C:\n    pass\n\n\nclass C:\n    pass\n",
+        "X: int = 1\nX: int = 2\n",
+        "import re\nX = re.compile('a')\nX = re.compile('b')\n",
+    ],
+)
+def test_the_rebinding_guard_sees_each_kind_of_definition(source):
+    """A constant, a function, a class and an annotated assignment all count.
+
+    The real case was a constant, but a redefined function or class disappears the same way,
+    and a guard that only looked at assignments would report a file as clean while one of its
+    tests never ran.
+    """
+    assert _module_level_rebindings(source), f"not detected: {source!r}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "X = 1\nY = 2\n",
+        "def f():\n    x = 1\n    x = 2\n",
+        "try:\n    import fast as impl\nexcept ImportError:\n    import slow as impl\n",
+        "import typing\nif typing.TYPE_CHECKING:\n    X = 1\nelse:\n    X = 2\n",
+        "class C:\n    X = 1\n\n\nclass D:\n    X = 2\n",
+    ],
+)
+def test_the_rebinding_guard_leaves_legitimate_code_alone(source):
+    """Guards the guard: one that fired on these would be switched off within a day.
+
+    A local rebound inside a function, the same name bound in each arm of a try/except or a
+    TYPE_CHECKING split, and the same attribute name on two classes are all normal. Only a
+    module's own top-level statements count.
+    """
+    assert not _module_level_rebindings(source), f"false positive: {source!r}"

@@ -84,10 +84,12 @@ AGGREGATIONS = {
 # "-" is required: the collectors only ever write points at the present time (even
 # forecast values are stored at their collection time), so a future range has no
 # data; an explicit ISO timestamp is still accepted for any future need.
-_RELATIVE_TIME_RE = re.compile(r"^-\d+[smhdw]$")
+_RELATIVE_TIME_RE = re.compile(r"-\d+[smhdw]")
 
-# A GROUP BY interval duration like "5m", "1h", "1d".
-_DURATION_RE = re.compile(r"^\d+[smhdw]$")
+# A GROUP BY interval duration like "5m", "1h", "1d". Checked with fullmatch rather than
+# match: this value is interpolated into GROUP BY time(...), and $ matches before a trailing
+# newline, so even the anchors do not make match() a whole-string test.
+_DURATION_RE = re.compile(r"\d+[smhdw]")
 
 # Upper bound on points returned by a single query, so a broad range can't
 # produce an unbounded response. Applied as a LIMIT; query_history's result
@@ -429,7 +431,7 @@ def parse_time_bound(value, *, now=None):
     text = value.strip()
     if text == "now":
         return now
-    if _RELATIVE_TIME_RE.match(text):
+    if _RELATIVE_TIME_RE.fullmatch(text):
         digits = text.lstrip("-")
         seconds = int(digits[:-1]) * _RELATIVE_UNIT_SECONDS[digits[-1]]
         return now - datetime.timedelta(seconds=seconds)
@@ -604,7 +606,7 @@ def _select_and_group(field, aggregation, group_by, instance_clause):
         raise ToolParamError(f"unknown aggregation {aggregation!r}; choose one of: raw, {render_values(AGGREGATIONS)}")
     if not group_by:
         raise ToolParamError(f"aggregation {aggregation!r} requires a group_by interval (e.g. '1h')")
-    if not _DURATION_RE.match(str(group_by)):
+    if not _DURATION_RE.fullmatch(str(group_by)):
         raise ToolParamError(f"invalid group_by interval {group_by!r}; use a duration like '5m', '1h', '1d'")
     # Verified against a real InfluxDB 1.8: GROUP BY time(1h), "host" fill(none) is
     # valid and yields one series per host, each with its own buckets. Worth checking
@@ -675,7 +677,9 @@ _DURATION_PART_RE = re.compile(r"(\d+)([wdhms])")
 # The whole string must be unit/value pairs and nothing else. findall alone would accept a
 # *prefix* - "720h junk" and "junk720h" both yielded 2592000 - turning a malformed value from
 # some future InfluxDB into a confident retention figure reported as fact.
-_DURATION_RE = re.compile(r"(?:\d+[wdhms])+")
+# Named for what it parses, not just "duration": it sat on _DURATION_RE and silently
+# replaced the group_by validator 500 lines above, which reads identically either way.
+_INFLUX_DURATION_RE = re.compile(r"(?:\d+[wdhms])+")
 
 
 # Returned by _at for a cell the row does not have. A distinct object rather than None
@@ -742,7 +746,7 @@ def _influx_duration_seconds(duration):
     Returns:
         int or None: whole seconds, or None when there is nothing parseable
     """
-    if not isinstance(duration, str) or not _DURATION_RE.fullmatch(duration.strip()):
+    if not isinstance(duration, str) or not _INFLUX_DURATION_RE.fullmatch(duration.strip()):
         return None
     parts = _DURATION_PART_RE.findall(duration.strip())
     return sum(int(value) * _DURATION_UNIT_SECONDS[unit] for value, unit in parts)
