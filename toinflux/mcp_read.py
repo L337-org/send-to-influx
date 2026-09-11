@@ -351,12 +351,27 @@ def annotate_rows(schema, field, columns, values):
     # column name (mean/max/...); fall back to the last column.
     value_index = next((i for i, c in enumerate(columns) if c != "time"), len(columns) - 1)
     points = []
+    short = 0
     for row in values:
-        value = row[value_index]
-        point = {"time": row[time_index], "value": value}
+        stamp = _at(row, time_index)
+        value = _at(row, value_index)
+        if stamp is _MISSING or value is _MISSING:
+            # A row shorter than its column list. Dropped rather than emitted with a
+            # null cell, because null is a legitimate value here - mean() over an empty
+            # GROUP BY window returns one - so a malformed row would read as real data.
+            short += 1
+            continue
+        point = {"time": stamp, "value": value}
         if codes:
             point["label"] = _decode_code(value, codes)
         points.append(point)
+    if short:
+        logging.warning(
+            "Dropped %d row(s) shorter than the column list %r while reading %r; InfluxDB returned a malformed result",
+            short,
+            columns,
+            field,
+        )
     result = {"source": schema.source, "field": field, "points": points}
     if meta.get("unit"):
         result["unit"] = meta["unit"]
@@ -663,14 +678,40 @@ _DURATION_PART_RE = re.compile(r"(\d+)([wdhms])")
 _DURATION_RE = re.compile(r"(?:\d+[wdhms])+")
 
 
+# Returned by _at for a cell the row does not have. A distinct object rather than None
+# because None is a legitimate cell value: mean() over an empty GROUP BY window returns
+# one, and a caller that must tell "no such cell" from "null" cannot do it on None.
+_MISSING = object()
+
+
+def _at(row, position):
+    """Return a row's cell at a position, or ``_MISSING`` where the row has none.
+
+    The positional half of the guard :func:`_cell` applies by name, for the one caller
+    that picks its columns by position rather than by looking them up. Negative positions
+    index from the end, as they do in the language, so a -1 fallback still works.
+
+    Args:
+        row (list): one row from a result series
+        position (int): the index wanted, possibly negative
+
+    Returns:
+        object: the value, or ``_MISSING`` when the row is too short
+    """
+    try:
+        return row[position]
+    except IndexError:
+        return _MISSING
+
+
 def _cell(row, index, name):
     """Return a named column's value from an InfluxDB result row, or None.
 
     InfluxDB returns ``columns`` and ``values`` separately, and nothing guarantees every row
     is as long as the column list - a short row would make a bare ``row[index[name]]`` raise
     IndexError deep inside a read, instead of the "could not read that" the callers are
-    written to expect. One reader for every row access in this module so the guard cannot be
-    present at some sites and missing at others.
+    written to expect. Every row access in this module goes through this or :func:`_at`, so
+    the guard cannot be present at some sites and missing at others.
 
     Args:
         row (list): one row from a result series
