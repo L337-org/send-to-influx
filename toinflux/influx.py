@@ -981,10 +981,10 @@ def _get(session, url, kwargs, description):
         # RequestException handler so a parse failure isn't misreported as a
         # transport read failure. raise_for_status()'s HTTPError is a
         # RequestException but not a ValueError, so it still classifies as transport.
-        logging.error("MCP read returned non-JSON (%s): %s", description, exc)
+        logging.error("InfluxDB read returned non-JSON (%s): %r", description, exc)
         raise SourceConnectionError(f"InfluxDB read returned an unparseable response ({description})") from exc
     except requests.exceptions.RequestException as exc:
-        logging.error("MCP read failed (%s): %s", description, exc)
+        logging.error("InfluxDB read failed (%s): %r", description, exc)
         raise SourceConnectionError(f"InfluxDB read failed ({description}): {exc}") from exc
 
 
