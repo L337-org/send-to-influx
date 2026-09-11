@@ -210,6 +210,19 @@ class TestNames:
             parse_rule("humidity", {"target", "dew"})
         assert "target" in str(exc.value) and "dew" in str(exc.value)
 
+    def test_a_declared_name_cannot_forge_a_line_in_the_error(self):
+        # Declared names come from a control document an MCP client can write, and this
+        # message lists them. The same rule AGENTS.md states for a lock name arriving over
+        # MQTT, and the same fix already made in the control store - applied here late,
+        # because the lesson did not travel between two modules that do not import
+        # each other.
+        with pytest.raises(RuleSyntaxError) as exc:
+            parse_rule("humidity", {"inside", "bad\nWARNING forged"})
+        message = str(exc.value)
+        assert "forged" in message
+        assert "\n" not in message
+        assert "\\n" in message
+
     def test_a_rule_with_nothing_declared_says_so_rather_than_showing_an_empty_list(self):
         with pytest.raises(RuleSyntaxError) as exc:
             parse_rule("target", set())

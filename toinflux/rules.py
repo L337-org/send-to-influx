@@ -491,6 +491,29 @@ class _Call:
         return set().union(*(argument.names() for argument in self.arguments)) if self.arguments else set()
 
 
+def _render_names(values):
+    """Render declared identifiers for a message, safely and in a stable order.
+
+    The names come from a control document, which an MCP client can write, so one
+    containing a newline would otherwise write its own line into the journal and into
+    any connected client's output - the rule AGENTS.md states for external values, which
+    this message was breaking. Sorting by ``repr`` also gives a total order if a name is
+    ever something other than a string.
+
+    ``toinflux.controls`` has its own copy of this for the same reason. They are
+    deliberately separate for now because the two modules do not yet import one another;
+    when the control store starts parsing rules they meet, and the pair should collapse
+    into one shared helper rather than becoming three.
+
+    Args:
+        values (collections.abc.Iterable): the declared identifiers
+
+    Returns:
+        str: a comma-separated, quoted, safely-ordered list, or "nothing" when empty
+    """
+    return ", ".join(repr(value) for value in sorted(values, key=repr)) or "nothing"
+
+
 def _arity_phrase(minimum, maximum):
     """Describe how many arguments a function wants, for an error message.
 
@@ -787,7 +810,7 @@ class _Parser:
             # Caught here rather than at evaluation, so an operator sees it at
             # --check-config rather than when a control first tries to run.
             raise _syntax_error(
-                f"unknown name {token.text!r} (declared: {', '.join(sorted(self.allowed_names)) or 'nothing'})",
+                f"unknown name {token.text!r} (declared: {_render_names(self.allowed_names)})",
                 token.offset,
             )
         return _Name(token.text, token.offset)
