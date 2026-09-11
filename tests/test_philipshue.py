@@ -981,7 +981,7 @@ class TestHueFieldMetadata:
     """Reading the description back, which is what gives a per-install field a unit."""
 
     def _series(self, pairs):
-        from toinflux.mcp_read import QuerySeries
+        from toinflux.influx import QuerySeries
 
         # One series per (device, host), which is how the grouped query answers.
         return [
@@ -1062,7 +1062,7 @@ class TestHueFieldMetadata:
         # The same reasoning as discover_tag_values' own guard: a malformed series must
         # not become a field description, because a wrong unit on a real field is worse
         # than none. Reachable only if the grouped query ever answers without its tag.
-        from toinflux.mcp_read import QuerySeries
+        from toinflux.influx import QuerySeries
 
         hue = _hue(sample_settings)
         series = [

@@ -1,9 +1,22 @@
-"""Parent class for data handlers to send data to InfluxDB."""
+"""Parent class for data handlers, and the InfluxDB write and read primitives.
+
+``DataHandler`` is the base every collector subclasses. It owns the write side: line
+protocol encoding, the write request, and the per-source buffering that keeps points
+alive across an outage rather than dropping them. The polling that drives it lives in
+sendtoinflux.py's worker rather than here.
+
+The module also owns reading back - the query builders, the live field and tag
+discovery, and the identifier validation and quoting they rest on - so that code with
+no interest in the MCP server can ask what is in the database without importing one.
+The "Reading back" banner below says why that half lives here and what must never be
+routed around.
+"""
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
+import re
 import time
 import logging
 import warnings
@@ -11,9 +24,9 @@ from collections import deque
 from itertools import islice
 import urllib3
 import requests
-from toinflux.exceptions import ToInfluxError
+from dataclasses import dataclass
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToInfluxError, ToolParamError
 from toinflux.general import load_settings
-from toinflux.exceptions import ConfigError
 
 
 class InfluxWriteError(ToInfluxError):
@@ -712,3 +725,577 @@ class DataHandler:
                 buffer.maxlen,
             )
         buffer.append([line, 0])
+
+
+# --------------------------------------------------------------------------- #
+# Reading back
+#
+# Everything below answers "what is in the database", as distinct from the write
+# path above. It lived in toinflux/mcp_read.py until the control work needed it:
+# a control process reads its inputs from InfluxDB and is meant to run with the
+# MCP server absent entirely, so importing that module would have pulled the MCP
+# SDK - mcp, anyio, pydantic, starlette and uvicorn - into every control just to
+# ask what the last temperature reading was.
+#
+# Reading from InfluxDB was never an MCP concern; it was simply needed there
+# first. Its tests came with it in name only: they are still in
+# tests/test_mcp_read.py, not tests/test_influx.py where the write path's are.
+#
+# The injection defence is split, and knowing which half is here matters. What
+# lives here: a measurement and its tags come from static schema, a field must
+# match a live-discovered key, and every identifier is charset-validated and
+# quoted before it reaches a query string. What did not move: time bounds are
+# parsed and re-emitted as RFC3339 by mcp_read.parse_time_bound, and the
+# aggregation map is there too, because both describe what the MCP tools accept
+# rather than how a query is built.
+#
+# Never add a query path that goes around the half that is here.
+# --------------------------------------------------------------------------- #
+
+# An identifier (measurement/field/tag key) is rejected only if it is empty or
+# contains an ASCII control character (which could corrupt query formatting or a
+# log line). The charset is otherwise unrestricted on purpose: field keys can
+# legitimately contain punctuation - line protocol escapes only comma/equals/
+# space/backslash, and collectors like Hue merely replace spaces with underscores
+# (a light "Kitchen (main)" becomes the field key "Kitchen_(main)"), so a stricter
+# charset would make real fields discoverable via SHOW FIELD KEYS yet unqueryable.
+# Injection safety rests on the allowlist (a queried field must be a key that
+# discovery actually returned) plus double-quote escaping in _quote_identifier,
+# not on this gate.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def resolve_db(source_settings, influx_settings):
+    """Return the database or bucket name the collector actually writes to.
+
+    Matches ``DataHandler._build_write_request()`` exactly: v2 (``influx.token`` set) uses
+    ``bucket`` falling back to ``db``; v1 uses ``db`` only, ignoring ``bucket``.
+
+    Mirroring the write path matters because a config can carry both keys - e.g.
+    a stale ``bucket`` left after switching v2->v1 - and picking ``bucket`` in v1
+    mode would send reads to a different database than the collectors write to.
+
+    Args:
+        source_settings (dict): the source's own settings block
+        influx_settings (dict): the ``influx`` block (its ``token`` selects the mode)
+
+    Returns:
+        str or None: the db or bucket name, or None when neither is set
+    """
+    if influx_settings.get("token"):
+        return source_settings.get("bucket", source_settings.get("db"))
+    return source_settings.get("db")
+
+
+def _validate_identifier(value, kind):
+    """Return ``value`` if it is a safe InfluxDB identifier, else raise.
+
+    Args:
+        value (str): candidate identifier
+        kind (str): what it is, for the error message (e.g. "field")
+
+    Returns:
+        str: the same value, once accepted
+
+    Raises:
+        ToolParamError: if the value isn't a safe identifier
+    """
+    if not isinstance(value, str) or not value or _CONTROL_CHAR_RE.search(value):
+        raise ToolParamError(f"invalid {kind} name: {value!r}")
+    return value
+
+
+def _quote_identifier(value):
+    """Double-quote an InfluxDB identifier, escaping backslashes and quotes.
+
+    Args:
+        value (str): the identifier to quote
+
+    Returns:
+        str: the value, double-quoted and escaped for InfluxQL
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _quote_string_literal(value):
+    """Single-quote an InfluxQL string literal (used for tag values).
+
+    Args:
+        value (str): the literal to quote
+
+    Returns:
+        str: the value, single-quoted and escaped for InfluxQL
+    """
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def _build_single_point_query(measurement, tag_filters, fields, order, group_by_tag=None):
+    """Build an InfluxQL SELECT for one point at either end of a measurement.
+
+    Shared by :func:`build_latest_query` and :func:`build_edge_time_query` - kept as one
+    implementation so the measurement/tag validation and quoting below cannot drift between
+    the value read and the timestamp-only reads.
+
+    Selects each field explicitly (not ``*``) so tag columns are excluded, and applies the
+    source's static tag filters. ``fields=None`` selects ``*`` instead, for a caller that
+    reads only the timestamp - excluding tag columns protects a *value* read, and no value
+    is read there. Measurement, field and tag keys are charset-validated and
+    double-quoted, tag values quoted string literals - the same layered defence as
+    build_query. Fields come from key discovery (the live allowlist), never model input.
+
+    Args:
+        measurement (str): the InfluxDB measurement name
+        tag_filters (dict): static tag key/value filters (may be empty)
+        fields (set or None): the field keys to select, or None to select ``*`` for a
+            timestamp-only read. Sorted here, so the iteration order of the caller's
+            collection does not reach the query.
+        order (str): ``"DESC"`` for the newest point, ``"ASC"`` for the oldest
+        group_by_tag (str or None): a tag key to return one point per value of, or None for a
+            single point across the whole measurement
+
+    Returns:
+        str: the InfluxQL query
+
+    Raises:
+        ValueError: ``order`` is neither ``"ASC"`` nor ``"DESC"``
+    """
+    if order not in ("ASC", "DESC"):
+        raise ValueError(f"order must be ASC or DESC, got {order!r}")
+    _validate_identifier(measurement, "measurement")
+    if fields is None:
+        # Only for callers that read the timestamp and nothing else - see
+        # build_edge_time_query. Enumerating fields is what keeps tag columns out of a
+        # *value* read, which does not apply when no value is read.
+        select = "*"
+    else:
+        select = ", ".join(_quote_identifier(_validate_identifier(f, "field")) for f in sorted(fields))
+    query = f"SELECT {select} FROM {_quote_identifier(measurement)}"
+    conditions = []
+    for tag_key, tag_value in sorted(tag_filters.items()):
+        _validate_identifier(tag_key, "tag")
+        conditions.append(f"{_quote_identifier(tag_key)} = {_quote_string_literal(tag_value)}")
+    if conditions:
+        query += f" WHERE {' AND '.join(conditions)}"
+    if group_by_tag:
+        # LIMIT 1 becomes one row *per series* once grouped, which is exactly what a
+        # per-producer "latest" or "oldest" needs - verified against a real InfluxDB
+        # 1.8, where this returned the newest point for each host in one round trip.
+        _validate_identifier(group_by_tag, "tag")
+        query += f" GROUP BY {_quote_identifier(group_by_tag)}"
+    return query + f" ORDER BY time {order} LIMIT 1"
+
+
+def build_latest_query(measurement, tag_filters, fields, group_by_tag=None):
+    """Build an InfluxQL SELECT for the single most recent point of a measurement.
+
+    The current-state read for a non-live source (see MCP_LIVE_STATE).
+
+    Args:
+        measurement (str): the InfluxDB measurement name
+        tag_filters (dict): static tag key/value filters (may be empty)
+        fields (set): the field keys to select, non-empty
+        group_by_tag (str or None): a tag key to return one point per value of, or None for a
+            single point across the whole measurement
+
+    Returns:
+        str: the InfluxQL query
+    """
+    return _build_single_point_query(measurement, tag_filters, fields, "DESC", group_by_tag)
+
+
+def build_edge_time_query(measurement, tag_filters, order, group_by_tag=None):
+    """Build an InfluxQL SELECT for the timestamp at one end of a measurement's data.
+
+    ``ORDER BY time ASC`` answers "when did collection start, or where has older data aged
+    out" - the oldest surviving point is the floor of what any history query can return,
+    whatever retention permits in principle. ``DESC`` gives the newest.
+
+    Selects ``*`` rather than enumerating fields, unlike :func:`build_latest_query`, because
+    the caller reads only the ``time`` column. Enumerating them here would put every field
+    key in the query string, and that string travels in a GET parameter: measured against a
+    real InfluxDB with a 120-field measurement, the enumerated form was a 3.4 KB query, and a
+    measurement grows with device count (a Nuki install prefixes fields per lock). A wide
+    enough estate would exceed a reverse proxy's request-line limit, failing a read that has
+    no need of the width. Tag columns coming back in the row are harmless when no value is
+    read from it.
+
+    Args:
+        measurement (str): the InfluxDB measurement name
+        tag_filters (dict): static tag key/value filters (may be empty)
+        order (str): ``"ASC"`` for the oldest point, ``"DESC"`` for the newest
+        group_by_tag (str or None): a tag key to return one point per value of, or None for a
+            single point across the whole measurement
+
+    Returns:
+        str: the InfluxQL query
+    """
+    return _build_single_point_query(measurement, tag_filters, None, order, group_by_tag)
+
+
+def _influx_read_request(influx_settings, db, query):
+    """Build (url, kwargs) for a GET /query.
+
+    Mirrors _build_write_request's v1/v2 branch: token and org via the v2 /query
+    compatibility endpoint (Token header), else v1 /query with HTTP basic auth.
+    ``epoch=s`` returns numeric unix timestamps rather than RFC3339 strings.
+
+    Args:
+        influx_settings (dict): the ``influx`` settings block
+        db (str): the database/bucket name to query
+        query (str): the InfluxQL query string
+
+    Returns:
+        tuple: ``(url, requests kwargs)``
+    """
+    timeout = influx_settings.get("timeout", 5)
+    params = {"db": db, "q": query, "epoch": "s"}
+    url = f'{influx_settings["url"]}/query'
+    if influx_settings.get("token"):
+        # The v1-compatibility /query endpoint resolves the bucket via its DBRP
+        # mapping (keyed by db) and the token is already org-scoped, so org isn't
+        # strictly required - but pass it when set, mirroring the v2 write path
+        # and disambiguating a token with access to more than one org.
+        if influx_settings.get("org"):
+            params["org"] = influx_settings["org"]
+        kwargs = {"headers": {"Authorization": f'Token {influx_settings["token"]}'}, "params": params}
+    else:
+        kwargs = {"auth": (influx_settings["user"], influx_settings["password"]), "params": params}
+    kwargs["verify"] = not influx_settings.get("insecure", False)
+    kwargs["timeout"] = timeout
+    return url, kwargs
+
+
+def _get(session, url, kwargs, description):
+    """Issue a GET and return parsed JSON.
+
+    Maps failures to SourceConnectionError with a message naming what was attempted.
+
+    Args:
+        session (requests.Session): the handler's session
+        url (str): the read endpoint to call
+        kwargs (dict): extra requests kwargs (auth, headers, verify, timeout)
+        description (str): what was being read, for the error message
+
+    Returns:
+        dict: the parsed JSON response
+
+    Raises:
+        SourceConnectionError: the InfluxDB query could not be issued or returned unusable JSON
+    """
+    try:
+        with warnings.catch_warnings():
+            if not kwargs.get("verify", True):
+                warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+            response = session.get(url, **kwargs)
+        response.raise_for_status()
+        return response.json()
+    except ValueError as exc:
+        # response.json() on a non-JSON body raises requests' JSONDecodeError, which
+        # is BOTH a ValueError and a RequestException - catch it before the
+        # RequestException handler so a parse failure isn't misreported as a
+        # transport read failure. raise_for_status()'s HTTPError is a
+        # RequestException but not a ValueError, so it still classifies as transport.
+        logging.error("InfluxDB read returned non-JSON (%s): %r", description, exc)
+        raise SourceConnectionError(f"InfluxDB read returned an unparseable response ({description})") from exc
+    except requests.exceptions.RequestException as exc:
+        logging.error("InfluxDB read failed (%s): %r", description, exc)
+        raise SourceConnectionError(f"InfluxDB read failed ({description}): {exc!r}") from exc
+
+
+@dataclass(frozen=True)
+class MeasurementKeys:
+    """What a measurement currently holds.
+
+    Its field keys with their InfluxDB types, and its tag keys.
+
+    ``field_types`` maps a field key to ``"float"``/``"integer"``/``"string"``/
+    ``"boolean"`` as ``SHOW FIELD KEYS`` reports it, **or to None** where the
+    response carried no ``fieldType`` column to read: the field is still listed,
+    because dropping it would remove it from the query allowlist, but nothing
+    honest can be said about its type. Every discovered key is therefore present;
+    its value may be None, so treat None as "unknown" and never as a type. The type
+    is not a nicety: it is what tells a caller that a text or coded field wants a
+    state-timeline rendering rather than a line, and it arrives in the same response
+    as the key names, so keeping it costs nothing where discarding it cost a guess.
+
+    ``tag_keys`` is every dimension the measurement can be grouped by. Only the
+    one tag a source declares as its instance axis was reachable before; the rest
+    (a MyEnergi ``device``, a Nuki lock) existed in the data and nowhere in the
+    schema a caller could see.
+
+    Attributes:
+        field_types (dict): field key to InfluxDB type, as reported by SHOW FIELD KEYS.
+        tag_keys (frozenset): the measurement's tag keys.
+    """
+
+    field_types: dict
+    tag_keys: frozenset
+
+    @property
+    def field_names(self):
+        """The field keys as a set - the injection allowlist."""
+        return set(self.field_types)
+
+
+def _statement_results(payload, description):
+    """Split a multi-statement InfluxQL response into ``{statement_id: [series]}``.
+
+    A per-result error (wrong db, auth, a rejected statement) arrives inside a 200
+    body, so it is raised here rather than left to look like an empty answer - the
+    same reasoning as :func:`run_query`, and it matters more with several statements
+    in flight: verified against InfluxDB 1.8 and 2.7's v1-compatibility endpoint that
+    an unusable database answers with statement 0 carrying ``"error": "not
+    executed"`` and *no result at all* for the statements after it, so a caller that
+    ignored the error would read the missing statement as "this measurement has no
+    tags".
+
+    ``statement_id`` is present on both versions; positional order is the fallback
+    so a response without it degrades to the same reading rather than to nothing.
+
+    Args:
+        payload (dict): the parsed response body
+        description (str): what was being discovered, for the error message
+
+    Returns:
+        dict: statement id to its list of series dicts
+
+    Raises:
+        SourceConnectionError: if any statement reported an error
+    """
+    out = {}
+    for index, result in enumerate(payload.get("results", [])):
+        if result.get("error"):
+            raise SourceConnectionError(f"InfluxDB rejected the {description}: {result['error']!r}")
+        out[result.get("statement_id", index)] = result.get("series", [])
+    return out
+
+
+def _key_column(all_series, column):  # noqa: DOC403 - a generator, but unannotated
+    """Yield each row's value from a named column across a statement's series.
+
+    Skips a series that has no such column, with a warning, rather than falling
+    back to a positional guess: a wrong key list would put fields in the tag list
+    or invent dimensions that cannot be grouped by, and both read as authoritative.
+
+    Args:
+        all_series (list): the series list for one statement
+        column (str): the column name to read (e.g. "fieldKey")
+
+    Yields:
+        tuple: (series, row, value) triples, the value always a string, so a caller can read a second column of the
+            same row
+    """
+    for series in all_series:
+        columns = series.get("columns", [])
+        if column not in columns:
+            logging.warning("Key discovery returned a series with no %r column (%s); ignoring it", column, columns)
+            continue
+        index = columns.index(column)
+        for row in series.get("values", []):
+            if len(row) > index and isinstance(row[index], str):
+                yield series, row, row[index]
+
+
+def discover_measurement_keys(session, influx_settings, db, measurement):
+    """Return a measurement's field keys (with their types) and tag keys.
+
+    One request carrying two statements, not two requests: InfluxQL accepts
+    semicolon-separated statements and returns a result per statement, so the tag
+    keys cost no extra round trip on a call that was already making one. Verified
+    against InfluxDB 1.8 and 2.7's v1-compatibility endpoint, whose responses here
+    are byte-identical.
+
+    The field set this returns is the live allowlist a queried field is checked
+    against. The measurement is charset-validated (it comes from the source class's
+    static schema, but validating is cheap) before interpolation.
+
+    Args:
+        session (requests.Session): the handler's session
+        influx_settings (dict): the shared ``influx`` settings block
+        db (str): the database or bucket to query
+        measurement (str): the measurement whose keys are wanted
+
+    Returns:
+        MeasurementKeys: the field types and tag keys, either half possibly empty
+
+    Raises:
+        SourceConnectionError: on a transport/parse failure, or a statement the server rejected
+    """
+    _validate_identifier(measurement, "measurement")
+    quoted = _quote_identifier(measurement)
+    query = f"SHOW FIELD KEYS FROM {quoted}; SHOW TAG KEYS FROM {quoted}"
+    url, kwargs = _influx_read_request(influx_settings, db, query)
+    payload = _get(session, url, kwargs, f"discover keys for {measurement}")
+    results = _statement_results(payload, f"key discovery for {measurement}")
+    field_types = {}
+    for series, row, name in _key_column(results.get(0, []), "fieldKey"):
+        columns = series.get("columns", [])
+        type_index = columns.index("fieldType") if "fieldType" in columns else None
+        # No fieldType column means no honest answer about the type, so the field is
+        # still listed and simply carries none.
+        field_types[name] = row[type_index] if type_index is not None and len(row) > type_index else None
+    tag_keys = {name for _, _, name in _key_column(results.get(1, []), "tagKey")}
+    return MeasurementKeys(field_types=field_types, tag_keys=frozenset(tag_keys))
+
+
+@dataclass(frozen=True)
+class QuerySeries:
+    """One series from an InfluxQL result: its tag set, columns and rows.
+
+    ``tags`` is empty for an ungrouped query. A ``GROUP BY`` on a tag returns one
+    of these per tag value, which is what makes a per-instance answer possible.
+
+    Attributes:
+        tags (dict): the tag values identifying this series, empty when not grouped.
+        columns (list): the column names, in the order the values use.
+        values (list): one list per row.
+    """
+
+    tags: dict
+    columns: list
+    values: list
+
+
+def discover_tag_values(session, influx_settings, db, measurement, tag):
+    """Return the set of values a tag actually holds in a measurement.
+
+    The exact analogue of :func:`discover_measurement_keys`, and it carries the same role: the
+    live allowlist an ``instance`` argument is validated against, so a value that was
+    never written is refused rather than producing a confidently empty answer. Being
+    discovered rather than configured also means a collector host that started
+    reporting yesterday is queryable today with no config change.
+
+    Verified against real InfluxDB 1.8 and 2.7 (the latter through its
+    v1-compatibility ``/query`` endpoint, whose response is identical): one series
+    with ``columns: ["key", "value"]`` and one row per value. Worth having checked
+    rather than assumed - that same endpoint reports a bucket's retention as ``0s``,
+    so its answers are not interchangeable with v1's by default.
+
+    Args:
+        session (requests.Session): the requests session to query through; the caller owns its lifetime.
+        influx_settings (dict): the parsed ``influx:`` block, for the URL and credentials.
+        db (str): the database or bucket to query.
+        measurement (str): the measurement whose tag values to enumerate.
+        tag (str): the tag key to enumerate (from the source class, never model input)
+
+    Returns:
+        set: the tag-value strings, possibly empty
+
+    Raises:
+        SourceConnectionError: on a transport/parse failure
+    """
+    _validate_identifier(measurement, "measurement")
+    _validate_identifier(tag, "tag")
+    query = f"SHOW TAG VALUES FROM {_quote_identifier(measurement)} WITH KEY = {_quote_identifier(tag)}"
+    url, kwargs = _influx_read_request(influx_settings, db, query)
+    payload = _get(session, url, kwargs, f"discover {tag} values for {measurement}")
+    values = set()
+    for result in payload.get("results", []):
+        # Same reasoning as discover_measurement_keys: a per-result error arrives in a 200 body,
+        # and swallowing it would make a broken query look like "no instances".
+        if result.get("error"):
+            raise SourceConnectionError(f"InfluxDB rejected the tag-value discovery: {result['error']!r}")
+        for series in result.get("series", []):
+            columns = series.get("columns", [])
+            if "value" not in columns:
+                # A -1 fallback would read each row's *last* cell, which happens to be the
+                # right one for today's ["key", "value"] shape and would silently invent
+                # tag values if that ever changed. Skipping is the honest answer: a wrong
+                # allowlist would refuse real producers and accept ones that do not exist.
+                logging.warning(
+                    "Tag-value discovery for %s returned a series with no 'value' column (%s); ignoring it",
+                    measurement,
+                    columns,
+                )
+                continue
+            index = columns.index("value")
+            for row in series.get("values", []):
+                # Same guard as _key_column: nothing guarantees a row is as long as the
+                # column list, and a bare row[index] turns a malformed response into an
+                # IndexError escaping a read the callers expect to raise SourceConnectionError.
+                if len(row) > index and isinstance(row[index], str):
+                    values.add(row[index])
+    return values
+
+
+def run_query(session, influx_settings, db, query):
+    """Execute an InfluxQL query and return **every** series it produced.
+
+    A ``GROUP BY`` on a tag yields one series per tag value, each carrying its own
+    ``tags`` map (verified against InfluxDB 1.8 and 2.7's v1-compatibility
+    endpoint, whose responses are identical here). An earlier version returned only
+    the first series, which silently discarded every producer but one - invisible
+    while every query happened to be ungrouped, and wrong the moment one is not.
+    Callers that genuinely cannot produce more than one series use
+    :func:`single_series` to say so explicitly.
+
+    Args:
+        session (requests.Session): the handler's session
+        influx_settings (dict): the shared ``influx`` settings block
+        db (str): the database or bucket to query
+        query (str): the InfluxQL to run
+
+    Returns:
+        list: QuerySeries, empty when the query matched nothing
+
+    Raises:
+        SourceConnectionError: on a transport/parse failure
+    """
+    url, kwargs = _influx_read_request(influx_settings, db, query)
+    payload = _get(session, url, kwargs, "query")
+    found = []
+    for result in payload.get("results", []):
+        if result.get("error"):
+            raise SourceConnectionError(f"InfluxDB rejected the query: {result['error']!r}")
+        for series in result.get("series", []):
+            found.append(
+                QuerySeries(
+                    tags=dict(series.get("tags") or {}),
+                    columns=series.get("columns", []),
+                    values=series.get("values", []),
+                )
+            )
+    return found
+
+
+def single_series(series):
+    """Flatten a :func:`run_query` result that must hold at most one series.
+
+    For queries that cannot produce more than one - no ``GROUP BY`` on a tag, so
+    InfluxQL merges every tag value into a single series - this restores the plain
+    ``(columns, values)`` shape.
+
+    **Raises rather than truncating if the assumption is violated.** Silently
+    keeping the first series is the exact defect this module was just fixed for, so
+    re-introducing it behind a helper would defeat the change: a later edit adding a
+    tag ``GROUP BY`` without updating its consumer would go back to losing data
+    invisibly. Failing loudly turns that into an immediate, obvious error instead.
+
+    The condition is unreachable today - verified against a real InfluxDB 1.8 that
+    every current caller's query returns exactly one series, including the
+    aggregation path's ``GROUP BY time(...)``, which splits rows rather than series.
+    So the guard costs nothing now and only fires on a genuine programming error.
+    ``ValueError`` matches ``_build_single_point_query``'s existing internal-guard
+    idiom; it is not a caller- or transport-level failure and must not be mapped to
+    ToolParamError or SourceConnectionError.
+
+    Args:
+        series (list): list of QuerySeries from run_query
+
+    Returns:
+        tuple: ``(columns, values)``, or ``([], [])`` when there is no series
+
+    Raises:
+        ValueError: if given more than one series
+    """
+    if not series:
+        return [], []
+    if len(series) > 1:
+        raise ValueError(
+            f"single_series() got {len(series)} series, expected at most one - the query "
+            f"grouped by a tag, so its consumer must handle every series (tag sets: "
+            f"{[s.tags for s in series]})"
+        )
+    return series[0].columns, series[0].values

@@ -21,7 +21,6 @@ from toinflux.mcp_read import (
     build_query,
     build_schema,
     current_state_result,
-    MeasurementKeys,
     discover_measurement_keys,
     field_kind,
     discover_tag_values,
@@ -31,14 +30,13 @@ from toinflux.mcp_read import (
     register_read_tools,
     resolve_db,
     resolve_schema,
-    QuerySeries,
     run_query,
     single_series,
     configured_instances,
     _validate_instance,
     _annotate_state_field,
-    _influx_read_request,
 )
+from toinflux.influx import MeasurementKeys, QuerySeries, _influx_read_request
 
 NOW = datetime.datetime(2026, 7, 21, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
@@ -297,6 +295,24 @@ class TestAnnotateRows:
     def test_empty_values(self):
         result = annotate_rows(make_schema(), "gen", [], [])
         assert result["points"] == []
+
+    def test_a_short_row_is_dropped_rather_than_crashing_the_read(self, caplog):
+        """A row shorter than its column list raised IndexError out of the read.
+
+        Dropped rather than emitted with a null cell: null is a legitimate value here, so
+        a malformed row would otherwise arrive at the client indistinguishable from a real
+        gap in the series.
+        """
+        with caplog.at_level("WARNING"):
+            result = annotate_rows(make_schema(), "gen", ["time", "gen"], [[100, 5], [200], [300, 7]])
+        assert result["points"] == [{"time": 100, "value": 5}, {"time": 300, "value": 7}]
+        assert "Dropped 1 row(s)" in caplog.text
+
+    def test_a_null_value_is_kept_because_an_empty_window_produces_one(self):
+        """mean() over a GROUP BY window with no points returns null. That is data, not a
+        malformed row, so it must survive the short-row guard."""
+        result = annotate_rows(make_schema(), "gen", ["time", "mean"], [[100, None]])
+        assert result["points"] == [{"time": 100, "value": None}]
 
 
 class TestInfluxReadRequest:
@@ -1880,6 +1896,16 @@ class TestDiscoverTagValues:
         assert values == set()
         assert "no 'value' column" in caplog.text
 
+    def test_a_row_shorter_than_its_columns_is_skipped_not_a_crash(self):
+        """Nothing guarantees a row is as long as the column list. A bare row[index]
+        raised IndexError out of a read whose callers are written to expect
+        SourceConnectionError, so one malformed row lost the whole allowlist."""
+        payload = {"results": [{"series": [{"columns": ["key", "value"], "values": [["host", "hostA"], ["host"]]}]}]}
+        values = discover_tag_values(
+            _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "m", "host"
+        )
+        assert values == {"hostA"}
+
     def test_result_error_surfaces_rather_than_looking_like_no_instances(self):
         payload = {"results": [{"error": "database not found: sdb"}]}
         with pytest.raises(SourceConnectionError, match="rejected the tag-value discovery"):
@@ -2231,7 +2257,7 @@ class TestDataRangeResult:
 
         A bare positional index would raise IndexError from inside the read rather than the
         "could not read that" the caller is written for. Applies to every row access in the
-        module, not just this one, which is why they share one reader.
+        module, not just this one, which is why they all go through _cell or _at.
         """
         from toinflux.mcp_read import _cell, data_range_result
 
