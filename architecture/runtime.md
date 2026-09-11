@@ -156,3 +156,45 @@ the wait, and abandoning an inherited pipe is a decision the loop can simply tak
 Once the child has exited, draining continues for `_DRAIN_GRACE_SECONDS` and then stops:
 whatever still holds that pipe is not going to close it. Output the command produced before
 that point is still returned.
+
+## Control configuration (`toinflux/controls.py`)
+
+A control is a closed loop holding something at a target by actuating a device. Each is a
+YAML document, one file per control, under the installation's **state directory** rather
+than `/etc`: these are written by the running service and by an MCP client on its behalf,
+and `/etc/send-to-influx` is root-owned while the service runs as `send-to-influx`.
+
+`resolve_state_dir()` (`toinflux/general.py`) is the single answer to "where does runtime
+state live" - systemd's `$STATE_DIRECTORY` when there is one, otherwise beside the settings
+file. `resolve_state_path()` in the MCP layer is built on it, so the OAuth state file and
+the control store cannot disagree about the location. It lives in `general.py` rather than
+the MCP layer so a control process can ask without importing the MCP SDK.
+
+**A control's name is its filename, and an MCP client chooses it.** `CONTROL_NAME_PATTERN`
+is an allow-list, and a name outside it is refused rather than sanitised: rewriting a name
+would make the control the caller asked for and the control that exists two different
+things, and mapping two requested names onto one file is worse than an error. This is the
+boundary that stops a caller picking which file gets written.
+
+**Writes are atomic.** A temporary file in the same directory, flushed and fsynced, then
+renamed into place - so a control process reading the document at the moment it changes
+sees the old one or the new one, never half of either. A failed write removes its
+temporary file rather than leaving a dot-file behind per attempt.
+
+**Validation here is structural only.** A rule expression is checked to be a string and no
+further; the parser reports its own syntax errors. That split keeps a missing key and a
+malformed expression each described by the code that understands it. Every problem in a
+document is collected rather than raising on the first, because an operator writing one by
+hand would otherwise fix a single typo per run.
+
+Two rules are worth knowing before changing this:
+
+- **Every stage must assign every device the control owns.** A stage that says nothing
+  about a device is not the same as a stage turning it off, and an operator reading the
+  ladder would assume it was off. This is how a heater silently stays on.
+- **A `bool` is not a number.** `bool` subclasses `int`, so `level: true` would otherwise
+  validate and then sort as 1, quietly inserting a rung into the ladder.
+
+`--check-config` validates every stored control, because they are configuration even though
+they do not live in `settings.yaml`, and the question that mode answers is whether this
+installation would start cleanly.
