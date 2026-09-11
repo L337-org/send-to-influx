@@ -279,6 +279,21 @@ class TestTheFetchLockSerialisesLiveFetches:
             with fetch_lock("hue", budget=1):
                 pass
 
+    def test_a_lock_that_cannot_work_is_reported_not_retried(self, tmp_path, monkeypatch):
+        """Contention is EAGAIN, which arrives as BlockingIOError. Any other OSError means
+        the lock is not working - a filesystem without flock support, a bad descriptor.
+
+        Retried as if it were contention, that failure is indistinguishable from a busy
+        lock: every control waits its whole budget, reports "busy", and carries on with
+        serialisation silently off. A lock that appears to work and guarantees nothing is
+        worse than one that says it cannot.
+        """
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        monkeypatch.setattr("fcntl.flock", MagicMock(side_effect=OSError(45, "Operation not supported")))
+        with pytest.raises(ConfigError, match="cannot lock .* to serialise live fetches of 'hue'"):
+            with fetch_lock("hue", budget=5):
+                pass
+
     def test_each_source_has_its_own_lock(self, tmp_path, monkeypatch):
         """Two controls reading different sources have no reason to wait for each other."""
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))

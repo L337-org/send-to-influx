@@ -411,23 +411,52 @@ def fetch_lock(  # noqa: DOC403 - a generator, but unannotated
     except OSError as exc:
         raise ConfigError(f"cannot open the fetch lock {path!r}: {exc}") from exc
     with handle:
-        held = False
-        while True:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                held = True
-                break
-            except OSError:
-                # Held by another control. Nothing here distinguishes "busy" from a lock
-                # this platform cannot take, and both mean the same thing to the caller.
-                if monotonic() >= deadline:
-                    break
-                sleep(min(rng.uniform(MIN_LOCK_BACKOFF, MAX_LOCK_BACKOFF), max(deadline - monotonic(), 0)))
+        held = _acquire(handle, path, source, deadline, rng, sleep, monotonic)
         try:
             yield held
         finally:
             if held:
                 fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _acquire(handle, path, source, deadline, rng, sleep, monotonic):
+    """Try for the lock until the deadline, and say whether it was taken.
+
+    Split out of :func:`fetch_lock` only to keep that function within the project's
+    cyclomatic complexity limit, as ``_send_buffered`` is split out of ``send_data``.
+
+    Args:
+        handle (io.TextIOWrapper): the open lock file; the lock is on this descriptor
+        path (str): the lock file's path, for the message
+        source (str): the source being locked, for the message
+        deadline (float): the monotonic time to give up at
+        rng (random.Random): the randomness for the backoff
+        sleep (callable): the sleep
+        monotonic (callable): the clock
+
+    Returns:
+        bool: True where the lock is now held
+
+    Raises:
+        ConfigError: where locking cannot work here at all
+    """
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            # Contention, and only contention. LOCK_NB reports a lock someone else holds as
+            # EAGAIN, which Python raises as BlockingIOError - measured, not assumed.
+            if monotonic() >= deadline:
+                return False
+            sleep(min(rng.uniform(MIN_LOCK_BACKOFF, MAX_LOCK_BACKOFF), max(deadline - monotonic(), 0)))
+        except OSError as exc:
+            # Anything else is the lock not working rather than being held: a filesystem
+            # that does not support flock, a bad descriptor. Retried as contention it would
+            # look identical to a busy lock, so every control would wait its whole budget,
+            # report "busy", and carry on with serialisation silently switched off - a lock
+            # that appears to work and guarantees nothing.
+            raise ConfigError(f"cannot lock {path!r} to serialise live fetches of {source!r}: {exc}") from exc
 
 
 def read_input(session, settings, spec, settings_file=None, now=None):
