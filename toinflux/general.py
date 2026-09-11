@@ -123,8 +123,11 @@ def render_values(values, separator=", ", empty="none"):
     Returns:
         str: the quoted, ordered list, or ``empty`` when there is nothing to show
     """
-    rendered = separator.join(repr(value) for value in sorted(values, key=repr))
-    return rendered or empty
+    # repr once per value, not twice: computing it separately for the sort key and the
+    # join would do the work again and, for a value whose repr is not stable, could sort
+    # by one string and display another.
+    quoted = sorted(repr(value) for value in values)
+    return separator.join(quoted) or empty
 
 
 def flatten_dict(data, parent_key="", sep="_"):

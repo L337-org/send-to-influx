@@ -1321,6 +1321,9 @@ class Hue(DataHandler):
             if isinstance(item, dict) and "error" in item
         ]
         if errors:
-            logging.error("Hue Bridge rejected a write to light %s - %s", light_id, "; ".join(errors))
+            # The bridge wrote these strings, so they go through the renderer for the
+            # same reason the raise below does: one containing a newline would otherwise
+            # write its own line into the journal.
+            logging.error("Hue Bridge rejected a write to light %s - %s", light_id, render_values(errors, "; "))
             raise SourceConnectionError(f"Hue Bridge rejected the write: {render_values(errors, '; ')}")
         return result

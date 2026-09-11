@@ -1053,10 +1053,27 @@ def _joins_inside_raises(source):
     return found
 
 
-def test_every_collection_in_an_error_is_rendered_safely():
-    """A collection reaches an error message through ``render_values``, never a bare join.
+def test_every_collection_interpolated_into_an_error_is_rendered_safely():
+    """A collection *interpolated into* an error message goes through ``render_values``.
 
-    Two problems, one rule. A value may not be a string - mapping keys read from YAML need
+    **What this does and does not cover**, because the boundary is a judgement the guard
+    cannot make and the docstring should not pretend otherwise.
+
+    It covers a collection interpolated into an f-string inside a ``raise`` - a list of
+    identifiers, field keys, device names, bridge names - which is where both real
+    defects were.
+
+    It does not cover ``raise ConfigError("; ".join(errors))``, where the items are
+    prose we wrote: "mqtt.broker_host is required for MQTT-based sources". Rendering
+    those would quote whole sentences, which is worse to read and protects nothing,
+    because the external values inside them are already quoted at the point each
+    sentence was built. Eight such sites exist and all of them are correct as they are.
+
+    Telling a list of values from a list of sentences is not something an AST can do, so
+    the guard covers the shape that goes wrong and this docstring is the record of the
+    shape it deliberately leaves alone.
+
+    Two problems, one rule, for what it does cover. A value may not be a string - mapping keys read from YAML need
     not be - so sorting a mixed collection raises ``TypeError`` while reporting bad input,
     turning a message into a crash. And a value may not be ours: field keys come back from
     InfluxDB, device names from a control document, bridge names from settings, and any of
