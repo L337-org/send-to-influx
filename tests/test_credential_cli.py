@@ -29,6 +29,33 @@ from toinflux.credential_cli import (
     _validate_storage_name,
     main,
 )
+from toinflux.exceptions import ConfigError
+from toinflux.process import CommandResult, ProcessError
+
+
+def command_result(stdout=b"", stderr=b"", returncode=0):
+    """Build a real run_command result rather than a stand-in for one.
+
+    A MagicMock would answer ``ok`` truthily whatever the exit status, so a test
+    asserting the failure path would pass against code that never checks it. This is
+    the actual dataclass, so a change to its shape breaks these tests rather than
+    letting them agree with an interface that no longer exists.
+
+    Args:
+        stdout (bytes): captured standard output
+        stderr (bytes): captured standard error
+        returncode (int): the exit status
+
+    Returns:
+        CommandResult: a result shaped exactly as run_command returns one
+    """
+    return CommandResult(
+        argv=["/usr/bin/systemd-creds"],
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
 
 # --------------------------------------------------------------------------- #
 # systemd-creds version check
@@ -45,19 +72,19 @@ class TestParseSystemdCredsVersion:
 
 class TestRequireSystemdCreds:
     def test_raises_specific_message_when_binary_missing(self):
-        with patch("subprocess.run", side_effect=FileNotFoundError):
+        with patch("toinflux.credential_cli.run_command", side_effect=ConfigError("not found on PATH")):
             with pytest.raises(CredentialCliError, match="systemd-creds not found"):
                 _require_systemd_creds()
 
     def test_raises_specific_message_when_version_too_old(self):
-        result = MagicMock(stdout="systemd 249 (249.11-0ubuntu3.20)\n")
-        with patch("subprocess.run", return_value=result):
+        result = command_result(stdout=b"systemd 249 (249.11-0ubuntu3.20)\n")
+        with patch("toinflux.credential_cli.run_command", return_value=result):
             with pytest.raises(CredentialCliError, match="requires systemd >= 250"):
                 _require_systemd_creds()
 
     def test_passes_when_version_new_enough(self):
-        result = MagicMock(stdout="systemd 257 (257.13-1~deb13u1)\n")
-        with patch("subprocess.run", return_value=result):
+        result = command_result(stdout=b"systemd 257 (257.13-1~deb13u1)\n")
+        with patch("toinflux.credential_cli.run_command", return_value=result):
             _require_systemd_creds()  # does not raise
 
 
@@ -153,9 +180,9 @@ class TestEncryptCredential:
         def fake_run(cmd, **kwargs):
             with open(cmd[-1], "w", encoding="utf8") as f:
                 f.write("ciphertext")
-            return MagicMock(returncode=0)
+            return command_result()
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch("toinflux.credential_cli.run_command", side_effect=fake_run):
             _encrypt_credential("influx-token", "a-real-secret", credstore_dir=str(credstore_dir))
 
         mode = stat_module.S_IMODE(os.stat(credstore_dir).st_mode)
@@ -175,9 +202,9 @@ class TestEncryptCredential:
         def fake_run(cmd, **kwargs):
             with open(cmd[-1], "w", encoding="utf8") as f:
                 f.write("ciphertext")
-            return MagicMock(returncode=0)
+            return command_result()
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch("toinflux.credential_cli.run_command", side_effect=fake_run):
             _encrypt_credential("influx-token", "a-real-secret", credstore_dir=str(credstore_dir))
 
         mode = stat_module.S_IMODE(os.stat(credstore_dir).st_mode)
@@ -206,7 +233,7 @@ class TestDecryptCredential:
         credstore.mkdir()
         (credstore / "influx-token.cred").write_text("ciphertext")
 
-        with patch("subprocess.run", return_value=MagicMock(stdout=b"  spaced-secret  \n")):
+        with patch("toinflux.credential_cli.run_command", return_value=command_result(stdout=b"  spaced-secret  \n")):
             assert _decrypt_credential("influx-token", credstore_dir=str(credstore)) == "  spaced-secret  "
 
     def test_raises_when_credential_missing(self, tmp_path):
@@ -227,7 +254,7 @@ class TestDecryptCredential:
         credstore.mkdir()
         (credstore / "influx-token.cred").write_text("ciphertext")
 
-        with patch("subprocess.run", return_value=MagicMock(stdout=b"secret")) as run:
+        with patch("toinflux.credential_cli.run_command", return_value=command_result(stdout=b"secret")) as run:
             _decrypt_credential("influx-token", credstore_dir=str(credstore))
         assert run.call_args[0][0] == [
             "systemd-creds",
@@ -246,7 +273,9 @@ class TestDecryptCredential:
         credstore.mkdir()
         (credstore / "influx-token.cred").write_text("ciphertext")
 
-        with patch("subprocess.run", return_value=MagicMock(stdout=b"\xff\xfe not valid utf-8")):
+        with patch(
+            "toinflux.credential_cli.run_command", return_value=command_result(stdout=b"\xff\xfe not valid utf-8")
+        ):
             with pytest.raises(CredentialCliError, match="not valid UTF-8"):
                 _decrypt_credential("influx-token", credstore_dir=str(credstore))
 
@@ -490,7 +519,7 @@ class TestCmdSet:
         monkeypatch.setattr(credential_cli.sys.stdin, "isatty", lambda: False)
         monkeypatch.setattr(credential_cli.sys.stdin, "read", lambda: "real-secret-value\n")
 
-        version_result = MagicMock(stdout="systemd 257\n")
+        version_result = command_result(stdout=b"systemd 257\n")
         encrypt_calls = []
 
         def fake_run(cmd, **kwargs):
@@ -500,16 +529,16 @@ class TestCmdSet:
                 encrypt_calls.append((cmd, kwargs))
                 (credstore / "influx-token.cred").parent.mkdir(parents=True, exist_ok=True)
                 (credstore / "influx-token.cred").write_text("ciphertext")
-                return MagicMock(returncode=0)
-            return MagicMock(returncode=0)
+                return command_result()
+            return command_result()
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch("toinflux.credential_cli.run_command", side_effect=fake_run):
             _cmd_set("influx-token", str(settings_path))
 
         assert len(encrypt_calls) == 1
         cmd, kwargs = encrypt_calls[0]
         assert "real-secret-value" not in cmd  # never in argv
-        assert kwargs["input"] == b"real-secret-value"
+        assert kwargs["stdin_bytes"] == b"real-secret-value"
 
         result_yaml = yaml.safe_load(settings_path.read_text())
         assert "stored in systemd-creds" in result_yaml["influx"]["token"]
@@ -535,14 +564,14 @@ class TestCmdSet:
 
         def fake_run(cmd, **kwargs):
             if cmd[:2] == ["systemd-creds", "--version"]:
-                return MagicMock(stdout="systemd 257\n")
+                return command_result(stdout=b"systemd 257\n")
             if cmd[:2] == ["systemd-creds", "encrypt"]:
                 credstore.mkdir(parents=True, exist_ok=True)
                 (credstore / "hue-user2.cred").write_text("ciphertext")
-                return MagicMock(returncode=0)
-            return MagicMock(returncode=0)
+                return command_result()
+            return command_result()
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch("toinflux.credential_cli.run_command", side_effect=fake_run):
             _cmd_set("hue-user2", str(settings_path))
 
         text = settings_path.read_text()
@@ -566,13 +595,13 @@ class TestCmdSet:
 
         def fake_run(cmd, **kwargs):
             if cmd[:2] == ["systemd-creds", "--version"]:
-                return MagicMock(stdout="systemd 257\n")
+                return command_result(stdout=b"systemd 257\n")
             if cmd[:2] == ["systemd-creds", "encrypt"]:
                 credstore.mkdir(parents=True, exist_ok=True)
                 (credstore / "influx-token.cred").write_text("ciphertext")
-            return MagicMock(returncode=0)
+            return command_result()
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch("toinflux.credential_cli.run_command", side_effect=fake_run):
             _cmd_set("influx-token", str(settings_path))
 
         result_lines = settings_path.read_text().splitlines()
@@ -601,13 +630,13 @@ class TestCmdSet:
 
         def fake_run(cmd, **kwargs):
             if cmd[:2] == ["systemd-creds", "--version"]:
-                return MagicMock(stdout="systemd 257\n")
+                return command_result(stdout=b"systemd 257\n")
             if cmd[:2] == ["systemd-creds", "encrypt"]:
                 credstore.mkdir(parents=True, exist_ok=True)
                 (credstore / "influx-token.cred").write_text("ciphertext")
-            return MagicMock(returncode=0)
+            return command_result()
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch("toinflux.credential_cli.run_command", side_effect=fake_run):
             with pytest.raises(CredentialCliError, match="was encrypted and stored in systemd-creds"):
                 _cmd_set("influx-token", str(settings_path))
 
@@ -630,7 +659,7 @@ class TestCmdRemove:
         monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
         monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(dropin))
 
-        with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+        with patch("toinflux.credential_cli.run_command", return_value=command_result()):
             _cmd_remove("influx-token", str(settings_path))
 
         assert not (credstore / "influx-token.cred").exists()
@@ -656,7 +685,7 @@ class TestCmdRemove:
         monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
         monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(tmp_path / "dropin.conf"))
 
-        with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+        with patch("toinflux.credential_cli.run_command", return_value=command_result()):
             _cmd_remove("hue-user2", str(settings_path))
 
         assert not (credstore / "hue-user2.cred").exists()
@@ -683,7 +712,7 @@ class TestCmdRemove:
 
         os.chmod(credstore, 0o500)  # read+execute only, no write
         try:
-            with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+            with patch("toinflux.credential_cli.run_command", return_value=command_result()):
                 with pytest.raises(CredentialCliError, match="could not remove"):
                     _cmd_remove("influx-token", str(settings_path))
         finally:
@@ -704,7 +733,7 @@ class TestCmdRemove:
         monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
         monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(dropin))
 
-        with patch("subprocess.run", return_value=MagicMock(returncode=0)):
+        with patch("toinflux.credential_cli.run_command", return_value=command_result()):
             _cmd_remove("influx-token", str(settings_path))
 
         out = capsys.readouterr().out
@@ -730,7 +759,7 @@ class TestCmdRemove:
         monkeypatch.setattr(credential_cli, "CREDSTORE_DIR", str(credstore))
         monkeypatch.setattr(credential_cli, "DROPIN_PATH", str(dropin))
 
-        with patch("subprocess.run") as run:
+        with patch("toinflux.credential_cli.run_command") as run:
             with pytest.raises(CredentialCliError, match="could not safely rewrite"):
                 _cmd_remove("influx-token", str(settings_path))
             run.assert_not_called()  # never reached _regenerate_dropin/_reload_systemd
@@ -1058,15 +1087,18 @@ class TestEnsureInfluxStorage:
         def fake_run(cmd, **kwargs):
             if cmd[:2] == ["systemd-creds", "decrypt"]:
                 if cmd[2:4] == ["--name=influx-user", str(credstore / "influx-user.cred")]:
-                    return MagicMock(stdout=b"real-admin\n")
+                    return command_result(stdout=b"real-admin\n")
                 if cmd[2:4] == ["--name=influx-password", str(credstore / "influx-password.cred")]:
-                    return MagicMock(stdout=b"real-password\n")
+                    return command_result(stdout=b"real-password\n")
             raise AssertionError(f"unexpected subprocess call: {cmd}")
 
         post_result = MagicMock(status_code=200)
         post_result.raise_for_status.return_value = None
 
-        with patch("subprocess.run", side_effect=fake_run), patch("requests.post", return_value=post_result) as post:
+        with (
+            patch("toinflux.credential_cli.run_command", side_effect=fake_run),
+            patch("requests.post", return_value=post_result) as post,
+        ):
             _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
 
         _, kwargs = post.call_args
@@ -1086,7 +1118,10 @@ class TestEnsureInfluxStorage:
         post_result = MagicMock(status_code=200)
         post_result.raise_for_status.return_value = None
 
-        with patch("subprocess.run") as run, patch("requests.post", return_value=post_result) as post:
+        with (
+            patch("toinflux.credential_cli.run_command") as run,
+            patch("requests.post", return_value=post_result) as post,
+        ):
             _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
 
         run.assert_not_called()  # nothing to decrypt
@@ -1108,7 +1143,7 @@ class TestEnsureInfluxStorage:
         post_result = MagicMock(status_code=200)
         post_result.raise_for_status.return_value = None
 
-        with patch("subprocess.run", return_value=MagicMock(stdout=b"real-password\n")):
+        with patch("toinflux.credential_cli.run_command", return_value=command_result(stdout=b"real-password\n")):
             with patch("requests.post", return_value=post_result) as post:
                 _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
 
@@ -1159,7 +1194,7 @@ class TestEnsureInfluxStorage:
         list_resp.raise_for_status.return_value = None
         list_resp.json.return_value = {"buckets": [{"name": "speedtest_db"}]}
 
-        with patch("subprocess.run", return_value=MagicMock(stdout=b"real-token\n")):
+        with patch("toinflux.credential_cli.run_command", return_value=command_result(stdout=b"real-token\n")):
             with patch("requests.get", return_value=list_resp) as get, patch("requests.post") as post:
                 _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
 
@@ -1188,7 +1223,7 @@ class TestEnsureInfluxStorage:
         create_resp = MagicMock(status_code=200)
         create_resp.raise_for_status.return_value = None
 
-        with patch("subprocess.run") as run:
+        with patch("toinflux.credential_cli.run_command") as run:
             with patch("requests.get", side_effect=fake_get), patch("requests.post", return_value=create_resp) as post:
                 _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
 
@@ -1212,7 +1247,7 @@ class TestEnsureInfluxStorage:
         post_result = MagicMock(status_code=200)
         post_result.raise_for_status.return_value = None
 
-        with patch("subprocess.run"), patch("requests.post", return_value=post_result) as post:
+        with patch("toinflux.credential_cli.run_command"), patch("requests.post", return_value=post_result) as post:
             _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
 
         _, kwargs = post.call_args
@@ -1228,7 +1263,7 @@ class TestEnsureInfluxStorage:
         post_result = MagicMock(status_code=200)
         post_result.raise_for_status.return_value = None
 
-        with patch("subprocess.run"), patch("requests.post", return_value=post_result) as post:
+        with patch("toinflux.credential_cli.run_command"), patch("requests.post", return_value=post_result) as post:
             _cmd_ensure_influx_storage("speedtest_db", str(settings_path))
 
         _, kwargs = post.call_args
@@ -1257,7 +1292,7 @@ class TestEnsureInfluxStorage:
         create_resp = MagicMock(status_code=200)
         create_resp.raise_for_status.return_value = None
 
-        with patch("subprocess.run"):
+        with patch("toinflux.credential_cli.run_command"):
             with (
                 patch("requests.get", side_effect=fake_get) as get,
                 patch("requests.post", return_value=create_resp) as post,
@@ -1304,7 +1339,7 @@ class TestMain:
         original = settings_path.read_text()
 
         monkeypatch.setattr("os.geteuid", lambda: 1000)
-        with patch("subprocess.run") as run:
+        with patch("toinflux.credential_cli.run_command") as run:
             code = main(["influx-token", "--settings", str(settings_path)])
 
         assert code == 1
@@ -1358,7 +1393,7 @@ class TestMain:
 
     def test_non_root_ensure_influx_storage_does_not_run(self, tmp_path, monkeypatch):
         monkeypatch.setattr("os.geteuid", lambda: 1000)
-        with patch("subprocess.run") as run:
+        with patch("toinflux.credential_cli.run_command") as run:
             code = main(["--ensure-influx-storage", "hue_db"])
         assert code == 1
         run.assert_not_called()
@@ -1538,3 +1573,66 @@ class TestSlotFieldCreation:
         assert "hue-user2: configured" in out
         assert "hue-user7: configured, but no matching field" in out
         assert "influx-token: not set" in out
+
+
+class TestEveryFailureArrivesAsCredentialCliError:
+    """main() catches CredentialCliError and nothing else.
+
+    run_command raises ProcessError when a command has to be killed, so a hung
+    systemd-creds would otherwise reach the operator as a traceback with no indication
+    of what to do about it, and with an exit status nothing chose.
+    """
+
+    def test_a_hung_version_check_is_reported_not_raised_raw(self):
+        with patch("toinflux.credential_cli.run_command", side_effect=ProcessError("killed after 10s")):
+            with pytest.raises(CredentialCliError, match="systemd-creds version"):
+                _require_systemd_creds()
+
+    def test_a_hung_encrypt_is_reported_not_raised_raw(self, tmp_path):
+        with patch("toinflux.credential_cli.run_command", side_effect=ProcessError("killed after 30s")):
+            with pytest.raises(CredentialCliError, match="influx-token"):
+                _encrypt_credential("influx-token", "a-secret", credstore_dir=str(tmp_path / "credstore"))
+
+    def test_a_hung_decrypt_is_reported_not_raised_raw(self, tmp_path):
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+        with patch("toinflux.credential_cli.run_command", side_effect=ProcessError("killed after 30s")):
+            with pytest.raises(CredentialCliError, match="influx-token"):
+                _decrypt_credential("influx-token", credstore_dir=str(credstore))
+
+    def test_a_truncated_credential_is_refused_rather_than_returned_short(self, tmp_path):
+        # Returning the first megabyte of an over-long value would authenticate against
+        # nothing and give no clue why, which is the silent-partial-result failure the
+        # capture cap is required to report rather than hide.
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+        truncated = CommandResult(
+            argv=["/usr/bin/systemd-creds"], returncode=0, stdout=b"partial", stderr=b"", stdout_truncated=True
+        )
+        with patch("toinflux.credential_cli.run_command", return_value=truncated):
+            with pytest.raises(CredentialCliError, match="truncated"):
+                _decrypt_credential("influx-token", credstore_dir=str(credstore))
+
+
+class TestSpawnFailuresAlsoArriveAsCredentialCliError:
+    """run_command raises ConfigError when systemd-creds cannot be executed at all.
+
+    _require_systemd_creds() checks for it up front, but that check and the encrypt or
+    decrypt that follows are separate moments: a package removed, a permission changed,
+    or a caller reaching these helpers directly all land here instead.
+    """
+
+    def test_an_unexecutable_systemd_creds_is_reported_on_encrypt(self, tmp_path):
+        with patch("toinflux.credential_cli.run_command", side_effect=ConfigError("not found on PATH")):
+            with pytest.raises(CredentialCliError, match="influx-token"):
+                _encrypt_credential("influx-token", "a-secret", credstore_dir=str(tmp_path / "credstore"))
+
+    def test_an_unexecutable_systemd_creds_is_reported_on_decrypt(self, tmp_path):
+        credstore = tmp_path / "credstore"
+        credstore.mkdir()
+        (credstore / "influx-token.cred").write_text("ciphertext")
+        with patch("toinflux.credential_cli.run_command", side_effect=ConfigError("not found on PATH")):
+            with pytest.raises(CredentialCliError, match="influx-token"):
+                _decrypt_credential("influx-token", credstore_dir=str(credstore))
