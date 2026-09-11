@@ -158,6 +158,11 @@ def source_handler(source, settings_file=None, instance=None):  # noqa: DOC403 -
     Yields:
         DataHandler: the handler, valid for the duration of the block
     """
+    # Keywords at every call site. This module's functions do not agree on the order of
+    # these two - stored_reading takes instance first, this takes settings_file first - and
+    # transposing them here would drop settings_file into instance, which is the bug already
+    # fixed once in this module: the handler reading a different settings document from the
+    # caller, invisible until someone runs with -s.
     handler = get_class(source, settings_file, instance)
     try:
         yield handler
@@ -194,7 +199,7 @@ def stored_reading(session, settings, source, field, instance=None, settings_fil
     # name this can never read is wrong whatever the settings say - checking second meant a
     # missing settings.yaml masked the real complaint, which is how CI found this.
     _refuse_reserved_field(field)
-    with source_handler(source, settings_file, instance) as handler:
+    with source_handler(source, settings_file=settings_file, instance=instance) as handler:
         return handler_reading(session, settings, handler, field, now)
 
 
@@ -510,7 +515,7 @@ def read_input(session, settings, spec, settings_file=None, now=None):
     # One handler for the whole call, closed on the way out. Every path here needs one -
     # even the stored read, for the measurement, tags and database - and each build opens a
     # session nothing closes.
-    with source_handler(source, settings_file, spec.get("instance")) as handler:
+    with source_handler(source, settings_file=settings_file, instance=spec.get("instance")) as handler:
         stored = handler_reading(session, settings, handler, field, now)
         if stored is not None and stored.age <= trigger:
             return stored
