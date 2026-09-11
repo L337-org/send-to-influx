@@ -349,7 +349,10 @@ def fetch_lock_path(source, settings_file=None):
 
     Args:
         source (str): the source name, in any case
-        settings_file (str or None): the settings path, for resolving the state directory
+        settings_file (str or None): the settings path the caller was started with. Used for
+            the state directory *and* passed to the handler, so it reads the same document
+            the ``settings`` argument came from. Omitting it where the caller is not on the
+            default settings.yaml leaves the handler on a different one from the queries.
 
     Returns:
         str: the lock file's path, which may not exist yet
@@ -380,7 +383,10 @@ def fetch_lock(  # noqa: DOC403 - a generator, but unannotated
     Args:
         source (str): the source whose lock to take
         budget (float): seconds to keep trying before giving up
-        settings_file (str or None): the settings path, for resolving the state directory
+        settings_file (str or None): the settings path the caller was started with. Used for
+            the state directory *and* passed to the handler, so it reads the same document
+            the ``settings`` argument came from. Omitting it where the caller is not on the
+            default settings.yaml leaves the handler on a different one from the queries.
         rng (random.Random or None): the randomness, injectable for tests
         sleep (callable or None): the sleep, injectable for tests
         monotonic (callable or None): the clock, injectable for tests
@@ -492,7 +498,10 @@ def read_input(session, settings, spec, settings_file=None, now=None):
         spec (dict): one input declaration. ``source`` and ``field`` are required;
             ``max_age`` and ``instance`` are optional, matching what the control store
             validates. An absent ``max_age`` leaves the source's floor as the trigger.
-        settings_file (str or None): the settings path, for resolving the state directory
+        settings_file (str or None): the settings path the caller was started with. Used for
+            the state directory *and* passed to the handler, so it reads the same document
+            the ``settings`` argument came from. Omitting it where the caller is not on the
+            default settings.yaml leaves the handler on a different one from the queries.
         now (float or None): the clock, for tests; defaults to time.time()
 
     Returns:
