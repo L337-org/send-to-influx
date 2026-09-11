@@ -219,6 +219,40 @@ class TestValidateSettings:
         sample_settings["hue"]["mcp_read_write"] = True
         validate_settings(sample_settings)
 
+    def test_non_numeric_poll_floor_raises_config_error(self, sample_settings):
+        """The live-fetch floor is reported at --check-config, not at a control's startup.
+
+        A control process resolves it hours later and in the journal, which is the wrong
+        place to find out that a number was typed as a string.
+        """
+        sample_settings["hue"]["poll_floor"] = "60"
+        with pytest.raises(ConfigError, match="poll_floor must be a number of seconds"):
+            validate_settings(sample_settings)
+
+    def test_bool_poll_floor_raises_config_error(self, sample_settings):
+        """`bool` subclasses `int`, so `poll_floor: true` would validate and then act as a
+        one-second floor - the same trap a control's stage level refuses a bool for."""
+        sample_settings["hue"]["poll_floor"] = True
+        with pytest.raises(ConfigError, match="poll_floor must be a number of seconds"):
+            validate_settings(sample_settings)
+
+    def test_negative_poll_floor_raises_config_error(self, sample_settings):
+        sample_settings["hue"]["poll_floor"] = -1
+        with pytest.raises(ConfigError, match="poll_floor must not be negative"):
+            validate_settings(sample_settings)
+
+    def test_numeric_poll_floor_is_accepted(self, sample_settings):
+        """Zero is a legitimate floor: it means this source may be asked whenever a control
+        wants it, which is the right setting for something cheap to read."""
+        for value in (0, 60, 12.5):
+            sample_settings["hue"]["poll_floor"] = value
+            validate_settings(sample_settings)
+
+    def test_absent_poll_floor_is_accepted(self, sample_settings):
+        """The key is optional; the source's own interval is the default floor."""
+        sample_settings["hue"].pop("poll_floor", None)
+        validate_settings(sample_settings)
+
     def test_empty_token_falls_back_to_v1_validation(self, sample_settings):
         """validate_settings treats an empty token as absent and validates v1 user/password instead."""
         sample_settings["influx"]["token"] = ""

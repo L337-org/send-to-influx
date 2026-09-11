@@ -27,6 +27,12 @@ from toinflux.exceptions import ConfigError
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_LOG_BACKUP_COUNT = 3
 
+# The per-source key, beside `interval` and `timeout`, bounding how often anything may go
+# live to this source. It lives here rather than in toinflux.inputs, which is the only
+# thing that honours it, because inputs imports influx and influx imports this module:
+# validating it here and importing the name the other way would be an import cycle.
+POLL_FLOOR_KEY = "poll_floor"
+
 
 def configure_logging(
     logfile=None, loglevel="INFO", log_max_bytes=DEFAULT_LOG_MAX_BYTES, log_backup_count=DEFAULT_LOG_BACKUP_COUNT
@@ -959,7 +965,35 @@ def _validate_source_block(source, settings, is_v2):
     # leave writes off. Fail loud instead - a user who set it meant to enable it.
     if "mcp_read_write" in source_cfg and not isinstance(source_cfg["mcp_read_write"], bool):
         errors.append(f"{source}.mcp_read_write must be true or false (got {source_cfg['mcp_read_write']!r})")
+    errors.extend(_validate_poll_floor(source, source_cfg))
     return errors
+
+
+def _validate_poll_floor(source, source_cfg):
+    """Return errors for a source's optional live-fetch floor.
+
+    Checked here rather than where it is read because a control process resolves it at
+    startup, long after --check-config is the place anyone is looking for a clear message.
+
+    A bool is refused for the reason it is refused in a control's stage levels: `bool`
+    subclasses `int`, so `poll_floor: true` would validate and then act as a one-second
+    floor, which is not what typing `true` meant.
+
+    Args:
+        source (str): the source name, for the message
+        source_cfg (dict): that source's settings section
+
+    Returns:
+        list: error strings, empty when the key is absent or usable
+    """
+    if POLL_FLOOR_KEY not in source_cfg:
+        return []
+    value = source_cfg[POLL_FLOOR_KEY]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return [f"{source}.{POLL_FLOOR_KEY} must be a number of seconds (got {value!r})"]
+    if value < 0:
+        return [f"{source}.{POLL_FLOOR_KEY} must not be negative (got {value!r})"]
+    return []
 
 
 def _log_config_warnings(warnings_found, settings_path, warn) -> None:
