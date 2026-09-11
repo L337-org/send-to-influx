@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.influx import InfluxWriteError
 from toinflux.inputs import (
     MAX_LOCK_BACKOFF,
@@ -361,6 +361,36 @@ class TestStoredReading:
         """
         with pytest.raises(ConfigError, match="cannot read a field named 'time'"):
             stored_reading(None, SETTINGS, "hue", "time")
+
+    def test_the_wrapper_escapes_even_if_the_inner_message_stops_doing_so(self, monkeypatch):
+        """What the outer !r is actually for, which is not what it first looks like.
+
+        Today the field name is escaped before it reaches this wrapper: _validate_identifier
+        quotes it, so a newline never arrives raw. Writing this test the obvious way - pass
+        a field containing a newline, assert the message has none - therefore passes with or
+        without the outer quoting and proves nothing. It did exactly that, which is why it
+        is written this way instead.
+
+        The outer quoting guards against the inner message format changing, so the test has
+        to supply an inner exception whose text is genuinely raw.
+        """
+
+        def fake_get_class(source, settings_file=None, instance=None):
+            handler = MagicMock()
+            handler.MCP_MEASUREMENT = None
+            handler.source = source
+            handler.mcp_tag_filters.return_value = {}
+            handler.source_settings = {"db": "x"}
+            return handler
+
+        monkeypatch.setattr("toinflux.inputs.get_class", fake_get_class)
+        monkeypatch.setattr(
+            "toinflux.inputs.build_latest_query",
+            MagicMock(side_effect=ToolParamError("invalid field name: temp\nDROP MEASUREMENT hue")),
+        )
+        with pytest.raises(ConfigError) as raised:
+            stored_reading(None, SETTINGS, "hue", "temperature")
+        assert "\n" not in str(raised.value), str(raised.value)
 
     def test_the_settings_file_reaches_the_handler(self, monkeypatch):
         """Otherwise the handler loads the default settings.yaml while the caller passes a
