@@ -28,6 +28,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.influx import InfluxWriteError
 from toinflux.inputs import (
     MAX_LOCK_BACKOFF,
     MIN_LOCK_BACKOFF,
@@ -496,6 +497,25 @@ class TestReadInput:
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         with pytest.raises(ConfigError, match="'hue.timeout' must be a finite number"):
             read_input(None, SETTINGS, SPEC)
+
+    def test_a_failed_write_back_still_returns_the_reading(self, monkeypatch, tmp_path, caplog):
+        """The value in hand is good; only the coordination failed.
+
+        Raising would throw away a fresh reading because a best-effort write missed, and
+        the caller's response to a failed read is the safe state - so an InfluxDB hiccup
+        would switch the heating off while the temperature it was holding was perfectly
+        well known. What is genuinely lost is that other controls will not see this value,
+        so the floor stops binding until a write succeeds, and that goes in the log.
+        """
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        handler = _handler(data={"temperature": 21.0})
+        handler.send_data.side_effect = InfluxWriteError("influx returned 503")
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: None)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        with caplog.at_level("WARNING"):
+            reading = read_input(None, SETTINGS, SPEC, now=9600.0)
+        assert (reading.value, reading.live) == (21.0, True)
+        assert "write back" in caplog.text
 
     @pytest.mark.parametrize("bad", [float("inf"), float("nan"), True, "900", None])
     def test_a_non_finite_max_age_cannot_make_an_input_permanently_fresh(self, monkeypatch, bad):

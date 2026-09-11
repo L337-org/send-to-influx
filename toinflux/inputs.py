@@ -34,7 +34,7 @@ from dataclasses import dataclass
 
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.general import POLL_FLOOR_KEY, get_class, resolve_state_dir
-from toinflux.influx import build_latest_query, resolve_db, run_query, single_series
+from toinflux.influx import InfluxWriteError, build_latest_query, resolve_db, run_query, single_series
 
 
 def resolve_poll_floor(source, settings):
@@ -513,6 +513,9 @@ def _live_reading(handler, source, field, stored, now):
     Raises:
         SourceConnectionError: where the fetch failed and nothing was stored either
         ConfigError: where the source is misconfigured, which no amount of retrying fixes
+
+    Note:
+        A failed write-back is logged rather than raised: the reading is still returned.
     """
     moment = time.time() if now is None else now
     try:
@@ -530,7 +533,18 @@ def _live_reading(handler, source, field, stored, now):
     # Write back every field the fetch returned, not just the one asked for: the round trip
     # has already been paid for, and another control reading a different field of this
     # source is the case the floor exists to serve.
-    handler.send_data(data)
+    try:
+        handler.send_data(data)
+    except InfluxWriteError as exc:
+        # The value in hand is good; only the coordination failed. Raising here would throw
+        # away a fresh reading because a best-effort write missed, and the caller's response
+        # to a failed read is the safe state - so an InfluxDB hiccup would switch the heating
+        # off while the temperature it was holding was perfectly well known.
+        #
+        # What is lost is that other controls will not see this value and will each fetch
+        # their own, so the floor stops binding until a write succeeds. send_data buffers the
+        # point on failure, so it may still land on a later cycle.
+        logging.warning("Could not write back the live read of %r for %r: %r", source, field, exc)
     if field not in data:
         return _require(stored, source, field, "the live read returned no such field")
     # The point's own time, not the time we asked for it. get_data() sets handler.timestamp
