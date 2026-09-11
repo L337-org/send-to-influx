@@ -20,6 +20,7 @@ and ``test_shipped_files_do_not_send_readers_to_the_pointer_file`` depends on kn
 here are shipped.
 """
 
+import ast
 import os
 import re
 import subprocess
@@ -1010,3 +1011,165 @@ def test_every_named_guard_exists():
         "these references are not nodeids you can run from the repository root, so a reader "
         "following one gets a collection error:\n  " + "\n  ".join(unrunnable)
     )
+
+
+# The one sanctioned way to put a collection into a message. Anything else joining one
+# into a `raise` is the shape of two real defects written two days apart.
+VALUE_RENDERER = "render_values"
+RENDERER_HOME = Path("toinflux") / "general.py"
+
+# The rule covers feature code: the package and the entry point. scripts/ is deliberately
+# out of scope - check-repo-hygiene.py is vendored byte-identically across the
+# organisation's repositories, so it cannot call a helper that exists only here, and
+# rewriting it locally would break the property that makes vendoring worthwhile.
+PRODUCT_CODE_ROOTS = ("toinflux", "sendtoinflux.py")
+
+
+def _joins_inside_raises(source):
+    """Find collections joined straight into the message of a raise.
+
+    Parsed rather than pattern-matched, because the shape spans lines and nests inside an
+    f-string. Scoped to ``raise`` deliberately: the same call in a query builder is
+    correct - ``' AND '.join(where)`` assembles InfluxQL, and quoting it would break the
+    query - so a rule over every join would be noise, and noise is what gets a guard
+    switched off.
+
+    Args:
+        source (str): the module's text
+
+    Returns:
+        list: ``(line, expression)`` for each offending join
+    """
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Raise):
+            continue
+        for piece in ast.walk(node):
+            if not isinstance(piece, ast.JoinedStr):
+                continue
+            for call in ast.walk(piece):
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "join":
+                    found.append((call.lineno, ast.unparse(call)))
+    return found
+
+
+def test_every_collection_interpolated_into_an_error_is_rendered_safely():
+    """A collection *interpolated into* an error message goes through ``render_values``.
+
+    **What this does and does not cover**, because the boundary is a judgement the guard
+    cannot make and the docstring should not pretend otherwise.
+
+    It covers a collection interpolated into an f-string inside a ``raise`` - a list of
+    identifiers, field keys, device names, bridge names - which is where both real
+    defects were.
+
+    It does not cover ``raise ConfigError("; ".join(errors))``, where the items are
+    prose we wrote: "mqtt.broker_host is required for MQTT-based sources". Rendering
+    those would quote whole sentences, which is worse to read and protects nothing,
+    because the external values inside them are already quoted at the point each
+    sentence was built. Eight such sites exist and all of them are correct as they are.
+
+    Telling a list of values from a list of sentences is not something an AST can do, so
+    the guard covers the shape that goes wrong and this docstring is the record of the
+    shape it deliberately leaves alone.
+
+    Two problems, one rule, for what it does cover. A value may not be a string - mapping keys read from YAML need
+    not be - so sorting a mixed collection raises ``TypeError`` while reporting bad input,
+    turning a message into a crash. And a value may not be ours: field keys come back from
+    InfluxDB, device names from a control document, bridge names from settings, and any of
+    them can carry a newline that writes its own line into the journal and into a connected
+    client's output.
+
+    This exists as a test rather than as prose because the prose already existed. The rule
+    is in AGENTS.md, and two distinct defects of exactly this shape were written two days
+    apart anyway - the second after the first had been found and fixed. The judgement the
+    rule asks for at each call site is "is this value external", and that judgement is what
+    keeps going wrong, so the rule here needs none: every collection is rendered the same
+    way whether it came from InfluxDB or from a constant two lines up.
+    """
+    # general.py is scanned like every other module. An earlier version excluded the
+    # whole file because it defines the renderer, which would have left a permanent
+    # hole: a collection interpolated into a raise there would never have been checked.
+    # The helper needs no exemption anyway - its own join is not inside a raise, so the
+    # detector never looks at it.
+    candidates = [
+        path for path in _modules_that_carry_a_header() if path.relative_to(REPO_ROOT).parts[0] in PRODUCT_CODE_ROOTS
+    ]
+    # A guard that searched nothing looks identical to a clean tree.
+    assert len(candidates) >= 15, f"only found {len(candidates)} module(s) to check, so discovery is broken"
+
+    offenders = []
+    for path in candidates:
+        relative = path.relative_to(REPO_ROOT)
+        for line, expression in _joins_inside_raises(path.read_text(encoding="utf-8")):
+            offenders.append(f"{relative}:{line}  {expression}")
+    assert not offenders, (
+        f"these raise a message built with a bare join; use {VALUE_RENDERER}() so a "
+        f"non-string value cannot crash the report and a newline cannot forge a log "
+        f"line:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_renderer_the_guard_points_at_actually_exists():
+    """Guards the guard: a renamed helper would leave the message above naming nothing.
+
+    Resolved as an attribute rather than searched for as text. The first version of this
+    test asked whether the string "render_values" appeared anywhere in the module, which
+    a comment or a docstring mentioning the old name satisfies perfectly well after the
+    function itself has gone - so it would have kept passing while the message it
+    protects pointed at nothing.
+    """
+    import toinflux.general
+
+    renderer = getattr(toinflux.general, VALUE_RENDERER, None)
+    assert callable(renderer), (
+        f"the guard's message tells people to use {VALUE_RENDERER}(), but " f"{RENDERER_HOME} defines no such callable"
+    )
+
+
+class TestTheCollectionGuardActuallyDetects:
+    """Guards the guard.
+
+    The check above passes because the tree is clean, which is indistinguishable from a
+    detector that never matches anything. These exercise the detector directly, on source
+    written for the purpose, so a broken matcher fails here rather than silently
+    approving the tree for ever.
+
+    **Fixture source must parse on the oldest supported interpreter**, which means an
+    f-string here may not reuse its own quote character: ``f"{" AND ".join(w)}"`` is PEP
+    701 and legal only from 3.12, so the outer and inner quotes always differ below. This
+    cannot be caught locally - a newer interpreter accepts it, and ``ast.parse``'s
+    ``feature_version`` does not reject it either - so the version matrix in CI is the
+    only thing that sees it. It has already caught it once.
+    """
+
+    def test_a_bare_join_in_a_raise_is_found(self):
+        found = _joins_inside_raises("def f(xs):\n    raise ValueError(f'bad: {\", \".join(xs)}')\n")
+        assert len(found) == 1
+
+    def test_a_join_spanning_lines_is_found(self):
+        source = 'def f(xs):\n    raise ValueError(\n        f"bad: "\n        f"{chr(44).join(xs)}"\n    )\n'
+        assert len(_joins_inside_raises(source)) == 1
+
+    def test_a_join_outside_a_raise_is_left_alone(self):
+        # The query builders do this and must keep doing it: ' AND '.join(where) assembles
+        # InfluxQL, and quoting the pieces would break the query rather than protect it.
+        assert _joins_inside_raises("def f(w):\n    return f'WHERE {\" AND \".join(w)}'\n") == []
+
+    def test_a_join_in_a_log_call_is_left_alone(self):
+        # Out of scope, and not because logging is inherently safe - the example below
+        # proves it is not, since the join happens before the argument is ever deferred.
+        # It is out of scope because logging call sites were not measured or converted in
+        # this change, so guarding them would fail on correct code. One genuinely unsafe
+        # log site was found by review and fixed by hand (philipshue's write failure,
+        # which joins strings the bridge wrote); the rest were left, and widening the
+        # guard to logging needs that measurement doing first.
+        assert _joins_inside_raises("def f(xs):\n    logging.warning(f'{\", \".join(xs)}')\n") == []
+
+    def test_the_sanctioned_renderer_is_not_flagged(self):
+        assert _joins_inside_raises("def f(xs):\n    raise ValueError(f'bad: {render_values(xs)}')\n") == []
+
+    def test_the_report_names_the_line_and_the_expression(self):
+        line, expression = _joins_inside_raises("\n\ndef f(xs):\n    raise ValueError(f'{\", \".join(xs)}')\n")[0]
+        assert line == 4
+        assert "join" in expression

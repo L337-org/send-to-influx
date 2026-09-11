@@ -89,6 +89,51 @@ def configure_logging(
         root.addHandler(file_handler)
 
 
+def render_values(values, separator=", ", empty="none"):
+    """Render a collection into an error message, quoted and safely ordered.
+
+    The sanctioned way to put a collection of values into a message a user or an MCP
+    client will see, because two distinct bugs of that shape were written in two days
+    despite the rule being documented.
+
+    ``tests/test_repo_hygiene.py::test_every_collection_interpolated_into_an_error_is_rendered_safely``
+    enforces it for one specific shape: a collection interpolated into an f-string inside
+    a ``raise``, which is where both bugs were. It deliberately does not cover joining
+    prose fragments we wrote, and it does not cover logging; that test's own docstring is
+    the record of what it leaves alone and why.
+
+    Two problems, one place:
+
+    A value may not be a string. Mapping keys read from YAML need not be, so sorting a
+    mixed collection raises ``TypeError`` and joining it raises too - turning a message
+    about bad input into a crash while reporting it. Sorting by ``repr`` gives a total
+    order whatever the values are.
+
+    A value may not be ours. Field keys come back from InfluxDB, device and input names
+    come from a control document, bridge names come from settings: any of them can carry
+    a newline, and a raw join lets it write its own line into the journal and into any
+    connected client's output. ``repr`` escapes it instead.
+
+    Quoting a collection of our own constants costs nothing and reads no worse - the
+    rule is uniform precisely so nobody has to judge provenance at each call site, which
+    is the judgement that went wrong.
+
+    Args:
+        values (collections.abc.Iterable): the values to list
+        separator (str): what to put between them
+        empty (str): what to return when there is nothing to list, so a call site can
+            keep wording an existing message already used
+
+    Returns:
+        str: the quoted, ordered list, or ``empty`` when there is nothing to show
+    """
+    # repr once per value, not twice: computing it separately for the sort key and the
+    # join would do the work again and, for a value whose repr is not stable, could sort
+    # by one string and display another.
+    quoted = sorted(repr(value) for value in values)
+    return separator.join(quoted) or empty
+
+
 def flatten_dict(data, parent_key="", sep="_"):
     """Flatten a nested dictionary into a single-level dictionary.
 

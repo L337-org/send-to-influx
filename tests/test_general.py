@@ -16,6 +16,7 @@ from toinflux.general import (
     mcp_block_errors,
     mcp_enabled,
     parse_mcp_bind_address,
+    render_values,
     validate_settings,
 )
 from toinflux.exceptions import ConfigError
@@ -936,3 +937,42 @@ class TestFactoryVersusClassLookup:
         assert source_class("SpeedTest") is Speedtest
         with patch("toinflux.influx.load_settings", return_value=self.SETTINGS):
             assert isinstance(get_class("SpeedTest"), Speedtest)
+
+
+class TestRenderValues:
+    """The one sanctioned way to put a collection into an error message.
+
+    Enforced by ``tests/test_repo_hygiene.py::test_every_collection_interpolated_into_an_error_is_rendered_safely``,
+    which exists because the rule it enforces was documented and broken twice anyway.
+    """
+
+    def test_values_are_quoted(self):
+        assert render_values(["b", "a"]) == "'a', 'b'"
+
+    def test_a_newline_cannot_forge_a_second_line(self):
+        # Field keys come back from InfluxDB, device names from a control document,
+        # bridge names from settings. Any of them can carry a newline, and a raw join
+        # lets it write its own line into the journal and into a connected client.
+        rendered = render_values(["bad\nWARNING forged"])
+        assert "\n" not in rendered
+        assert "\\n" in rendered
+
+    def test_a_mixed_collection_sorts_instead_of_raising(self):
+        # YAML mapping keys need not be strings, and sorting a mixed set has no total
+        # order in Python 3 - so a plain sorted() turns a message about bad input into a
+        # TypeError while reporting it.
+        assert render_values({1, "x"}) == "'x', 1"
+
+    def test_the_order_is_stable(self):
+        assert render_values({"b", "a", "c"}) == render_values({"c", "a", "b"})
+
+    def test_an_empty_collection_says_none_by_default(self):
+        assert render_values([]) == "none"
+
+    def test_the_empty_text_can_match_an_existing_message(self):
+        # Several messages already said "(none)" before this helper existed; a safety fix
+        # should not quietly reword what a user sees.
+        assert render_values([], empty="(none)") == "(none)"
+
+    def test_the_separator_can_be_chosen(self):
+        assert render_values(["a", "b"], separator="; ") == "'a'; 'b'"

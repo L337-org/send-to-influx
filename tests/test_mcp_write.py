@@ -779,7 +779,9 @@ class TestHueMultiBridgeWrites:
                     bridge="nosuch.example.com",
                 )
         assert "unknown bridge" in str(excinfo.value)
-        assert "configured bridges: downstairs.example.com" in str(excinfo.value)
+        # Quoted now: a bridge name comes from settings and goes into a message, so it
+        # is rendered through render_values like every other collection in an error.
+        assert "configured bridges: 'downstairs.example.com'" in str(excinfo.value)
 
     def test_unknown_device_names_the_discovery_tool(self):
         handlers = self._two_bridges()

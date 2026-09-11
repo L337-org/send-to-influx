@@ -42,6 +42,7 @@ __license__ = "MIT"
 
 from mcp.types import ToolAnnotations
 
+from toinflux.general import render_values
 from toinflux.exceptions import ToolParamError
 from toinflux.mcp_common import close_session, register_tool
 from toinflux.mcp_read import build_panel_query, field_kind, resolve_schema
@@ -279,8 +280,8 @@ def suggest_panels_result(source, settings, settings_file, fields=None):
         unknown = [name for name in wanted if name not in schema.allowed_fields]
         if unknown:
             raise ToolParamError(
-                f"unknown field(s) {', '.join(repr(name) for name in unknown)} for source {source!r}; "
-                f"available fields: {', '.join(sorted(schema.allowed_fields)) or '(none)'}"
+                f"unknown field(s) {render_values(unknown)} for source {source!r}; "
+                f"available fields: {render_values(schema.allowed_fields, empty='(none)')}"
             )
         tags = series_tags(schema)
         return {

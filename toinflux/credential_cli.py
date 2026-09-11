@@ -29,6 +29,7 @@ import requests
 import urllib3
 import yaml
 
+from toinflux.general import render_values
 from toinflux.credentials import (
     CANONICAL_SLOT_SUFFIX_RE,
     CREDENTIAL_FIELDS,
@@ -1317,7 +1318,7 @@ def _credential_name_arg(value):
     if is_credential_name(value):
         return value
     raise argparse.ArgumentTypeError(
-        f"unknown credential {value!r}. Valid names: {', '.join(sorted(CREDENTIAL_FIELDS))}, "
+        f"unknown credential {value!r}. Valid names: {render_values(CREDENTIAL_FIELDS)}, "
         f"or a numbered Hue bridge username - hue-user2, hue-user3, ... (hue-user is the first bridge)"
     )
 
