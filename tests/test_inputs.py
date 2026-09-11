@@ -127,6 +127,15 @@ class TestResolvePollFloor:
         with pytest.raises(ConfigError, match="must be a number of seconds|is required"):
             resolve_poll_floor("hue", {"hue": {"interval": 300, "poll_floor": bad}})
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_floor_is_refused(self, bad):
+        """YAML .nan and .inf are floats, so type and sign checks both pass them, and
+        neither fails loudly later - which is the problem. A nan floor compares False
+        against any age, so the floor never holds and every cycle goes live; an inf floor
+        compares True, so nothing ever does."""
+        with pytest.raises(ConfigError, match="must be a finite number of seconds"):
+            resolve_poll_floor("hue", {"hue": {"interval": 300, "poll_floor": bad}})
+
     def test_a_negative_floor_is_refused(self):
         with pytest.raises(ConfigError, match="must not be negative"):
             resolve_poll_floor("hue", {"hue": {"interval": 300, "poll_floor": -5}})
@@ -460,6 +469,20 @@ class TestReadInput:
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         reading = read_input(None, SETTINGS, SPEC, now=9600.0)
         assert (reading.timestamp, reading.age) == (9600.0, 0.0)
+
+    def test_a_non_finite_timeout_cannot_hang_the_wait_loop(self, monkeypatch, tmp_path):
+        """The worst of the non-finite cases, and the reason the timeout goes through the
+        same validation as the floor. fetch_lock's deadline comparison is False forever
+        against a nan, so a contended control would wait for ever - a hang, in the
+        subsystem whose entire design is about processes not hanging.
+        """
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        stored = InputReading(value=19.5, timestamp=0.0, age=5000.0, live=False)
+        handler = _handler(timeout=float("nan"))
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        with pytest.raises(ConfigError, match="'hue.timeout' must be a finite number"):
+            read_input(None, SETTINGS, SPEC)
 
     def test_a_misconfigured_source_is_not_degraded_into_a_transient_failure(self, monkeypatch, tmp_path):
         """ConfigError means stop; SourceConnectionError means fail safe and carry on.

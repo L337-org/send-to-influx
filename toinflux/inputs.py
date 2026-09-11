@@ -24,6 +24,7 @@ __license__ = "MIT"
 
 import fcntl
 import logging
+import math
 import os
 import random
 import stat
@@ -100,6 +101,13 @@ def _as_seconds(value, setting):
         raise ConfigError(f"{setting!r} is required to resolve the live-fetch floor, and is missing")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"{setting!r} must be a number of seconds (got {value!r})")
+    # YAML .nan and .inf parse to floats and survive every check above. Neither fails
+    # loudly later, which is the problem: a nan floor compares False against any age, so
+    # the floor never holds and every cycle goes live; an inf floor compares True, so it
+    # never does. A nan used as a wait budget is worse - see fetch_lock, where the deadline
+    # comparison is False forever and the loop cannot exit.
+    if not math.isfinite(value):
+        raise ConfigError(f"{setting!r} must be a finite number of seconds (got {value!r})")
     if value < 0:
         raise ConfigError(f"{setting!r} must not be negative (got {value!r})")
     return float(value)
@@ -402,7 +410,9 @@ def read_input(session, settings, spec, settings_file=None, now=None):
         if not handler.MCP_LIVE_STATE:
             # Nothing to gain: this source's live read is no fresher than what is stored.
             return _require(stored, source, field, "it has no live read and InfluxDB holds no point for it")
-        budget = float(handler.source_settings.get("timeout", 5))
+        # Through the same door as the floor, so one piece of code decides what a duration
+        # is. A non-finite budget stops fetch_lock's wait loop ever reaching its deadline.
+        budget = _as_seconds(handler.source_settings.get("timeout", 5), f"{source}.timeout")
         with fetch_lock(source, budget, settings_file) as held:
             if not held:
                 logging.warning(

@@ -236,6 +236,15 @@ class TestValidateSettings:
         with pytest.raises(ConfigError, match="poll_floor must be a number of seconds"):
             validate_settings(sample_settings)
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_non_finite_poll_floor_raises_config_error(self, sample_settings, bad):
+        """.nan and .inf are floats to YAML and to isinstance, and neither fails loudly at
+        runtime: a nan floor never holds so every cycle goes live, an inf one always holds
+        so nothing ever does."""
+        sample_settings["hue"]["poll_floor"] = bad
+        with pytest.raises(ConfigError, match="poll_floor must be a finite number"):
+            validate_settings(sample_settings)
+
     def test_negative_poll_floor_raises_config_error(self, sample_settings):
         sample_settings["hue"]["poll_floor"] = -1
         with pytest.raises(ConfigError, match="poll_floor must not be negative"):

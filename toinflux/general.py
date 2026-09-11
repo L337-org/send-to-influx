@@ -8,6 +8,7 @@ __license__ = "MIT"
 import copy
 import ipaddress
 import logging
+import math
 import os
 import stat
 import sys
@@ -991,6 +992,11 @@ def _validate_poll_floor(source, source_cfg):
     value = source_cfg[POLL_FLOOR_KEY]
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return [f"{source}.{POLL_FLOOR_KEY} must be a number of seconds (got {value!r})"]
+    # .nan and .inf are floats as far as YAML and isinstance are concerned, and neither
+    # fails loudly later: a nan floor never holds so every cycle goes live, and an inf one
+    # always holds so nothing ever does. Same check the collection interval gets.
+    if not math.isfinite(value):
+        return [f"{source}.{POLL_FLOOR_KEY} must be a finite number of seconds (got {value!r})"]
     if value < 0:
         return [f"{source}.{POLL_FLOOR_KEY} must not be negative (got {value!r})"]
     return []
