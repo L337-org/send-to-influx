@@ -148,17 +148,21 @@ class TestBuildQuery:
         with pytest.raises(ToolParamError, match="invalid group_by"):
             build_query(make_schema(), field="gen", start="-1h", end="now", aggregation="mean", group_by=bad)
 
-    @pytest.mark.parametrize("bad", ["1h junk", "1h) --", "1h);DROP MEASUREMENT x", "5m or 1=1", "1h\nSELECT", "1h "])
+    @pytest.mark.parametrize(
+        "bad", ["1h junk", "1h) --", "1h);DROP MEASUREMENT x", "5m or 1=1", "1h\nSELECT", "1h ", "1h\n"]
+    )
     def test_a_valid_duration_prefix_does_not_carry_a_payload_in_with_it(self, bad):
-        """group_by is interpolated into GROUP BY time(...), so it must match whole.
+        r"""group_by is interpolated into GROUP BY time(...), so it must match whole.
 
-        Every case here begins with a genuine duration and was accepted while the retention
-        regex shadowed this one and the check used match(): "1h);DROP" reached InfluxDB as
-        GROUP BY time(1h);DROP) fill(none). The cases above this one all fail at the first
-        character, so they never exercised the prefix, which is why the suite stayed green.
+        Every case begins with a genuine duration. The cases in the test above all fail at the
+        first character, so they never exercised a prefix at all, which is why the suite stayed
+        green while `1h);DROP` reached InfluxDB as `GROUP BY time(1h);DROP) fill(none)`.
 
-        The trailing-space case is not padding: $ matches before a newline, so anchors alone
-        do not make match() a whole-string test.
+        The last case, a bare trailing newline, is the only one here that also defeats the
+        anchored `^\d+[smhdw]$` this was meant to be, because `$` matches before a trailing
+        newline. It is what makes fullmatch the fix rather than restoring the anchors: with
+        `match()` and anchors restored, every other case here passes and that one still gets
+        through.
         """
         with pytest.raises(ToolParamError, match="invalid group_by"):
             build_query(make_schema(), field="gen", start="-1h", end="now", aggregation="mean", group_by=bad)
