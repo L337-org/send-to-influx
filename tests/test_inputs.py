@@ -259,6 +259,16 @@ class TestTheFetchLockSerialisesLiveFetches:
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
         assert fetch_lock_path("Hue") == fetch_lock_path("hue")
 
+    def test_an_unopenable_lock_file_is_a_config_error_not_an_oserror(self, tmp_path, monkeypatch):
+        """A bare OSError crossing this boundary breaks the documented contract and reaches
+        an operator as a traceback instead of a message naming the file."""
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        # A directory where the lock file should be: open() cannot open it for writing.
+        os.makedirs(os.path.join(tmp_path, "locks", "fetch-hue.lock"))
+        with pytest.raises(ConfigError, match="cannot open the fetch lock"):
+            with fetch_lock("hue", budget=1):
+                pass
+
     def test_each_source_has_its_own_lock(self, tmp_path, monkeypatch):
         """Two controls reading different sources have no reason to wait for each other."""
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
@@ -290,6 +300,25 @@ SPEC = {"source": "hue", "field": "temperature", "max_age": 900}
 
 
 class TestStoredReading:
+    def test_an_unusable_field_name_is_a_config_error_not_a_tool_error(self, monkeypatch):
+        """The identifier check refuses a control character and says ToolParamError, because
+        its other caller is an MCP tool taking a model's argument. Here the name came from a
+        control document, so it is a configuration fault: stop, and no retry helps. A caller
+        catching ConfigError to mean "stop" would otherwise miss it entirely.
+        """
+
+        def fake_get_class(source, settings_file=None, instance=None):
+            handler = MagicMock()
+            handler.MCP_MEASUREMENT = None
+            handler.source = source
+            handler.mcp_tag_filters.return_value = {}
+            handler.source_settings = {"db": "x"}
+            return handler
+
+        monkeypatch.setattr("toinflux.inputs.get_class", fake_get_class)
+        with pytest.raises(ConfigError, match="unusable field"):
+            stored_reading(None, SETTINGS, "hue", "temp\nDROP MEASUREMENT hue")
+
     def test_the_settings_file_reaches_the_handler(self, monkeypatch):
         """Otherwise the handler loads the default settings.yaml while the caller passes a
         different document, and the two disagree about which database to read - invisible

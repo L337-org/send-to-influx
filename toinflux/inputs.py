@@ -31,7 +31,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.general import POLL_FLOOR_KEY, get_class, resolve_state_dir
 from toinflux.influx import build_latest_query, resolve_db, run_query, single_series
 
@@ -203,9 +203,18 @@ def handler_reading(session, settings, handler, field, now=None):
 
     Raises:
         SourceConnectionError: on a transport or parse failure
+        ConfigError: where the field name cannot go into a query at all
     """
     measurement = handler.MCP_MEASUREMENT or handler.source
-    query = build_latest_query(measurement, handler.mcp_tag_filters(), {field})
+    try:
+        query = build_latest_query(measurement, handler.mcp_tag_filters(), {field})
+    except ToolParamError as exc:
+        # The identifier check refuses a field name carrying a control character, and says so
+        # as ToolParamError because its other caller is an MCP tool taking a model's argument.
+        # Here the name came from a control document, so it is a configuration fault: the
+        # control must not start, and no retry helps. Re-typed rather than documented as-is,
+        # because a caller catching ConfigError to mean "stop" would otherwise miss it.
+        raise ConfigError(f"control input names an unusable field: {exc}") from exc
     db = resolve_db(handler.source_settings, settings["influx"])
     columns, values = single_series(run_query(session, settings["influx"], db, query))
     if not values:
@@ -322,7 +331,14 @@ def fetch_lock(  # noqa: DOC403 - a generator, but unannotated
     deadline = monotonic() + budget
     # Opened once and kept open: the lock is on the descriptor, so reopening per attempt
     # would drop it. "a" rather than "w" so a waiter cannot truncate the holder's file.
-    with open(path, "a", encoding="utf-8") as handle:
+    try:
+        # Wrapped for the same reason the makedirs above is: an OSError crossing this
+        # boundary breaks the documented contract and reaches an operator as a traceback
+        # rather than as a message naming the file it could not open.
+        handle = open(path, "a", encoding="utf-8")  # noqa: SIM115 - closed by the with below
+    except OSError as exc:
+        raise ConfigError(f"cannot open the fetch lock {path!r}: {exc}") from exc
+    with handle:
         held = False
         while True:
             try:
