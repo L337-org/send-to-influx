@@ -18,6 +18,7 @@ from importlib.metadata import version, PackageNotFoundError
 import toinflux
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.controls import validate_stored_controls
 
 try:
     __version__ = version("send-to-influx")
@@ -672,6 +673,16 @@ def _check_config_and_exit(settings, args):
         toinflux.validate_settings(
             settings, source=args.source, settings_path=args.settings or "settings.yaml", warn=True
         )
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    # Stored controls are checked here too, because they are configuration even though
+    # they do not live in settings.yaml. An operator running --check-config is asking
+    # whether this installation would start cleanly, and a control with a stage that
+    # forgets a device would otherwise be discovered by the control process at the
+    # moment it was meant to start actuating a heater.
+    try:
+        validate_stored_controls(args.settings)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         sys.exit(1)

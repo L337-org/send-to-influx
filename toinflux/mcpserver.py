@@ -40,7 +40,7 @@ import time
 from urllib.parse import urlparse
 
 from toinflux.exceptions import ConfigError
-from toinflux.general import parse_mcp_bind_address
+from toinflux.general import parse_mcp_bind_address, resolve_state_dir
 
 ACCESS_TOKEN_TTL_SECONDS = 3600
 REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600
@@ -346,14 +346,7 @@ def resolve_state_path(settings, settings_file=None):
     # beside settings.yaml, writable by whoever is running the process. No new configuration,
     # and no behaviour change off systemd.
     #
-    # Colon-separated when a unit declares several; take the first, so adding a second
-    # StateDirectory= later cannot silently move this file.
-    state_dir = os.environ.get("STATE_DIRECTORY", "").split(os.pathsep)[0].strip()
-    if state_dir:
-        return os.path.join(state_dir, "mcp-oauth-state.json")
-    base_dir = os.path.abspath(os.path.dirname(__file__) + "/..")
-    settings_dir = os.path.dirname(os.path.join(base_dir, settings_file or "settings.yaml"))
-    return os.path.join(settings_dir, "mcp-oauth-state.json")
+    return os.path.join(resolve_state_dir(settings_file), "mcp-oauth-state.json")
 
 
 def _transport_security_settings(public_url):

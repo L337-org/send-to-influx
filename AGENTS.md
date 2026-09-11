@@ -27,7 +27,7 @@ background.
 |---|---|
 | `toinflux/mcp*.py`, `toinflux/mcpserver.py` | [architecture/mcp-server.md](architecture/mcp-server.md) |
 | any collector under `toinflux/` (not the MCP modules) | [architecture/collectors.md](architecture/collectors.md) |
-| `sendtoinflux.py`, `toinflux/general.py`, `toinflux/process.py` | [architecture/runtime.md](architecture/runtime.md) |
+| `sendtoinflux.py`, `toinflux/general.py`, `toinflux/process.py`, `toinflux/controls.py` | [architecture/runtime.md](architecture/runtime.md) |
 | running an external command from anywhere | `toinflux.process.run_command`, and [architecture/runtime.md](architecture/runtime.md) |
 | `packaging/`, `toinflux/credentials.py`, `toinflux/credential_cli.py`, or adding a settings section | [architecture/packaging.md](architecture/packaging.md) |
 | adding a data source | the checklist in [CONTRIBUTING.md](CONTRIBUTING.md) |
@@ -133,6 +133,9 @@ keeps these names honest, and each guard's docstring carries the reasoning.
   *prose fragments* we wrote is a different thing and is left alone; see the guard's docstring
 - `tests/test_repo_hygiene.py::test_only_the_process_helper_starts_a_process` - every external
   command goes through `toinflux.process.run_command`
+- `tests/test_controls.py::TestControlNames::test_refuses_anything_that_could_choose_a_different_file`
+  - a control name becomes a filename and arrives from an MCP client
+- `tests/test_controls.py::TestTheStageLadder::test_a_stage_that_forgets_a_device_is_refused`
 
 ### MCP server
 

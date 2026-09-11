@@ -289,6 +289,56 @@ class TestMain:
             )
             mock_print.assert_called_once_with("Configuration OK")
 
+    def test_main_check_config_rejects_a_broken_stored_control(self, tmp_path, monkeypatch, capsys):
+        """--check-config fails when a stored control is structurally wrong.
+
+        Controls are configuration even though they do not live in settings.yaml. An
+        operator running this is asking whether the installation would start cleanly, and
+        a stage that forgets a device would otherwise surface at the moment a control
+        process was meant to start actuating a heater.
+        """
+        from toinflux.controls import save_control
+
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        save_control("conservatory", {"inputs": {}, "pid": {}, "output": {}, "devices": {}, "enabled": "yes"})
+
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
+            patch("sendtoinflux.toinflux.validate_settings"),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
+        ):
+            mock_load_settings.return_value = {"sources": ["hue"]}
+            with pytest.raises(SystemExit) as exc_info:
+                sendtoinflux.main()
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "conservatory" in captured.err
+        # The verdict goes to stderr and stdout stays clean, the same split every other
+        # diagnostic here follows.
+        assert "conservatory" not in captured.out
+
+    def test_main_check_config_passes_with_a_sound_stored_control(self, tmp_path, monkeypatch):
+        """A well-formed control does not stop --check-config reporting OK."""
+        from tests.test_controls import a_valid_control
+        from toinflux.controls import save_control
+
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        save_control("conservatory", a_valid_control())
+
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
+            patch("sendtoinflux.toinflux.validate_settings"),
+            patch("sendtoinflux.print") as mock_print,
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(0)),
+        ):
+            mock_load_settings.return_value = {"sources": ["hue"]}
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+            mock_print.assert_called_once_with("Configuration OK")
+
     def test_main_check_config_validates_explicit_source_argument(self, tmp_path):
         """--check-config also validates the source named by --source, even if it isn't in sources:.
 
