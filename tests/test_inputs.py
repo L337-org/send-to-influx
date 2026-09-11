@@ -301,7 +301,7 @@ class TestReadInput:
     def test_a_fresh_stored_value_never_touches_the_device(self, monkeypatch):
         stored = InputReading(value=19.5, timestamp=1000.0, age=100.0, live=False)
         handler = _handler()
-        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         assert read_input(None, SETTINGS, SPEC) is stored
         handler.get_data.assert_not_called()
@@ -312,7 +312,7 @@ class TestReadInput:
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
         stored = InputReading(value=19.5, timestamp=0.0, age=5000.0, live=False)
         handler = _handler(data={"temperature": 21.0, "humidity": 55.0})
-        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         reading = read_input(None, SETTINGS, SPEC, now=9999.0)
         assert (reading.value, reading.live, reading.age) == (21.0, True, 0.0)
@@ -324,7 +324,7 @@ class TestReadInput:
         which every other control's source is polled."""
         stored = InputReading(value=19.5, timestamp=0.0, age=120.0, live=False)
         handler = _handler()
-        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         # 120s old, the control wants 60s, the source's floor is its 300s interval.
         assert read_input(None, SETTINGS, {**SPEC, "max_age": 60}) is stored
@@ -338,7 +338,7 @@ class TestReadInput:
         fresh = InputReading(value=21.0, timestamp=9990.0, age=9.0, live=False)
         handler = _handler()
         readings = iter([stale, fresh])
-        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: next(readings))
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: next(readings))
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         assert read_input(None, SETTINGS, SPEC) is fresh
         handler.get_data.assert_not_called()
@@ -349,7 +349,7 @@ class TestReadInput:
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
         stored = InputReading(value=19.5, timestamp=0.0, age=5000.0, live=False)
         handler = _handler()
-        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         monkeypatch.setattr("toinflux.inputs.fetch_lock", lambda *a, **k: _never_held())
         with caplog.at_level("WARNING"):
@@ -362,7 +362,7 @@ class TestReadInput:
         something and return nothing fresher."""
         stored = InputReading(value=19.5, timestamp=0.0, age=5000.0, live=False)
         handler = _handler(live=False)
-        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         assert read_input(None, SETTINGS, SPEC) is stored
         handler.get_data.assert_not_called()
@@ -373,7 +373,7 @@ class TestReadInput:
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
         stored = InputReading(value=19.5, timestamp=0.0, age=5000.0, live=False)
         handler = _handler(fails=SourceConnectionError("bridge unreachable"))
-        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         with caplog.at_level("WARNING"):
             assert read_input(None, SETTINGS, SPEC) is stored
@@ -384,15 +384,55 @@ class TestReadInput:
         "no reading" indistinguishable from a reading of zero at the call site."""
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
         handler = _handler(fails=SourceConnectionError("bridge unreachable"))
-        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: None)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: None)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         with pytest.raises(SourceConnectionError, match="no value available for 'temperature'"):
             read_input(None, SETTINGS, SPEC)
 
+    def test_a_misconfigured_source_is_not_degraded_into_a_transient_failure(self, monkeypatch, tmp_path):
+        """ConfigError means stop; SourceConnectionError means fail safe and carry on.
+
+        ConfigError is a ToInfluxError, so catching that broadly swallowed it - and Hue's
+        bridge() and MyEnergi's device() both raise it. A misconfigured bridge would have
+        read as a device that kept being unreachable, for as long as nobody looked.
+        """
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        stored = InputReading(value=19.5, timestamp=0.0, age=5000.0, live=False)
+        handler = _handler(fails=ConfigError("no such bridge 'bridge9'"))
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        with pytest.raises(ConfigError, match="bridge9"):
+            read_input(None, SETTINGS, SPEC)
+
+    @pytest.mark.parametrize(
+        "age,live,fails",
+        [
+            pytest.param(1.0, True, None, id="fresh-enough-to-return-before-the-lock"),
+            pytest.param(5000.0, False, None, id="source-has-no-live-read"),
+            pytest.param(5000.0, True, None, id="fetches-and-writes-back"),
+            pytest.param(5000.0, True, SourceConnectionError("unreachable"), id="fetch-failed"),
+        ],
+    )
+    def test_the_handler_session_is_closed_on_every_path(self, monkeypatch, tmp_path, age, live, fails):
+        """DataHandler.__init__ opens a requests.Session whether or not anything uses it,
+        and nothing in this project closes one. A collector builds a handler per process so
+        that never mattered; a control loop reads its inputs every cycle.
+
+        Every path, because the leak is worst on the ones that build a handler and then
+        never fetch - which is also where it is easiest to forget.
+        """
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        reading = InputReading(value=19.5, timestamp=0.0, age=age, live=False)
+        handler = _handler(live=live, data={"temperature": 21.0}, fails=fails)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: reading)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        read_input(None, SETTINGS, SPEC)
+        handler.session.close.assert_called_once()
+
     def test_a_live_read_missing_the_field_raises_rather_than_inventing_one(self, monkeypatch, tmp_path):
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
         handler = _handler(data={"humidity": 55.0})
-        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: None)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: None)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         with pytest.raises(SourceConnectionError, match="no such field"):
             read_input(None, SETTINGS, SPEC)

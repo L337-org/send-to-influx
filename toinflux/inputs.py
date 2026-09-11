@@ -31,7 +31,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from toinflux.exceptions import ConfigError, SourceConnectionError, ToInfluxError
+from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.general import POLL_FLOOR_KEY, get_class, resolve_state_dir
 from toinflux.influx import build_latest_query, resolve_db, run_query, single_series
 
@@ -118,6 +118,35 @@ class InputReading:
     live: bool
 
 
+@contextmanager
+def source_handler(source, settings_file=None, instance=None):  # noqa: DOC403 - a generator, but unannotated
+    """Yield a handler for a source and close the session it opened.
+
+    ``DataHandler.__init__`` opens a ``requests.Session`` whether or not anything uses it,
+    and nothing closes it. A collector builds one handler for the life of the process, so
+    that never mattered; a control loop reads its inputs every cycle, and one unclosed
+    session per read is a socket and a file descriptor per read.
+
+    Whoever opens a handler closes it. The alternative - letting each function build its
+    own and hoping - is how the leak got here in the first place.
+
+    Args:
+        source (str): the source to build a handler for
+        settings_file (str or None): the settings path, so the handler reads the same document
+        instance (str or None): which producer, for a source that has several
+
+    Yields:
+        DataHandler: the handler, valid for the duration of the block
+    """
+    handler = get_class(source, settings_file, instance)
+    try:
+        yield handler
+    finally:
+        opened = getattr(handler, "session", None)
+        if opened is not None:
+            opened.close()
+
+
 def stored_reading(session, settings, source, field, instance=None, settings_file=None, now=None):
     """Return the newest point InfluxDB holds for one field, or None.
 
@@ -141,7 +170,30 @@ def stored_reading(session, settings, source, field, instance=None, settings_fil
         SourceConnectionError: on a transport or parse failure
         ConfigError: where the source has no usable settings section
     """
-    handler = get_class(source, settings_file, instance)
+    with source_handler(source, settings_file, instance) as handler:
+        return handler_reading(session, settings, handler, field, now)
+
+
+def handler_reading(session, settings, handler, field, now=None):
+    """Return the newest stored point for a field, using a handler the caller owns.
+
+    Split from :func:`stored_reading` so a caller reading the same source twice - which
+    ``read_input`` does either side of the fetch lock - builds one handler rather than one
+    per read.
+
+    Args:
+        session (requests.Session): the session to query through
+        settings (dict): the whole parsed settings document
+        handler (DataHandler): the source's handler, already scoped to the instance
+        field (str): the field key to read
+        now (float or None): the clock, for tests; defaults to time.time()
+
+    Returns:
+        InputReading or None: the newest point, or None where the measurement holds none
+
+    Raises:
+        SourceConnectionError: on a transport or parse failure
+    """
     measurement = handler.MCP_MEASUREMENT or handler.source
     query = build_latest_query(measurement, handler.mcp_tag_filters(), {field})
     db = resolve_db(handler.source_settings, settings["influx"])
@@ -310,32 +362,34 @@ def read_input(session, settings, spec, settings_file=None, now=None):
         ConfigError: where the source has no usable settings section
     """
     source, field = spec["source"], spec["field"]
-    instance = spec.get("instance")
     trigger = max(float(spec["max_age"]), resolve_poll_floor(source, settings))
-    stored = stored_reading(session, settings, source, field, instance, settings_file, now)
-    if stored is not None and stored.age <= trigger:
-        return stored
-    handler = get_class(source, settings_file, instance)
-    if not handler.MCP_LIVE_STATE:
-        # Nothing to gain: this source's live read is no fresher than what is stored.
-        return _require(stored, source, field, "it has no live read and InfluxDB holds no point for it")
-    budget = float(handler.source_settings.get("timeout", 5))
-    with fetch_lock(source, budget, settings_file) as held:
-        if not held:
-            logging.warning(
-                "Gave up waiting %.1fs for the %r fetch lock reading %r; using the stored value",
-                budget,
-                source,
-                field,
-            )
-            return _require(stored, source, field, "the fetch lock was busy and InfluxDB holds no point for it")
-        # The holder we were waiting behind has almost certainly just written the value, so
-        # look again before touching the device. The lock is held across the write-back for
-        # this to be true.
-        fresh = stored_reading(session, settings, source, field, instance, settings_file, now)
-        if fresh is not None and fresh.age <= trigger:
-            return fresh
-        return _live_reading(handler, source, field, stored, now)
+    # One handler for the whole call, closed on the way out. Every path here needs one -
+    # even the stored read, for the measurement, tags and database - and each build opens a
+    # session nothing closes.
+    with source_handler(source, settings_file, spec.get("instance")) as handler:
+        stored = handler_reading(session, settings, handler, field, now)
+        if stored is not None and stored.age <= trigger:
+            return stored
+        if not handler.MCP_LIVE_STATE:
+            # Nothing to gain: this source's live read is no fresher than what is stored.
+            return _require(stored, source, field, "it has no live read and InfluxDB holds no point for it")
+        budget = float(handler.source_settings.get("timeout", 5))
+        with fetch_lock(source, budget, settings_file) as held:
+            if not held:
+                logging.warning(
+                    "Gave up waiting %.1fs for the %r fetch lock reading %r; using the stored value",
+                    budget,
+                    source,
+                    field,
+                )
+                return _require(stored, source, field, "the fetch lock was busy and InfluxDB holds no point for it")
+            # The holder we were waiting behind has almost certainly just written the value,
+            # so look again before touching the device. The lock is held across the
+            # write-back for this to be true.
+            fresh = handler_reading(session, settings, handler, field, now)
+            if fresh is not None and fresh.age <= trigger:
+                return fresh
+            return _live_reading(handler, source, field, stored, now)
 
 
 def _live_reading(handler, source, field, stored, now):
@@ -358,11 +412,17 @@ def _live_reading(handler, source, field, stored, now):
 
     Raises:
         SourceConnectionError: where the fetch failed and nothing was stored either
+        ConfigError: where the source is misconfigured, which no amount of retrying fixes
     """
     moment = time.time() if now is None else now
     try:
         data = handler.get_data()
-    except ToInfluxError as exc:
+    except SourceConnectionError as exc:
+        # SourceConnectionError only, not ToInfluxError. ConfigError is a ToInfluxError too
+        # - Hue's bridge() and MyEnergi's device() raise it - and it means stop rather than
+        # retry: degrading it here would hide a misconfigured bridge as a device that keeps
+        # being unreachable, for as long as nobody looked. Same for ToolParamError.
+        #
         # Logged rather than swallowed: this is the difference between a control acting on
         # old data and one that cannot see its input at all, and only the log says which.
         logging.warning("Live read of %r for %r failed, using the stored value: %r", source, field, exc)
