@@ -219,7 +219,7 @@ because anyone writing a rule already has that order in their fingers, and a lan
 looked like Python but bound differently would be worse than one that looked nothing like
 it.
 
-Four decisions worth knowing before changing this:
+Five decisions worth knowing before changing this:
 
 - **Truth is a number.** A comparison yields 1.0 or 0.0, `if` treats non-zero as true, and
   a gate is true when it evaluates non-zero. `and`/`or` return 1.0 or 0.0 rather than one

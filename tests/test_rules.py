@@ -402,19 +402,29 @@ class TestBounds:
             parse_rule("(" * depth + "1" + ")" * depth, NAMES)
 
     @pytest.mark.parametrize(
-        "text",
+        "shape,build",
         [
-            "(" * 500 + "1" + ")" * 500,
-            "-" * 500 + "1",
-            "abs(" * 500 + "1" + ")" * 500,
-            "not " * 500 + "1",
+            ("brackets", lambda n: "(" * n + "1" + ")" * n),
+            ("unary minus", lambda n: "-" * n + "1"),
+            ("call arguments", lambda n: "abs(" * n + "1" + ")" * n),
+            ("not", lambda n: "not " * n + "1"),
         ],
     )
-    def test_deep_nesting_of_every_recursive_shape_is_refused_not_crashed(self, text):
-        # Each of these recurses by a different route: brackets and calls through
-        # expression(), repeated minus through unary(), repeated not through negation().
-        # Guarding only one of them would leave the others unbounded.
-        with pytest.raises(RuleSyntaxError):
+    def test_every_recursive_route_is_bounded_by_the_depth_guard(self, shape, build):
+        """Each of these recurses by a different route, and each route needs its own
+        guard: brackets and call arguments through expression(), repeated minus through
+        unary(), repeated not through negation().
+
+        Sized just past the depth limit rather than arbitrarily large, and the message is
+        asserted rather than only the exception type. The first version of this test used
+        five hundred repetitions, which put two of the four cases over MAX_RULE_LENGTH -
+        so they were refused by the *length* guard while claiming to prove the *depth*
+        guard, and passed without ever exercising it. Both guards raise the same type,
+        which is exactly why the type alone proves nothing here.
+        """
+        text = build(MAX_NESTING_DEPTH + 1)
+        assert len(text) <= MAX_RULE_LENGTH, "this case is being caught by the length guard instead"
+        with pytest.raises(RuleSyntaxError, match="nests more than"):
             parse_rule(text, NAMES)
 
     def test_a_wide_shallow_rule_is_not_mistaken_for_a_deep_one(self):

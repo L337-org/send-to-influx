@@ -643,8 +643,15 @@ class _Parser:
             object: the node
         """
         if self._at_keyword("not"):
-            self.take()
-            return _Not(self.negation())
+            token = self.take()
+            # The third recursive route, and the one missed first time round. `not not
+            # not ...` recurses here without passing through expression() or unary(), so
+            # guarding those two left this one bounded only by the interpreter's stack.
+            self._descend(token.offset)
+            try:
+                return _Not(self.negation())
+            finally:
+                self.depth -= 1
         return self.comparison()
 
     def comparison(self):
