@@ -227,14 +227,26 @@ class _Name:
             float: the bound value
 
         Raises:
-            RuleEvaluationError: the binding is absent at evaluation time
+            RuleEvaluationError: the binding is absent, or is not a number
         """
         if self.identifier not in bindings:
             # Parsing already rejected undeclared names, so reaching here means the
             # caller supplied an incomplete table - a stale input, most likely. A
             # runtime failure rather than a configuration one, so the control fails safe.
             raise RuleEvaluationError(f"no value available for {self.identifier!r}")
-        return float(bindings[self.identifier])
+        value = bindings[self.identifier]
+        # Bindings come from InfluxDB, which stores strings and nulls as happily as it
+        # stores numbers, so a field whose type nobody checked would otherwise reach
+        # float() and escape as a raw ValueError - crashing the control loop instead of
+        # failing it safe. A bool is accepted deliberately: InfluxDB has a boolean field
+        # type, a control reading one means exactly 1 or 0 by it, and there is nothing
+        # ambiguous to guess at. That differs from a bool in a stage's `level:`, which is
+        # an operator typo rather than data, and is refused there.
+        if not isinstance(value, (int, float, bool)):
+            raise RuleEvaluationError(
+                f"{self.identifier!r} is {type(value).__name__}, not a number, so the rule cannot be evaluated"
+            )
+        return float(value)
 
     def names(self):
         """Return the identifiers this node depends on.
@@ -771,9 +783,18 @@ class Rule:
 def parse_rule(text, allowed_names=()):
     """Parse one rule, resolving its names against what the control declared.
 
+    ``allowed_names`` is normalised to a frozenset here rather than used as given: the
+    parser both tests membership and lists it in an error message, so a one-shot iterable
+    would be consumed by the first failure and report nothing afterwards.
+
+    A bare string is refused rather than accepted. It satisfies every iterable contract
+    and iterates one character at a time, so ``allowed_names="target"`` would silently
+    declare ``t``, ``a``, ``r``, ``g`` and ``e`` as valid names and accept a rule the
+    control never meant to allow.
+
     Args:
         text (str): the rule as written in the control document
-        allowed_names (collections.abc.Container): identifiers the control declared as
+        allowed_names (collections.abc.Iterable): identifiers the control declared as
             inputs or parameters
 
     Returns:
@@ -781,8 +802,14 @@ def parse_rule(text, allowed_names=()):
 
     Raises:
         RuleSyntaxError: the rule does not parse, or names something undeclared
+        ConfigError: ``allowed_names`` was given as a bare string
     """
     if not isinstance(text, str):
         raise _syntax_error(f"a rule must be text, got {type(text).__name__}", 0)
-    root = _Parser(text, allowed_names).parse()
+    if isinstance(allowed_names, str):
+        raise ConfigError(
+            f"allowed_names must be a collection of identifiers, not the string {allowed_names!r} - "
+            f"a string would declare each of its characters as a separate name"
+        )
+    root = _Parser(text, frozenset(allowed_names)).parse()
     return Rule(source=text, root=root, referenced=frozenset(root.names()))

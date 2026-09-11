@@ -222,6 +222,25 @@ class TestNames:
             rule.evaluate({})
         assert "target" in str(exc.value)
 
+    @pytest.mark.parametrize("value", ["hello", None, [1], {"a": 1}, object()])
+    def test_a_binding_that_is_not_a_number_fails_safe_rather_than_crashing(self, value):
+        # Bindings come from InfluxDB, which stores strings and nulls as happily as
+        # numbers. Unchecked, a string field reached float() and escaped as a raw
+        # ValueError, taking the control loop down instead of failing it safe.
+        rule = parse_rule("target + 1", NAMES)
+        with pytest.raises(RuleEvaluationError) as exc:
+            rule.evaluate({"target": value})
+        assert "target" in str(exc.value)
+        assert type(value).__name__ in str(exc.value)
+
+    def test_a_boolean_binding_is_accepted_as_one_or_zero(self):
+        # Deliberately different from a bool in a stage's `level:`, which is refused.
+        # There a bool is an operator typo; here it is data - InfluxDB has a boolean
+        # field type, and a control reading one means exactly 1 or 0 by it.
+        rule = parse_rule("target", NAMES)
+        assert rule.evaluate({"target": True}) == 1.0
+        assert rule.evaluate({"target": False}) == 0.0
+
     @pytest.mark.parametrize("keyword", ["and", "or", "not"])
     def test_an_operator_cannot_be_used_as_a_name(self, keyword):
         with pytest.raises(RuleSyntaxError):
@@ -260,6 +279,25 @@ class TestTheLanguageHasNoWayOut:
     def test_anything_outside_the_grammar_is_refused(self, text):
         with pytest.raises(RuleSyntaxError):
             parse_rule(text, NAMES)
+
+    def test_declared_names_given_as_a_bare_string_are_refused(self):
+        # A string satisfies every iterable contract and iterates one character at a
+        # time, so this would silently declare 't', 'a', 'r', 'g' and 'e' as names and
+        # accept a rule the control never meant to allow.
+        with pytest.raises(ConfigError) as exc:
+            parse_rule("t + a", "target")
+        assert "string" in str(exc.value)
+
+    def test_declared_names_may_be_any_iterable(self):
+        # Normalised on the way in, so a one-shot iterable is not consumed by the first
+        # membership test and then absent from the error message.
+        rule = parse_rule("target", (name for name in ["target", "dew"]))
+        assert rule.referenced == frozenset({"target"})
+
+    def test_a_one_shot_iterable_still_lists_the_declared_names_on_failure(self):
+        with pytest.raises(RuleSyntaxError) as exc:
+            parse_rule("humidity", (name for name in ["target", "dew"]))
+        assert "target" in str(exc.value) and "dew" in str(exc.value)
 
     def test_a_rule_must_be_text(self):
         with pytest.raises(RuleSyntaxError):
