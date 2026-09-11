@@ -1173,3 +1173,92 @@ class TestTheCollectionGuardActuallyDetects:
         line, expression = _joins_inside_raises("\n\ndef f(xs):\n    raise ValueError(f'{\", \".join(xs)}')\n")[0]
         assert line == 4
         assert "join" in expression
+
+
+# The one module allowed to import subprocess. Everything else goes through
+# toinflux.process.run_command, whose protections (no shell, an allow-listed
+# environment, a mandatory timeout, a capped read) are worth nothing if a single call
+# site opts out.
+PROCESS_HELPER = Path("toinflux") / "process.py"
+
+
+def _imports_subprocess(source):
+    """Whether a module imports subprocess, in any of the forms Python allows.
+
+    Parsed rather than pattern-matched. The first version was a regex anchored at the
+    start of a line, which `import os, subprocess` walked straight past - a guard with a
+    bypass is worse than none, because it reads as enforcement while providing none. The
+    grammar already knows what an import is, so ask it.
+
+    Args:
+        source (str): the module's text
+
+    Returns:
+        bool: True if subprocess is imported by any spelling
+    """
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            if any(alias.name == "subprocess" or alias.name.startswith("subprocess.") for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "subprocess" or (node.module or "").startswith("subprocess."):
+                return True
+    return False
+
+
+def test_only_the_process_helper_starts_a_process():
+    """Shipped code reaches subprocess through toinflux.process, never directly.
+
+    This is the guard that makes the helper real. Before it existed the credential CLI
+    called ``subprocess.run`` four times, each inheriting the caller's whole environment
+    with no timeout, and the next author would have copied the nearest example. Prose
+    saying "use the helper" fails silently the first time someone does not read it.
+
+    Tests are excluded: they legitimately spawn processes to probe what the platform
+    does, and ``tests/test_process.py`` in particular has to, because what it asserts
+    only exists at the boundary.
+    """
+    candidates = [
+        path
+        for path in _modules_that_carry_a_header()
+        if path.relative_to(REPO_ROOT).parts[0] in PRODUCT_CODE_ROOTS and path.relative_to(REPO_ROOT) != PROCESS_HELPER
+    ]
+    # A guard that searched nothing looks identical to a clean tree.
+    assert len(candidates) >= 15, f"only found {len(candidates)} module(s) to check, so discovery is broken"
+
+    offenders = [
+        str(path.relative_to(REPO_ROOT)) for path in candidates if _imports_subprocess(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "these modules import subprocess directly instead of using "
+        f"toinflux.process.run_command: {', '.join(offenders)}"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import subprocess",
+        "import os, subprocess",
+        "import subprocess as sp",
+        "import os, subprocess as sp",
+        "from subprocess import run",
+        "from subprocess import run as r",
+        "def f():\n    import subprocess\n",
+    ],
+)
+def test_the_subprocess_guard_sees_every_import_spelling(source):
+    """The guard must not be dodgeable by how the import is written.
+
+    `import os, subprocess` slipped past the first version, which anchored a regex at the
+    start of a line. Parametrised over every form Python accepts, including one nested in
+    a function, because a guard with a known bypass reads as enforcement and provides
+    none.
+    """
+    assert _imports_subprocess(source), f"not detected: {source!r}"
+
+
+def test_the_subprocess_guard_does_not_fire_on_unrelated_imports():
+    """Guards the guard: something matching everything would pass the check above while
+    reporting every module in the tree as an offender."""
+    assert not _imports_subprocess("import os\nfrom pathlib import Path\nsubprocess = None\n")

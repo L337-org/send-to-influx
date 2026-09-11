@@ -76,3 +76,83 @@ validated, constructed, and then died with `AttributeError: 'MyEnergi' object ha
 'get_data'` on every cycle. It is simply absent now, like `DataHandler`, and `known_sources()`
 needs no filter. `measurement_for()`/`shares_measurement()` are unaffected - they iterate
 `known_sources()`, which never included it.
+
+## Running an external command (`toinflux/process.py`)
+
+`run_command()` is the only place this project starts a process. Read this before adding a
+call site; `tests/test_repo_hygiene.py::test_only_the_process_helper_starts_a_process` fails a
+module under `toinflux/` that imports `subprocess` instead.
+
+What it guarantees, and why each one is there rather than left to the caller:
+
+- **No shell, ever.** The argument list is passed as a list, so a value that reaches argv
+  cannot become a second command.
+- **An allow-listed environment**, not the inherited one. `INHERITED_ENV_KEYS` names what
+  passes through. `CREDENTIALS_DIRECTORY` and `STATE_DIRECTORY` are on it because a control
+  process reads its own secrets and its own configuration from them: dropping either produces
+  a child that reports a missing file or a permissions error a long way from the cause.
+
+  The list is **generous with benign variables and strict about one category**, and the
+  asymmetry is the reason: a missing variable surfaces as what looks like a permissions bug,
+  while a spare one a child never reads costs nothing. So identity, locale, timezone and
+  `TMPDIR` are all carried. What never passes is anything that changes *what code the child
+  runs* - `PYTHONPATH`, `PYTHONHOME`, `LD_PRELOAD`, `LD_LIBRARY_PATH` - which is the actual
+  purpose of having a list rather than housekeeping, and is guarded by
+  `tests/test_process.py::TestEnvironmentAllowList::test_execution_altering_variables_never_reach_the_child`.
+- **argv[0] resolved before the spawn**, by `shutil.which()` against the *child's* PATH so
+  lookup and execution cannot disagree, or used as given when it is a path. A path is
+  legitimate: a console script inside the packaged venv is on nobody's PATH. Failure is
+  `ConfigError`, which no amount of retrying fixes.
+- **A mandatory timeout.** No default, because no default fits both a version banner and a
+  TPM-backed decrypt. Overrunning raises `ProcessError` after killing the child.
+- **A cap on what is kept** from each output stream, which keeps draining past the limit
+  rather than stopping. A reader that stopped would leave the child blocked writing into a
+  full pipe, turning a large output into a hang.
+- **Standard error only in the timeout message.** Standard output is the data channel:
+  `systemd-creds decrypt` writes the plaintext credential there, so a decrypt that hung
+  after emitting part of it would put the secret into an exception message and from there
+  into the journal.
+
+Two shapes of failure, and the split matters:
+
+- **A command that ran and exited non-zero is returned**, not raised. Its output is usually the
+  only explanation of why it failed, and some callers legitimately ignore the status. Check
+  `CommandResult.ok`.
+- **A command that never finished raises.** There is no exit status to report, and returning
+  partial output invites a caller to use it as though the command had completed.
+
+`_pump()` reports which of the two happened by returning a bool, and the polarity reads
+backwards from the usual instinct: **True means it went wrong** and the caller must kill the
+child. False means the pump finished on its own terms, which it only does once the child has
+exited - and that post-condition is what makes the `wait()` after it safe without a timeout of
+its own.
+
+**Captured output is bytes, deliberately.** `stdout_text`/`stderr_text` decode with replacement
+for a message or a log line. A caller holding something that must be exactly what the command
+emitted decodes strictly itself: `_decrypt_credential()` does, and treats invalid UTF-8 as the
+failure it is, which decoding centrally with replacement would have turned into replacement
+characters that still look like a password.
+
+**Nothing here logs captured output**, because a command's stdout can be a decrypted secret.
+Whether any of it is safe to log is a question only the caller can answer.
+
+### The pump is single-threaded, and has to be
+
+`_pump()` feeds standard input and drains both outputs from the calling thread, using a
+selector over non-blocking pipes. The obvious design - a reader thread per pipe - was tried
+first and does not work, for a reason worth recording because it is invisible until it bites:
+
+- A grandchild that inherits a pipe holds its write end open, so the read never reaches EOF
+  however long the wait. The direct child can have exited long before.
+- A blocked reader thread cannot be cleaned up from outside. Closing the stream from another
+  thread waits on the same lock the blocked read holds rather than interrupting it - measured,
+  not assumed: a `close()` took as long as the reader stayed blocked.
+
+So the threaded version could only leak a reader per call or block the caller past its own
+timeout, and a supervisor launching control processes on a loop would do both. With no
+threads there is nothing to leak, the deadline covers the whole interaction rather than only
+the wait, and abandoning an inherited pipe is a decision the loop can simply take.
+
+Once the child has exited, draining continues for `_DRAIN_GRACE_SECONDS` and then stops:
+whatever still holds that pipe is not going to close it. Output the command produced before
+that point is still returned.
