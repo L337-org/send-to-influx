@@ -1111,8 +1111,20 @@ def test_every_collection_interpolated_into_an_error_is_rendered_safely():
 
 
 def test_the_renderer_the_guard_points_at_actually_exists():
-    """Guards the guard: a renamed helper would leave the message above naming nothing."""
-    assert VALUE_RENDERER in (REPO_ROOT / RENDERER_HOME).read_text(encoding="utf-8")
+    """Guards the guard: a renamed helper would leave the message above naming nothing.
+
+    Resolved as an attribute rather than searched for as text. The first version of this
+    test asked whether the string "render_values" appeared anywhere in the module, which
+    a comment or a docstring mentioning the old name satisfies perfectly well after the
+    function itself has gone - so it would have kept passing while the message it
+    protects pointed at nothing.
+    """
+    import toinflux.general
+
+    renderer = getattr(toinflux.general, VALUE_RENDERER, None)
+    assert callable(renderer), (
+        f"the guard's message tells people to use {VALUE_RENDERER}(), but " f"{RENDERER_HOME} defines no such callable"
+    )
 
 
 class TestTheCollectionGuardActuallyDetects:
