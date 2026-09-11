@@ -38,6 +38,7 @@ __license__ = "MIT"
 import re
 from dataclasses import dataclass
 from toinflux.exceptions import ConfigError, ToInfluxError
+from toinflux.general import render_values
 
 
 class RuleSyntaxError(ConfigError):
@@ -843,7 +844,7 @@ class _Parser:
         """
         if token.text not in FUNCTION_ARITY:
             raise _syntax_error(
-                f"unknown function {token.text!r} (available: {', '.join(sorted(FUNCTION_ARITY))})",
+                f"unknown function {token.text!r} (available: {render_values(FUNCTION_ARITY)})",
                 token.offset,
             )
         self.take()
