@@ -173,6 +173,19 @@ def tokenise(text):
             continue
         number = _NUMBER_RE.match(text, position)
         if number:
+            # A number pattern matches greedily but can stop short: "1e" yields the digit
+            # and leaves the "e" to be read as a name, so the rule parses on as "1"
+            # followed by something unexpected and the operator is told about a stray
+            # identifier rather than the broken literal they actually typed. Anything
+            # running straight on from a number is that mistake.
+            trailing = _NAME_RE.match(text, number.end())
+            if trailing:
+                bad = text[position : trailing.end()]
+                raise _syntax_error(
+                    f"{bad!r} is not a valid number - a number cannot run straight into a name, "
+                    f"so add a space or an operator between them",
+                    position,
+                )
             tokens.append(_Token("number", number.group(), position))
             position = number.end()
             continue

@@ -517,3 +517,39 @@ class TestArityWording:
     def test_the_real_message_uses_it(self):
         with pytest.raises(RuleSyntaxError, match="abs\\(\\) takes 1 argument, got 2"):
             parse_rule("abs(1, 2)", NAMES)
+
+
+class TestMalformedNumbers:
+    """A number pattern matches greedily but can stop short.
+
+    `1e` yields the digit and leaves the `e` to be read as a name, so the rule parsed on
+    and the operator was told about a stray identifier rather than the broken literal
+    they actually typed. Anything running straight on from a number is that mistake.
+    """
+
+    @pytest.mark.parametrize("text", ["1e", "2x", "1e+", "3abc", "1_000"])
+    def test_a_number_running_into_a_name_is_named_as_the_problem(self, text):
+        with pytest.raises(RuleSyntaxError) as exc:
+            parse_rule(text, NAMES)
+        message = str(exc.value)
+        assert "not a valid number" in message
+        assert "offset 0" in message
+
+    def test_the_message_shows_the_whole_offending_run_not_just_the_digits(self):
+        # "1e" is the useful thing to show. Reporting only "1" would describe the half
+        # that was fine.
+        with pytest.raises(RuleSyntaxError, match="'1e'"):
+            parse_rule("1e", NAMES)
+
+    @pytest.mark.parametrize("text", ["1e3", "1e-3", "1E3", "1.5", "1 and 2", "1 + 2", "min(1, 2)"])
+    def test_well_formed_numbers_are_unaffected(self, text):
+        parse_rule(text, NAMES)
+
+    def test_a_keyword_jammed_against_a_number_is_now_refused(self):
+        # Deliberate consequence rather than an oversight: `1and 2` used to parse, because
+        # the tokeniser happily produced number, name, number. Requiring the space is
+        # worth losing that - nobody writes it on purpose, and accepting it means `1e`
+        # cannot be diagnosed.
+        with pytest.raises(RuleSyntaxError, match="not a valid number"):
+            parse_rule("1and 2", NAMES)
+        assert parse_rule("1 and 2", NAMES).evaluate({}) == 1.0
