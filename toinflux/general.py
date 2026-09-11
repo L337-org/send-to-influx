@@ -994,7 +994,12 @@ def _validate_poll_floor(source, source_cfg):
         return [f"{source}.{POLL_FLOOR_KEY} must be a number of seconds (got {value!r})"]
     # .nan and .inf are floats as far as YAML and isinstance are concerned, and neither
     # fails loudly later: a nan floor never holds so every cycle goes live, and an inf one
-    # always holds so nothing ever does. Same check the collection interval gets.
+    # always holds so nothing ever does.
+    #
+    # `interval` above gets no such check - only that it is present - so a `.nan` there
+    # still reaches a worker's sleep. That is a gap in existing validation rather than
+    # something this key introduced, and it is raised separately rather than widened into
+    # here. Said explicitly because the obvious assumption is that the two match.
     if not math.isfinite(value):
         return [f"{source}.{POLL_FLOOR_KEY} must be a finite number of seconds (got {value!r})"]
     if value < 0:

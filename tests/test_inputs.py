@@ -158,12 +158,17 @@ class TestTheFetchLockSerialisesLiveFetches:
 
     def test_an_uncontended_control_is_not_delayed(self, tmp_path, monkeypatch):
         """The holder proceeds immediately. A design that made everyone wait a little would
-        put a delay on the common path to fix the rare one."""
+        put a delay on the common path to fix the rare one.
+
+        Asserted as "never sleeps" rather than "took under 0.1s": the property is that the
+        backoff path is not entered at all, and a wall-clock threshold would test how busy
+        the machine is as much as what the code does.
+        """
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
-        started = time.monotonic()
-        with fetch_lock("probe", budget=5) as held:
+        slept = []
+        with fetch_lock("probe", budget=5, sleep=slept.append) as held:
             assert held
-            assert time.monotonic() - started < 0.1
+        assert slept == [], f"waited on an uncontended lock: {slept}"
 
     def test_a_second_process_waits_for_the_holder(self, tmp_path, monkeypatch):
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
