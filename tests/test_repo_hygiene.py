@@ -24,6 +24,7 @@ import ast
 import os
 import re
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -1262,3 +1263,136 @@ def test_the_subprocess_guard_does_not_fire_on_unrelated_imports():
     """Guards the guard: something matching everything would pass the check above while
     reporting every module in the tree as an offender."""
     assert not _imports_subprocess("import os\nfrom pathlib import Path\nsubprocess = None\n")
+
+
+def _bound_names(target):
+    """Yield every name a single assignment target binds.
+
+    Recursive because a target nests: `A, (B, *rest) = ...` binds three names, and reading
+    only `ast.Name` at the top would report the whole statement as binding nothing.
+
+    Args:
+        target (ast.AST): one element of an assignment's `targets`
+
+    Yields:
+        str: each bound name
+    """
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, ast.Starred):
+        yield from _bound_names(target.value)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            yield from _bound_names(element)
+
+
+def _module_level_rebindings(source):
+    """Return every module-level name this source assigns, defines or classes twice.
+
+    Imports are deliberately not counted, and neither is a function or class redefinition
+    that shadows an import: pyflakes already reports both as F811, and flake8 is a required
+    check here, so counting them again would put two failures on one fault. What F811 does
+    *not* see is a plain assignment rebound - `X = re.compile(...)` twice - which is the
+    case this exists for. Verified by probing pyflakes rather than assumed.
+
+    Only the module's own top-level statements, so a name defined once in each arm of an
+    `if TYPE_CHECKING:` or a `try/except ImportError` is not reported: those are one binding
+    chosen at runtime, which is the normal way to write them.
+
+    Args:
+        source (str): the module's source text
+
+    Returns:
+        set: the rebound names, empty when every top-level name is bound once
+    """
+    names = []
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                names.extend(_bound_names(target))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.append(node.target.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(node.name)
+    return {name for name, count in Counter(names).items() if count > 1}
+
+
+def test_no_module_binds_a_top_level_name_twice():
+    """A shadowed module-level name is invisible in review and can disable a check.
+
+    `_DURATION_RE` was defined twice in toinflux/mcp_read.py: a `^\\d+[smhdw]$` validator for
+    the `group_by` interval, and 500 lines later a `(?:\\d+[wdhms])+` parser for retention
+    strings. The second won at import time, so the validator silently became a prefix match
+    on a value interpolated into `GROUP BY time(...)`, and `1h);DROP MEASUREMENT x` passed it.
+
+    Neither definition is wrong to read. That is the whole problem: review sees two correct
+    constants, never the pair, and the test suite went on passing because every case it
+    checked failed at the first character rather than at the prefix. A machine comparing
+    names across the file is the only reader that sees it.
+
+    Covers tests too, where a redefined `def test_...` replaces the first one and takes it
+    out of the run without failing anything.
+    """
+    offenders = {}
+    for path in _every_python_file():
+        rebound = _module_level_rebindings(path.read_text(encoding="utf-8"))
+        if rebound:
+            offenders[path] = rebound
+    assert not offenders, "module-level names bound twice: " + "; ".join(
+        f"{path}: {', '.join(sorted(names))}" for path, names in sorted(offenders.items())
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "X = 1\nX = 2\n",
+        "def f():\n    pass\n\n\ndef f():\n    pass\n",
+        "class C:\n    pass\n\n\nclass C:\n    pass\n",
+        "X: int = 1\nX: int = 2\n",
+        "import re\nX = re.compile('a')\nX = re.compile('b')\n",
+        "X, Y = 1, 2\nX = 3\n",
+        "X, (Y, *Z) = 1, (2, 3)\nZ = 4\n",
+        "X = Y = 1\nY = 2\n",
+    ],
+)
+def test_the_rebinding_guard_sees_each_kind_of_definition(source):
+    """A constant, a function, a class, an annotated assignment and a destructured one.
+
+    The real case was a plain constant, but a redefined function or class disappears the same
+    way, and a guard that only looked at assignments would report a file as clean while one of
+    its tests never ran.
+
+    Destructuring is here because reading only the top-level `ast.Name` of a target sees no
+    names at all in `X, Y = ...`, so the statement would look like it bound nothing and every
+    later rebinding of X would go unreported. Nested and starred targets bind names too.
+    """
+    assert _module_level_rebindings(source), f"not detected: {source!r}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "X = 1\nY = 2\n",
+        "def f():\n    x = 1\n    x = 2\n",
+        "try:\n    import fast as impl\nexcept ImportError:\n    import slow as impl\n",
+        "import typing\nif typing.TYPE_CHECKING:\n    X = 1\nelse:\n    X = 2\n",
+        "class C:\n    X = 1\n\n\nclass D:\n    X = 2\n",
+        "import os\nimport os\n",
+        "from a import parse\n\n\ndef parse():\n    pass\n",
+    ],
+)
+def test_the_rebinding_guard_leaves_legitimate_code_alone(source):
+    """Guards the guard: one that fired on these would be switched off within a day.
+
+    A local rebound inside a function, the same name bound in each arm of a try/except or a
+    TYPE_CHECKING split, and the same attribute name on two classes are all normal. Only a
+    module's own top-level statements count.
+
+    The last two are real faults that this guard deliberately does not report, because
+    pyflakes already reports both as F811 and flake8 is a required check. Two failures for
+    one fault teaches people to read neither. Probed against pyflakes rather than assumed:
+    it flags a repeated import and a function shadowing one, and stays silent on a repeated
+    assignment, which is the gap this fills.
+    """
+    assert not _module_level_rebindings(source), f"false positive: {source!r}"
