@@ -49,7 +49,7 @@ def resolve_poll_floor(source, settings):
     two controls each honouring sixty seconds still reach the device at thirty combined.
 
     Args:
-        source (str): the source name, which must have a settings section
+        source (str): the source name in any case, which must have a settings section
         settings (dict): the whole parsed settings document
 
     Returns:
@@ -58,6 +58,11 @@ def resolve_poll_floor(source, settings):
     Raises:
         ConfigError: where the source has no settings section, or neither key is usable
     """
+    # A source name is case-insensitive across this project - get_class() says so and
+    # lowercases before constructing - while settings sections are canonically lowercase,
+    # because validate_settings() matches them against known_sources(). Normalising here
+    # rather than at one call site keeps every caller on the same convention.
+    source = source.lower()
     source_cfg = (settings or {}).get(source)
     if not isinstance(source_cfg, dict):
         raise ConfigError(
@@ -253,13 +258,16 @@ def fetch_lock_path(source, settings_file=None):
     reading different sources have no reason to wait for each other.
 
     Args:
-        source (str): the source name
+        source (str): the source name, in any case
         settings_file (str or None): the settings path, for resolving the state directory
 
     Returns:
         str: the lock file's path, which may not exist yet
     """
-    return os.path.join(resolve_state_dir(settings_file), LOCK_DIR_NAME, f"fetch-{source}.lock")
+    # Lowercased for the same reason resolve_poll_floor() does it, and here it is the
+    # difference between serialising and not: two controls naming the same source in
+    # different cases would otherwise take two different locks and both go live.
+    return os.path.join(resolve_state_dir(settings_file), LOCK_DIR_NAME, f"fetch-{source.lower()}.lock")
 
 
 @contextmanager

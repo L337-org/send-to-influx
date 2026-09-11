@@ -97,6 +97,12 @@ class TestResolvePollFloor:
         assert resolve_poll_floor("hue", settings) == 300.0
         assert resolve_poll_floor("openmeteo", settings) == 600.0
 
+    def test_the_source_name_is_case_insensitive(self):
+        """get_class() accepts any case and lowercases, and settings sections are
+        canonically lowercase because validate_settings matches them against
+        known_sources(). A control spec saying "Hue" must land on the same floor."""
+        assert resolve_poll_floor("Hue", {"hue": {"interval": 300, "poll_floor": 60}}) == 60.0
+
     @pytest.mark.parametrize("settings", [{}, {"hue": None}, {"hue": "300"}, {"hue": []}])
     def test_a_source_without_a_usable_section_is_a_config_error(self, settings):
         """Including a section present but empty, which is what commenting out every field
@@ -241,6 +247,13 @@ class TestTheFetchLockSerialisesLiveFetches:
             assert held
         assert os.path.isdir(tmp_path / "locks"), "the lock directory was not created"
         assert not list(tmp_path.glob("fetch-*.lock")), "a lock file landed in the state directory itself"
+
+    def test_the_lock_name_is_case_insensitive(self, tmp_path, monkeypatch):
+        """Otherwise two controls naming the same source in different cases take two
+        different locks and both go live, which is the one thing the lock exists to stop -
+        and it fails silently, since each control sees a lock it always wins."""
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        assert fetch_lock_path("Hue") == fetch_lock_path("hue")
 
     def test_each_source_has_its_own_lock(self, tmp_path, monkeypatch):
         """Two controls reading different sources have no reason to wait for each other."""
