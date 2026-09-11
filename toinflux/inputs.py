@@ -188,8 +188,59 @@ def stored_reading(session, settings, source, field, instance=None, settings_fil
         SourceConnectionError: on a transport or parse failure
         ConfigError: where the source has no usable settings section
     """
+    # Before the handler, not after. Building one loads the settings document, and a field
+    # name this can never read is wrong whatever the settings say - checking second meant a
+    # missing settings.yaml masked the real complaint, which is how CI found this.
+    _refuse_reserved_field(field)
     with source_handler(source, settings_file, instance) as handler:
         return handler_reading(session, settings, handler, field, now)
+
+
+def _required(spec, key):
+    """Return one key of an input declaration, or say which is missing.
+
+    The control store validates a document at --check-config, so a spec reaching here is
+    normally complete. This keeps the promise in the docstring true anyway: everything
+    wrong with a declaration arrives as a ConfigError rather than as a KeyError traceback
+    from somewhere further in.
+
+    Args:
+        spec (dict): one input declaration
+        key (str): the key wanted
+
+    Returns:
+        object: the value
+
+    Raises:
+        ConfigError: where the key is absent
+    """
+    if key not in spec:
+        raise ConfigError(f"control input declaration is missing {key!r}")
+    return spec[key]
+
+
+def _refuse_reserved_field(field):
+    """Refuse a field name that cannot be told apart from the timestamp column.
+
+    A result carries its timestamp in a column called ``time``, so a field of the same name
+    gives two columns with one name and nothing in the response to say which is which.
+    Reading the wrong one produces an age rather than an error, and a wrong age is the one
+    thing a control must not be handed quietly.
+
+    Whether InfluxDB will store such a field is not a question this checkout can answer,
+    and it does not change the answer: unreachable if it cannot, unreadable here if it can.
+
+    Args:
+        field (str): the field key a control asked for
+
+    Raises:
+        ConfigError: where the name is the timestamp column's
+    """
+    if field == TIME_COLUMN:
+        raise ConfigError(
+            f"control input cannot read a field named {TIME_COLUMN!r}: a result's timestamp "
+            f"column has that name too, so the two cannot be told apart"
+        )
 
 
 def handler_reading(session, settings, handler, field, now=None):
@@ -214,20 +265,7 @@ def handler_reading(session, settings, handler, field, now=None):
         ConfigError: where the field name cannot go into a query, or collides with the
             timestamp column
     """
-    if field == TIME_COLUMN:
-        # A result carries its timestamp in a column of this name, so a field of the same
-        # name gives two columns called "time" and nothing in the response says which is
-        # which. Reading the wrong one produces an age rather than an error, and a wrong
-        # age is the one thing a control must not be handed quietly.
-        #
-        # Whether InfluxDB will even store such a field is not something this checkout can
-        # answer - there is no instance here to ask - and the question does not change the
-        # answer: if it cannot, this is unreachable and costs nothing; if it can, the value
-        # is unreadable here and saying so is better than guessing a column.
-        raise ConfigError(
-            f"control input cannot read a field named {TIME_COLUMN!r}: a result's timestamp "
-            f"column has that name too, so the two cannot be told apart"
-        )
+    _refuse_reserved_field(field)
     measurement = handler.MCP_MEASUREMENT or handler.source
     try:
         query = build_latest_query(measurement, handler.mcp_tag_filters(), {field})
@@ -417,8 +455,12 @@ def read_input(session, settings, spec, settings_file=None, now=None):
         SourceConnectionError: where no value could be obtained at all
         ConfigError: where the source has no usable settings section
     """
-    source, field = spec["source"], spec["field"]
-    trigger = max(float(spec["max_age"]), resolve_poll_floor(source, settings))
+    source, field = _required(spec, "source"), _required(spec, "field")
+    # max_age through the same door as the floor and the timeout. It is the third duration
+    # in this expression and the one I left bare: an .inf max_age makes the trigger infinite,
+    # so the input reads as perpetually fresh and is never refreshed however old it gets.
+    max_age = _as_seconds(spec.get("max_age"), f"max_age for input {field}")
+    trigger = max(max_age, resolve_poll_floor(source, settings))
     # One handler for the whole call, closed on the way out. Every path here needs one -
     # even the stored read, for the measurement, tags and database - and each build opens a
     # session nothing closes.

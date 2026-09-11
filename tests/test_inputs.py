@@ -497,6 +497,26 @@ class TestReadInput:
         with pytest.raises(ConfigError, match="'hue.timeout' must be a finite number"):
             read_input(None, SETTINGS, SPEC)
 
+    @pytest.mark.parametrize("bad", [float("inf"), float("nan"), True, "900", None])
+    def test_a_non_finite_max_age_cannot_make_an_input_permanently_fresh(self, monkeypatch, bad):
+        """The third duration in the same expression, and the one left bare. An .inf max_age
+        makes the trigger infinite, so the input reads as perpetually fresh and is never
+        refreshed however old it actually gets - the failure mode being that the control
+        goes on acting on days-old data without ever falling to its safe state."""
+        handler = _handler()
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: None)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        with pytest.raises(ConfigError, match="max_age for input temperature"):
+            read_input(None, SETTINGS, {**SPEC, "max_age": bad})
+
+    @pytest.mark.parametrize("missing", ["source", "field"])
+    def test_an_incomplete_declaration_says_which_key_is_missing(self, missing):
+        """A KeyError traceback from somewhere further in is not a report about a control
+        document. The store validates one at --check-config, so this is the backstop."""
+        spec = {key: value for key, value in SPEC.items() if key != missing}
+        with pytest.raises(ConfigError, match=f"missing '{missing}'"):
+            read_input(None, SETTINGS, spec)
+
     def test_a_misconfigured_source_is_not_degraded_into_a_transient_failure(self, monkeypatch, tmp_path):
         """ConfigError means stop; SourceConnectionError means fail safe and carry on.
 
