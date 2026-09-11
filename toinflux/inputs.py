@@ -163,7 +163,7 @@ def source_handler(source, settings_file=None, instance=None):  # noqa: DOC403 -
     # transposing them here would drop settings_file into instance, which is the bug already
     # fixed once in this module: the handler reading a different settings document from the
     # caller, invisible until someone runs with -s.
-    handler = get_class(source, settings_file, instance)
+    handler = get_class(source, settings_file=settings_file, instance=instance)
     try:
         yield handler
     finally:
