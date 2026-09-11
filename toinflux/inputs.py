@@ -23,13 +23,14 @@ __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
 import fcntl
+import logging
 import os
 import random
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from toinflux.exceptions import ConfigError
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToInfluxError
 from toinflux.general import POLL_FLOOR_KEY, get_class, resolve_state_dir
 from toinflux.influx import build_latest_query, resolve_db, run_query, single_series
 
@@ -252,3 +253,122 @@ def fetch_lock(  # noqa: DOC403 - a generator, but unannotated
         finally:
             if held:
                 fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def read_input(session, settings, spec, settings_file=None, now=None):
+    """Return the current value of one declared control input.
+
+    InfluxDB first. A live fetch happens only when the stored point is older than this
+    input can use, and it writes its result back, which is what lets the next control read
+    it rather than going to the device itself.
+
+    **The poll floor takes precedence over the input's own max_age.** The trigger is
+    whichever is larger, and that is the same thing as "do not fetch if the newest point is
+    younger than the floor" precisely because a live fetch writes back: a control asking
+    sooner reads the value the previous one stored. Wanting fresher data than the floor
+    allows is not an error, it just does not get it - and if the value is then too stale to
+    act on, that is the control's fail-safe rather than this function's problem.
+
+    A source that declares ``MCP_LIVE_STATE = False`` is never fetched live. Octopus is a
+    day behind and Speedtest is expensive, so going to the device would cost something and
+    return nothing fresher.
+
+    Args:
+        session (requests.Session): the session to read through; the caller owns its lifetime
+        settings (dict): the whole parsed settings document
+        spec (dict): one input declaration - ``source``, ``field``, ``max_age``, optional ``instance``
+        settings_file (str or None): the settings path, for resolving the state directory
+        now (float or None): the clock, for tests; defaults to time.time()
+
+    Returns:
+        InputReading: the newest value available, whose ``age`` the caller must judge
+
+    Raises:
+        SourceConnectionError: where no value could be obtained at all
+        ConfigError: where the source has no usable settings section
+    """
+    source, field = spec["source"], spec["field"]
+    instance = spec.get("instance")
+    trigger = max(float(spec["max_age"]), resolve_poll_floor(source, settings))
+    stored = stored_reading(session, settings, source, field, instance, now)
+    if stored is not None and stored.age <= trigger:
+        return stored
+    handler = get_class(source, settings_file, instance)
+    if not handler.MCP_LIVE_STATE:
+        # Nothing to gain: this source's live read is no fresher than what is stored.
+        return _require(stored, source, field, "it has no live read and InfluxDB holds no point for it")
+    budget = float(handler.source_settings.get("timeout", 5))
+    with fetch_lock(source, budget, settings_file) as held:
+        if not held:
+            logging.warning(
+                "Gave up waiting %.1fs for the %r fetch lock reading %r; using the stored value",
+                budget,
+                source,
+                field,
+            )
+            return _require(stored, source, field, "the fetch lock was busy and InfluxDB holds no point for it")
+        # The holder we were waiting behind has almost certainly just written the value, so
+        # look again before touching the device. The lock is held across the write-back for
+        # this to be true.
+        fresh = stored_reading(session, settings, source, field, instance, now)
+        if fresh is not None and fresh.age <= trigger:
+            return fresh
+        return _live_reading(handler, source, field, stored, now)
+
+
+def _live_reading(handler, source, field, stored, now):
+    """Fetch from the source, write it back, and return it.
+
+    A failed fetch degrades to the stored value rather than propagating. The device being
+    unreachable is what the control's fail-safe is for, and raising here would make a
+    reachable-but-stale input and an unreachable one behave differently when the control
+    responds to both the same way.
+
+    Args:
+        handler (DataHandler): the source's handler, already built and scoped to the instance
+        source (str): the source being read, for messages
+        field (str): the field wanted
+        stored (InputReading or None): what InfluxDB held, to fall back to
+        now (float or None): the clock, for tests
+
+    Returns:
+        InputReading: the live value, or the stored one where the fetch failed
+
+    Raises:
+        SourceConnectionError: where the fetch failed and nothing was stored either
+    """
+    moment = time.time() if now is None else now
+    try:
+        data = handler.get_data()
+    except ToInfluxError as exc:
+        # Logged rather than swallowed: this is the difference between a control acting on
+        # old data and one that cannot see its input at all, and only the log says which.
+        logging.warning("Live read of %r for %r failed, using the stored value: %r", source, field, exc)
+        return _require(stored, source, field, f"the live read failed ({exc!r}) and InfluxDB holds no point for it")
+    # Write back every field the fetch returned, not just the one asked for: the round trip
+    # has already been paid for, and another control reading a different field of this
+    # source is the case the floor exists to serve.
+    handler.send_data(data)
+    if field not in data:
+        return _require(stored, source, field, "the live read returned no such field")
+    return InputReading(value=data[field], timestamp=moment, age=0.0, live=True)
+
+
+def _require(reading, source, field, why):
+    """Return a reading, or raise saying why there is none.
+
+    Args:
+        reading (InputReading or None): the candidate
+        source (str): the source, for the message
+        field (str): the field, for the message
+        why (str): what was tried, phrased to follow the field name
+
+    Returns:
+        InputReading: the reading, when there is one
+
+    Raises:
+        SourceConnectionError: when there is not
+    """
+    if reading is None:
+        raise SourceConnectionError(f"no value available for {field!r} from source {source!r}: {why}")
+    return reading

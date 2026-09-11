@@ -22,10 +22,27 @@ import sys
 import textwrap
 import time
 
+from contextlib import contextmanager
+from unittest.mock import MagicMock
+
 import pytest
 
-from toinflux.exceptions import ConfigError
-from toinflux.inputs import MAX_LOCK_BACKOFF, MIN_LOCK_BACKOFF, fetch_lock, fetch_lock_path, resolve_poll_floor
+from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.inputs import (
+    MAX_LOCK_BACKOFF,
+    MIN_LOCK_BACKOFF,
+    InputReading,
+    fetch_lock,
+    fetch_lock_path,
+    read_input,
+    resolve_poll_floor,
+)
+
+
+@contextmanager
+def _never_held():
+    """Stand in for a fetch lock another process is holding for longer than the budget."""
+    yield False
 
 
 def _holder_script(state_dir, hold_seconds):
@@ -223,3 +240,122 @@ class TestTheFetchLockSerialisesLiveFetches:
         finally:
             holder.send_signal(signal.SIGKILL)
             holder.wait(timeout=10)
+
+
+def _handler(live=True, timeout=5, data=None, fails=None):
+    """A stand-in source handler for the live-fetch path."""
+    handler = MagicMock()
+    handler.MCP_LIVE_STATE = live
+    handler.source_settings = {"timeout": timeout}
+    if fails is not None:
+        handler.get_data.side_effect = fails
+    else:
+        handler.get_data.return_value = data or {}
+    return handler
+
+
+SETTINGS = {"hue": {"interval": 300, "db": "x"}, "influx": {"url": "http://x", "user": "u", "password": "p"}}
+SPEC = {"source": "hue", "field": "temperature", "max_age": 900}
+
+
+class TestReadInput:
+    """InfluxDB first, and the device only when the stored value is too old to use."""
+
+    def test_a_fresh_stored_value_never_touches_the_device(self, monkeypatch):
+        stored = InputReading(value=19.5, timestamp=1000.0, age=100.0, live=False)
+        handler = _handler()
+        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        assert read_input(None, SETTINGS, SPEC) is stored
+        handler.get_data.assert_not_called()
+
+    def test_a_stale_stored_value_is_refreshed_and_written_back(self, monkeypatch, tmp_path):
+        """The write-back is what makes the database the shared state: without it the next
+        control to ask would go to the device too, and the floor would bind nothing."""
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        stored = InputReading(value=19.5, timestamp=0.0, age=5000.0, live=False)
+        handler = _handler(data={"temperature": 21.0, "humidity": 55.0})
+        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        reading = read_input(None, SETTINGS, SPEC, now=9999.0)
+        assert (reading.value, reading.live, reading.age) == (21.0, True, 0.0)
+        handler.send_data.assert_called_once_with({"temperature": 21.0, "humidity": 55.0})
+
+    def test_the_poll_floor_beats_a_shorter_max_age(self, monkeypatch):
+        """A control wanting fresher data than the source's floor allows gets the stored
+        value anyway. Deciding otherwise would let one control's document set the rate at
+        which every other control's source is polled."""
+        stored = InputReading(value=19.5, timestamp=0.0, age=120.0, live=False)
+        handler = _handler()
+        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        # 120s old, the control wants 60s, the source's floor is its 300s interval.
+        assert read_input(None, SETTINGS, {**SPEC, "max_age": 60}) is stored
+        handler.get_data.assert_not_called()
+
+    def test_the_recheck_after_the_lock_avoids_touching_the_device(self, monkeypatch, tmp_path):
+        """Whoever held the lock has almost certainly just written the value. Re-reading
+        before fetching is what turns a queue of waiters into one device read."""
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        stale = InputReading(value=19.5, timestamp=0.0, age=5000.0, live=False)
+        fresh = InputReading(value=21.0, timestamp=9990.0, age=9.0, live=False)
+        handler = _handler()
+        readings = iter([stale, fresh])
+        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: next(readings))
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        assert read_input(None, SETTINGS, SPEC) is fresh
+        handler.get_data.assert_not_called()
+
+    def test_a_busy_lock_falls_back_to_the_stored_value(self, monkeypatch, tmp_path, caplog):
+        """One wedged fetch must not stall every control sharing the source. The value
+        comes back stale and the control decides; the log says why it is stale."""
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        stored = InputReading(value=19.5, timestamp=0.0, age=5000.0, live=False)
+        handler = _handler()
+        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        monkeypatch.setattr("toinflux.inputs.fetch_lock", lambda *a, **k: _never_held())
+        with caplog.at_level("WARNING"):
+            assert read_input(None, SETTINGS, SPEC) is stored
+        handler.get_data.assert_not_called()
+        assert "fetch lock" in caplog.text
+
+    def test_a_source_with_no_live_read_is_never_fetched(self, monkeypatch):
+        """Octopus is a day behind and Speedtest is expensive: going live would cost
+        something and return nothing fresher."""
+        stored = InputReading(value=19.5, timestamp=0.0, age=5000.0, live=False)
+        handler = _handler(live=False)
+        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        assert read_input(None, SETTINGS, SPEC) is stored
+        handler.get_data.assert_not_called()
+
+    def test_a_failed_live_read_degrades_to_the_stored_value(self, monkeypatch, tmp_path, caplog):
+        """An unreachable device and a stale-but-readable one get the same response from
+        the control, so they must not differ in whether this raises."""
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        stored = InputReading(value=19.5, timestamp=0.0, age=5000.0, live=False)
+        handler = _handler(fails=SourceConnectionError("bridge unreachable"))
+        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        with caplog.at_level("WARNING"):
+            assert read_input(None, SETTINGS, SPEC) is stored
+        assert "Live read" in caplog.text
+
+    def test_no_stored_point_and_a_failed_fetch_raises(self, monkeypatch, tmp_path):
+        """Nothing to return and nothing to fall back to. Returning None here would make
+        "no reading" indistinguishable from a reading of zero at the call site."""
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        handler = _handler(fails=SourceConnectionError("bridge unreachable"))
+        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: None)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        with pytest.raises(SourceConnectionError, match="no value available for 'temperature'"):
+            read_input(None, SETTINGS, SPEC)
+
+    def test_a_live_read_missing_the_field_raises_rather_than_inventing_one(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        handler = _handler(data={"humidity": 55.0})
+        monkeypatch.setattr("toinflux.inputs.stored_reading", lambda *a, **k: None)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        with pytest.raises(SourceConnectionError, match="no such field"):
+            read_input(None, SETTINGS, SPEC)
