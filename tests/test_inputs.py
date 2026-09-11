@@ -46,7 +46,7 @@ def _never_held():
     yield False
 
 
-def _holder_script(state_dir, hold_seconds):
+def _holder_script(hold_seconds):
     """Return a script that takes the fetch lock, says so, and holds it.
 
     A real process rather than a thread: the properties being tested are the kernel's, and
@@ -63,9 +63,13 @@ def _holder_script(state_dir, hold_seconds):
 
 
 def _start_holder(state_dir, hold_seconds):
-    """Start a holder and return it once it reports the lock is taken."""
+    """Start a holder and return it once it reports the lock is taken.
+
+    The child finds the lock through STATE_DIRECTORY in its environment, which is what a
+    real control process does, so state_dir is passed as that rather than as an argument.
+    """
     child = subprocess.Popen(
-        [sys.executable, "-c", _holder_script(state_dir, hold_seconds)],
+        [sys.executable, "-c", _holder_script(hold_seconds)],
         stdout=subprocess.PIPE,
         text=True,
         env={**os.environ, "STATE_DIRECTORY": str(state_dir), "PYTHONPATH": ""},
@@ -268,11 +272,12 @@ class TestTheFetchLockSerialisesLiveFetches:
             holder.wait(timeout=10)
 
 
-def _handler(live=True, timeout=5, data=None, fails=None):
+def _handler(live=True, timeout=5, data=None, fails=None, timestamp=None):
     """A stand-in source handler for the live-fetch path."""
     handler = MagicMock()
     handler.MCP_LIVE_STATE = live
     handler.source_settings = {"timeout": timeout}
+    handler.timestamp = timestamp
     if fails is not None:
         handler.get_data.side_effect = fails
     else:
@@ -328,6 +333,7 @@ class TestReadInput:
         monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         reading = read_input(None, SETTINGS, SPEC, now=9999.0)
+        # Age 0 because this handler set no timestamp of its own; see the two tests below.
         assert (reading.value, reading.live, reading.age) == (21.0, True, 0.0)
         handler.send_data.assert_called_once_with({"temperature": 21.0, "humidity": 55.0})
 
@@ -401,6 +407,30 @@ class TestReadInput:
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         with pytest.raises(SourceConnectionError, match="no value available for 'temperature'"):
             read_input(None, SETTINGS, SPEC)
+
+    def test_a_live_reading_carries_the_point_s_own_time_not_the_time_we_asked(self, monkeypatch, tmp_path):
+        """get_data() sets handler.timestamp where the reading is older than the request -
+        Nuki does, Octopus does - and send_data writes the point at that same value.
+
+        Reporting age 0 would disagree with what InfluxDB then holds, and would tell a
+        control that an hour-old reading was brand new. Freshly fetched is not the same
+        thing as fresh.
+        """
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        handler = _handler(data={"temperature": 21.0}, timestamp=6000)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: None)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        reading = read_input(None, SETTINGS, SPEC, now=9600.0)
+        assert (reading.timestamp, reading.age, reading.live) == (6000.0, 3600.0, True)
+
+    def test_a_live_reading_with_no_handler_timestamp_is_now(self, monkeypatch, tmp_path):
+        """The ordinary case: the handler read the device and the point is the moment."""
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        handler = _handler(data={"temperature": 21.0}, timestamp=None)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: None)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        reading = read_input(None, SETTINGS, SPEC, now=9600.0)
+        assert (reading.timestamp, reading.age) == (9600.0, 0.0)
 
     def test_a_misconfigured_source_is_not_degraded_into_a_transient_failure(self, monkeypatch, tmp_path):
         """ConfigError means stop; SourceConnectionError means fail safe and carry on.

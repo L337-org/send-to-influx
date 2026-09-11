@@ -441,7 +441,12 @@ def _live_reading(handler, source, field, stored, now):
     handler.send_data(data)
     if field not in data:
         return _require(stored, source, field, "the live read returned no such field")
-    return InputReading(value=data[field], timestamp=moment, age=0.0, live=True)
+    # The point's own time, not the time we asked for it. get_data() sets handler.timestamp
+    # where the reading is older than the request - Nuki does, Octopus does - and send_data
+    # writes the point at that same value, so reporting age 0 here would disagree with what
+    # InfluxDB now holds and would tell a control an hour-old reading was brand new.
+    stamp = moment if handler.timestamp is None else float(handler.timestamp)
+    return InputReading(value=data[field], timestamp=stamp, age=moment - stamp, live=True)
 
 
 def _require(reading, source, field, why):
