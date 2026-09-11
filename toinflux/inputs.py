@@ -67,7 +67,8 @@ def resolve_poll_floor(source, settings):
     if not isinstance(source_cfg, dict):
         raise ConfigError(
             f"cannot resolve the live-fetch floor for source {source!r}: it has no settings section. "
-            f"Add a {source!r} section with an interval, or a {POLL_FLOOR_KEY} to set the floor directly"
+            f"Add a {source!r} section with an 'interval' in it, or set "
+            f"{f'{source}.{POLL_FLOOR_KEY}'!r} there to give the floor directly"
         )
     if POLL_FLOOR_KEY in source_cfg:
         return _as_seconds(source_cfg[POLL_FLOOR_KEY], f"{source}.{POLL_FLOOR_KEY}")
@@ -91,12 +92,16 @@ def _as_seconds(value, setting):
     Raises:
         ConfigError: where the value is missing, not a number, or negative
     """
+    # Quoted because the setting name is built from a source name, and that arrives from a
+    # control document an MCP client writes. general.py's validator interpolates the same
+    # names bare, matching every message around it, where they come from the operator's own
+    # sources: list instead - a different provenance rather than an inconsistency.
     if value is None:
-        raise ConfigError(f"{setting} is required to resolve the live-fetch floor, and is missing")
+        raise ConfigError(f"{setting!r} is required to resolve the live-fetch floor, and is missing")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ConfigError(f"{setting} must be a number of seconds (got {value!r})")
+        raise ConfigError(f"{setting!r} must be a number of seconds (got {value!r})")
     if value < 0:
-        raise ConfigError(f"{setting} must not be negative (got {value!r})")
+        raise ConfigError(f"{setting!r} must not be negative (got {value!r})")
     return float(value)
 
 

@@ -117,7 +117,7 @@ class TestResolvePollFloor:
     def test_a_section_with_neither_key_names_the_setting_to_add(self):
         """The message has to say what to write, because the reader is an operator looking
         at a journal line rather than at this code."""
-        with pytest.raises(ConfigError, match="hue.interval is required"):
+        with pytest.raises(ConfigError, match="'hue.interval' is required"):
             resolve_poll_floor("hue", {"hue": {"db": "x"}})
 
     @pytest.mark.parametrize("bad", [True, False, "60", None, [60]])
@@ -134,7 +134,7 @@ class TestResolvePollFloor:
     def test_a_bad_interval_is_refused_when_it_is_the_fallback(self):
         """The default path validates too. An unusable interval reaching a control as a
         floor of None would fail much later, somewhere less obvious."""
-        with pytest.raises(ConfigError, match="hue.interval must be a number of seconds"):
+        with pytest.raises(ConfigError, match="'hue.interval' must be a number of seconds"):
             resolve_poll_floor("hue", {"hue": {"interval": "300"}})
 
 
