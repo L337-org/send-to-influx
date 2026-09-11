@@ -13,7 +13,7 @@ This module deliberately imports nothing from the MCP layer. A control runs with
 server absent entirely, and importing ``toinflux.mcp_read`` would pull an HTTP server stack
 into every control process to ask what the last temperature reading was.
 
-The floor's settings key is ``general.POLL_FLOOR_KEY``, declared there because
+The floor's settings key is ``general.MINIMUM_INTERVAL_KEY``, declared there because
 ``--check-config`` validates it and this module imports ``influx``, which imports
 ``general``: owning the name here and importing it back would be a cycle.
 """
@@ -33,17 +33,22 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
-from toinflux.general import POLL_FLOOR_KEY, get_class, resolve_state_dir
+from toinflux.general import MINIMUM_INTERVAL_KEY, get_class, resolve_state_dir, source_class
 from toinflux.influx import InfluxWriteError, build_latest_query, resolve_db, run_query, single_series
 
 
-def resolve_poll_floor(source, settings):
+def resolve_minimum_interval(source, settings):
     """Return the minimum seconds between live fetches of a source.
 
-    The source's own ``poll_floor`` where it sets one, and its ``interval`` otherwise: a
-    collector already asks the device every ``interval`` seconds, so that cadence is known
-    to be acceptable and makes a defensible default. A source that tolerates being asked
-    more often sets a lower floor explicitly.
+    Three answers in order: the operator's ``minimum_interval`` for that source, then the
+    source class's own ``MINIMUM_INTERVAL``, then its collection ``interval``.
+
+    The class's value is the real one, and it belongs there because it describes what the
+    far end tolerates rather than how often this operator wants data. Someone collecting
+    Open-Meteo every six hours has said nothing about how often its API may be asked, so
+    reading the floor off ``interval`` would be hours wrong in either direction. The
+    operator override exists because only they know their own estate: a Hue bridge on a
+    congested network may want more room than the class assumes.
 
     The floor is per source rather than per control on purpose. Controls are separate
     processes, so a number written in one control's file cannot bind another's behaviour:
@@ -69,10 +74,16 @@ def resolve_poll_floor(source, settings):
         raise ConfigError(
             f"cannot resolve the live-fetch floor for source {source!r}: it has no settings section. "
             f"Add a {source!r} section with an 'interval' in it, or set "
-            f"{f'{source}.{POLL_FLOOR_KEY}'!r} there to give the floor directly"
+            f"{f'{source}.{MINIMUM_INTERVAL_KEY}'!r} there to give the floor directly"
         )
-    if POLL_FLOOR_KEY in source_cfg:
-        return _as_seconds(source_cfg[POLL_FLOOR_KEY], f"{source}.{POLL_FLOOR_KEY}")
+    if MINIMUM_INTERVAL_KEY in source_cfg:
+        return _as_seconds(source_cfg[MINIMUM_INTERVAL_KEY], f"{source}.{MINIMUM_INTERVAL_KEY}")
+    declared = source_class(source).MINIMUM_INTERVAL
+    if declared is not None:
+        return _as_seconds(declared, f"{source}'s built-in minimum interval")
+    # Nothing declared, which no shipped source does. The collection interval is a safe
+    # answer rather than a good one: it is the operator's cadence, not what the far end
+    # tolerates, so it can be hours out in either direction.
     return _as_seconds(source_cfg.get("interval"), f"{source}.interval")
 
 
@@ -80,7 +91,7 @@ def _as_seconds(value, setting):
     """Return a settings value as a non-negative number of seconds.
 
     A bool is refused rather than accepted as 1 or 0. ``bool`` subclasses ``int``, so
-    ``poll_floor: true`` would otherwise validate and then behave as a one-second floor,
+    ``minimum_interval: true`` would otherwise validate and then behave as a one-second floor,
     which is not what anyone typing ``true`` meant.
 
     Args:
@@ -357,7 +368,7 @@ def fetch_lock_path(source, settings_file=None):
     Returns:
         str: the lock file's path, which may not exist yet
     """
-    # Lowercased for the same reason resolve_poll_floor() does it, and here it is the
+    # Lowercased for the same reason resolve_minimum_interval() does it, and here it is the
     # difference between serialising and not: two controls naming the same source in
     # different cases would otherwise take two different locks and both go live.
     return os.path.join(resolve_state_dir(settings_file), LOCK_DIR_NAME, f"fetch-{source.lower()}.lock")
@@ -520,7 +531,7 @@ def read_input(session, settings, spec, settings_file=None, now=None):
     # ask for anyway. Required here instead would make --check-config pass documents that
     # then failed at runtime, and the validator is the contract.
     max_age = _as_seconds(spec.get("max_age", 0), f"max_age for input {field}")
-    trigger = max(max_age, resolve_poll_floor(source, settings))
+    trigger = max(max_age, resolve_minimum_interval(source, settings))
     # One handler for the whole call, closed on the way out. Every path here needs one -
     # even the stored read, for the measurement, tags and database - and each build opens a
     # session nothing closes.

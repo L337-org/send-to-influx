@@ -347,10 +347,18 @@ class MyEnergi(DataHandler):
     """Child class of DataHandler to get data from MyEnergi.
 
     Attributes:
+        MINIMUM_INTERVAL (int): 60 - myenergi's cloud API rather than the hardware, and
+            one known to be unreliable under load; shared by zappi, harvi and eddi.
         MCP_INSTANCE_TAG (str): "device" - the trio share one measurement, so each point names
             which device produced it.
         MCP_TAG_FILTERS (dict): empty on this shared parent; each concrete device sets its own.
     """
+
+    # myenergi's cloud API rather than the hardware: a third party, and one whose director
+    # service is known to be unreliable under load. Sixty seconds sits well inside the
+    # shipped 300 while leaving a control real headroom, and applies to zappi, harvi and
+    # eddi alike because they share this base and the same endpoint.
+    MINIMUM_INTERVAL = 60
 
     # All three types share the `myenergi` measurement, and `device` is the tag that tells
     # them apart - now carrying the operator's label rather than the type name. Naming it as

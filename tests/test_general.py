@@ -219,47 +219,47 @@ class TestValidateSettings:
         sample_settings["hue"]["mcp_read_write"] = True
         validate_settings(sample_settings)
 
-    def test_non_numeric_poll_floor_raises_config_error(self, sample_settings):
+    def test_non_numeric_minimum_interval_raises_config_error(self, sample_settings):
         """The live-fetch floor is reported at --check-config, not at a control's startup.
 
         A control process resolves it hours later and in the journal, which is the wrong
         place to find out that a number was typed as a string.
         """
-        sample_settings["hue"]["poll_floor"] = "60"
-        with pytest.raises(ConfigError, match="poll_floor must be a number of seconds"):
+        sample_settings["hue"]["minimum_interval"] = "60"
+        with pytest.raises(ConfigError, match="minimum_interval must be a number of seconds"):
             validate_settings(sample_settings)
 
-    def test_bool_poll_floor_raises_config_error(self, sample_settings):
-        """`bool` subclasses `int`, so `poll_floor: true` would validate and then act as a
+    def test_bool_minimum_interval_raises_config_error(self, sample_settings):
+        """`bool` subclasses `int`, so `minimum_interval: true` would validate and then act as a
         one-second floor - the same trap a control's stage level refuses a bool for."""
-        sample_settings["hue"]["poll_floor"] = True
-        with pytest.raises(ConfigError, match="poll_floor must be a number of seconds"):
+        sample_settings["hue"]["minimum_interval"] = True
+        with pytest.raises(ConfigError, match="minimum_interval must be a number of seconds"):
             validate_settings(sample_settings)
 
     @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
-    def test_non_finite_poll_floor_raises_config_error(self, sample_settings, bad):
+    def test_non_finite_minimum_interval_raises_config_error(self, sample_settings, bad):
         """.nan and .inf are floats to YAML and to isinstance, and neither fails loudly at
         runtime: a nan floor never holds so every cycle goes live, an inf one always holds
         so nothing ever does."""
-        sample_settings["hue"]["poll_floor"] = bad
-        with pytest.raises(ConfigError, match="poll_floor must be a finite number"):
+        sample_settings["hue"]["minimum_interval"] = bad
+        with pytest.raises(ConfigError, match="minimum_interval must be a finite number"):
             validate_settings(sample_settings)
 
-    def test_negative_poll_floor_raises_config_error(self, sample_settings):
-        sample_settings["hue"]["poll_floor"] = -1
-        with pytest.raises(ConfigError, match="poll_floor must not be negative"):
+    def test_negative_minimum_interval_raises_config_error(self, sample_settings):
+        sample_settings["hue"]["minimum_interval"] = -1
+        with pytest.raises(ConfigError, match="minimum_interval must not be negative"):
             validate_settings(sample_settings)
 
-    def test_numeric_poll_floor_is_accepted(self, sample_settings):
+    def test_numeric_minimum_interval_is_accepted(self, sample_settings):
         """Zero is a legitimate floor: it means this source may be asked whenever a control
         wants it, which is the right setting for something cheap to read."""
         for value in (0, 60, 12.5):
-            sample_settings["hue"]["poll_floor"] = value
+            sample_settings["hue"]["minimum_interval"] = value
             validate_settings(sample_settings)
 
-    def test_absent_poll_floor_is_accepted(self, sample_settings):
+    def test_absent_minimum_interval_is_accepted(self, sample_settings):
         """The key is optional; the source's own interval is the default floor."""
-        sample_settings["hue"].pop("poll_floor", None)
+        sample_settings["hue"].pop("minimum_interval", None)
         validate_settings(sample_settings)
 
     def test_empty_token_falls_back_to_v1_validation(self, sample_settings):

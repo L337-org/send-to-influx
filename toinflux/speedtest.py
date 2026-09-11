@@ -31,6 +31,8 @@ class Speedtest(DataHandler):
     """Child class of DataHandler to run a speed test and send the results to InfluxDB.
 
     Attributes:
+        MINIMUM_INTERVAL (int): 3600 - never consulted today, and high on purpose:
+            a run saturates the link, so a live read must never be cheap to repeat.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_LIVE_STATE (bool): False - a run takes minutes and saturates the link, so
             current-state reads the latest recorded run rather than triggering one.
@@ -39,6 +41,12 @@ class Speedtest(DataHandler):
             several collectors into one database stay comparable rather than merged.
         MCP_FIELD_METADATA (dict): units and aggregation kinds for throughput and latency.
     """
+
+    # Also never consulted today - MCP_LIVE_STATE is False - but deliberately high rather
+    # than absent, because a run saturates the connection for the best part of a minute.
+    # If a live read is ever added, the default must not be one that a control could invoke
+    # every cycle.
+    MINIMUM_INTERVAL = 3600
 
     MCP_DESCRIPTION = "Internet speed test: download/upload throughput and latency."
     # get_data() runs a full download/upload test (minutes, saturates the link),

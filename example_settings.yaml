@@ -146,12 +146,15 @@ hue:
   timeout: 5
   # Interval in seconds between data collection
   interval: 300
-  # Optional floor, in seconds, on how often anything may go live to this source outside
-  # the collection interval above. Only control loops read live at all, and this bounds
-  # every control sharing the source rather than any one of them. Defaults to `interval`,
-  # since the collector already asks the bridge that often. Lower it for a source that is
-  # cheap to read; 0 means a control may read it whenever it wants.
-  # poll_floor: 60
+  # Optional override, in seconds, on how often anything may go live to this source
+  # outside the collection interval above. Only control loops read live at all, and this
+  # bounds every control sharing the source rather than any one of them.
+  #
+  # Each source ships with its own built-in value describing what the far end tolerates -
+  # 10 for a Hue bridge on your own network, 600 for Open-Meteo's free API - so leaving
+  # this out is the normal case. Set it where your estate differs: a bridge on a congested
+  # network may want more room. 0 means a control may read it whenever it wants.
+  # minimum_interval: 60
   # Temperature unit (C/F/K)
   temperature_units: "C"
   # Skip TLS certificate verification. Defaults to true since Hue bridges are commonly

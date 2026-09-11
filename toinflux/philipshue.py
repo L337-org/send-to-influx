@@ -442,6 +442,8 @@ class Hue(DataHandler):
     """Child class of DataHandler to get data from a Hue Bridge.
 
     Attributes:
+        MINIMUM_INTERVAL (int): 10 - a bridge on the local network with no third party
+            in the way; enough to stop a runaway loop without constraining a control.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_WRITABLE (bool): True - lights and plugs can be actuated, opt-in per install.
         MCP_INSTANCE_TAG (str): the tag naming which bridge a point came from.
@@ -450,6 +452,12 @@ class Hue(DataHandler):
         HUE_CT_MIN (int): the lowest colour temperature, in mirek, the bridge accepts.
         HUE_CT_MAX (int): the highest colour temperature, in mirek, the bridge accepts.
     """
+
+    # A bridge on the local network, with no third party between us and it. Philips' own
+    # rate guidance is about commands (writes); reading sensor state is cheap. Ten seconds
+    # is enough to stop a misconfigured loop hammering the bridge without constraining any
+    # realistic control, whose process variable is a temperature or a light level.
+    MINIMUM_INTERVAL = 10
 
     MCP_DESCRIPTION = "Philips Hue: lights and smart plugs (on/off, brightness) and motion/temperature/light sensors."
 

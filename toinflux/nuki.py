@@ -114,6 +114,8 @@ class Nuki(MqttDataHandler):
     lock could not be queried as a dimension - see ``UPGRADING.md`` for the migration.
 
     Attributes:
+        MINIMUM_INTERVAL (int): 0 - a streaming source, so a live read returns the last
+            message an open subscription already delivered and sends nothing.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_INSTANCE_TAG (str): "device" - each lock is its own point, tagged with its
             Nuki-app name, so the lock is queryable as a dimension.
@@ -123,6 +125,11 @@ class Nuki(MqttDataHandler):
             door-sensor state fields, plus the battery levels.
         STREAM_TOPIC_FILTER (str): the MQTT topic pattern the streaming path subscribes to.
     """
+
+    # Zero, because a "live read" here costs nothing on the wire. This source is STREAMING:
+    # get_data() returns the last message an already-open MQTT subscription delivered, so
+    # asking again sends no request to the bridge and there is nothing to rate limit.
+    MINIMUM_INTERVAL = 0
 
     MCP_DESCRIPTION = "Nuki smart locks and door sensors: lock state, door state and battery levels."
     # Each lock is its own point, tagged with the lock. Before this, every lock's state was

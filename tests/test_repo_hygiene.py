@@ -1396,3 +1396,25 @@ def test_the_rebinding_guard_leaves_legitimate_code_alone(source):
     assignment, which is the gap this fills.
     """
     assert not _module_level_rebindings(source), f"false positive: {source!r}"
+
+
+def test_every_source_declares_a_minimum_interval():
+    """A source must say how often anything may go live to it, rather than inheriting a guess.
+
+    The base class leaves ``MINIMUM_INTERVAL`` as None, which falls back to the operator's
+    collection ``interval``. That is a safe answer and a poor one: the interval is how often
+    *this* operator wants data, and says nothing about what the far end tolerates. Someone
+    polling a free public API every six hours has not thereby decided it may be asked every
+    six hours.
+
+    So the fallback exists for a source under development, and shipping one without a number
+    fails here. The value is a judgement about somebody else's endpoint, which is exactly the
+    kind of decision that should be made deliberately rather than inherited.
+    """
+    from toinflux.general import known_sources, source_class
+
+    missing = sorted(source for source in known_sources() if source_class(source).MINIMUM_INTERVAL is None)
+    assert not missing, (
+        f"these sources inherit the interval fallback instead of declaring a minimum interval: "
+        f"{', '.join(missing)}. Set MINIMUM_INTERVAL on each class, with the reasoning beside it"
+    )

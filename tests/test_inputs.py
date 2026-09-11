@@ -36,7 +36,7 @@ from toinflux.inputs import (
     fetch_lock,
     fetch_lock_path,
     read_input,
-    resolve_poll_floor,
+    resolve_minimum_interval,
     stored_reading,
 )
 
@@ -79,54 +79,72 @@ def _start_holder(state_dir, hold_seconds):
     return child
 
 
-class TestResolvePollFloor:
+class TestResolveMinimumInterval:
     def test_an_explicit_floor_wins(self):
-        assert resolve_poll_floor("hue", {"hue": {"interval": 300, "poll_floor": 60}}) == 60.0
+        assert resolve_minimum_interval("hue", {"hue": {"interval": 300, "minimum_interval": 60}}) == 60.0
 
-    def test_the_collection_interval_is_the_default(self):
-        """A collector already asks the device this often, so the cadence is known to be
-        acceptable. Anything lower has to be chosen deliberately."""
-        assert resolve_poll_floor("hue", {"hue": {"interval": 300}}) == 300.0
+    def test_the_source_class_value_beats_the_collection_interval(self):
+        """The class value describes what the far end tolerates; the interval describes how
+        often this operator wants data. Reading the floor off the interval would be hours
+        wrong in either direction - openmeteo ships at 900 and the API tolerates 600."""
+        assert resolve_minimum_interval("openmeteo", {"openmeteo": {"interval": 21600}}) == 600.0
+
+    def test_an_operator_override_beats_the_source_class(self):
+        """Only the operator knows their own estate: a bridge on a congested network may
+        want more room than the class assumes."""
+        assert resolve_minimum_interval("hue", {"hue": {"interval": 300, "minimum_interval": 45}}) == 45.0
+
+    def test_a_source_that_declares_nothing_falls_back_to_the_interval(self, monkeypatch):
+        """No shipped source does - a hygiene test says so - but the fallback has to work
+        for one under development, and it must not be silently zero."""
+        handler = MagicMock()
+        handler.MINIMUM_INTERVAL = None
+        monkeypatch.setattr("toinflux.inputs.source_class", lambda source: handler)
+        assert resolve_minimum_interval("hue", {"hue": {"interval": 300}}) == 300.0
 
     def test_zero_is_a_floor_rather_than_a_missing_value(self):
         """Zero means "ask whenever a control wants it", which is right for a source that is
         cheap to read. A falsy check would silently substitute the interval instead."""
-        assert resolve_poll_floor("hue", {"hue": {"interval": 300, "poll_floor": 0}}) == 0.0
+        assert resolve_minimum_interval("hue", {"hue": {"interval": 300, "minimum_interval": 0}}) == 0.0
 
     def test_the_floor_is_read_per_source(self):
         """The floor binds every control sharing a source, so it cannot come from one
         control's document: two controls each honouring 60 s still reach the device at 30 s
         combined. This test is the structural half of that - one settings document, two
         sources, two different answers."""
-        settings = {"hue": {"interval": 300}, "openmeteo": {"interval": 1800, "poll_floor": 600}}
-        assert resolve_poll_floor("hue", settings) == 300.0
-        assert resolve_poll_floor("openmeteo", settings) == 600.0
+        settings = {"hue": {"interval": 300}, "openmeteo": {"interval": 1800, "minimum_interval": 1200}}
+        assert resolve_minimum_interval("hue", settings) == 10.0
+        assert resolve_minimum_interval("openmeteo", settings) == 1200.0
 
     def test_the_source_name_is_case_insensitive(self):
         """get_class() accepts any case and lowercases, and settings sections are
         canonically lowercase because validate_settings matches them against
         known_sources(). A control spec saying "Hue" must land on the same floor."""
-        assert resolve_poll_floor("Hue", {"hue": {"interval": 300, "poll_floor": 60}}) == 60.0
+        assert resolve_minimum_interval("Hue", {"hue": {"interval": 300, "minimum_interval": 60}}) == 60.0
 
     @pytest.mark.parametrize("settings", [{}, {"hue": None}, {"hue": "300"}, {"hue": []}])
     def test_a_source_without_a_usable_section_is_a_config_error(self, settings):
         """Including a section present but empty, which is what commenting out every field
         leaves behind and parses as null."""
         with pytest.raises(ConfigError, match="cannot resolve the live-fetch floor"):
-            resolve_poll_floor("hue", settings)
+            resolve_minimum_interval("hue", settings)
 
-    def test_a_section_with_neither_key_names_the_setting_to_add(self):
-        """The message has to say what to write, because the reader is an operator looking
-        at a journal line rather than at this code."""
+    def test_a_section_with_nothing_usable_names_the_setting_to_add(self, monkeypatch):
+        """Only reachable for a source declaring no class value, since otherwise that
+        answers first. The message still has to say what to write, because the reader is an
+        operator looking at a journal line rather than at this code."""
+        handler = MagicMock()
+        handler.MINIMUM_INTERVAL = None
+        monkeypatch.setattr("toinflux.inputs.source_class", lambda source: handler)
         with pytest.raises(ConfigError, match="'hue.interval' is required"):
-            resolve_poll_floor("hue", {"hue": {"db": "x"}})
+            resolve_minimum_interval("hue", {"hue": {"db": "x"}})
 
     @pytest.mark.parametrize("bad", [True, False, "60", None, [60]])
     def test_a_non_numeric_floor_is_refused(self, bad):
-        """A bool included: `bool` subclasses `int`, so `poll_floor: true` would otherwise
+        """A bool included: `bool` subclasses `int`, so `minimum_interval: true` would otherwise
         behave as a one-second floor, which is not what typing `true` meant."""
         with pytest.raises(ConfigError, match="must be a number of seconds|is required"):
-            resolve_poll_floor("hue", {"hue": {"interval": 300, "poll_floor": bad}})
+            resolve_minimum_interval("hue", {"hue": {"interval": 300, "minimum_interval": bad}})
 
     @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
     def test_a_non_finite_floor_is_refused(self, bad):
@@ -135,17 +153,20 @@ class TestResolvePollFloor:
         against any age, so the floor never holds and every cycle goes live; an inf floor
         compares True, so nothing ever does."""
         with pytest.raises(ConfigError, match="must be a finite number of seconds"):
-            resolve_poll_floor("hue", {"hue": {"interval": 300, "poll_floor": bad}})
+            resolve_minimum_interval("hue", {"hue": {"interval": 300, "minimum_interval": bad}})
 
     def test_a_negative_floor_is_refused(self):
         with pytest.raises(ConfigError, match="must not be negative"):
-            resolve_poll_floor("hue", {"hue": {"interval": 300, "poll_floor": -5}})
+            resolve_minimum_interval("hue", {"hue": {"interval": 300, "minimum_interval": -5}})
 
-    def test_a_bad_interval_is_refused_when_it_is_the_fallback(self):
-        """The default path validates too. An unusable interval reaching a control as a
+    def test_a_bad_interval_is_refused_when_it_is_the_fallback(self, monkeypatch):
+        """The fallback path validates too. An unusable interval reaching a control as a
         floor of None would fail much later, somewhere less obvious."""
+        handler = MagicMock()
+        handler.MINIMUM_INTERVAL = None
+        monkeypatch.setattr("toinflux.inputs.source_class", lambda source: handler)
         with pytest.raises(ConfigError, match="'hue.interval' must be a number of seconds"):
-            resolve_poll_floor("hue", {"hue": {"interval": "300"}})
+            resolve_minimum_interval("hue", {"hue": {"interval": "300"}})
 
 
 class TestTheFetchLockSerialisesLiveFetches:
@@ -439,7 +460,7 @@ class TestReadInput:
         assert (reading.value, reading.live, reading.age) == (21.0, True, 0.0)
         handler.send_data.assert_called_once_with({"temperature": 21.0, "humidity": 55.0})
 
-    def test_the_poll_floor_beats_a_shorter_max_age(self, monkeypatch):
+    def test_the_minimum_interval_beats_a_shorter_max_age(self, monkeypatch):
         """A control wanting fresher data than the source's floor allows gets the stored
         value anyway. Deciding otherwise would let one control's document set the rate at
         which every other control's source is polled."""
@@ -447,8 +468,11 @@ class TestReadInput:
         handler = _handler()
         monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
-        # 120s old, the control wants 60s, the source's floor is its 300s interval.
-        assert read_input(None, SETTINGS, {**SPEC, "max_age": 60}) is stored
+        # 120s old and the control wants 60s, but carbonintensity's floor is 900: the grid
+        # publishes half-hourly, so asking sooner spends someone else's capacity for nothing.
+        settings = {**SETTINGS, "carbonintensity": {"interval": 1800, "db": "x"}}
+        spec = {"source": "carbonintensity", "field": "intensity_actual", "max_age": 60}
+        assert read_input(None, settings, spec) is stored
         handler.get_data.assert_not_called()
 
     def test_the_recheck_after_the_lock_avoids_touching_the_device(self, monkeypatch, tmp_path):
@@ -576,9 +600,10 @@ class TestReadInput:
         handler = _handler()
         monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
-        spec = {key: value for key, value in SPEC.items() if key != "max_age"}
-        # 120s old against hue's 300s interval as the floor: inside it, so no live read.
-        assert read_input(None, SETTINGS, spec) is stored
+        # 120s old against carbonintensity's 900s floor: inside it, so no live read.
+        settings = {**SETTINGS, "carbonintensity": {"interval": 1800, "db": "x"}}
+        spec = {"source": "carbonintensity", "field": "intensity_actual"}
+        assert read_input(None, settings, spec) is stored
         handler.get_data.assert_not_called()
 
     @pytest.mark.parametrize("bad", [float("inf"), float("nan"), True, "900"])

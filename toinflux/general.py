@@ -32,7 +32,7 @@ DEFAULT_LOG_BACKUP_COUNT = 3
 # live to this source. It lives here rather than in toinflux.inputs, which is the only
 # thing that honours it, because inputs imports influx and influx imports this module:
 # validating it here and importing the name the other way would be an import cycle.
-POLL_FLOOR_KEY = "poll_floor"
+MINIMUM_INTERVAL_KEY = "minimum_interval"
 
 
 def configure_logging(
@@ -966,18 +966,18 @@ def _validate_source_block(source, settings, is_v2):
     # leave writes off. Fail loud instead - a user who set it meant to enable it.
     if "mcp_read_write" in source_cfg and not isinstance(source_cfg["mcp_read_write"], bool):
         errors.append(f"{source}.mcp_read_write must be true or false (got {source_cfg['mcp_read_write']!r})")
-    errors.extend(_validate_poll_floor(source, source_cfg))
+    errors.extend(_validate_minimum_interval(source, source_cfg))
     return errors
 
 
-def _validate_poll_floor(source, source_cfg):
+def _validate_minimum_interval(source, source_cfg):
     """Return errors for a source's optional live-fetch floor.
 
     Checked here rather than where it is read because a control process resolves it at
     startup, long after --check-config is the place anyone is looking for a clear message.
 
     A bool is refused for the reason it is refused in a control's stage levels: `bool`
-    subclasses `int`, so `poll_floor: true` would validate and then act as a one-second
+    subclasses `int`, so `minimum_interval: true` would validate and then act as a one-second
     floor, which is not what typing `true` meant.
 
     Args:
@@ -987,11 +987,11 @@ def _validate_poll_floor(source, source_cfg):
     Returns:
         list: error strings, empty when the key is absent or usable
     """
-    if POLL_FLOOR_KEY not in source_cfg:
+    if MINIMUM_INTERVAL_KEY not in source_cfg:
         return []
-    value = source_cfg[POLL_FLOOR_KEY]
+    value = source_cfg[MINIMUM_INTERVAL_KEY]
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return [f"{source}.{POLL_FLOOR_KEY} must be a number of seconds (got {value!r})"]
+        return [f"{source}.{MINIMUM_INTERVAL_KEY} must be a number of seconds (got {value!r})"]
     # .nan and .inf are floats as far as YAML and isinstance are concerned, and neither
     # fails loudly later: a nan floor never holds so every cycle goes live, and an inf one
     # always holds so nothing ever does.
@@ -1001,9 +1001,9 @@ def _validate_poll_floor(source, source_cfg):
     # something this key introduced, and it is raised separately rather than widened into
     # here. Said explicitly because the obvious assumption is that the two match.
     if not math.isfinite(value):
-        return [f"{source}.{POLL_FLOOR_KEY} must be a finite number of seconds (got {value!r})"]
+        return [f"{source}.{MINIMUM_INTERVAL_KEY} must be a finite number of seconds (got {value!r})"]
     if value < 0:
-        return [f"{source}.{POLL_FLOOR_KEY} must not be negative (got {value!r})"]
+        return [f"{source}.{MINIMUM_INTERVAL_KEY} must not be negative (got {value!r})"]
     return []
 
 

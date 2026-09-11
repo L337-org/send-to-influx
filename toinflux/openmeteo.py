@@ -18,11 +18,19 @@ class OpenMeteo(DataHandler):
     """Child class of DataHandler to get weather data from Open-Meteo.
 
     Attributes:
+        MINIMUM_INTERVAL (int): 600 - a free public API used without a key, and about
+            the resolution of the data, so asking faster returns the same numbers.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_MEASUREMENT (str): "weather" - this source's measurement is not its own name.
         MCP_FIELD_METADATA (dict): units and aggregation kinds for the example-settings
             fields; any other Open-Meteo variable a user configures carries none.
     """
+
+    # A free public API used without a key, so the courtesy owed is real. Ten minutes is
+    # also about the resolution of the data: the current-conditions block does not change
+    # faster than that, so a shorter interval spends someone else's capacity to receive the
+    # same numbers back. The shipped collection interval is 900.
+    MINIMUM_INTERVAL = 600
 
     MCP_DESCRIPTION = "Open-Meteo weather: temperature, humidity, precipitation, cloud, wind and radiation."
     # Writes to the "weather" measurement, not "openmeteo".

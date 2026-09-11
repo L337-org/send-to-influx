@@ -17,12 +17,20 @@ class Octopus(DataHandler):
     """Child class of DataHandler to get data from Octopus Energy.
 
     Attributes:
+        MINIMUM_INTERVAL (int): 1800 - never consulted, since MCP_LIVE_STATE is False;
+            declared so the number is a decision rather than an accident if that changes.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_LIVE_STATE (bool): False - readings arrive up to 24 h late, so a live API call is
             no fresher than InfluxDB and current-state reads the latest recorded point instead.
         MCP_FIELD_METADATA (dict): units and aggregation kinds for the three fields; both
             consumption fields are per-interval rather than meter totals.
     """
+
+    # Never actually consulted: MCP_LIVE_STATE is False because the data is around a day
+    # behind, so nothing ever goes live to this source. Declared anyway rather than left to
+    # the interval fallback, so that the number is a decision rather than an accident if a
+    # live read is ever added.
+    MINIMUM_INTERVAL = 1800
 
     MCP_DESCRIPTION = "Octopus Energy smart meter: latest electricity/gas consumption and unit rate."
     # ~24 h delayed, so a live API read is no fresher than InfluxDB - current-state

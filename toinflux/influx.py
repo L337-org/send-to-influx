@@ -196,6 +196,9 @@ class DataHandler:
             MCP client.
         MCP_LIVE_STATE (bool): True - whether a current-state read may call ``get_data()``
             live. False where a live read is expensive or no fresher than InfluxDB.
+        MINIMUM_INTERVAL (int or None): None on the base - the shortest interval, in
+            seconds, at which anything may go live to this source. Every shipped source
+            names one; None falls back to the operator's collection ``interval``.
         MCP_WRITABLE (bool): False - whether this source offers a write action at all. The
             operator still has to opt in per source; see ``mcp_write_enabled()``.
         MCP_INSTANCE_TAG (str or None): None for a single-target source - the tag naming which
@@ -258,6 +261,15 @@ class DataHandler:
     # - for those, current-state reads the latest recorded point from InfluxDB
     # instead of ever calling get_data().
     MCP_LIVE_STATE = True
+    # The shortest interval, in seconds, at which anything may go live to this source -
+    # the bound a control loop honours when its input is stale. It belongs to the source
+    # rather than to the operator's collection cadence, because it describes what the far
+    # end tolerates: an operator polling Open-Meteo every six hours has said nothing about
+    # how often the API may be asked. An operator can still override it per source in
+    # settings.yaml, and None means fall back to that source's `interval`, which is a safe
+    # answer rather than a good one - every shipped source names a number, and
+    # tests/test_repo_hygiene.py::test_every_source_declares_a_minimum_interval says so.
+    MINIMUM_INTERVAL: "int | None" = None
     # Whether this source implements a write/control path the MCP server can
     # expose. A subclass with MCP_WRITABLE = True provides its own vendor write
     # method(s) - the shape is per source, e.g. Hue's mcp_set_device_state()/

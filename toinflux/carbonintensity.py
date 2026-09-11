@@ -17,10 +17,17 @@ class CarbonIntensity(DataHandler):
     """Child class of DataHandler to get National Grid carbon intensity data.
 
     Attributes:
+        MINIMUM_INTERVAL (int): 900 - the grid publishes on half-hourly
+            settlement periods, so this is already twice as often as the figure moves.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_FIELD_METADATA (dict): unit and aggregation kind for the two intensity
             fields; the ``gen_<fuel>`` fields carry none, and UNITS.md documents them.
     """
+
+    # The national grid publishes on half-hourly settlement periods, so fifteen minutes is
+    # already twice as often as the underlying figure can move. Free public API, no key,
+    # same courtesy as Open-Meteo. The shipped collection interval is 1800.
+    MINIMUM_INTERVAL = 900
 
     MCP_DESCRIPTION = "UK carbon intensity (actual/forecast gCO2/kWh) and the generation fuel mix."
     # Only the two intensity fields carry a unit here. The gen_<fuel>
