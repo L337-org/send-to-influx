@@ -89,6 +89,36 @@ def configure_logging(
         root.addHandler(file_handler)
 
 
+def resolve_state_dir(settings_file=None):
+    """Return the directory this installation keeps runtime state in.
+
+    Runtime state is what the service writes as it runs - OAuth client registrations,
+    control configurations - as distinct from configuration, which an admin writes. The
+    two have different homes because they have different owners: ``/etc/send-to-influx``
+    is root-owned and the service runs as ``send-to-influx``, so nothing there is
+    writable by it.
+
+    Under systemd this is the unit's ``StateDirectory``, read from the environment rather
+    than hardcoded so that a source checkout or a screen session - which this project
+    treats as equally first class - finds it unset and keeps the historical location
+    beside the settings file, writable by whoever is running the process.
+
+    Args:
+        settings_file (str or None): the settings path the process was started with, used
+            to anchor the off-systemd default; None means the project-root default
+
+    Returns:
+        str: the directory runtime state lives in
+    """
+    # Colon-separated when a unit declares several; take the first, so adding a second
+    # StateDirectory= later cannot silently move everything that lives here.
+    state_dir = os.environ.get("STATE_DIRECTORY", "").split(os.pathsep)[0].strip()
+    if state_dir:
+        return state_dir
+    base_dir = os.path.abspath(os.path.dirname(__file__) + "/..")
+    return os.path.dirname(os.path.join(base_dir, settings_file or "settings.yaml"))
+
+
 def flatten_dict(data, parent_key="", sep="_"):
     """Flatten a nested dictionary into a single-level dictionary.
 
