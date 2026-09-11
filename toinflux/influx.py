@@ -25,9 +25,8 @@ from itertools import islice
 import urllib3
 import requests
 from dataclasses import dataclass
-from toinflux.exceptions import SourceConnectionError, ToInfluxError, ToolParamError
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToInfluxError, ToolParamError
 from toinflux.general import load_settings
-from toinflux.exceptions import ConfigError
 
 
 class InfluxWriteError(ToInfluxError):
