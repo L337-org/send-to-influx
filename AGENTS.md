@@ -27,7 +27,7 @@ background.
 |---|---|
 | `toinflux/mcp*.py`, `toinflux/mcpserver.py` | [architecture/mcp-server.md](architecture/mcp-server.md) |
 | any collector under `toinflux/` (not the MCP modules) | [architecture/collectors.md](architecture/collectors.md) |
-| `sendtoinflux.py`, `toinflux/general.py`, `toinflux/process.py`, `toinflux/controls.py` | [architecture/runtime.md](architecture/runtime.md) |
+| `sendtoinflux.py`, `toinflux/general.py`, `toinflux/process.py`, `toinflux/controls.py`, `toinflux/rules.py` | [architecture/runtime.md](architecture/runtime.md) |
 | running an external command from anywhere | `toinflux.process.run_command`, and [architecture/runtime.md](architecture/runtime.md) |
 | `packaging/`, `toinflux/credentials.py`, `toinflux/credential_cli.py`, or adding a settings section | [architecture/packaging.md](architecture/packaging.md) |
 | adding a data source | the checklist in [CONTRIBUTING.md](CONTRIBUTING.md) |
@@ -130,6 +130,8 @@ keeps these names honest, and each guard's docstring carries the reasoning.
 - `tests/test_controls.py::TestControlNames::test_refuses_anything_that_could_choose_a_different_file`
   - a control name becomes a filename and arrives from an MCP client
 - `tests/test_controls.py::TestTheStageLadder::test_a_stage_that_forgets_a_device_is_refused`
+- `tests/test_rules.py::TestTheLanguageHasNoWayOut` - a rule cannot reach an attribute, a
+  string, an import or any call outside `FUNCTION_ARITY`
 
 ### MCP server
 
