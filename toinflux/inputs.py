@@ -548,7 +548,8 @@ def read_input(session, settings, spec, settings_file=None, now=None):
         with fetch_lock(source, budget, settings_file) as held:
             if not held:
                 logging.warning(
-                    "Gave up waiting %.1fs for the %r fetch lock reading %r; using the stored value",
+                    "Gave up waiting %.1fs for the %r fetch lock reading %r; falling back to "
+                    "the stored value if there is one",
                     budget,
                     source,
                     field,
@@ -599,7 +600,12 @@ def _live_reading(handler, source, field, stored, now):
         #
         # Logged rather than swallowed: this is the difference between a control acting on
         # old data and one that cannot see its input at all, and only the log says which.
-        logging.warning("Live read of %r for %r failed, using the stored value: %r", source, field, exc)
+        logging.warning(
+            "Live read of %r for %r failed (%r); falling back to the stored value if there is one",
+            source,
+            field,
+            exc,
+        )
         return _require(stored, source, field, f"the live read failed ({exc!r}) and InfluxDB holds no point for it")
     # Write back every field the fetch returned, not just the one asked for: the round trip
     # has already been paid for, and another control reading a different field of this
