@@ -32,27 +32,37 @@ from toinflux.exceptions import ConfigError, ToInfluxError
 # child starts from a known environment rather than whatever the operator, the shell
 # or a previous process left behind.
 #
-# Each entry earns its place:
+# The list is deliberately generous with benign variables, because the failure is
+# asymmetric: one that is missing surfaces as something that looks like a permissions
+# bug, a long way from the cause, while a spare one a child never reads costs nothing.
+#
 #   PATH                    resolves the binary, and the child's own lookups
 #   HOME                    tools that read a per-user config or cache
+#   USER/LOGNAME            identity, read by one or the other depending on the tool
 #   LANG/LC_ALL/LC_CTYPE    the encoding a child writes its output in
 #   TZ                      local-time formatting, which controls compare against
+#   TMPDIR                  where a child puts scratch files
 #   XDG_RUNTIME_DIR         systemctl talking to a user manager
 #   DBUS_SESSION_BUS_ADDRESS  ditto
 #   CREDENTIALS_DIRECTORY   systemd's credential drop; a child reads its own secrets
 #                           from here rather than being handed them by its parent
 #   STATE_DIRECTORY         where a control process finds its configuration
 #
-# The last two are the reason this list is not shorter. Dropping either produces a
-# child that cannot find its credentials or its state and reports it as a
-# permissions or missing-file problem, which is a long way from the cause.
+# What stays out is the point of having a list at all: anything that changes *what code
+# the child runs* - PYTHONPATH, PYTHONHOME, LD_PRELOAD, LD_LIBRARY_PATH. That is not
+# hypothetical here; a system PYTHONPATH on the development machine leaks into fresh
+# virtual environments, so an inherited one would silently change which modules a child
+# imports. Guarded by test_execution_altering_variables_never_reach_the_child.
 INHERITED_ENV_KEYS = (
     "PATH",
     "HOME",
+    "USER",
+    "LOGNAME",
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
     "TZ",
+    "TMPDIR",
     "XDG_RUNTIME_DIR",
     "DBUS_SESSION_BUS_ADDRESS",
     "CREDENTIALS_DIRECTORY",
@@ -342,18 +352,22 @@ def _pump(process, stdin_bytes, captures, timeout):
     call or blocked the caller past its own timeout. With no threads there is nothing to
     leak, and the deadline covers the whole interaction rather than only the wait.
 
+    Returns a verdict rather than raising, so the caller owns the kill and the message.
+    Note the polarity, which is the opposite way round from the usual instinct that True
+    is the good case: **True means it went wrong**. The False return also carries a
+    post-condition the caller relies on - the child has already exited, which is what
+    makes the unbounded ``wait()`` after it safe.
+
     Args:
         process (subprocess.Popen): the running child
         stdin_bytes (bytes or None): what to write to standard input
         captures (dict): stream name to :class:`_Capture`, filled in place
         timeout (int or float): seconds allowed before the child is deemed overrunning
 
-    Returns a verdict rather than raising so the caller owns the kill and the message.
-    A False return also carries a post-condition the caller relies on: the child has
-    exited, so the ``wait()`` that follows returns immediately.
-
     Returns:
-        bool: True if the deadline passed while the child was still running
+        bool: True if the deadline passed while the child was still running, so the
+            caller must kill it; False if the pump finished on its own terms, which
+            means the child has exited
     """
     deadline = time.monotonic() + timeout
     abandon_at = None
@@ -441,6 +455,11 @@ def run_command(argv, *, timeout, stdin_bytes=None, env_extra=None, output_limit
 
     captures = {"stdout": _Capture(output_limit), "stderr": _Capture(output_limit)}
     with process:
+        # True means the deadline passed with the child still running, so we kill it.
+        # False means the pump finished on its own terms, and it only does that once the
+        # child has exited - which is why the wait() below needs no timeout of its own
+        # and cannot block. The polarity reads backwards from "True is the good case";
+        # the variable is named for what True means rather than for what the call did.
         timed_out = _pump(process, stdin_bytes, captures, timeout)
         if timed_out:
             process.kill()

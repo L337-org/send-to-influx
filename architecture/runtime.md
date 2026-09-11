@@ -91,6 +91,14 @@ What it guarantees, and why each one is there rather than left to the caller:
   passes through. `CREDENTIALS_DIRECTORY` and `STATE_DIRECTORY` are on it because a control
   process reads its own secrets and its own configuration from them: dropping either produces
   a child that reports a missing file or a permissions error a long way from the cause.
+
+  The list is **generous with benign variables and strict about one category**, and the
+  asymmetry is the reason: a missing variable surfaces as what looks like a permissions bug,
+  while a spare one a child never reads costs nothing. So identity, locale, timezone and
+  `TMPDIR` are all carried. What never passes is anything that changes *what code the child
+  runs* - `PYTHONPATH`, `PYTHONHOME`, `LD_PRELOAD`, `LD_LIBRARY_PATH` - which is the actual
+  purpose of having a list rather than housekeeping, and is guarded by
+  `tests/test_process.py::TestEnvironmentAllowList::test_execution_altering_variables_never_reach_the_child`.
 - **argv[0] resolved before the spawn**, by `shutil.which()` against the *child's* PATH so
   lookup and execution cannot disagree, or used as given when it is a path. A path is
   legitimate: a console script inside the packaged venv is on nobody's PATH. Failure is
@@ -112,6 +120,12 @@ Two shapes of failure, and the split matters:
   `CommandResult.ok`.
 - **A command that never finished raises.** There is no exit status to report, and returning
   partial output invites a caller to use it as though the command had completed.
+
+`_pump()` reports which of the two happened by returning a bool, and the polarity reads
+backwards from the usual instinct: **True means it went wrong** and the caller must kill the
+child. False means the pump finished on its own terms, which it only does once the child has
+exited - and that post-condition is what makes the `wait()` after it safe without a timeout of
+its own.
 
 **Captured output is bytes, deliberately.** `stdout_text`/`stderr_text` decode with replacement
 for a message or a log line. A caller holding something that must be exactly what the command

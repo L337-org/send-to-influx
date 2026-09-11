@@ -240,6 +240,21 @@ class TestEnvironmentAllowList:
             )
         assert result.stdout.strip() == b"UTC"
 
+    @pytest.mark.parametrize("name", ["PYTHONPATH", "PYTHONHOME", "LD_PRELOAD", "LD_LIBRARY_PATH"])
+    def test_execution_altering_variables_never_reach_the_child(self, name):
+        # The reason the allow-list exists, as distinct from tidiness: these change *what
+        # code the child runs*, not merely how it behaves. Not hypothetical on this
+        # project - a system PYTHONPATH on the development machine leaks into fresh
+        # virtual environments, so an inherited one would quietly change which modules a
+        # child imports. Named individually so adding one to INHERITED_ENV_KEYS fails
+        # here rather than passing as "well, it is on the list".
+        with patch.dict(os.environ, {name: "/somewhere/injected"}, clear=False):
+            result = run_command(
+                python_c(f"import os; print(os.environ.get({name!r}, 'absent'))"),
+                timeout=30,
+            )
+        assert result.stdout.strip() == b"absent"
+
     def test_the_child_environment_holds_nothing_but_the_allow_list(self):
         # The broad guard: a future edit reaching for os.environ.copy() passes every
         # targeted test above and fails this one.
