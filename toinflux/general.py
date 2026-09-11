@@ -93,7 +93,7 @@ def render_values(values, separator=", ", empty="none"):
     """Render a collection into an error message, quoted and safely ordered.
 
     The one sanctioned way to put a collection into a message a user or an MCP client
-    will see. ``tests/test_repo_hygiene.py::test_every_collection_in_an_error_is_rendered_safely``
+    will see. ``tests/test_repo_hygiene.py::test_every_collection_interpolated_into_an_error_is_rendered_safely``
     fails any ``raise`` that joins a collection into its message without coming through
     here, because two distinct bugs of this shape were written in two days despite the
     rule being documented.

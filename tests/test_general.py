@@ -942,7 +942,7 @@ class TestFactoryVersusClassLookup:
 class TestRenderValues:
     """The one sanctioned way to put a collection into an error message.
 
-    Enforced by ``tests/test_repo_hygiene.py::test_every_collection_in_an_error_is_rendered_safely``,
+    Enforced by ``tests/test_repo_hygiene.py::test_every_collection_interpolated_into_an_error_is_rendered_safely``,
     which exists because the rule it enforces was documented and broken twice anyway.
     """
 
