@@ -291,6 +291,15 @@ class TestTheLanguageHasNoWayOut:
             parse_rule("t + a", "target")
         assert "string" in str(exc.value)
 
+    @pytest.mark.parametrize("value", [None, 42, object()])
+    def test_declared_names_that_are_not_a_collection_are_reported_not_crashed(self, value):
+        # Reachable from real configuration rather than only from a coding slip: a control
+        # document with no `inputs:` section yields None here, and every other input
+        # problem in this function becomes a typed error rather than a raw TypeError.
+        with pytest.raises(ConfigError) as exc:
+            parse_rule("1", value)
+        assert type(value).__name__ in str(exc.value)
+
     def test_declared_names_may_be_any_iterable(self):
         # Normalised on the way in, so a one-shot iterable is not consumed by the first
         # membership test and then absent from the error message.

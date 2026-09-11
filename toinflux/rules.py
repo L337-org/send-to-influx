@@ -866,7 +866,7 @@ def parse_rule(text, allowed_names=()):
 
     Raises:
         RuleSyntaxError: the rule does not parse, or names something undeclared
-        ConfigError: ``allowed_names`` was given as a bare string
+        ConfigError: ``allowed_names`` is a bare string, or is not a collection at all
     """
     if not isinstance(text, str):
         raise _syntax_error(f"a rule must be text, got {type(text).__name__}", 0)
@@ -876,7 +876,16 @@ def parse_rule(text, allowed_names=()):
             f"a string would declare each of its characters as a separate name"
         )
     try:
-        root = _Parser(text, frozenset(allowed_names)).parse()
+        declared = frozenset(allowed_names)
+    except TypeError as exc:
+        # Reachable from real configuration rather than only from a coding slip: a
+        # control document with no `inputs:` section yields None here, and this function
+        # turns every other input problem into a typed error rather than a crash.
+        raise ConfigError(
+            f"allowed_names must be a collection of identifiers, got {type(allowed_names).__name__}"
+        ) from exc
+    try:
+        root = _Parser(text, declared).parse()
     except RecursionError as exc:
         # Belt and braces. MAX_NESTING_DEPTH is the real defence and should mean this is
         # unreachable, but the cost of being wrong is a raw RecursionError escaping into
