@@ -36,6 +36,7 @@ from toinflux.inputs import (
     fetch_lock_path,
     read_input,
     resolve_poll_floor,
+    stored_reading,
 )
 
 
@@ -229,6 +230,18 @@ class TestTheFetchLockSerialisesLiveFetches:
             holder.send_signal(signal.SIGKILL)
             holder.wait(timeout=10)
 
+    def test_locks_live_in_their_own_directory(self, tmp_path, monkeypatch):
+        """Not loose in the state directory. Off systemd that directory is wherever
+        settings.yaml is, which for a source checkout is the repository root, and a loose
+        fetch-<source>.lock there is easy to commit by accident - one already was."""
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        path = fetch_lock_path("hue")
+        assert os.path.dirname(path) == str(tmp_path / "locks")
+        with fetch_lock("hue", budget=1) as held:
+            assert held
+        assert os.path.isdir(tmp_path / "locks"), "the lock directory was not created"
+        assert not list(tmp_path.glob("fetch-*.lock")), "a lock file landed in the state directory itself"
+
     def test_each_source_has_its_own_lock(self, tmp_path, monkeypatch):
         """Two controls reading different sources have no reason to wait for each other."""
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
@@ -256,6 +269,30 @@ def _handler(live=True, timeout=5, data=None, fails=None):
 
 SETTINGS = {"hue": {"interval": 300, "db": "x"}, "influx": {"url": "http://x", "user": "u", "password": "p"}}
 SPEC = {"source": "hue", "field": "temperature", "max_age": 900}
+
+
+class TestStoredReading:
+    def test_the_settings_file_reaches_the_handler(self, monkeypatch):
+        """Otherwise the handler loads the default settings.yaml while the caller passes a
+        different document, and the two disagree about which database to read - invisible
+        until someone runs with -s, and then wrong rather than broken."""
+        seen = {}
+
+        def fake_get_class(source, settings_file=None, instance=None):
+            seen.update(source=source, settings_file=settings_file, instance=instance)
+            handler = MagicMock()
+            handler.MCP_MEASUREMENT = None
+            handler.source = source
+            handler.mcp_tag_filters.return_value = {}
+            handler.source_settings = {"db": "x"}
+            return handler
+
+        monkeypatch.setattr("toinflux.inputs.get_class", fake_get_class)
+        monkeypatch.setattr("toinflux.inputs.resolve_db", lambda *a: "db")
+        monkeypatch.setattr("toinflux.inputs.run_query", lambda *a: [])
+        monkeypatch.setattr("toinflux.inputs.single_series", lambda series: ([], []))
+        stored_reading(None, SETTINGS, "hue", "temperature", "bridge1", "/etc/other.yaml")
+        assert seen == {"source": "hue", "settings_file": "/etc/other.yaml", "instance": "bridge1"}
 
 
 class TestReadInput:

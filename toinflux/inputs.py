@@ -26,6 +26,7 @@ import fcntl
 import logging
 import os
 import random
+import stat
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -61,7 +62,7 @@ def resolve_poll_floor(source, settings):
     if not isinstance(source_cfg, dict):
         raise ConfigError(
             f"cannot resolve the live-fetch floor for source {source!r}: it has no settings section. "
-            f"Add a {source} section with an interval, or a {POLL_FLOOR_KEY} to set the floor directly"
+            f"Add a {source!r} section with an interval, or a {POLL_FLOOR_KEY} to set the floor directly"
         )
     if POLL_FLOOR_KEY in source_cfg:
         return _as_seconds(source_cfg[POLL_FLOOR_KEY], f"{source}.{POLL_FLOOR_KEY}")
@@ -117,7 +118,7 @@ class InputReading:
     live: bool
 
 
-def stored_reading(session, settings, source, field, instance=None, now=None):
+def stored_reading(session, settings, source, field, instance=None, settings_file=None, now=None):
     """Return the newest point InfluxDB holds for one field, or None.
 
     Reads are ``epoch=s``, so the time column is already unix seconds and there is no
@@ -129,6 +130,8 @@ def stored_reading(session, settings, source, field, instance=None, now=None):
         source (str): the source that writes the field
         field (str): the field key to read
         instance (str or None): which producer, for a source that has several
+        settings_file (str or None): the settings path the caller was started with, so the
+            handler this builds reads the same document the ``settings`` argument came from
         now (float or None): the clock, for tests; defaults to time.time()
 
     Returns:
@@ -138,7 +141,7 @@ def stored_reading(session, settings, source, field, instance=None, now=None):
         SourceConnectionError: on a transport or parse failure
         ConfigError: where the source has no usable settings section
     """
-    handler = get_class(source, instance=instance)
+    handler = get_class(source, settings_file, instance)
     measurement = handler.MCP_MEASUREMENT or handler.source
     query = build_latest_query(measurement, handler.mcp_tag_filters(), {field})
     db = resolve_db(handler.source_settings, settings["influx"])
@@ -184,11 +187,18 @@ MIN_LOCK_BACKOFF = 0.05
 MAX_LOCK_BACKOFF = 0.5
 
 
+# Locks live in their own directory under the state directory, as control documents do.
+# Off systemd the state directory is wherever settings.yaml is, which for a source checkout
+# is the repository root, and loose fetch-<source>.lock files landing there are easy to
+# commit by accident. One directory also makes one ignore rule enough.
+LOCK_DIR_NAME = "locks"
+
+
 def fetch_lock_path(source, settings_file=None):
     """Return the lock file serialising live fetches of one source.
 
-    One file per source, in the state directory. Per source because that is what the floor
-    binds: two controls reading different sources have no reason to wait for each other.
+    One file per source. Per source because that is what the floor binds: two controls
+    reading different sources have no reason to wait for each other.
 
     Args:
         source (str): the source name
@@ -197,7 +207,7 @@ def fetch_lock_path(source, settings_file=None):
     Returns:
         str: the lock file's path, which may not exist yet
     """
-    return os.path.join(resolve_state_dir(settings_file), f"fetch-{source}.lock")
+    return os.path.join(resolve_state_dir(settings_file), LOCK_DIR_NAME, f"fetch-{source}.lock")
 
 
 @contextmanager
@@ -227,11 +237,23 @@ def fetch_lock(  # noqa: DOC403 - a generator, but unannotated
 
     Yields:
         bool: True where the lock is held for the duration of the block
+
+    Raises:
+        ConfigError: where the lock directory cannot be created
     """
     rng = random.Random() if rng is None else rng
     sleep = time.sleep if sleep is None else sleep
     monotonic = time.monotonic if monotonic is None else monotonic
     path = fetch_lock_path(source, settings_file)
+    directory = os.path.dirname(path)
+    try:
+        os.makedirs(directory, exist_ok=True)
+        # 0700 for the same reason the control directory sets it: systemd already creates
+        # the state directory that way, but a source checkout puts this beside settings.yaml
+        # where the default is whatever the umask allows.
+        os.chmod(directory, stat.S_IRWXU)
+    except OSError as exc:
+        raise ConfigError(f"cannot create the fetch lock directory {directory!r}: {exc}") from exc
     deadline = monotonic() + budget
     # Opened once and kept open: the lock is on the descriptor, so reopening per attempt
     # would drop it. "a" rather than "w" so a waiter cannot truncate the holder's file.
@@ -290,7 +312,7 @@ def read_input(session, settings, spec, settings_file=None, now=None):
     source, field = spec["source"], spec["field"]
     instance = spec.get("instance")
     trigger = max(float(spec["max_age"]), resolve_poll_floor(source, settings))
-    stored = stored_reading(session, settings, source, field, instance, now)
+    stored = stored_reading(session, settings, source, field, instance, settings_file, now)
     if stored is not None and stored.age <= trigger:
         return stored
     handler = get_class(source, settings_file, instance)
@@ -310,7 +332,7 @@ def read_input(session, settings, spec, settings_file=None, now=None):
         # The holder we were waiting behind has almost certainly just written the value, so
         # look again before touching the device. The lock is held across the write-back for
         # this to be true.
-        fresh = stored_reading(session, settings, source, field, instance, now)
+        fresh = stored_reading(session, settings, source, field, instance, settings_file, now)
         if fresh is not None and fresh.age <= trigger:
             return fresh
         return _live_reading(handler, source, field, stored, now)
