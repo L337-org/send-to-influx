@@ -730,10 +730,15 @@ class DataHandler:
 # first. Moved verbatim, so the mcp_read tests that cover it are unchanged and
 # are the evidence that this changed no behaviour.
 #
-# The injection defence lives here too and is not optional: a measurement and its
-# tags come from static schema, a field must match a live-discovered key, every
-# identifier is charset-validated and quoted, and times are re-emitted as RFC3339.
-# Never add a query path that goes around it.
+# The injection defence is split, and knowing which half is here matters. What
+# lives here: a measurement and its tags come from static schema, a field must
+# match a live-discovered key, and every identifier is charset-validated and
+# quoted before it reaches a query string. What did not move: time bounds are
+# parsed and re-emitted as RFC3339 by mcp_read.parse_time_bound, and the
+# aggregation map is there too, because both describe what the MCP tools accept
+# rather than how a query is built.
+#
+# Never add a query path that goes around the half that is here.
 # --------------------------------------------------------------------------- #
 
 # An identifier (measurement/field/tag key) is rejected only if it is empty or

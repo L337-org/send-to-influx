@@ -178,12 +178,12 @@ disabled capability is not registered at all rather than registered-and-refusing
   registrars, because a bypass returns the right payload and passes every behaviour test.
 - **Grafana vocabulary stays in `toinflux/mcp_dashboards.py`.** `mcp_read` does not import it, so the
   leak is structurally impossible rather than merely avoided.
-- **Injection defence lives in `toinflux/influx.py`**, not here: measurement and tags come from the
-  static schema, a field must match a live-discovered key, every identifier is charset-validated
-  and quoted, times are re-emitted as RFC3339, aggregations come from a fixed map. Never add a
-  query path that bypasses it. It moved out of `mcp_read` so a control process can read from
-  InfluxDB without importing the MCP SDK; the aggregation map stays here because it is part of
-  what the read tools advertise.
+- **The injection defence is split, and the split is the thing to get right.** Query construction
+  is in `toinflux/influx.py`: measurement and tags come from the static schema, a field must match
+  a live-discovered key, and every identifier is charset-validated and quoted. What a tool
+  *accepts* stays here: `parse_time_bound` re-emits times as RFC3339, and aggregations come from a
+  fixed map. Never add a query path that bypasses either half. Construction moved out of
+  `mcp_read` so a control process can read from InfluxDB without importing the MCP SDK.
 - **The advertised surface is held to the AI-consumer standard** in full by
   `tests/test_mcp_surface.py` - descriptions, titles, siblings, dangling references, byte budget.
   Read it, not this file, before changing a description: all of it fails CI on its own.

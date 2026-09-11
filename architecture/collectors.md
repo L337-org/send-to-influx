@@ -367,12 +367,12 @@ entirely, so importing that module would have pulled the MCP SDK - `mcp`, `anyio
 last temperature reading was. Reading from InfluxDB was never an MCP concern; it was
 simply needed there first.
 
-**The injection defence is here and is not optional.** A measurement and its tags come
-from the static schema, a field must match a live-discovered key, every identifier is
-charset-validated and quoted, and times are re-emitted as RFC3339. Never add a query path
-that goes around it - a second way to build a query is how the first one stops being the
-only one.
+**Half the injection defence is here, and knowing which half matters.** What moved is
+query *construction*: a measurement and its tags come from the static schema, a field must
+match a live-discovered key, and every identifier is charset-validated and quoted before it
+reaches a query string. Never add a query path that goes around it - a second way to build
+a query is how the first one stops being the only one.
 
-Two things deliberately stayed in `mcp_read.py`, because both are about what the MCP tools
-advertise rather than about talking to InfluxDB: the aggregation map, and the schema
-objects that describe a source to a model.
+What stayed in `mcp_read.py` is what a tool *accepts*, because that describes the MCP
+surface rather than how InfluxDB is talked to: `parse_time_bound`, which re-emits a time as
+RFC3339, the aggregation map, and the schema objects that describe a source to a model.
