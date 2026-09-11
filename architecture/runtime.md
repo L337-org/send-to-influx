@@ -198,3 +198,51 @@ Two rules are worth knowing before changing this:
 `--check-config` validates every stored control, because they are configuration even though
 they do not live in `settings.yaml`, and the question that mode answers is whether this
 installation would start cleanly.
+## The control rule language (`toinflux/rules.py`)
+
+A control decides what to aim for from the estate's own data - hold the conservatory at
+the greater of the user's target or dew point plus five, cap the heaters when grid carbon
+is high, run only while it is cold outside. Those are expressions, and they arrive from a
+file an MCP client can write.
+
+**They are parsed, never evaluated as code.** The grammar is arithmetic over numbers and
+nothing else: no strings, no attribute access, no indexing, no assignment, and no calls
+beyond a fixed table of five. There is no path from a rule to an object, an import or the
+filesystem because the language cannot express one - which is a stronger position than a
+deny-list that has to be kept complete.
+
+`simpleeval` and `asteval` were considered and rejected: both evaluate a subset of the
+Python AST, a far larger surface to defend than a numbers-only grammar needs.
+
+Precedence is Python's - `or` < `and` < `not` < comparison < `+ -` < `* /` < unary minus -
+because anyone writing a rule already has that order in their fingers, and a language that
+looked like Python but bound differently would be worse than one that looked nothing like
+it.
+
+Five decisions worth knowing before changing this:
+
+- **Truth is a number.** A comparison yields 1.0 or 0.0, `if` treats non-zero as true, and
+  a gate is true when it evaluates non-zero. `and`/`or` return 1.0 or 0.0 rather than one
+  of their operands as Python's do, so a non-truth value cannot leak out of a gate into a
+  sum.
+- **`and`, `or` and `if` short-circuit**, so a rule can guard its own arithmetic:
+  `divisor != 0 and total / divisor > 5` never divides by zero. (`not` is unary, so there
+  is nothing for it to skip.)
+- **A rule is bounded in length and nesting depth.** Recursive descent recurses, so
+  nesting depth is stack depth: unbounded, a few thousand opening brackets exhaust the
+  interpreter and raise `RecursionError`, which is not a `RuleSyntaxError` and so escapes
+  as a crash rather than a report about a bad rule. `MAX_NESTING_DEPTH` is measured rather
+  than picked - about ten frames per level against a default limit of 1000 - and
+  `tests/test_rules.py::TestBounds::test_a_rule_at_the_nesting_limit_still_parses` holds
+  it, so a future interpreter spending more frames per level fails CI rather than a
+  control process.
+- **Comparisons do not chain.** Python reads `a < b < c` as a chain and C reads it as
+  `(a < b) < c`; both are defensible and they disagree, so it is refused with a message
+  naming the `and` form to write instead.
+- **Names resolve when the rule is parsed**, against what the control declared, so an
+  undeclared name is a `--check-config` failure rather than a surprise at three in the
+  morning. A rule reports the names it reads, which is how the loop knows what to fetch.
+
+The two failure types are not interchangeable. `RuleSyntaxError` is a `ConfigError`: the
+rule is wrong and waiting will not fix it. `RuleEvaluationError` is not: the rule is fine
+and *this evaluation* could not produce a value, which the control's fail-safe handles.

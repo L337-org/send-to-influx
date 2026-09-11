@@ -28,6 +28,7 @@ isn't covered here, look in `architecture/`.
 │   ├── exceptions.py       # ConfigError (fatal) / SourceConnectionError (retryable) / ToolParamError
 │   ├── process.py          # run_command() - the only place this project starts a process
 │   ├── controls.py         # control documents: where they live, reading/writing, structural validation
+│   ├── rules.py            # the control rule language: tokenise(), parse_rule(), Rule.evaluate()
 │   ├── credentials.py      # systemd-creds substitution into loaded settings
 │   ├── credential_cli.py   # send-to-influx-set-credential
 │   ├── influx.py           # DataHandler base class - owns send_data() (line protocol + InfluxDB HTTP POST)
