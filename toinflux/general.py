@@ -89,6 +89,44 @@ def configure_logging(
         root.addHandler(file_handler)
 
 
+def render_values(values, separator=", ", empty="none"):
+    """Render a collection into an error message, quoted and safely ordered.
+
+    The one sanctioned way to put a collection into a message a user or an MCP client
+    will see. ``tests/test_repo_hygiene.py::test_every_collection_in_an_error_is_rendered_safely``
+    fails any ``raise`` that joins a collection into its message without coming through
+    here, because two distinct bugs of this shape were written in two days despite the
+    rule being documented.
+
+    Two problems, one place:
+
+    A value may not be a string. Mapping keys read from YAML need not be, so sorting a
+    mixed collection raises ``TypeError`` and joining it raises too - turning a message
+    about bad input into a crash while reporting it. Sorting by ``repr`` gives a total
+    order whatever the values are.
+
+    A value may not be ours. Field keys come back from InfluxDB, device and input names
+    come from a control document, bridge names come from settings: any of them can carry
+    a newline, and a raw join lets it write its own line into the journal and into any
+    connected client's output. ``repr`` escapes it instead.
+
+    Quoting a collection of our own constants costs nothing and reads no worse - the
+    rule is uniform precisely so nobody has to judge provenance at each call site, which
+    is the judgement that went wrong.
+
+    Args:
+        values (collections.abc.Iterable): the values to list
+        separator (str): what to put between them
+        empty (str): what to return when there is nothing to list, so a call site can
+            keep wording an existing message already used
+
+    Returns:
+        str: the quoted, ordered list, or ``empty`` when there is nothing to show
+    """
+    rendered = separator.join(repr(value) for value in sorted(values, key=repr))
+    return rendered or empty
+
+
 def flatten_dict(data, parent_key="", sep="_"):
     """Flatten a nested dictionary into a single-level dictionary.
 

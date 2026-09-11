@@ -102,7 +102,9 @@ Break one of these and the failure is silent or data-destroying.
   usable yet" (no host, or a placeholder token) is only a **warning**, because the shipped example is
   exactly that state and raising would stop every collector.
 - **Name external values with `!r` in every message.** A lock name comes from MQTT and one containing
-  a newline forges a journal line and reaches MCP clients.
+  a newline forges a journal line and reaches MCP clients. A *collection* goes through
+  `general.render_values()` rather than a bare join - same reason, plus a value that is not a
+  string would otherwise raise while reporting the bad input. Guarded, so not a review item.
 - **Changing a measurement, tag set or field key means sweeping `tests/integration/` too.** Those
   tests are deselected by default and `pytest -m integration` without a broker skips cleanly, so a
   green local run proves nothing about them. Grep for the old names, run the suite against a real
@@ -123,6 +125,8 @@ keeps these names honest, and each guard's docstring carries the reasoning.
 - `tests/test_mqtt.py::TestStreamMqttMessages::test_message_callback_runs_off_the_network_thread`
 - `tests/test_speedtest.py::TestSpeedtest::test_get_data_raises_source_connection_error_on_implausible_ping`
   - the ceiling is 5000 ms
+- `tests/test_repo_hygiene.py::test_every_collection_in_an_error_is_rendered_safely` - a
+  collection reaches an error message through `general.render_values()`, never a bare join
 
 ### MCP server
 

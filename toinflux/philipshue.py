@@ -12,6 +12,7 @@ import warnings
 from collections import namedtuple
 import urllib3
 import requests
+from toinflux.general import render_values
 from toinflux.credentials import CANONICAL_SLOT_SUFFIX_RE, PLACEHOLDER_VALUES, SENTINEL_PREFIX
 from toinflux.influx import DataHandler, escape_key_or_tag_value
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
@@ -1025,7 +1026,7 @@ class Hue(DataHandler):
                 return cls._rgb_to_xy(r, g, b)
         raise ToolParamError(
             f"color must be an RGB hex like '#ff8800' or a known colour name (got {color!r}); "
-            f"names: {', '.join(sorted(cls._HUE_COLOR_NAMES))}"
+            f"names: {render_values(cls._HUE_COLOR_NAMES)}"
         )
 
     @staticmethod
@@ -1321,5 +1322,5 @@ class Hue(DataHandler):
         ]
         if errors:
             logging.error("Hue Bridge rejected a write to light %s - %s", light_id, "; ".join(errors))
-            raise SourceConnectionError(f"Hue Bridge rejected the write: {'; '.join(errors)}")
+            raise SourceConnectionError(f"Hue Bridge rejected the write: {render_values(errors, '; ')}")
         return result

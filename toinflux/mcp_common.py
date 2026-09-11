@@ -20,7 +20,7 @@ import logging
 from mcp.server.mcpserver.exceptions import ToolError
 
 from toinflux.exceptions import ConfigError, ToInfluxError, ToolParamError
-from toinflux.general import INSTANCED_SOURCES, expand_sources, get_class
+from toinflux.general import INSTANCED_SOURCES, expand_sources, get_class, render_values
 
 # Every failure this project raises deliberately inherits ToInfluxError, and that base is what the
 # translation catches. It was a tuple of two types, and a tuple is a list that goes stale: ConfigError
@@ -185,7 +185,7 @@ def resolve_handlers(source, settings, settings_file):
     available = configured_sources(settings)
     if source.lower() not in available:
         raise ToolParamError(
-            f"unknown source {source!r}; available sources: {', '.join(sorted(available)) or '(none)'}"
+            f"unknown source {source!r}; available sources: {render_values(available, empty='(none)')}"
         )
     units = expand_sources([source.lower()], settings)
     if not units:
@@ -229,7 +229,7 @@ def resolve_handler(source, settings, settings_file, instance=None):
     available = configured_sources(settings)
     if source.lower() not in available:
         raise ToolParamError(
-            f"unknown source {source!r}; available sources: {', '.join(sorted(available)) or '(none)'}"
+            f"unknown source {source!r}; available sources: {render_values(available, empty='(none)')}"
         )
     if instance is not None and source.lower() not in INSTANCED_SOURCES:
         # A single-target source ignores its instance entirely - mcp_tag_filters() does not
@@ -240,7 +240,7 @@ def resolve_handler(source, settings, settings_file, instance=None):
         # parameter inherits the check instead of having to remember it.
         raise ToolParamError(
             f"source {source!r} has a single target, so it cannot be scoped to {instance!r}. "
-            f"Sources with separate targets: {', '.join(sorted(INSTANCED_SOURCES)) or '(none)'}"
+            f"Sources with separate targets: {render_values(INSTANCED_SOURCES, empty='(none)')}"
         )
     try:
         handler = get_class(source, settings_file, instance=instance)

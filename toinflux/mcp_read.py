@@ -41,7 +41,7 @@ import urllib3
 from mcp.types import ToolAnnotations
 
 from toinflux.exceptions import SourceConnectionError, ToolParamError
-from toinflux.general import INSTANCED_SOURCES, expand_sources, shares_measurement
+from toinflux.general import INSTANCED_SOURCES, expand_sources, shares_measurement, render_values
 from toinflux.mcp_common import (
     close_session,
     configured_sources,
@@ -563,7 +563,7 @@ def build_query(
     if field not in schema.allowed_fields:
         raise ToolParamError(
             f"unknown field {field!r} for source {schema.source!r}; "
-            f"available fields: {', '.join(sorted(schema.allowed_fields)) or '(none)'}"
+            f"available fields: {render_values(schema.allowed_fields, empty='(none)')}"
         )
     _validate_identifier(schema.measurement, "measurement")
     _validate_identifier(field, "field")
@@ -654,9 +654,7 @@ def _select_and_group(field, aggregation, group_by, instance_clause):
         return _quote_identifier(field), f" GROUP BY{instance_clause[1:]}" if instance_clause else ""
     func = AGGREGATIONS.get(aggregation)
     if func is None:
-        raise ToolParamError(
-            f"unknown aggregation {aggregation!r}; choose one of: raw, {', '.join(sorted(AGGREGATIONS))}"
-        )
+        raise ToolParamError(f"unknown aggregation {aggregation!r}; choose one of: raw, {render_values(AGGREGATIONS)}")
     if not group_by:
         raise ToolParamError(f"aggregation {aggregation!r} requires a group_by interval (e.g. '1h')")
     if not _DURATION_RE.match(str(group_by)):
@@ -702,11 +700,11 @@ def build_panel_query(schema, field, aggregation, group_by_tags=()):
     if field not in schema.allowed_fields:
         raise ToolParamError(
             f"unknown field {field!r} for source {schema.source!r}; "
-            f"available fields: {', '.join(sorted(schema.allowed_fields)) or '(none)'}"
+            f"available fields: {render_values(schema.allowed_fields, empty='(none)')}"
         )
     func = AGGREGATIONS.get(aggregation)
     if func is None:
-        raise ToolParamError(f"unknown aggregation {aggregation!r}; choose one of: {', '.join(sorted(AGGREGATIONS))}")
+        raise ToolParamError(f"unknown aggregation {aggregation!r}; choose one of: {render_values(AGGREGATIONS)}")
     _validate_identifier(schema.measurement, "measurement")
     _validate_identifier(field, "field")
     tags = ""

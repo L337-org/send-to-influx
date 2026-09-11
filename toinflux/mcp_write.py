@@ -25,6 +25,7 @@ import logging
 
 from mcp.types import ToolAnnotations
 
+from toinflux.general import render_values
 from toinflux.exceptions import SourceConnectionError, ToolParamError
 
 # Shared per-call handler lifecycle (construct from current settings, close the
@@ -241,7 +242,7 @@ def _resolve_hue_target(handlers, device, bridge):
     known = [instance for instance, _ in handlers]
     if bridge is not None:
         if bridge not in known:
-            raise ToolParamError(f"unknown bridge {bridge!r}; configured bridges: {', '.join(known)}")
+            raise ToolParamError(f"unknown bridge {bridge!r}; configured bridges: {render_values(known)}")
         handlers = [(instance, handler) for instance, handler in handlers if instance == bridge]
 
     matches, unreachable = _hue_matches_across_bridges(handlers, device, bridge)
