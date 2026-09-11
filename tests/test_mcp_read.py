@@ -1878,6 +1878,16 @@ class TestDiscoverTagValues:
         assert values == set()
         assert "no 'value' column" in caplog.text
 
+    def test_a_row_shorter_than_its_columns_is_skipped_not_a_crash(self):
+        """Nothing guarantees a row is as long as the column list. A bare row[index]
+        raised IndexError out of a read whose callers are written to expect
+        SourceConnectionError, so one malformed row lost the whole allowlist."""
+        payload = {"results": [{"series": [{"columns": ["key", "value"], "values": [["host", "hostA"], ["host"]]}]}]}
+        values = discover_tag_values(
+            _mock_session(payload), {"url": "http://x", "user": "u", "password": "p"}, "db", "m", "host"
+        )
+        assert values == {"hostA"}
+
     def test_result_error_surfaces_rather_than_looking_like_no_instances(self):
         payload = {"results": [{"error": "database not found: sdb"}]}
         with pytest.raises(SourceConnectionError, match="rejected the tag-value discovery"):

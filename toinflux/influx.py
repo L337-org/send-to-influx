@@ -1201,7 +1201,10 @@ def discover_tag_values(session, influx_settings, db, measurement, tag):
                 continue
             index = columns.index("value")
             for row in series.get("values", []):
-                if row and isinstance(row[index], str):
+                # Same guard as _key_column: nothing guarantees a row is as long as the
+                # column list, and a bare row[index] turns a malformed response into an
+                # IndexError escaping a read the callers expect to raise SourceConnectionError.
+                if len(row) > index and isinstance(row[index], str):
                     values.add(row[index])
     return values
 
