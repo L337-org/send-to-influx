@@ -985,7 +985,7 @@ def _get(session, url, kwargs, description):
         raise SourceConnectionError(f"InfluxDB read returned an unparseable response ({description})") from exc
     except requests.exceptions.RequestException as exc:
         logging.error("InfluxDB read failed (%s): %r", description, exc)
-        raise SourceConnectionError(f"InfluxDB read failed ({description}): {exc}") from exc
+        raise SourceConnectionError(f"InfluxDB read failed ({description}): {exc!r}") from exc
 
 
 @dataclass(frozen=True)
@@ -1051,7 +1051,7 @@ def _statement_results(payload, description):
     out = {}
     for index, result in enumerate(payload.get("results", [])):
         if result.get("error"):
-            raise SourceConnectionError(f"InfluxDB rejected the {description}: {result['error']}")
+            raise SourceConnectionError(f"InfluxDB rejected the {description}: {result['error']!r}")
         out[result.get("statement_id", index)] = result.get("series", [])
     return out
 
@@ -1180,7 +1180,7 @@ def discover_tag_values(session, influx_settings, db, measurement, tag):
         # Same reasoning as discover_measurement_keys: a per-result error arrives in a 200 body,
         # and swallowing it would make a broken query look like "no instances".
         if result.get("error"):
-            raise SourceConnectionError(f"InfluxDB rejected the tag-value discovery: {result['error']}")
+            raise SourceConnectionError(f"InfluxDB rejected the tag-value discovery: {result['error']!r}")
         for series in result.get("series", []):
             columns = series.get("columns", [])
             if "value" not in columns:
@@ -1229,7 +1229,7 @@ def run_query(session, influx_settings, db, query):
     found = []
     for result in payload.get("results", []):
         if result.get("error"):
-            raise SourceConnectionError(f"InfluxDB rejected the query: {result['error']}")
+            raise SourceConnectionError(f"InfluxDB rejected the query: {result['error']!r}")
         for series in result.get("series", []):
             found.append(
                 QuerySeries(
