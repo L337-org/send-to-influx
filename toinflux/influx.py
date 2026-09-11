@@ -727,8 +727,8 @@ class DataHandler:
 # ask what the last temperature reading was.
 #
 # Reading from InfluxDB was never an MCP concern; it was simply needed there
-# first. Moved verbatim, so the mcp_read tests that cover it are unchanged and
-# are the evidence that this changed no behaviour.
+# first. Its tests came with it in name only: they are still in
+# tests/test_mcp_read.py, not tests/test_influx.py where the write path's are.
 #
 # The injection defence is split, and knowing which half is here matters. What
 # lives here: a measurement and its tags come from static schema, a field must
