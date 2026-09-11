@@ -226,7 +226,16 @@ Four decisions worth knowing before changing this:
   of their operands as Python's do, so a non-truth value cannot leak out of a gate into a
   sum.
 - **`and`, `or` and `if` short-circuit**, so a rule can guard its own arithmetic:
-  `divisor != 0 and total / divisor > 5` never divides by zero.
+  `divisor != 0 and total / divisor > 5` never divides by zero. (`not` is unary, so there
+  is nothing for it to skip.)
+- **A rule is bounded in length and nesting depth.** Recursive descent recurses, so
+  nesting depth is stack depth: unbounded, a few thousand opening brackets exhaust the
+  interpreter and raise `RecursionError`, which is not a `RuleSyntaxError` and so escapes
+  as a crash rather than a report about a bad rule. `MAX_NESTING_DEPTH` is measured rather
+  than picked - about ten frames per level against a default limit of 1000 - and
+  `tests/test_rules.py::TestBounds::test_a_rule_at_the_nesting_limit_still_parses` holds
+  it, so a future interpreter spending more frames per level fails CI rather than a
+  control process.
 - **Comparisons do not chain.** Python reads `a < b < c` as a chain and C reads it as
   `(a < b) < c`; both are defensible and they disagree, so it is refused with a message
   naming the `and` form to write instead.

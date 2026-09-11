@@ -8,10 +8,13 @@ a fixed table. The second half is why so many of these tests assert that somethi
 """
 
 import math
+import sys
 import pytest
 from toinflux.exceptions import ConfigError
 from toinflux.rules import (
     FUNCTION_ARITY,
+    MAX_NESTING_DEPTH,
+    MAX_RULE_LENGTH,
     Rule,
     RuleEvaluationError,
     RuleSyntaxError,
@@ -374,3 +377,80 @@ class TestParsingHappensOnce:
         value = evaluate("1 + 1")
         assert isinstance(value, float)
         assert not math.isnan(value)
+
+
+class TestBounds:
+    """A rule is external input, so its cost has to be bounded before it is parsed.
+
+    Recursive descent recurses: nesting depth is stack depth. Unbounded, a few thousand
+    opening brackets exhaust the interpreter and raise RecursionError - which is not a
+    RuleSyntaxError, so it escapes as a crash in whatever was parsing rather than being
+    reported as the bad rule it is.
+    """
+
+    def test_a_rule_at_the_nesting_limit_still_parses(self):
+        # This is the test that keeps MAX_NESTING_DEPTH honest. The limit was set from a
+        # measurement - roughly ten Python frames per level against the default
+        # recursion limit - so if a future interpreter spends more frames per level, this
+        # fails in CI rather than a control process falling over in the field.
+        text = "(" * MAX_NESTING_DEPTH + "1" + ")" * MAX_NESTING_DEPTH
+        assert parse_rule(text, NAMES).evaluate({}) == 1.0
+
+    def test_one_level_past_the_limit_is_refused(self):
+        depth = MAX_NESTING_DEPTH + 1
+        with pytest.raises(RuleSyntaxError, match="nests more than"):
+            parse_rule("(" * depth + "1" + ")" * depth, NAMES)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "(" * 500 + "1" + ")" * 500,
+            "-" * 500 + "1",
+            "abs(" * 500 + "1" + ")" * 500,
+            "not " * 500 + "1",
+        ],
+    )
+    def test_deep_nesting_of_every_recursive_shape_is_refused_not_crashed(self, text):
+        # Each of these recurses by a different route: brackets and calls through
+        # expression(), repeated minus through unary(), repeated not through negation().
+        # Guarding only one of them would leave the others unbounded.
+        with pytest.raises(RuleSyntaxError):
+            parse_rule(text, NAMES)
+
+    def test_a_wide_shallow_rule_is_not_mistaken_for_a_deep_one(self):
+        # The limit measures nesting, not size. Every argument of a call is its own
+        # expression, so a counter that only ever went up would refuse this - 60 siblings
+        # at a nesting depth of two - and an operator would be told their perfectly flat
+        # rule was too deeply nested.
+        arguments = ", ".join(["1"] * 60)
+        assert parse_rule(f"min({arguments})", NAMES).evaluate({}) == 1.0
+
+    def test_a_long_flat_sum_is_not_mistaken_for_a_deep_one(self):
+        # Same property by the other route: repeated binary operators at one level.
+        assert parse_rule(" + ".join(["1"] * 60), NAMES).evaluate({}) == 60.0
+
+    def test_an_overlong_rule_is_refused_before_it_is_parsed(self):
+        with pytest.raises(RuleSyntaxError, match="at most"):
+            parse_rule("1 + " * MAX_RULE_LENGTH + "1", NAMES)
+
+    def test_a_rule_of_ordinary_length_is_unaffected(self):
+        assert parse_rule("max(target, dew + 5)", NAMES).evaluate({"target": 18, "dew": 16}) == 21
+
+
+def test_a_recursion_error_is_translated_rather_than_escaping(monkeypatch):
+    """The backstop behind the depth limit.
+
+    MAX_NESTING_DEPTH should make this unreachable, so it is provoked directly by
+    lowering the interpreter's own limit. The cost of the bound being one interpreter
+    release too generous is a raw RecursionError reaching a control process, and the text
+    comes from a file an MCP client can write - so a report about a bad rule is the right
+    outcome even when the first line of defence has been out-thought.
+    """
+    monkeypatch.setattr(sys, "setrecursionlimit", sys.setrecursionlimit)
+    original = sys.getrecursionlimit()
+    sys.setrecursionlimit(60)
+    try:
+        with pytest.raises(RuleSyntaxError, match="too deeply"):
+            parse_rule("(" * (MAX_NESTING_DEPTH - 1) + "1" + ")" * (MAX_NESTING_DEPTH - 1), NAMES)
+    finally:
+        sys.setrecursionlimit(original)

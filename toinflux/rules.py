@@ -26,8 +26,9 @@ which return 1.0 or 0.0 rather than one of their operands as Python's do.
 
 Precedence runs ``or`` < ``and`` < ``not`` < comparison < ``+ -`` < ``* /`` < unary
 minus, which is Python's order, because anyone writing one of these has that order in
-their fingers already. ``and``, ``or`` and ``not`` short-circuit, so a rule can guard
+their fingers already. ``and``, ``or`` and ``if`` short-circuit, so a rule can guard
 its own arithmetic: ``divisor != 0 and total / divisor > 5`` never divides by zero.
+(``not`` is unary, so there is nothing for it to skip.)
 """
 
 __author__ = "Gavin Lucas"
@@ -110,6 +111,23 @@ COMPARISONS = {
 
 # Longest first, so "<=" is never read as "<" followed by a stray "=".
 _OPERATORS = ("<=", ">=", "==", "!=", "<", ">", "+", "-", "*", "/")
+
+# Bounds on what a rule may be, because a rule is external input: an MCP client writes
+# one. Without them a deeply nested expression exhausts the interpreter's stack and
+# escapes as RecursionError - not a RuleSyntaxError, so it crashes the caller rather
+# than being reported as the bad rule it is.
+#
+# Both are far beyond any real rule: the worked example in the design note nests three
+# levels and runs to forty characters.
+#
+# The depth figure is measured rather than picked. Recursive descent costs about ten
+# Python frames per level of nesting here, so against the default recursion limit of
+# 1000 the interpreter gives out somewhere near a hundred levels - fewer when the caller
+# is already deep in a stack of its own. 40 leaves room for both, and
+# test_a_rule_at_the_nesting_limit_still_parses holds it: if a future interpreter spends
+# more frames per level, CI says so rather than a control process falling over.
+MAX_RULE_LENGTH = 2000
+MAX_NESTING_DEPTH = 40
 
 _NUMBER_RE = re.compile(r"\d+(\.\d+)?([eE][+-]?\d+)?")
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -489,11 +507,20 @@ class _Parser:
         Args:
             text (str): the rule as written
             allowed_names (collections.abc.Container): identifiers the control declared
+
+        Raises:
+            RuleSyntaxError: the rule is longer than MAX_RULE_LENGTH
         """
+        if len(text) > MAX_RULE_LENGTH:
+            raise _syntax_error(f"a rule may be at most {MAX_RULE_LENGTH} characters, got {len(text)}", 0)
         self.text = text
         self.tokens = tokenise(text)
         self.allowed_names = allowed_names
         self.position = 0
+        # Starts below zero because the outermost expression is not nesting: the first
+        # call brings this to 0, so the limit counts brackets rather than being one
+        # stricter than it reads.
+        self.depth = -1
 
     def peek(self):
         """Return the next token without consuming it.
@@ -542,6 +569,24 @@ class _Parser:
         token = self.peek()
         return token is not None and token.kind == "operator" and token.text in operators
 
+    def _descend(self, offset):
+        """Count one level of nesting, refusing to go deeper than the limit.
+
+        Recursive descent recurses, so nesting depth is stack depth. Unbounded, a rule
+        of a few thousand opening brackets exhausts the interpreter's stack and raises
+        RecursionError, which is not a RuleSyntaxError and so escapes as a crash rather
+        than a report about a bad rule.
+
+        Args:
+            offset (int): where in the rule the descent happens, for the message
+
+        Raises:
+            RuleSyntaxError: the expression nests deeper than MAX_NESTING_DEPTH
+        """
+        self.depth += 1
+        if self.depth > MAX_NESTING_DEPTH:
+            raise _syntax_error(f"expression nests more than {MAX_NESTING_DEPTH} levels deep", offset)
+
     def parse(self):
         """Parse the whole rule and insist nothing is left over.
 
@@ -568,11 +613,16 @@ class _Parser:
         Returns:
             object: the node
         """
-        node = self.conjunction()
-        while self._at_keyword("or"):
-            self.take()
-            node = _Logical("or", node, self.conjunction())
-        return node
+        token = self.peek()
+        self._descend(token.offset if token else len(self.text))
+        try:
+            node = self.conjunction()
+            while self._at_keyword("or"):
+                self.take()
+                node = _Logical("or", node, self.conjunction())
+            return node
+        finally:
+            self.depth -= 1
 
     def conjunction(self):
         """Parse an ``and`` chain.
@@ -654,8 +704,15 @@ class _Parser:
             object: the node
         """
         if self._at_operator(("-",)):
-            self.take()
-            return _Unary(self.unary())
+            token = self.take()
+            # Counted as nesting in its own right: `- - - -...` recurses here without
+            # ever passing through expression(), so guarding only there would leave this
+            # path unbounded.
+            self._descend(token.offset)
+            try:
+                return _Unary(self.unary())
+            finally:
+                self.depth -= 1
         return self.primary()
 
     def primary(self):
@@ -811,5 +868,13 @@ def parse_rule(text, allowed_names=()):
             f"allowed_names must be a collection of identifiers, not the string {allowed_names!r} - "
             f"a string would declare each of its characters as a separate name"
         )
-    root = _Parser(text, frozenset(allowed_names)).parse()
+    try:
+        root = _Parser(text, frozenset(allowed_names)).parse()
+    except RecursionError as exc:
+        # Belt and braces. MAX_NESTING_DEPTH is the real defence and should mean this is
+        # unreachable, but the cost of being wrong is a raw RecursionError escaping into
+        # a control process, and the text comes from a file an MCP client can write. A
+        # bound that turns out to be one interpreter release too generous should still
+        # produce a report about a bad rule rather than a crash.
+        raise _syntax_error("the rule nests too deeply to parse", 0) from exc
     return Rule(source=text, root=root, referenced=frozenset(root.names()))
