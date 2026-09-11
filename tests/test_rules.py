@@ -470,18 +470,41 @@ class TestBounds:
         assert parse_rule("max(target, dew + 5)", NAMES).evaluate({"target": 18, "dew": 16}) == 21
 
 
-def test_a_recursion_error_is_translated_rather_than_escaping(monkeypatch):
+def _current_stack_depth():
+    """Count the frames already on the stack.
+
+    Needed because the recursion-limit test has to choose a limit *relative* to wherever
+    pytest happens to be, rather than an absolute number: a fixed low limit raises
+    RecursionError from setrecursionlimit() itself the moment the runner's own stack is
+    deeper than it, which varies with pytest version, plugins and xdist.
+
+    Returns:
+        int: frames between here and the top of the stack
+    """
+    depth = 0
+    frame = sys._getframe()
+    while frame is not None:
+        depth += 1
+        frame = frame.f_back
+    return depth
+
+
+def test_a_recursion_error_is_translated_rather_than_escaping():
     """The backstop behind the depth limit.
 
     MAX_NESTING_DEPTH should make this unreachable, so it is provoked directly by
-    lowering the interpreter's own limit. The cost of the bound being one interpreter
-    release too generous is a raw RecursionError reaching a control process, and the text
-    comes from a file an MCP client can write - so a report about a bad rule is the right
-    outcome even when the first line of defence has been out-thought.
+    lowering the interpreter's own limit to just above the current stack - enough to keep
+    running, far too little for the hundreds of frames a deep rule needs. The cost of the
+    bound being one interpreter release too generous is a raw RecursionError reaching a
+    control process, and the text comes from a file an MCP client can write, so a report
+    about a bad rule is the right outcome even when the first line of defence has been
+    out-thought.
     """
-    monkeypatch.setattr(sys, "setrecursionlimit", sys.setrecursionlimit)
     original = sys.getrecursionlimit()
-    sys.setrecursionlimit(60)
+    try:
+        sys.setrecursionlimit(_current_stack_depth() + 30)
+    except (RecursionError, ValueError):  # pragma: no cover - environment-dependent
+        pytest.skip("cannot lower the recursion limit from this stack depth")
     try:
         with pytest.raises(RuleSyntaxError, match="too deeply"):
             parse_rule("(" * (MAX_NESTING_DEPTH - 1) + "1" + ")" * (MAX_NESTING_DEPTH - 1), NAMES)
