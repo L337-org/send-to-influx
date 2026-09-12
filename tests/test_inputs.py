@@ -179,6 +179,47 @@ class TestResolveMinimumInterval:
             resolve_minimum_interval("hue", {"hue": {"interval": "300"}})
 
 
+class TestASourceWhoseLiveReadCoversEveryInstance:
+    """Nuki: every lock arrives over one MQTT subscription, so get_data returns
+    {instance: {field: value}} rather than a flat mapping.
+
+    Read as a flat mapping, every field looked absent - so a Nuki live read reported "no such
+    field" and fell back to the stored value every time, silently, for the one source whose
+    live read costs nothing on the wire.
+    """
+
+    def _nuki(self, monkeypatch, tmp_path, data, instance):
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        handler = _handler(data=data, instance_tag="device", covers_all=True)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: None)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        spec = {"source": "nuki", "field": "stateValue", "max_age": 900}
+        if instance is not None:
+            spec["instance"] = instance
+        settings = {**SETTINGS, "nuki": {"interval": 300, "db": "x"}}
+        return handler, settings, spec
+
+    def test_the_named_instance_is_read_from_the_per_instance_payload(self, monkeypatch, tmp_path):
+        data = {"Front_Door": {"stateValue": 1.0}, "Back_Door": {"stateValue": 3.0}}
+        _, settings, spec = self._nuki(monkeypatch, tmp_path, data, "Back_Door")
+        assert read_input(None, settings, spec, now=9600.0).value == 3.0
+
+    def test_reading_one_without_an_instance_is_a_config_error(self, monkeypatch, tmp_path):
+        """One live read covers every lock, so there is no single answer to give."""
+        data = {"Front_Door": {"stateValue": 1.0}}
+        _, settings, spec = self._nuki(monkeypatch, tmp_path, data, None)
+        with pytest.raises(ConfigError, match="must name an instance"):
+            read_input(None, settings, spec)
+
+    def test_an_instance_that_has_not_reported_falls_back_rather_than_failing(self, monkeypatch, tmp_path):
+        """Not a configuration fault - the lock may simply not have said anything yet - so
+        it reads as no fields and takes the stored value, or raises if there is none."""
+        data = {"Front_Door": {"stateValue": 1.0}}
+        _, settings, spec = self._nuki(monkeypatch, tmp_path, data, "Side_Door")
+        with pytest.raises(SourceConnectionError, match="no such field"):
+            read_input(None, settings, spec)
+
+
 class TestTheValueIsAlwaysANumber:
     """InputReading.value is annotated float, so it has to be one.
 
@@ -510,10 +551,18 @@ def _reading_handler(source, settings_file=None, instance=None):
     return handler
 
 
-def _handler(live=True, timeout=5, data=None, fails=None, timestamp=None):
-    """A stand-in source handler for the live-fetch path."""
+def _handler(live=True, timeout=5, data=None, fails=None, timestamp=None, instance_tag=None, covers_all=False):
+    """A stand-in source handler for the live-fetch path.
+
+    Every attribute the code reads is set explicitly. A MagicMock invents truthy values for
+    anything it is not given, so leaving MCP_INSTANCE_TAG and
+    MCP_LIVE_STATE_COVERS_ALL_INSTANCES unset silently put every test down the per-instance
+    branch - which is how eight of them started failing at once when that branch was added.
+    """
     handler = MagicMock()
     handler.MCP_LIVE_STATE = live
+    handler.MCP_INSTANCE_TAG = instance_tag
+    handler.MCP_LIVE_STATE_COVERS_ALL_INSTANCES = covers_all
     handler.source_settings = {"timeout": timeout}
     handler.timestamp = timestamp
     if fails is not None:

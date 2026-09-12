@@ -691,10 +691,10 @@ def read_input(session, settings, spec, settings_file=None, now=None):
             fresh = handler_reading(session, settings, handler, field, now)
             if fresh is not None and fresh.age <= trigger:
                 return fresh
-            return _live_reading(handler, source, field, stored, now)
+            return _live_reading(handler, source, field, spec.get("instance"), stored, now)
 
 
-def _live_reading(handler, source, field, stored, now):
+def _live_reading(handler, source, field, instance, stored, now):
     """Fetch from the source, write it back, and return it.
 
     A failed fetch degrades to the stored value rather than propagating. The device being
@@ -706,6 +706,7 @@ def _live_reading(handler, source, field, stored, now):
         handler (DataHandler): the source's handler, already built and scoped to the instance
         source (str): the source being read, for messages
         field (str): the field wanted
+        instance (str or None): which producer, for a source whose live read covers them all
         stored (InputReading or None): what InfluxDB held, to fall back to
         now (float or None): the clock, for tests
 
@@ -761,12 +762,49 @@ def _live_reading(handler, source, field, stored, now):
         # their own, so the floor stops binding until a write succeeds. send_data buffers the
         # point on failure, so it may still land on a later cycle.
         logging.warning("Could not write back the live read of %r for %r: %r", source, field, exc)
-    if field not in data:
+    fields = _live_fields(handler, data, source, instance)
+    if field not in fields:
         return _require(stored, source, field, "the live read returned no such field")
     stamp = float(written_at)
     return InputReading(
-        value=_as_reading_value(data[field], source, field), timestamp=stamp, age=moment - stamp, live=True
+        value=_as_reading_value(fields[field], source, field), timestamp=stamp, age=moment - stamp, live=True
     )
+
+
+def _live_fields(handler, data, source, instance):
+    """Return the flat ``{field: value}`` mapping for the instance being read.
+
+    Most sources' ``get_data()`` returns that shape already. A source whose single live read
+    covers every producer returns ``{instance: {field: value}}`` instead - Nuki, whose locks
+    all arrive over one MQTT subscription - so the instance has to be picked out.
+
+    Without this the per-instance shape made every field look absent: a Nuki live read
+    reported "no such field" and fell back to the stored value every time, silently, for the
+    one source whose live read costs nothing.
+
+    Args:
+        handler (DataHandler): the source's handler
+        data (dict): whatever get_data returned
+        source (str): the source, for messages
+        instance (str or None): which producer the control asked for
+
+    Returns:
+        dict: the field mapping to read from, empty where the instance is absent
+
+    Raises:
+        ConfigError: where such a source was read without naming an instance
+    """
+    if not (handler.MCP_INSTANCE_TAG and handler.MCP_LIVE_STATE_COVERS_ALL_INSTANCES):
+        return data
+    if instance is None:
+        # No retry fixes this: the control has to say which lock it means.
+        raise ConfigError(
+            f"a control input on source {source!r} must name an instance: one live read "
+            f"covers every {handler.MCP_INSTANCE_TAG} and there is no single answer"
+        )
+    # A missing instance is not a configuration fault - the lock may simply not have
+    # reported yet - so it reads as "no fields", which falls back to the stored value.
+    return data.get(instance) or {}
 
 
 def _require(reading, source, field, why):
