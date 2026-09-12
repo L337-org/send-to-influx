@@ -17,6 +17,7 @@ import threading
 import faulthandler
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
+from toinflux.general import render_values
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.controls import list_controls, validate_stored_controls
@@ -747,7 +748,7 @@ def _start_control_supervisor(settings, args):
     # this process through sys.exit and the daemon thread simply stops - so the last word on
     # leaving devices safe belongs here, where it runs either way. stop_all is idempotent.
     atexit.register(supervisor.stop_all)
-    logging.info("Supervising %s control(s): %s", len(names), ", ".join(names))
+    logging.info("Supervising %s control(s): %s", len(names), render_values(names))
     return supervisor
 
 

@@ -9,6 +9,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import logging
 import os
 import sys
 import time
@@ -414,3 +415,31 @@ class TestTheRestartDecisionItself:
         clock.now += 10_000
         supervisor.poll(timeout=0)
         assert started == [], "started a control that had not been running"
+
+
+class TestOneBadControlDocument:
+    """A corrupt stored document is that control's problem. The supervisor is built inside
+    the collector's own main process, so anything that escapes here takes the collection
+    down with it - over a file nobody is using."""
+
+    @pytest.mark.parametrize(
+        "cycle",
+        [
+            pytest.param("soon", id="not-a-number"),
+            pytest.param(True, id="a-bool-is-not-one-second"),
+            pytest.param(float("nan"), id="nan"),
+            pytest.param(float("inf"), id="inf"),
+            pytest.param(0, id="zero"),
+            pytest.param(-5, id="negative"),
+        ],
+    )
+    def test_an_unusable_cycle_window_is_a_config_error_not_a_crash(self, cycle):
+        with pytest.raises(ConfigError, match="cycle_seconds"):
+            stall_seconds({"output": {"cycle_seconds": cycle}})
+
+    def test_a_control_that_cannot_be_read_is_skipped_rather_than_fatal(self, state_directory, caplog):
+        _two_controls(state_directory)
+        with caplog.at_level(logging.ERROR):
+            supervisor = Supervisor(["conservatory", "nosuchcontrol"], settings_file=state_directory.settings_file)
+        assert list(supervisor.children) == ["conservatory"]
+        assert "nosuchcontrol" in caplog.text and "skipped" in caplog.text

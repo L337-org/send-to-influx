@@ -23,6 +23,7 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import logging
+import math
 import os
 import selectors
 import signal
@@ -102,9 +103,19 @@ def stall_seconds(document):
 
     Returns:
         float: seconds of silence that mean something is wrong
+
+    Raises:
+        ConfigError: where the control's cycle window is not a positive number of seconds
     """
-    cycle = float((document.get("output") or {}).get("cycle_seconds", 900))
-    return max(MINIMUM_STALL_SECONDS, MISSED_BEATS_BEFORE_KILL * cycle)
+    cycle = (document.get("output") or {}).get("cycle_seconds", 900)
+    # Checked rather than converted. A bare float() on a stored document raises ValueError
+    # or TypeError, and this runs while the supervisor is being built in the collector's own
+    # main process - so one corrupt control would take the collector down with it rather
+    # than failing that control. A bool is refused for the usual reason: it is an int, and
+    # `cycle_seconds: true` would become a one-second window.
+    if isinstance(cycle, bool) or not isinstance(cycle, (int, float)) or not math.isfinite(cycle) or cycle <= 0:
+        raise ConfigError(f"output.cycle_seconds must be a positive number of seconds, got {cycle!r}")
+    return max(MINIMUM_STALL_SECONDS, MISSED_BEATS_BEFORE_KILL * float(cycle))
 
 
 @dataclass
@@ -143,7 +154,8 @@ class Supervisor:
             backoff (callable or None): failures -> seconds before a restart
 
         Raises:
-            ConfigError: where a named control cannot be read
+            ConfigError: never for one unusable control - that one is logged and skipped -
+                but the signature keeps the type for a caller that passes nothing readable
         """
         self.settings_file = settings_file
         self._clock = clock
@@ -156,8 +168,14 @@ class Supervisor:
             # Read now rather than at each start: a control that cannot be read is a
             # configuration fault, and finding that out per restart would turn it into a
             # respawn loop that logs the same message for ever.
-            document = load_control(name, settings_file)
-            self.children[name] = Child(name=name, stall_seconds=stall_seconds(document))
+            try:
+                document = load_control(name, settings_file)
+                self.children[name] = Child(name=name, stall_seconds=stall_seconds(document))
+            except ConfigError as exc:
+                # That control's problem, not everybody's. Refusing to supervise anything
+                # because one stored document is corrupt would stop the heating over a file
+                # nobody is using, and this runs inside the collector's main process.
+                logging.error("Control %r cannot be supervised and is being skipped: %r", name, exc)
 
     def _default_argv(self, name):
         """Return the argv that starts one control through the installed console script.
