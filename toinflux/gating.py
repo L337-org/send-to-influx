@@ -308,7 +308,13 @@ class DeviceGuard:
             # an exception here becomes a traceback printed by atexit and nothing else.
             # Logged with the underlying error because a device left energised after a
             # shutdown is exactly the failure somebody will be looking for.
-            logging.error("Control %r could not apply %r on exit: %s", self.name, self.safe_state, exc)
+            #
+            # %r rather than %s, unlike a raised message: nothing carries the exception's
+            # class here. A raise has `from exc` and the chain says what type it was, so
+            # repeating it in the text is noise; a swallowed one has only this line, and
+            # "the bridge did not answer" reads identically whether it was a connection
+            # failure worth retrying or a configuration fault that will never come right.
+            logging.error("Control %r could not apply %r on exit: %r", self.name, self.safe_state, exc)
 
     def _device_list(self):
         """Return the device names for a log line, each quoted.
