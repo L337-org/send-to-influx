@@ -8,6 +8,7 @@ __license__ = "MIT"
 import sys
 import time
 import json
+import atexit
 import math
 import signal
 import logging
@@ -18,8 +19,9 @@ from importlib.metadata import version, PackageNotFoundError
 import toinflux
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
-from toinflux.controls import validate_stored_controls
+from toinflux.controls import list_controls, validate_stored_controls
 from toinflux.control_process import heartbeat_writer, run_control
+from toinflux.supervision import Supervisor
 
 try:
     __version__ = version("send-to-influx")
@@ -701,6 +703,54 @@ def _check_config_and_exit(settings, args):
     sys.exit(0)
 
 
+def _controls_enabled(settings):
+    """Whether this installation runs the control subsystem at all.
+
+    Off unless it is switched on. Controls actuate devices unattended, so an installation
+    that has not said it wants that does not get it - and this is deliberately not the
+    collector's ``mcp_read_write`` flag, because wanting a heating loop is not the same as
+    granting a model device-write access.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        bool: True where ``controls.enabled`` is exactly true
+    """
+    block = settings.get("controls")
+    return isinstance(block, dict) and block.get("enabled") is True
+
+
+def _start_control_supervisor(settings, args):
+    """Start the control supervisor in its own thread, or return None.
+
+    Returns None where the subsystem is switched off or no controls are stored, so the
+    ordinary collector install starts nothing and says nothing.
+
+    Args:
+        settings (dict): the parsed settings document
+        args (argparse.Namespace): the parsed command line
+
+    Returns:
+        Supervisor or None: the running supervisor, already started
+    """
+    if not _controls_enabled(settings):
+        return None
+    names = list_controls(args.settings)
+    if not names:
+        logging.warning("controls.enabled is true but no controls are stored, so none will run")
+        return None
+    supervisor = Supervisor(names, settings_file=args.settings)
+    thread = threading.Thread(target=supervisor.run, args=(SHUTDOWN,), name="control-supervisor", daemon=True)
+    thread.start()
+    # The supervisor's own loop stops its controls when SHUTDOWN is set, but a signal exits
+    # this process through sys.exit and the daemon thread simply stops - so the last word on
+    # leaving devices safe belongs here, where it runs either way. stop_all is idempotent.
+    atexit.register(supervisor.stop_all)
+    logging.info("Supervising %s control(s): %s", len(names), ", ".join(names))
+    return supervisor
+
+
 def _run_control_and_exit(args):
     """Run one control as this process, and exit with what it did.
 
@@ -825,6 +875,8 @@ def main() -> None:
         # collects nothing, serves no MCP, and starting a worker here would put two things
         # in one process that the supervisor expects to kill independently.
         _run_control_and_exit(args)
+
+    _start_control_supervisor(settings, args)
 
     requested = _requested_sources(settings, args)
     units = toinflux.expand_sources(requested, settings)

@@ -219,6 +219,25 @@ class Supervisor:
                 self.start(child.name)
         return self.events
 
+    def run(self, stop, poll_seconds=0.5) -> None:
+        """Poll until asked to stop, then stop every control.
+
+        One thread runs this, and it is the only thread in the design. That is not the same
+        as the thread-per-pipe shape the module docstring rules out: what cannot be bounded
+        is a thread blocked on a single child's pipe, and this one blocks on a selector over
+        all of them with a timeout.
+
+        Args:
+            stop (threading.Event): set to end the loop
+            poll_seconds (float): how long each pass waits for a pipe to become readable
+        """
+        self.start_all()
+        try:
+            while not stop.is_set():
+                self.poll(timeout=poll_seconds)
+        finally:
+            self.stop_all()
+
     def _read(self, child) -> None:
         """Read whatever one child's pipe has ready, and notice EOF.
 

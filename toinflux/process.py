@@ -412,11 +412,12 @@ def spawn(argv, *, env_extra=None, pass_fds=(), stderr=None):
     rather than about what it is started for - and a second spawn site written by hand is
     how one of them ends up missing.
 
-    **This is the one process call in the project with no timeout, deliberately.** A
-    mandatory deadline is meaningless for a child that is supposed to keep running, so the
-    guarantee it provides - that nothing runs unbounded and unwatched - moves to the caller:
-    a supervisor that reads this child's heartbeat and kills it when it stops beating. A
-    caller with no such watchdog must not use this.
+    **The timeout here is the watchdog, not a deadline to finish by.** The mandatory-timeout
+    rule is about a command that completes and returns, where the timeout bounds how long
+    the caller waits for an answer; a child meant to keep running has no such moment. What
+    bounds this one is the heartbeat: it must refresh the watchdog within its stall
+    threshold or the supervisor kills it, so it is no more unbounded than a command with a
+    deadline - the deadline simply repeats. A caller with no such watchdog must not use this.
 
     ``pass_fds`` is how a heartbeat pipe reaches the child. Everything not named there is
     closed in the child, which is what keeps a grandchild from holding the pipe open and
