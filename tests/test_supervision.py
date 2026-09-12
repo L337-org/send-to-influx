@@ -263,13 +263,17 @@ class TestTheRunAsAWhole:
         healthy throughout, and the only place the truth exists is the kernel's accounting."""
         supervisor.start_all()
         _wait_for(supervisor, "beat", "conservatory")
+        # Settled on both sides. A census taken while the stub bridge is still winding down
+        # the connection that made a control's devices safe counts that thread and its
+        # socket, and reports a handshake as a leak - which is what this test did in CI
+        # while passing here, where descriptors are not counted at all.
         before = census.take(os.getpid())
         for _ in range(3):
             supervisor.children["conservatory"].process.kill()
             _wait_for(supervisor, "died", "conservatory")
             _wait_for(supervisor, "started", "conservatory")
             _wait_for(supervisor, "beat", "conservatory")
-        invariants.check(invariants.nothing_leaked(before, census.take(os.getpid())))
+        invariants.check(invariants.nothing_leaked(before, census.quiet_after(before, os.getpid())))
 
     def test_stopping_leaves_nothing_running_and_nothing_energised(self, supervisor, bridge):
         supervisor.start_all()

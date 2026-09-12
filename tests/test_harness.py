@@ -418,6 +418,48 @@ class TestTheCensus:
             census.take(os.getpid())
         assert killed == [True]
 
+    def test_it_waits_out_a_thread_that_is_still_finishing(self):
+        """The difference between a leak and a handshake. A census taken the instant a
+        connection closes counts the server thread still winding down, and comparing that
+        against a quiet earlier reading reports growth that is not there.
+
+        Four hundred milliseconds on purpose: the first version of this waited for two
+        readings to agree, which any transient outlasting the gap between samples satisfies
+        while it is still running. A leak is growth that *stays*, so the check re-reads
+        until nothing exceeds the baseline.
+        """
+        import threading
+
+        before = census.take(os.getpid())
+        started = threading.Event()
+
+        def briefly():
+            """Live for a moment and exit."""
+            started.set()
+            time.sleep(0.4)
+
+        thread = threading.Thread(target=briefly, daemon=True)
+        thread.start()
+        started.wait(timeout=5)
+        assert census.take(os.getpid()).threads > before.threads, "the transient was not observed"
+        assert census.quiet_after(before, os.getpid()).threads == before.threads
+        thread.join(timeout=5)
+
+    def test_growth_that_stays_is_still_reported(self):
+        """The other half: a check that waited for quiet for ever would report nothing."""
+        import threading
+
+        before = census.take(os.getpid())
+        stop = threading.Event()
+        thread = threading.Thread(target=stop.wait, daemon=True)
+        thread.start()
+        try:
+            after = census.quiet_after(before, os.getpid(), attempts=3, pause=0.05)
+            assert after.threads > before.threads
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+
     def test_it_says_which_counts_it_could_not_take(self):
         """A count that is not available reads exactly like a count of zero, and only one
         of those is true."""
