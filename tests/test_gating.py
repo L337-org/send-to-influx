@@ -79,6 +79,22 @@ class TestTheThreeConditions:
         with pytest.raises(ConfigError):
             Gate(_document(enable_when="nosuchthing < 5"))
 
+    def test_the_bindings_are_not_gathered_for_a_control_that_is_switched_off(self):
+        """The check order only pays if the cost is deferred. Gathering a control's inputs
+        means reading InfluxDB and possibly the device itself, and a control that is
+        disabled or outside its window should not pay for a sensor read to be told so."""
+        gathered = []
+
+        def bindings():
+            gathered.append(True)
+            return {"outside": 5.0}
+
+        assert Gate(_document(enabled=False)).decide(bindings, NIGHT).actuating is False
+        assert Gate(_document()).decide(bindings, DAY).actuating is False
+        assert gathered == []
+        assert Gate(_document()).decide(bindings, NIGHT).actuating is True
+        assert gathered == [True]
+
     def test_the_reason_quotes_the_rule_it_names(self):
         """A newline is ordinary whitespace to the rule parser, so a rule can carry one -
         and this reason reaches a log line. Quoted, it cannot write a second entry."""

@@ -627,6 +627,44 @@ def _acquire(handle, path, source, deadline, rng, sleep, monotonic):
             raise ConfigError(f"cannot lock {path!r} to serialise live fetches of {source!r}: {exc!r}") from exc
 
 
+def input_max_age(spec, settings):
+    """Return how old one control input's reading may be before it stops being usable.
+
+    The input's own ``max_age`` where it names one, and otherwise the source's
+    ``DEFAULT_MAX_AGE``. Here rather than at each call site because two of them need the
+    same answer for different reasons - this module decides whether to refresh, and the
+    control loop decides whether to act - and a staleness rule that disagreed with itself
+    would refresh a reading it then refused.
+
+    Args:
+        spec (dict): one input declaration
+        settings (dict): the whole parsed settings document
+
+    Returns:
+        float: seconds
+
+    Raises:
+        ConfigError: where the source is unknown or a declared duration is unusable
+    """
+    source = _required(spec, "source")
+    # max_age through the same door as the floor and the timeout. It is the third duration
+    # in this expression and the one I left bare: an .inf max_age makes the trigger
+    # infinite, so the input reads as perpetually fresh and is never refreshed however old
+    # it gets.
+    #
+    # max_age is optional in a control document and stays that way: it arrived late enough
+    # that requiring it would break documents people already have. An absent one takes the
+    # source's own DEFAULT_MAX_AGE, which is how long that source's readings stay worth
+    # acting on.
+    #
+    # Not a multiple of the minimum interval, which was the first attempt and is wrong in
+    # both directions. Nuki's minimum interval is 0, so any multiple of it is 0 and every
+    # reading would be instantly too old; Octopus data is a day behind by nature, so any
+    # multiple of its rate limit would put a healthy feed permanently in the fail-safe. How
+    # often a source may be asked and how long its answer stays true are unrelated.
+    return _as_seconds(spec.get("max_age", resolve_max_age(source, settings)), f"max_age for input {spec.get('field')}")
+
+
 def read_input(session, settings, spec, settings_file=None, now=None):
     """Return the current value of one declared control input.
 
@@ -669,21 +707,8 @@ def read_input(session, settings, spec, settings_file=None, now=None):
             cannot be taken
     """
     source, field = _required(spec, "source"), _required(spec, "field")
-    # max_age through the same door as the floor and the timeout. It is the third duration
-    # in this expression and the one I left bare: an .inf max_age makes the trigger infinite,
-    # so the input reads as perpetually fresh and is never refreshed however old it gets.
     minimum = resolve_minimum_interval(source, settings)
-    # max_age is optional in a control document and stays that way: it arrived late enough
-    # that requiring it would break documents people already have. An absent one takes the
-    # source's own DEFAULT_MAX_AGE, which is how long that source's readings stay worth
-    # acting on.
-    #
-    # Not a multiple of the minimum interval, which was the first attempt and is wrong in
-    # both directions. Nuki's minimum interval is 0, so any multiple of it is 0 and every
-    # reading would be instantly too old; Octopus data is a day behind by nature, so any
-    # multiple of its rate limit would put a healthy feed permanently in the fail-safe. How
-    # often a source may be asked and how long its answer stays true are unrelated.
-    max_age = _as_seconds(spec.get("max_age", resolve_max_age(source, settings)), f"max_age for input {field}")
+    max_age = input_max_age(spec, settings)
     trigger = max(max_age, minimum)
     # One handler for the whole call, closed on the way out. Every path here needs one -
     # even the stored read, for the measurement, tags and database - and each build opens a

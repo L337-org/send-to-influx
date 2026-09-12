@@ -25,46 +25,13 @@ import requests
 from tests.harness import census, faults, invariants
 from tests.harness.bridge import StubBridge, plug
 from tests.harness.certificates import write_self_signed
-from tests.harness.influxdb import StubInflux
-from tests.harness.installation import Installation, conservatory
+from tests.harness.installation import conservatory
 from toinflux.controls import control_dir, load_control, validate_control
 from toinflux.exceptions import SourceConnectionError
 from toinflux.inputs import stored_reading
 from toinflux.philipshue import Hue
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-@pytest.fixture
-def bridge():
-    """Yield a running stub bridge.
-
-    Yields:
-        StubBridge: the bridge, stopped afterwards
-    """
-    with StubBridge() as running:
-        yield running
-
-
-@pytest.fixture
-def influx():
-    """Yield a running stub InfluxDB.
-
-    Yields:
-        StubInflux: the database, stopped afterwards
-    """
-    with StubInflux({"temperature_2m": 8.5, "conservatory_temperature": 16.0}) as running:
-        yield running
-
-
-@pytest.fixture
-def installation(tmp_path, bridge, influx):
-    """Yield an installation wired to both stubs.
-
-    Yields:
-        Installation: the installation
-    """
-    yield Installation(tmp_path, bridge=bridge, influx=influx)
 
 
 def _hue(installation):

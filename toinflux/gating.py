@@ -100,7 +100,11 @@ class Gate:
         """Return what this cycle should do, and whether that is a change.
 
         Args:
-            bindings (dict): name -> value for the rules
+            bindings (dict or callable): name -> value for the rules, or a callable
+                returning one. A callable is resolved only if the rule is reached, which is
+                what makes the check order pay: gathering a control's inputs means reading
+                InfluxDB and possibly the device itself, and a control that is switched off
+                or outside its window should not pay for a sensor read to be told so.
             moment (datetime.datetime): an aware moment, for the active period
 
         Returns:
@@ -129,7 +133,8 @@ class Gate:
         as well.
 
         Args:
-            bindings (dict): name -> value for the rules
+            bindings (dict or callable): name -> value for the rules, or a callable
+                returning one, resolved only if the rule is reached
             moment (datetime.datetime): an aware moment
 
         Returns:
@@ -139,7 +144,7 @@ class Gate:
             return False, "the control is disabled"
         if not is_inside(self.period, moment):
             return False, "outside the active period"
-        if self._enable_when is not None and not _holds(self._enable_when, bindings):
+        if self._enable_when is not None and not _holds(self._enable_when, _resolve(bindings)):
             # Quoted: the rule text is whatever the control document says, and this reason
             # reaches a log line and an operator's screen.
             return False, f"enable_when is false: {self._enable_when.source!r}"
@@ -156,6 +161,18 @@ class Gate:
             str: one of the built-in safe states
         """
         return self.period.end_state if self.period is not None else self.safe_state
+
+
+def _resolve(bindings):
+    """Return the bindings, calling for them where the caller deferred the cost.
+
+    Args:
+        bindings (dict or callable): the bindings, or something that produces them
+
+    Returns:
+        dict: name -> value
+    """
+    return bindings() if callable(bindings) else bindings
 
 
 def _holds(rule, bindings):
