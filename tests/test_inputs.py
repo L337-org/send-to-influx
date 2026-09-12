@@ -36,7 +36,7 @@ from toinflux.inputs import (
     fetch_lock,
     fetch_lock_path,
     _as_reading_value,
-    _default_max_age,
+    resolve_max_age,
     read_input,
     resolve_minimum_interval,
     stored_reading,
@@ -267,15 +267,39 @@ class TestTheDefaultMaxAge:
         ],
     )
     def test_each_source_declares_its_own(self, source, expected):
-        assert _default_max_age(source) == expected
+        assert resolve_max_age(source, {}) == expected
+
+    def test_an_operator_override_beats_the_source_default(self):
+        """Staleness is partly a property of the estate: a class can say how fast dew point
+        moves, but not that one bridge is on a flaky link. Without this an operator would
+        have to edit every control document that reads the source."""
+        assert resolve_max_age("hue", {"hue": {"interval": 300, "max_age": 120}}) == 120.0
+
+    def test_an_input_declaring_its_own_max_age_beats_both(self, monkeypatch):
+        """Three levels, most specific winning: the input, then the settings override, then
+        the class."""
+        stored = InputReading(value=1.0, timestamp=0.0, age=200.0, live=False)
+        handler = _handler()
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        settings = {**SETTINGS, "carbonintensity": {"interval": 1800, "db": "x", "max_age": 100}}
+        spec = {"source": "carbonintensity", "field": "intensity_actual", "max_age": 5000}
+        # The input says 5000 and wins over the settings' 100, so 200s old is still fresh.
+        assert read_input(None, settings, spec) is stored
+        handler.get_data.assert_not_called()
+
+    @pytest.mark.parametrize("bad", [float("nan"), "900", True, -1])
+    def test_an_unusable_override_is_refused(self, bad):
+        with pytest.raises(ConfigError, match="hue.max_age"):
+            resolve_max_age("hue", {"hue": {"interval": 300, "max_age": bad}})
 
     def test_it_is_not_a_multiple_of_the_minimum_interval(self):
         """The property, not the numbers. Nuki may be asked as often as you like and its
         state stays true for hours; Octopus must not be asked often and its data is a day
         behind. Any formula relating the two gets at least one of them badly wrong."""
         assert resolve_minimum_interval("nuki", {"nuki": {"interval": 300}}) == 0.0
-        assert _default_max_age("nuki") > 0, "a zero rate limit must not mean zero tolerance"
-        assert _default_max_age("octopus") > 24 * 3600, "a day-behind feed must not read as stale"
+        assert resolve_max_age("nuki", {}) > 0, "a zero rate limit must not mean zero tolerance"
+        assert resolve_max_age("octopus", {}) > 24 * 3600, "a day-behind feed must not read as stale"
 
 
 class TestTheFetchLockSerialisesLiveFetches:

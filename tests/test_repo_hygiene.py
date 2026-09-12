@@ -1439,3 +1439,34 @@ def test_every_source_declares_a_default_max_age():
         f"these sources declare no default max age: {', '.join(missing)}. Set DEFAULT_MAX_AGE on "
         f"each class, reasoned from how long its readings stay true rather than from its rate limit"
     )
+
+
+def test_the_example_settings_quote_the_real_per_source_defaults():
+    """A default written into the shipped example must be the one the code uses.
+
+    example_settings.yaml documents `minimum_interval` and `max_age` per source and names
+    each default in the comment above it. Those numbers live on the handler classes, so a
+    hand-written copy in a YAML comment is exactly the kind of thing that is right the day
+    it is written and wrong six months later - and wrong in the file an operator trusts.
+
+    Checked by reading both and comparing, rather than by remembering to update two places.
+    """
+    from toinflux.general import known_sources, source_class
+
+    text = (REPO_ROOT / "example_settings.yaml").read_text(encoding="utf-8")
+    wrong, missing = [], []
+    for source in sorted(known_sources()):
+        handler = source_class(source)
+        section = re.search(rf"^{re.escape(source)}:$(.*?)(?=^\S|\Z)", text, re.M | re.S)
+        if not section:
+            continue
+        for key, expected in (("minimum_interval", handler.MINIMUM_INTERVAL), ("max_age", handler.DEFAULT_MAX_AGE)):
+            found = re.search(
+                rf"^  # Uncomment[^\n]*\(default: (\d+) seconds\)\n  # {key}: (\d+)$", section.group(1), re.M
+            )
+            if not found:
+                missing.append(f"{source}.{key}")
+            elif {int(found.group(1)), int(found.group(2))} != {expected}:
+                wrong.append(f"{source}.{key}: example says {found.group(1)}/{found.group(2)}, code says {expected}")
+    assert not missing, "sources documented in example_settings.yaml without these keys: " + ", ".join(missing)
+    assert not wrong, "example_settings.yaml disagrees with the handler classes: " + "; ".join(wrong)

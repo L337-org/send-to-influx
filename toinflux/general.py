@@ -34,6 +34,12 @@ DEFAULT_LOG_BACKUP_COUNT = 3
 # validating it here and importing the name the other way would be an import cycle.
 MINIMUM_INTERVAL_KEY = "minimum_interval"
 
+# The per-source key overriding how long one of its readings stays worth acting on. Same
+# three-level shape as the key above: the source class's default, this override, then an
+# individual control input's own max_age. An operator who knows their estate goes stale
+# faster than the class assumes should not have to edit every control document to say so.
+MAX_AGE_KEY = "max_age"
+
 
 def configure_logging(
     logfile=None, loglevel="INFO", log_max_bytes=DEFAULT_LOG_MAX_BYTES, log_backup_count=DEFAULT_LOG_BACKUP_COUNT
@@ -965,7 +971,8 @@ def _validate_source_block(source, settings, is_v2):
     # leave writes off. Fail loud instead - a user who set it meant to enable it.
     if "mcp_read_write" in source_cfg and not isinstance(source_cfg["mcp_read_write"], bool):
         errors.append(f"{source}.mcp_read_write must be true or false (got {source_cfg['mcp_read_write']!r})")
-    errors.extend(_validate_minimum_interval(source, source_cfg))
+    errors.extend(_validate_duration(source, source_cfg, MINIMUM_INTERVAL_KEY))
+    errors.extend(_validate_duration(source, source_cfg, MAX_AGE_KEY))
     return errors
 
 
@@ -998,39 +1005,42 @@ def _validate_interval(source, source_cfg):
     return []
 
 
-def _validate_minimum_interval(source, source_cfg):
-    """Return errors for a source's optional live-fetch floor.
+def _validate_duration(source, source_cfg, key):
+    """Return errors for one of a source's optional duration overrides.
 
-    Checked here rather than where it is read because a control process resolves it at
+    Shared by ``minimum_interval`` and ``max_age``, which differ in meaning and not at all
+    in what a usable value looks like.
+
+    Checked here rather than where it is read because a control process resolves these at
     startup, long after --check-config is the place anyone is looking for a clear message.
 
     A bool is refused for the reason it is refused in a control's stage levels: `bool`
-    subclasses `int`, so `minimum_interval: true` would validate and then act as a one-second
-    floor, which is not what typing `true` meant.
+    subclasses `int`, so `minimum_interval: true` would validate and then act as a one
+    second bound, which is not what typing `true` meant. `.nan` and `.inf` are refused
+    because neither fails loudly later - a nan bound never holds and an inf one always
+    does, so the setting silently means its own opposite.
+
+    Zero is allowed, unlike the collection ``interval``: it is a meaningful bound here
+    ("ask whenever you like", "nothing is ever stale enough to matter") where as a
+    collection interval it would spin a worker.
 
     Args:
         source (str): the source name, for the message
         source_cfg (dict): that source's settings section
+        key (str): which duration key to check
 
     Returns:
         list: error strings, empty when the key is absent or usable
     """
-    if MINIMUM_INTERVAL_KEY not in source_cfg:
+    if key not in source_cfg:
         return []
-    value = source_cfg[MINIMUM_INTERVAL_KEY]
+    value = source_cfg[key]
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return [f"{source}.{MINIMUM_INTERVAL_KEY} must be a number of seconds (got {value!r})"]
-    # .nan and .inf are floats as far as YAML and isinstance are concerned, and neither
-    # fails loudly later: a nan floor never holds so every cycle goes live, and an inf one
-    # always holds so nothing ever does.
-    # `interval` gets the same treatment in _validate_interval, which it did not until this
-    # key went in and the mismatch became obvious. The two differ in one respect only:
-    # zero is a legitimate minimum interval, meaning "ask whenever you like", and is not a
-    # legitimate collection interval, because a worker would spin.
+        return [f"{source}.{key} must be a number of seconds (got {value!r})"]
     if not math.isfinite(value):
-        return [f"{source}.{MINIMUM_INTERVAL_KEY} must be a finite number of seconds (got {value!r})"]
+        return [f"{source}.{key} must be a finite number of seconds (got {value!r})"]
     if value < 0:
-        return [f"{source}.{MINIMUM_INTERVAL_KEY} must not be negative (got {value!r})"]
+        return [f"{source}.{key} must not be negative (got {value!r})"]
     return []
 
 

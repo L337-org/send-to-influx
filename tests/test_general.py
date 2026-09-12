@@ -279,6 +279,21 @@ class TestValidateSettings:
         with pytest.raises(ConfigError, match="minimum_interval must not be negative"):
             validate_settings(sample_settings)
 
+    @pytest.mark.parametrize(
+        "bad,expected", [("900", "must be a number"), (float("nan"), "must be a finite"), (-1, "must not be negative")]
+    )
+    def test_an_unusable_max_age_raises_config_error(self, sample_settings, bad, expected):
+        """The same three checks as minimum_interval, through the shared validator: the two
+        keys differ in meaning and not at all in what a usable value looks like."""
+        sample_settings["hue"]["max_age"] = bad
+        with pytest.raises(ConfigError, match=f"max_age {expected}"):
+            validate_settings(sample_settings)
+
+    def test_a_usable_max_age_is_accepted(self, sample_settings):
+        for value in (0, 120, 900.5):
+            sample_settings["hue"]["max_age"] = value
+            validate_settings(sample_settings)
+
     def test_numeric_minimum_interval_is_accepted(self, sample_settings):
         """Zero is a legitimate floor: it means this source may be asked whenever a control
         wants it, which is the right setting for something cheap to read."""

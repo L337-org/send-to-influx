@@ -37,6 +37,7 @@ from dataclasses import dataclass
 
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.general import (
+    MAX_AGE_KEY,
     MINIMUM_INTERVAL_KEY,
     get_class,
     known_sources,
@@ -237,22 +238,34 @@ def stored_reading(session, settings, source, field, instance=None, settings_fil
         return handler_reading(session, settings, handler, field, now)
 
 
-def _default_max_age(source):
+def resolve_max_age(source, settings):
     """Return how long a source's readings stay worth acting on.
 
-    The source class's ``DEFAULT_MAX_AGE``. Every shipped source declares one, and a hygiene
-    test says so; a source under development that has not gets the conservative answer,
-    since acting on data of unknown age is the failure this bound exists to prevent.
+    Three answers in order, the same shape as :func:`resolve_minimum_interval`: the
+    operator's ``max_age`` for that source, then the source class's ``DEFAULT_MAX_AGE``,
+    then zero. An individual control input overrides all of it with its own ``max_age``.
+
+    The operator override exists because staleness is partly a property of the estate. A
+    class can say how fast dew point moves; it cannot know that one bridge is on a flaky
+    link, and nobody should have to edit every control document to say so.
+
+    Every shipped source declares a class value and a hygiene test says so, so the zero is
+    for a source under development: acting on data of unknown age is the failure this bound
+    exists to prevent, and zero means nothing is ever fresh enough.
 
     Args:
         source (str): the source name, in any case
+        settings (dict): the whole parsed settings document
 
     Returns:
         float: seconds
 
     Raises:
-        ConfigError: where the source is not a known one, from source_class
+        ConfigError: where the source is unknown, or its override is not a usable duration
     """
+    source_cfg = (settings or {}).get(source.lower())
+    if isinstance(source_cfg, dict) and MAX_AGE_KEY in source_cfg:
+        return _as_seconds(source_cfg[MAX_AGE_KEY], f"{source.lower()}.{MAX_AGE_KEY}")
     declared = source_class(source).DEFAULT_MAX_AGE
     if declared is None:
         return 0.0
@@ -647,7 +660,7 @@ def read_input(session, settings, spec, settings_file=None, now=None):
     # reading would be instantly too old; Octopus data is a day behind by nature, so any
     # multiple of its rate limit would put a healthy feed permanently in the fail-safe. How
     # often a source may be asked and how long its answer stays true are unrelated.
-    max_age = _as_seconds(spec.get("max_age", _default_max_age(source)), f"max_age for input {field}")
+    max_age = _as_seconds(spec.get("max_age", resolve_max_age(source, settings)), f"max_age for input {field}")
     trigger = max(max_age, minimum)
     # One handler for the whole call, closed on the way out. Every path here needs one -
     # even the stored read, for the measurement, tags and database - and each build opens a
