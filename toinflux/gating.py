@@ -140,7 +140,9 @@ class Gate:
         if not is_inside(self.period, moment):
             return False, "outside the active period"
         if self._enable_when is not None and not _holds(self._enable_when, bindings):
-            return False, f"enable_when is false: {self._enable_when.source}"
+            # Quoted: the rule text is whatever the control document says, and this reason
+            # reaches a log line and an operator's screen.
+            return False, f"enable_when is false: {self._enable_when.source!r}"
         return True, None
 
     def closing_state(self):
@@ -298,7 +300,7 @@ class DeviceGuard:
         atexit.unregister(self._at_exit)
         if self._commands is None:
             return
-        logging.info("Control %r applying %r on %s: %s", self.name, self.safe_state, self._device_list(), reason)
+        logging.info("Control %r applying %r on %s: %r", self.name, self.safe_state, self._device_list(), reason)
         try:
             self._command(self._commands)
         except Exception as exc:  # noqa: BLE001 - nothing above this can handle it

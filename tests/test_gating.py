@@ -79,6 +79,12 @@ class TestTheThreeConditions:
         with pytest.raises(ConfigError):
             Gate(_document(enable_when="nosuchthing < 5"))
 
+    def test_the_reason_quotes_the_rule_it_names(self):
+        """A newline is ordinary whitespace to the rule parser, so a rule can carry one -
+        and this reason reaches a log line. Quoted, it cannot write a second entry."""
+        decision = Gate(_document(enable_when="outside <\n 15")).decide({"outside": 20.0}, NIGHT)
+        assert "\n" not in decision.reason
+
     def test_a_gate_that_cannot_be_evaluated_is_this_cycle_not_this_control(self):
         """RuleEvaluationError, so the fail-safe covers the cycle and the control is still
         there next time - the same distinction the loop uses for its own rules."""
@@ -235,7 +241,8 @@ def _run_child(script, signal_number=None):
     """Run a child to completion, optionally signalling it once it is ready.
 
     Returns:
-        list: the mappings the child commanded, in order
+        subprocess.Popen: the finished child, for its return code; what it commanded is
+        read from the record file with :func:`_commanded_in`
     """
     child = subprocess.Popen(
         [sys.executable, "-c", script],
