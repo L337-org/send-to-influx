@@ -156,6 +156,22 @@ class TestTheStubBridgeIsABridge:
         directory = finished.stdout.strip()
         assert directory and not os.path.exists(directory), directory
 
+    def test_a_server_that_will_not_stop_is_loud_about_it(self):
+        """A timed join nobody checks is the silence this harness refuses everywhere else.
+        A server thread that outlives its endpoint answers in the background of every test
+        that follows, and surfaces as flakiness somewhere unrelated."""
+        endpoint = StubBridge()
+        real_shutdown = endpoint._server.shutdown
+        endpoint._server.shutdown = lambda: None
+        endpoint._thread.join = lambda timeout=None: None
+        try:
+            with pytest.raises(AssertionError, match="did not shut down"):
+                endpoint.stop()
+        finally:
+            endpoint._server.shutdown = real_shutdown
+            del endpoint._thread.join
+            endpoint.stop()
+
     def test_a_certificate_it_was_given_is_left_alone(self, tmp_path):
         """A shared certificate outlives the endpoint using it, and removing it would break
         the next endpoint that was handed the same one."""

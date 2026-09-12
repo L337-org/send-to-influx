@@ -269,10 +269,22 @@ class StubEndpoint:
         great many ``harness-tls-*`` directories under the system temp dir over a run, and a
         test process that litters outside its own tree is a process somebody has to clean up
         after by hand.
+
+        Raises:
+            AssertionError: the server thread outlived the shutdown, which leaves a live
+                socket answering in the background of every test that follows
         """
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=5)
+        # A timed join that nobody checks is the same silence this harness refuses
+        # everywhere else: the thread either stopped or it did not, and "did not" means the
+        # rest of the suite runs with a live endpoint answering behind it. That failure
+        # surfaces as flakiness somewhere unrelated, which is the expensive kind.
+        if self._thread.is_alive():
+            raise AssertionError(f"the stub endpoint at {self.url} did not shut down within 5s")
+        # After the aliveness check, deliberately: a server still running would still be
+        # holding this certificate open.
         if self._own_certificate_dir:
             shutil.rmtree(self._own_certificate_dir, ignore_errors=True)
             self._own_certificate_dir = None
