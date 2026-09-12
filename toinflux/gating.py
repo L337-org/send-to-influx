@@ -49,9 +49,9 @@ class Decision:
     """
 
     actuating: bool
-    reason: str = None
-    edge: str = None
-    apply: str = None
+    reason: "str | None" = None
+    edge: "str | None" = None
+    apply: "str | None" = None
 
 
 class Gate:
