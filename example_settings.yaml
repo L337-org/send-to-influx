@@ -206,6 +206,12 @@ openmeteo:
   # See https://open-meteo.com/en/docs for a full list of available variables
   fields:
     - "temperature_2m"
+    # The temperature the air would have to fall to for water to condense out of it. A
+    # conservatory held just above it does not stream with condensation, which is the
+    # motivating case for the control loops - see the README's "Control loops" section.
+    # Collected by default because it costs nothing extra: the API returns every requested
+    # variable in one response.
+    - "dew_point_2m"
     - "relative_humidity_2m"
     - "precipitation"
     - "cloud_cover"

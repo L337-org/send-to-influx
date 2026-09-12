@@ -209,7 +209,7 @@ class TestEveryEntrySaysSomething:
         # A ratchet, not a target. Deleting entries to make the checks above pass is the
         # one way to satisfy them while making the answer worse, and it would otherwise
         # leave no trace.
-        assert len(DECLARED) >= 56, f"only {len(DECLARED)} field metadata entries declared, down from 56"
+        assert len(DECLARED) >= 57, f"only {len(DECLARED)} field metadata entries declared, down from 57"
 
 
 class TestDescriptionsEarnTheirBytes:
@@ -331,3 +331,70 @@ class TestUnitsDocumentationAgrees:
             f"{source}.{field}: UNITS.md and MCP_FIELD_METADATA disagree about these codes "
             f"(declared, documented): {mismatched}"
         )
+
+
+class TestWhatTheExampleShips:
+    """The other direction from the checks above: those ask whether a declared field is
+    documented, and this asks whether a *shipped* field is declared. A field added to the
+    example settings without metadata reaches a new install's InfluxDB with no unit anywhere,
+    and nothing else notices."""
+
+    @staticmethod
+    def _example_settings():
+        """Return the shipped example settings.
+
+        Returns:
+            dict: the parsed document
+        """
+        import yaml
+
+        with open(UNITS_MD.parent / "example_settings.yaml", "r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle)
+
+    @classmethod
+    def _example_fields(cls, source):
+        """Return the fields the shipped example collects for one source.
+
+        Args:
+            source (str): the settings section to read
+
+        Returns:
+            list: the field names
+        """
+        return list((cls._example_settings().get(source) or {}).get("fields") or [])
+
+    @classmethod
+    def _sections_with_fields(cls):
+        """Return every settings section the example gives a fields list.
+
+        Found rather than listed, so a source added to the example is covered without
+        anybody remembering to add it here.
+
+        Returns:
+            list: section names, sorted
+        """
+        settings = cls._example_settings()
+        return sorted(
+            name
+            for name, block in settings.items()
+            if isinstance(block, dict) and isinstance(block.get("fields"), list)
+        )
+
+    def test_the_search_finds_more_than_one_section(self):
+        """A guard that searched nothing would look exactly like a clean tree - and the
+        first version of this checked only openmeteo, which is the same hole one section
+        wide."""
+        assert len(self._sections_with_fields()) >= 4, self._sections_with_fields()
+
+    def test_every_field_the_example_collects_carries_metadata(self):
+        missing = []
+        for source in self._sections_with_fields():
+            declared = {field for declared_source, field, _meta in DECLARED if declared_source == source}
+            missing += [f"{source}.{field}" for field in self._example_fields(source) if field not in declared]
+        assert not missing, f"shipped without units or a kind: {missing}"
+
+    def test_the_dew_point_is_collected_by_default(self):
+        """The condensation floor the control loops are for. A conservatory held just above
+        the dew point does not stream, and a control cannot read a field nobody collects -
+        so this is shipped rather than left for each install to discover."""
+        assert "dew_point_2m" in self._example_fields("openmeteo")

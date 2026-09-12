@@ -127,6 +127,7 @@ the API, so every field uses Open-Meteo's own default unit. For the fields in th
 | Field | Unit |
 |---|---|
 | `temperature_2m` | °C |
+| `dew_point_2m` | °C |
 | `relative_humidity_2m` | % |
 | `precipitation` | mm |
 | `cloud_cover` | % |
