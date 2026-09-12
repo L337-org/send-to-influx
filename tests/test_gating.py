@@ -340,7 +340,10 @@ class TestStopping:
         guard = DeviceGuard("conservatory", "unenergised", ["far"], refuse)
         with caplog.at_level(logging.ERROR):
             guard.stop("the process is exiting")
-        assert "the bridge did not answer" in caplog.text
+        # The type as well as the message: this line is the only record there will be, and
+        # a connection failure worth retrying reads identically to a permanent one without
+        # it. A raised message can leave the class to `from exc`; this cannot.
+        assert "SourceConnectionError" in caplog.text and "the bridge did not answer" in caplog.text
 
     def test_a_replaced_guard_stops_commanding(self):
         """A control reloaded in a long-lived process builds a new guard. The old one is
