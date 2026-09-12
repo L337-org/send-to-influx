@@ -1396,3 +1396,77 @@ def test_the_rebinding_guard_leaves_legitimate_code_alone(source):
     assignment, which is the gap this fills.
     """
     assert not _module_level_rebindings(source), f"false positive: {source!r}"
+
+
+def test_every_source_declares_a_minimum_interval():
+    """A source must say how often anything may go live to it, rather than inheriting a guess.
+
+    The base class leaves ``MINIMUM_INTERVAL`` as None, which falls back to the operator's
+    collection ``interval``. That is a safe answer and a poor one: the interval is how often
+    *this* operator wants data, and says nothing about what the far end tolerates. Someone
+    polling a free public API every six hours has not thereby decided it may be asked every
+    six hours.
+
+    So the fallback exists for a source under development, and shipping one without a number
+    fails here. The value is a judgement about somebody else's endpoint, which is exactly the
+    kind of decision that should be made deliberately rather than inherited.
+    """
+    from toinflux.general import known_sources, source_class
+
+    missing = sorted(source for source in known_sources() if source_class(source).MINIMUM_INTERVAL is None)
+    assert not missing, (
+        f"these sources inherit the interval fallback instead of declaring a minimum interval: "
+        f"{', '.join(missing)}. Set MINIMUM_INTERVAL on each class, with the reasoning beside it"
+    )
+
+
+def test_every_source_declares_a_default_max_age():
+    """A source must say how long its readings stay worth acting on.
+
+    Deliberately separate from ``MINIMUM_INTERVAL``, and the first attempt derived one from
+    the other, which is wrong in both directions. Nuki's minimum interval is 0 because an
+    MQTT read sends nothing, so a multiple of it made every reading instantly stale; Octopus
+    data is around a day behind by nature, so a multiple of its rate limit would have put a
+    healthy feed permanently in the fail-safe.
+
+    How often a source may be asked and how long its answer stays true are unrelated
+    questions, so each gets its own answer and each has to be chosen.
+    """
+    from toinflux.general import known_sources, source_class
+
+    missing = sorted(source for source in known_sources() if source_class(source).DEFAULT_MAX_AGE is None)
+    assert not missing, (
+        f"these sources declare no default max age: {', '.join(missing)}. Set DEFAULT_MAX_AGE on "
+        f"each class, reasoned from how long its readings stay true rather than from its rate limit"
+    )
+
+
+def test_the_example_settings_quote_the_real_per_source_defaults():
+    """A default written into the shipped example must be the one the code uses.
+
+    example_settings.yaml documents `minimum_interval` and `max_age` per source and names
+    each default in the comment above it. Those numbers live on the handler classes, so a
+    hand-written copy in a YAML comment is exactly the kind of thing that is right the day
+    it is written and wrong six months later - and wrong in the file an operator trusts.
+
+    Checked by reading both and comparing, rather than by remembering to update two places.
+    """
+    from toinflux.general import known_sources, source_class
+
+    text = (REPO_ROOT / "example_settings.yaml").read_text(encoding="utf-8")
+    wrong, missing = [], []
+    for source in sorted(known_sources()):
+        handler = source_class(source)
+        section = re.search(rf"^{re.escape(source)}:$(.*?)(?=^\S|\Z)", text, re.M | re.S)
+        if not section:
+            continue
+        for key, expected in (("minimum_interval", handler.MINIMUM_INTERVAL), ("max_age", handler.DEFAULT_MAX_AGE)):
+            found = re.search(
+                rf"^  # Uncomment[^\n]*\(default: (\d+) seconds\)\n  # {key}: (\d+)$", section.group(1), re.M
+            )
+            if not found:
+                missing.append(f"{source}.{key}")
+            elif {int(found.group(1)), int(found.group(2))} != {expected}:
+                wrong.append(f"{source}.{key}: example says {found.group(1)}/{found.group(2)}, code says {expected}")
+    assert not missing, "sources documented in example_settings.yaml without these keys: " + ", ".join(missing)
+    assert not wrong, "example_settings.yaml disagrees with the handler classes: " + "; ".join(wrong)

@@ -219,6 +219,93 @@ class TestValidateSettings:
         sample_settings["hue"]["mcp_read_write"] = True
         validate_settings(sample_settings)
 
+    @pytest.mark.parametrize(
+        "bad,expected",
+        [
+            (float("nan"), "interval must be a finite number"),
+            (float("inf"), "interval must be a finite number"),
+            ("300", "interval must be a number of seconds"),
+            (True, "interval must be a number of seconds"),
+            (0, "interval must be greater than zero"),
+            (-5, "interval must be greater than zero"),
+        ],
+    )
+    def test_an_unusable_interval_raises_config_error(self, sample_settings, bad, expected):
+        """Presence was the only check, so `interval: .nan` passed --check-config and then
+        reached a worker's time.sleep, which raises. The same is true of a string, a bool
+        and anything at or below zero, none of which sleep accepts and all of which a YAML
+        file can hold.
+
+        The accepted shape is the one _stall_threshold_seconds already requires before it
+        will use the value.
+        """
+        sample_settings["hue"]["interval"] = bad
+        with pytest.raises(ConfigError, match=expected):
+            validate_settings(sample_settings)
+
+    def test_a_usable_interval_is_accepted(self, sample_settings):
+        for value in (1, 300, 12.5):
+            sample_settings["hue"]["interval"] = value
+            validate_settings(sample_settings)
+
+    def test_non_numeric_minimum_interval_raises_config_error(self, sample_settings):
+        """The live-fetch floor is reported at --check-config, not at a control's startup.
+
+        A control process resolves it hours later and in the journal, which is the wrong
+        place to find out that a number was typed as a string.
+        """
+        sample_settings["hue"]["minimum_interval"] = "60"
+        with pytest.raises(ConfigError, match="minimum_interval must be a number of seconds"):
+            validate_settings(sample_settings)
+
+    def test_bool_minimum_interval_raises_config_error(self, sample_settings):
+        """`bool` subclasses `int`, so `minimum_interval: true` would validate and then act as a
+        one-second floor - the same trap a control's stage level refuses a bool for."""
+        sample_settings["hue"]["minimum_interval"] = True
+        with pytest.raises(ConfigError, match="minimum_interval must be a number of seconds"):
+            validate_settings(sample_settings)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_non_finite_minimum_interval_raises_config_error(self, sample_settings, bad):
+        """.nan and .inf are floats to YAML and to isinstance, and neither fails loudly at
+        runtime: a nan floor never holds so every cycle goes live, an inf one always holds
+        so nothing ever does."""
+        sample_settings["hue"]["minimum_interval"] = bad
+        with pytest.raises(ConfigError, match="minimum_interval must be a finite number"):
+            validate_settings(sample_settings)
+
+    def test_negative_minimum_interval_raises_config_error(self, sample_settings):
+        sample_settings["hue"]["minimum_interval"] = -1
+        with pytest.raises(ConfigError, match="minimum_interval must not be negative"):
+            validate_settings(sample_settings)
+
+    @pytest.mark.parametrize(
+        "bad,expected", [("900", "must be a number"), (float("nan"), "must be a finite"), (-1, "must not be negative")]
+    )
+    def test_an_unusable_max_age_raises_config_error(self, sample_settings, bad, expected):
+        """The same three checks as minimum_interval, through the shared validator: the two
+        keys differ in meaning and not at all in what a usable value looks like."""
+        sample_settings["hue"]["max_age"] = bad
+        with pytest.raises(ConfigError, match=f"max_age {expected}"):
+            validate_settings(sample_settings)
+
+    def test_a_usable_max_age_is_accepted(self, sample_settings):
+        for value in (0, 120, 900.5):
+            sample_settings["hue"]["max_age"] = value
+            validate_settings(sample_settings)
+
+    def test_numeric_minimum_interval_is_accepted(self, sample_settings):
+        """Zero is a legitimate floor: it means this source may be asked whenever a control
+        wants it, which is the right setting for something cheap to read."""
+        for value in (0, 60, 12.5):
+            sample_settings["hue"]["minimum_interval"] = value
+            validate_settings(sample_settings)
+
+    def test_absent_minimum_interval_is_accepted(self, sample_settings):
+        """The key is optional; the source's own interval is the default floor."""
+        sample_settings["hue"].pop("minimum_interval", None)
+        validate_settings(sample_settings)
+
     def test_empty_token_falls_back_to_v1_validation(self, sample_settings):
         """validate_settings treats an empty token as absent and validates v1 user/password instead."""
         sample_settings["influx"]["token"] = ""

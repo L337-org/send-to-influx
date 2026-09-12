@@ -114,6 +114,12 @@ class TestControlNames:
             "x" * 64,
             None,
             17,
+            # `$` matches before a trailing newline, so an anchored pattern checked with
+            # match() is not a whole-string test - this passed the allow-list until the
+            # check became fullmatch. It matters here more than most places: the name
+            # becomes a filename and an MCP client chooses it.
+            "conservatory\n",
+            "conservatory\nrm -rf",
         ],
     )
     def test_refuses_anything_that_could_choose_a_different_file(self, name):

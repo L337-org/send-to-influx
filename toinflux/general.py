@@ -8,6 +8,7 @@ __license__ = "MIT"
 import copy
 import ipaddress
 import logging
+import math
 import os
 import stat
 import sys
@@ -26,6 +27,18 @@ from toinflux.exceptions import ConfigError
 
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_LOG_BACKUP_COUNT = 3
+
+# The per-source key, beside `interval` and `timeout`, bounding how often anything may go
+# live to this source. It lives here rather than in toinflux.inputs, which is the only
+# thing that honours it, because inputs imports influx and influx imports this module:
+# validating it here and importing the name the other way would be an import cycle.
+MINIMUM_INTERVAL_KEY = "minimum_interval"
+
+# The per-source key overriding how long one of its readings stays worth acting on. Same
+# three-level shape as the key above: the source class's default, this override, then an
+# individual control input's own max_age. An operator who knows their estate goes stale
+# faster than the class assumes should not have to edit every control document to say so.
+MAX_AGE_KEY = "max_age"
 
 
 def configure_logging(
@@ -947,8 +960,7 @@ def _validate_source_block(source, settings, is_v2):
         return [unusable]
     errors = []
     source_cfg = settings[source]
-    if "interval" not in source_cfg:
-        errors.append(f"{source}.interval is required")
+    errors.extend(_validate_interval(source, source_cfg))
     if is_v2:
         if "db" not in source_cfg and "bucket" not in source_cfg:
             errors.append(f"{source}.db (or {source}.bucket for InfluxDB v2) is required")
@@ -959,7 +971,86 @@ def _validate_source_block(source, settings, is_v2):
     # leave writes off. Fail loud instead - a user who set it meant to enable it.
     if "mcp_read_write" in source_cfg and not isinstance(source_cfg["mcp_read_write"], bool):
         errors.append(f"{source}.mcp_read_write must be true or false (got {source_cfg['mcp_read_write']!r})")
+    errors.extend(_validate_duration(source, source_cfg, MINIMUM_INTERVAL_KEY))
+    errors.extend(_validate_duration(source, source_cfg, MAX_AGE_KEY))
     return errors
+
+
+def _validate_interval(source, source_cfg):
+    """Return errors for a source's collection interval.
+
+    Previously checked only for presence, so `interval: .nan` passed --check-config and then
+    reached a worker's `time.sleep`, which raises. The same is true of a string, a bool or a
+    negative number, all of which a YAML file can hold and none of which `sleep` accepts.
+
+    The accepted shape is the one `_stall_threshold_seconds` in sendtoinflux.py already
+    requires before it will use the value: a real number, finite, and greater than zero.
+
+    Args:
+        source (str): the source name, for the message
+        source_cfg (dict): that source's settings section
+
+    Returns:
+        list: error strings, empty when the interval is usable
+    """
+    if "interval" not in source_cfg:
+        return [f"{source}.interval is required"]
+    value = source_cfg["interval"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return [f"{source}.interval must be a number of seconds (got {value!r})"]
+    if not math.isfinite(value):
+        return [f"{source}.interval must be a finite number of seconds (got {value!r})"]
+    if value <= 0:
+        return [f"{source}.interval must be greater than zero (got {value!r})"]
+    return []
+
+
+def _validate_duration(source, source_cfg, key):
+    """Return errors for one of a source's optional duration overrides.
+
+    Shared by ``minimum_interval`` and ``max_age``, which differ in meaning and not at all
+    in what a usable value looks like.
+
+    Checked here rather than where it is read because a control process resolves these at
+    startup, long after --check-config is the place anyone is looking for a clear message.
+
+    A bool is refused for the reason it is refused in a control's stage levels: `bool`
+    subclasses `int`, so `minimum_interval: true` would validate and then act as a one
+    second bound, which is not what typing `true` meant. `.nan` and `.inf` are refused
+    because neither fails loudly later - a nan bound never holds and an inf one always
+    does, so the setting silently means its own opposite.
+
+    Zero is allowed, unlike the collection ``interval``, which would spin a worker. It means
+    different things for the two keys and is meaningful for both.
+
+    ``minimum_interval: 0`` says the source may be read live whenever a control wants it,
+    which is right for one that costs nothing to ask - Nuki's state has already arrived over
+    an open subscription.
+
+    ``max_age: 0`` says the input tolerates no staleness of its own. It does **not** mean a
+    live read every cycle: the trigger is the larger of this and the source's minimum
+    interval, so with a minimum of 900 a stored point is still used until it is 900 seconds
+    old. What it does is hand the decision entirely to the source, and - once the control
+    loop exists - leave nothing fresh enough to act on, so the safe state applies.
+
+    Args:
+        source (str): the source name, for the message
+        source_cfg (dict): that source's settings section
+        key (str): which duration key to check
+
+    Returns:
+        list: error strings, empty when the key is absent or usable
+    """
+    if key not in source_cfg:
+        return []
+    value = source_cfg[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return [f"{source}.{key} must be a number of seconds (got {value!r})"]
+    if not math.isfinite(value):
+        return [f"{source}.{key} must be a finite number of seconds (got {value!r})"]
+    if value < 0:
+        return [f"{source}.{key} must not be negative (got {value!r})"]
+    return []
 
 
 def _log_config_warnings(warnings_found, settings_path, warn) -> None:

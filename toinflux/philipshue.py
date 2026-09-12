@@ -118,14 +118,19 @@ def _parse_slot_field(field):
         tuple: ``(slot, error)`` - ``(None, None)`` when the field doesn't name a slot at all, ``(None, message)`` when
             it looks like one but isn't canonical
     """
-    match = _SLOT_FIELD_RE.match(str(field))
+    # fullmatch throughout: `$` matches before a trailing newline, so match() would read
+    # "host2\n" as naming bridge slot 2 rather than as the malformed key it is.
+    match = _SLOT_FIELD_RE.fullmatch(str(field))
     if not match:
         return (None, None)
     suffix = match.group("suffix")
-    if suffix and not CANONICAL_SLOT_SUFFIX_RE.match(suffix):
+    if suffix and not CANONICAL_SLOT_SUFFIX_RE.fullmatch(suffix):
         return (
             None,
-            f"hue.{field} is not a valid bridge slot - the first bridge is hue.host/hue.user, and "
+            # Quoted although _SLOT_FIELD_RE has already constrained it to letters and digits:
+            # that safety lives in a regex two lines up, and a message's safety should not
+            # depend on a check somewhere else staying exactly as strict as it is today.
+            f"{f'hue.{field}'!r} is not a valid bridge slot - the first bridge is hue.host/hue.user, and "
             f"further bridges are numbered from 2 with no leading zeros (hue.host2/hue.user2, "
             f"hue.host3/hue.user3, ...)",
         )
@@ -442,6 +447,10 @@ class Hue(DataHandler):
     """Child class of DataHandler to get data from a Hue Bridge.
 
     Attributes:
+        MINIMUM_INTERVAL (int): 10 - a bridge on the local network with no third party
+            in the way; enough to stop a runaway loop without constraining a control.
+        DEFAULT_MAX_AGE (int): 900 - sensors report on change and the collector writes on
+            its own cycle, so an older reading means the bridge or collector stopped.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_WRITABLE (bool): True - lights and plugs can be actuated, opt-in per install.
         MCP_INSTANCE_TAG (str): the tag naming which bridge a point came from.
@@ -450,6 +459,17 @@ class Hue(DataHandler):
         HUE_CT_MIN (int): the lowest colour temperature, in mirek, the bridge accepts.
         HUE_CT_MAX (int): the highest colour temperature, in mirek, the bridge accepts.
     """
+
+    # A bridge on the local network, with no third party between us and it. Philips' own
+    # rate guidance is about commands (writes); reading sensor state is cheap. Ten seconds
+    # is enough to stop a misconfigured loop hammering the bridge without constraining any
+    # realistic control, whose process variable is a temperature or a light level.
+    MINIMUM_INTERVAL = 10
+    # Sensors report on change and the collector writes on its own cycle (300 shipped), so a
+    # reading older than fifteen minutes does not mean the room stopped changing - it means
+    # the bridge or the collector stopped. Temperature itself moves slowly, so this bound is
+    # about liveness rather than about the value going out of date.
+    DEFAULT_MAX_AGE = 900
 
     MCP_DESCRIPTION = "Philips Hue: lights and smart plugs (on/off, brightness) and motion/temperature/light sensors."
 

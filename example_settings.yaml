@@ -146,6 +146,10 @@ hue:
   timeout: 5
   # Interval in seconds between data collection
   interval: 300
+  # Uncomment the line below to change how often a control may read this source live (default: 10 seconds)
+  # minimum_interval: 10
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 900 seconds)
+  # max_age: 900
   # Temperature unit (C/F/K)
   temperature_units: "C"
   # Skip TLS certificate verification. Defaults to true since Hue bridges are commonly
@@ -170,6 +174,10 @@ speedtest:
   mcp_read_write: false
   # Interval in seconds between data collection
   interval: 21600
+  # Uncomment the line below to change how often a control may read this source live (default: 3600 seconds)
+  # minimum_interval: 3600
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 86400 seconds)
+  # max_age: 86400
   # Timeout for the speedtest scan
   timeout: 5
   # The fields to collect from the Speedtest results
@@ -185,6 +193,10 @@ openmeteo:
   db: "weather_db"
   # Interval in seconds between data collection (15 minutes minimum recommended)
   interval: 900
+  # Uncomment the line below to change how often a control may read this source live (default: 600 seconds)
+  # minimum_interval: 600
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 3600 seconds)
+  # max_age: 3600
   # Latitude and longitude for the weather location
   latitude: 51.5
   longitude: -2.6
@@ -206,6 +218,10 @@ carbonintensity:
   db: "grid_db"
   # Interval in seconds between data collection (half-hourly data, 1800 minimum)
   interval: 1800
+  # Uncomment the line below to change how often a control may read this source live (default: 900 seconds)
+  # minimum_interval: 900
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 3600 seconds)
+  # max_age: 3600
   # Timeout for requests to the Carbon Intensity API
   timeout: 10
   # Set to true to also collect the national generation fuel mix percentages
@@ -238,6 +254,10 @@ zappi:
   db: "zappi_db"
   # Interval in seconds between data collection
   interval: 300
+  # Uncomment the line below to change how often a control may read this source live (default: 60 seconds)
+  # minimum_interval: 60
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 300 seconds)
+  # max_age: 300
   # The serial number of the Zappi device. This form - one serial at the top of the
   # block - collects a single device and tags it device=zappi in InfluxDB, exactly as
   # it always has. Add an optional `label:` here to tag it with a name of your own
@@ -273,6 +293,10 @@ harvi:
   db: "myenergi_db"
   # Interval in seconds between data collection
   interval: 300
+  # Uncomment the line below to change how often a control may read this source live (default: 60 seconds)
+  # minimum_interval: 60
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 300 seconds)
+  # max_age: 300
   # The serial number of the Harvi device. Also sent as the MyEnergi API's digest
   # username, which the API accepts for any device on the account. Add an optional
   # `label:` to choose the InfluxDB `device` tag, or a `devices:` list for more than
@@ -293,6 +317,10 @@ eddi:
   db: "myenergi_db"
   # Interval in seconds between data collection
   interval: 300
+  # Uncomment the line below to change how often a control may read this source live (default: 60 seconds)
+  # minimum_interval: 60
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 300 seconds)
+  # max_age: 300
   # The serial number of the Eddi device. Also sent as the MyEnergi API's digest
   # username, which the API accepts for any device on the account. Add an optional
   # `label:` to choose the InfluxDB `device` tag, or a `devices:` list for more than
@@ -315,6 +343,10 @@ octopus:
   db: "octopus_db"
   # Interval in seconds between data collection (half-hourly data, 1800 minimum)
   interval: 1800
+  # Uncomment the line below to change how often a control may read this source live (default: 1800 seconds)
+  # minimum_interval: 1800
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 172800 seconds)
+  # max_age: 172800
   # Your Octopus Energy API key (from https://octopus.energy/dashboard/developer/)
   api_key: "your_octopus_api_key"
   # Your electricity meter MPAN (13-digit number, found on your bill)
@@ -343,6 +375,10 @@ nuki:
   timeout: 3
   # Interval in seconds between data collection
   interval: 300
+  # Uncomment the line below to change how often a control may read this source live (default: 0 seconds)
+  # minimum_interval: 0
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 900 seconds)
+  # max_age: 900
   # No per-lock configuration is needed: every lock provisioned to the broker
   # publishes under its own topic namespace and is reported automatically, with
   # fields prefixed by the lock's own name from the Nuki app - give each lock a
