@@ -12,6 +12,7 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import os
+import socket
 import ssl
 import stat
 import subprocess
@@ -25,46 +26,13 @@ import requests
 from tests.harness import census, faults, invariants
 from tests.harness.bridge import StubBridge, plug
 from tests.harness.certificates import write_self_signed
-from tests.harness.influxdb import StubInflux
-from tests.harness.installation import Installation, conservatory
+from tests.harness.installation import conservatory
 from toinflux.controls import control_dir, load_control, validate_control
 from toinflux.exceptions import SourceConnectionError
 from toinflux.inputs import stored_reading
 from toinflux.philipshue import Hue
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-@pytest.fixture
-def bridge():
-    """Yield a running stub bridge.
-
-    Yields:
-        StubBridge: the bridge, stopped afterwards
-    """
-    with StubBridge() as running:
-        yield running
-
-
-@pytest.fixture
-def influx():
-    """Yield a running stub InfluxDB.
-
-    Yields:
-        StubInflux: the database, stopped afterwards
-    """
-    with StubInflux({"temperature_2m": 8.5, "conservatory_temperature": 16.0}) as running:
-        yield running
-
-
-@pytest.fixture
-def installation(tmp_path, bridge, influx):
-    """Yield an installation wired to both stubs.
-
-    Yields:
-        Installation: the installation
-    """
-    yield Installation(tmp_path, bridge=bridge, influx=influx)
 
 
 def _hue(installation):
@@ -355,6 +323,31 @@ class TestTheInstallation:
         assert found.stdout.strip() == "conservatory"
 
 
+class TestTheNetworkGuard:
+    def test_a_unix_socket_is_not_the_internet(self, tmp_path, monkeypatch):
+        """Local by construction - the journal, a credential helper, a container runtime -
+        so refusing one would fail tests that never left the machine.
+
+        Connected for real rather than asserted on a refusal, because a refusal has more
+        than one cause. The path is relative, because an absolute one under the temporary
+        directory exceeds the 104 characters AF_UNIX allows on this platform - which is how
+        the first version of this test failed.
+        """
+        monkeypatch.chdir(tmp_path)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind("s.sock")
+            listener.listen(1)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect("s.sock")
+                # Connecting at all is the assertion: the guard would have raised.
+                assert client.fileno() >= 0
+
+    def test_an_address_off_this_machine_is_refused(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as outbound:
+            with pytest.raises(AssertionError, match="not this machine"):
+                outbound.connect(("93.184.216.34", 80))
+
+
 class TestTheCensus:
     def test_it_counts_children_and_not_its_own_ps(self):
         """A census that was wrong by exactly one would be believed."""
@@ -424,6 +417,48 @@ class TestTheCensus:
         with pytest.raises(AssertionError, match="could not read the process table"):
             census.take(os.getpid())
         assert killed == [True]
+
+    def test_it_waits_out_a_thread_that_is_still_finishing(self):
+        """The difference between a leak and a handshake. A census taken the instant a
+        connection closes counts the server thread still winding down, and comparing that
+        against a quiet earlier reading reports growth that is not there.
+
+        Four hundred milliseconds on purpose: the first version of this waited for two
+        readings to agree, which any transient outlasting the gap between samples satisfies
+        while it is still running. A leak is growth that *stays*, so the check re-reads
+        until nothing exceeds the baseline.
+        """
+        import threading
+
+        before = census.take(os.getpid())
+        started = threading.Event()
+
+        def briefly():
+            """Live for a moment and exit."""
+            started.set()
+            time.sleep(0.4)
+
+        thread = threading.Thread(target=briefly, daemon=True)
+        thread.start()
+        started.wait(timeout=5)
+        assert census.take(os.getpid()).threads > before.threads, "the transient was not observed"
+        assert census.quiet_after(before, os.getpid()).threads == before.threads
+        thread.join(timeout=5)
+
+    def test_growth_that_stays_is_still_reported(self):
+        """The other half: a check that waited for quiet for ever would report nothing."""
+        import threading
+
+        before = census.take(os.getpid())
+        stop = threading.Event()
+        thread = threading.Thread(target=stop.wait, daemon=True)
+        thread.start()
+        try:
+            after = census.quiet_after(before, os.getpid(), attempts=3, pause=0.05)
+            assert after.threads > before.threads
+        finally:
+            stop.set()
+            thread.join(timeout=5)
 
     def test_it_says_which_counts_it_could_not_take(self):
         """A count that is not available reads exactly like a count of zero, and only one
