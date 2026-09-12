@@ -127,7 +127,10 @@ def _parse_slot_field(field):
     if suffix and not CANONICAL_SLOT_SUFFIX_RE.fullmatch(suffix):
         return (
             None,
-            f"hue.{field} is not a valid bridge slot - the first bridge is hue.host/hue.user, and "
+            # Quoted although _SLOT_FIELD_RE has already constrained it to letters and digits:
+            # that safety lives in a regex two lines up, and a message's safety should not
+            # depend on a check somewhere else staying exactly as strict as it is today.
+            f"{f'hue.{field}'!r} is not a valid bridge slot - the first bridge is hue.host/hue.user, and "
             f"further bridges are numbered from 2 with no leading zeros (hue.host2/hue.user2, "
             f"hue.host3/hue.user3, ...)",
         )
