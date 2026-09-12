@@ -18,6 +18,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import time
 import warnings
 from dataclasses import dataclass, field
 
@@ -184,27 +185,40 @@ def nothing_leaked(before, after, allowance=0):
     return report
 
 
-def kept_cycling(endpoint, period, tolerance=3.0, ignore_before=None):
+def kept_cycling(endpoint, period, tolerance=3.0, ignore_before=None, until=None):
     """The loop never stalled: the far end kept being asked, at roughly its cadence.
 
     Measured at the endpoint rather than from a heartbeat, because a heartbeat is the
     subject's own account of itself. A loop that stopped doing any work while continuing to
     say it was alive is exactly the failure this is looking for.
 
+    **The silence after the last request counts too.** A loop that stalls at the end of the
+    window leaves no later request to make an oversized gap with, so checking only the gaps
+    between requests reports success for the one shape of stall a scenario is most likely to
+    produce: kill something, then look. That was the first version of this, and it would
+    have passed a run that died halfway through.
+
     Args:
         endpoint (StubEndpoint): the endpoint the loop talks to
         period (float): the cycle time in seconds
         tolerance (float): how many periods may pass with no request at all
         ignore_before (float or None): a ``time.monotonic()`` reading to start from
+        until (float or None): the end of the window the loop was meant to be running for;
+            now, when None
 
     Returns:
-        Report: the longest silence, where it was too long
+        Report: each silence that was too long
     """
     moments = [r.at for r in endpoint.requests if ignore_before is None or r.at >= ignore_before]
+    ended = time.monotonic() if until is None else until
     violations = []
     for earlier, later in zip(moments, moments[1:]):
         if later - earlier > period * tolerance:
             violations.append(f"nothing was asked for {later - earlier:.2f}s, more than {tolerance} cycles")
+    if moments and ended - moments[-1] > period * tolerance:
+        violations.append(
+            f"nothing was asked for the last {ended - moments[-1]:.2f}s of the window, " f"more than {tolerance} cycles"
+        )
     if not moments:
         violations.append("the endpoint was never asked for anything at all")
     return Report(name="the loop never stalls", violations=violations)

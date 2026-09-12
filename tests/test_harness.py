@@ -22,6 +22,7 @@ import requests
 
 from tests.harness import census, faults, invariants
 from tests.harness.bridge import StubBridge
+from tests.harness.certificates import write_self_signed
 from tests.harness.influxdb import StubInflux
 from tests.harness.installation import Installation, conservatory
 from toinflux.controls import control_dir, load_control, validate_control
@@ -118,6 +119,24 @@ class TestTheStubBridgeIsABridge:
         with faults.erroring(bridge, 503):
             with pytest.raises(SourceConnectionError):
                 _hue(installation).mcp_list_writable_devices()
+
+    def test_it_takes_its_certificate_directory_away_with_it(self):
+        """One per endpoint per test is a great many `harness-tls-*` directories under the
+        system temp dir over a run, and a test process that litters outside its own tree is
+        one somebody cleans up by hand."""
+        endpoint = StubBridge()
+        generated = endpoint._own_certificate_dir
+        assert generated and os.path.isdir(generated)
+        endpoint.stop()
+        assert not os.path.exists(generated)
+
+    def test_a_certificate_it_was_given_is_left_alone(self, tmp_path):
+        """A shared certificate outlives the endpoint using it, and removing it would break
+        the next endpoint that was handed the same one."""
+        shared = write_self_signed(str(tmp_path))
+        endpoint = StubBridge(certificate=shared)
+        endpoint.stop()
+        assert os.path.exists(shared[0])
 
     def test_a_fault_clears_itself_when_the_body_raises(self, installation, bridge):
         """A fault left switched on makes the next scenario fail for a reason that has
@@ -381,6 +400,15 @@ class TestTheInvariantsCatchViolations:
         bridge.requests[0].at -= 600
         broken = invariants.kept_cycling(bridge, period=1, tolerance=3).violations
         assert len(broken) == 1 and "nothing was asked" in broken[0]
+
+    def test_a_stall_at_the_end_of_the_window_is_a_violation(self, bridge, installation):
+        """The shape a scenario is most likely to produce - kill something, then look - and
+        the one a gaps-only check reports success for, because a loop that stops leaves no
+        later request to make an oversized gap with."""
+        _hue(installation).mcp_list_writable_devices()
+        bridge.requests[-1].at -= 600
+        broken = invariants.kept_cycling(bridge, period=1, tolerance=3).violations
+        assert len(broken) == 1 and "the last" in broken[0], broken
 
     def test_an_endpoint_nobody_asked_anything_is_a_violation(self, bridge):
         """Silence is not success: a control that never started would satisfy every other

@@ -31,6 +31,8 @@ __license__ = "MIT"
 
 import http.server
 import json
+import os
+import shutil
 import socket
 import ssl
 import threading
@@ -196,8 +198,15 @@ class StubEndpoint:
         self.lock = threading.Lock()
         self._server = _Server(self)
         self.scheme = "https" if tls else "http"
+        # The directory to remove on the way out, and None where the caller supplied its own
+        # certificate: a shared one outlives this endpoint, and deleting it would break the
+        # next endpoint that was given it.
+        self._own_certificate_dir = None
         if tls:
-            certificate_path, key_path = certificate or write_self_signed()
+            if certificate is None:
+                certificate = write_self_signed()
+                self._own_certificate_dir = os.path.dirname(certificate[0])
+            certificate_path, key_path = certificate
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(certificate_path, key_path)
             self._server.socket = context.wrap_socket(self._server.socket, server_side=True)
@@ -254,10 +263,19 @@ class StubEndpoint:
             return [r.path for r in self.requests if method is None or r.method == method]
 
     def stop(self) -> None:
-        """Shut the server down and wait for its thread."""
+        """Shut the server down, wait for its thread, and remove what it generated.
+
+        The certificate directory goes with it. One per endpoint per test adds up to a
+        great many ``harness-tls-*`` directories under the system temp dir over a run, and a
+        test process that litters outside its own tree is a process somebody has to clean up
+        after by hand.
+        """
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=5)
+        if self._own_certificate_dir:
+            shutil.rmtree(self._own_certificate_dir, ignore_errors=True)
+            self._own_certificate_dir = None
 
     def __enter__(self):
         """Return the running endpoint.
