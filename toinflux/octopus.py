@@ -17,8 +17,8 @@ class Octopus(DataHandler):
     """Child class of DataHandler to get data from Octopus Energy.
 
     Attributes:
-        MINIMUM_INTERVAL (int): 1800 - never consulted, since MCP_LIVE_STATE is False;
-            declared so the number is a decision rather than an accident if that changes.
+        MINIMUM_INTERVAL (int): 1800 - read, but unable to cause a device read while
+            MCP_LIVE_STATE is False, and dominated by DEFAULT_MAX_AGE in the fetch trigger.
         DEFAULT_MAX_AGE (int): 172800 - the data is around a day behind by nature, so a
             tighter bound would put a healthy feed permanently in the fail-safe.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
@@ -28,10 +28,13 @@ class Octopus(DataHandler):
             consumption fields are per-interval rather than meter totals.
     """
 
-    # Never actually consulted: MCP_LIVE_STATE is False because the data is around a day
-    # behind, so nothing ever goes live to this source. Declared anyway rather than left to
-    # the interval fallback, so that the number is a decision rather than an accident if a
-    # live read is ever added.
+    # Read on every control input, but it can never cause a device read: MCP_LIVE_STATE is
+    # False because the data is around a day behind, so nothing goes live to this source.
+    # It also happens not to change the fetch trigger, which is the larger of this and
+    # DEFAULT_MAX_AGE - and that is 172800 here, so this is always dominated.
+    #
+    # Declared anyway rather than left to the interval fallback, so the number is a decision
+    # rather than an accident if a live read is ever added.
     MINIMUM_INTERVAL = 1800
     # Consumption data is around a day behind by nature, so any bound near the collection
     # cadence would put a healthy feed permanently in the fail-safe. Forty-eight hours is
