@@ -185,9 +185,14 @@ def _validate_storage_name(name):
     """
     # fullmatch, not match: `$` matches before a trailing newline, and this name becomes
     # part of a credential's filename.
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+    #
+    # The type check is in front of the pattern for the same reason require_valid_control_name
+    # has one: re.fullmatch raises TypeError on a non-string, and a refusal this tool is
+    # meant to explain would arrive as a traceback instead. Quoted with !r rather than hand
+    # quotes, so a name carrying a control character cannot shape its own message.
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise CredentialCliError(
-            f"'{name}' is not a valid database/bucket name - use only letters, digits, underscores, and hyphens."
+            f"{name!r} is not a valid database/bucket name - use only letters, digits, underscores, and hyphens."
         )
 
 

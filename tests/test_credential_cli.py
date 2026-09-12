@@ -159,6 +159,19 @@ class TestValidateStorageName:
         with pytest.raises(CredentialCliError, match="not a valid database/bucket name"):
             _validate_storage_name("")
 
+    def test_rejects_a_non_string_as_a_refusal_rather_than_a_traceback(self):
+        """re.fullmatch raises TypeError on a non-string, so the refusal this tool exists to
+        explain would arrive as a stack trace instead."""
+        with pytest.raises(CredentialCliError, match="not a valid database/bucket name"):
+            _validate_storage_name(None)
+
+    def test_the_message_quotes_the_name_it_refuses(self):
+        """Hand quotes around an interpolated value do not escape a control character, and
+        this message carries a value straight from the command line."""
+        with pytest.raises(CredentialCliError) as raised:
+            _validate_storage_name("hue_db\nWARNING  created")
+        assert "\n" not in str(raised.value)
+
 
 # --------------------------------------------------------------------------- #
 # _encrypt_credential
