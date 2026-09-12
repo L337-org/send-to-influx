@@ -46,6 +46,11 @@ CONTROL_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,62}$"
 # having declared a zero stage correctly. `leave_unchanged` is the absence of a safe
 # state rather than a safe state, and is opt-in precisely so it is never reached by
 # omission.
+# What an active period's boundary looks like. Shared with toinflux.schedule, which parses
+# the same strings: strptime("%H:%M") accepts "9:00" and "9:0", so a parser left to itself
+# would be laxer than the validator and a document could pass one and not the other.
+CLOCK_TIME_PATTERN = r"([01]\d|2[0-3]):[0-5]\d"
+
 SAFE_STATE_UNENERGISED = "unenergised"
 SAFE_STATE_LEAVE_UNCHANGED = "leave_unchanged"
 BUILT_IN_SAFE_STATES = (SAFE_STATE_UNENERGISED, SAFE_STATE_LEAVE_UNCHANGED)
@@ -453,7 +458,7 @@ def _check_active_period(document, errors) -> None:
         value = period.get(field)
         # fullmatch: `$` matches before a trailing newline, so "23:35\n" passed this and
         # became an active-period boundary carrying a line break.
-        if not isinstance(value, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
+        if not isinstance(value, str) or not re.fullmatch(CLOCK_TIME_PATTERN, value):
             errors.append(f"active_period.{field}: is required and must be a 24-hour HH:MM time, got {value!r}")
     end_state = period.get("end_state", SAFE_STATE_UNENERGISED)
     if end_state not in BUILT_IN_SAFE_STATES:
