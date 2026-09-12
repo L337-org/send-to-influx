@@ -35,6 +35,7 @@ from toinflux.inputs import (
     InputReading,
     fetch_lock,
     fetch_lock_path,
+    _as_reading_value,
     _default_max_age,
     read_input,
     resolve_minimum_interval,
@@ -168,6 +169,73 @@ class TestResolveMinimumInterval:
         monkeypatch.setattr("toinflux.inputs.source_class", lambda source: handler)
         with pytest.raises(ConfigError, match="'hue.interval' must be a number of seconds"):
             resolve_minimum_interval("hue", {"hue": {"interval": "300"}})
+
+
+class TestTheValueIsAlwaysANumber:
+    """InputReading.value is annotated float, so it has to be one.
+
+    InfluxDB fields can hold strings and booleans as well as numbers, and both the stored
+    and live paths previously passed through whatever arrived - so the annotation was a
+    claim rather than a contract.
+    """
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            pytest.param(19.5, 19.5, id="float"),
+            pytest.param(19, 19.0, id="int-becomes-float"),
+            pytest.param(True, 1.0, id="bool-is-data-from-influx-meaning-one"),
+            pytest.param(False, 0.0, id="bool-false-is-zero-not-missing"),
+        ],
+    )
+    def test_a_number_or_a_boolean_reads_as_a_number(self, raw, expected):
+        """A bool converts rather than being refused: InfluxDB has a boolean field type and
+        a Hue plug's on/off state arrives through it, meaning exactly 1 or 0.
+
+        That is the opposite of how a bool is treated in a stage's level:, where it is an
+        operator typo. Same type, read differently, because the two arrive from different
+        places - and that inconsistency is deliberate enough to be worth a test either side.
+        """
+        assert _as_reading_value(raw, "hue", "temperature") == expected
+
+    @pytest.mark.parametrize("raw", ["19.5", None, [19.5], {"value": 19.5}])
+    def test_anything_else_is_refused_rather_than_passed_on(self, raw):
+        """There is no PID over a string. Handing the loop something it will fail on later,
+        somewhere less obvious, is worse than refusing it here - and no retry fixes a field
+        whose type is wrong, so it is a configuration fault."""
+        with pytest.raises(ConfigError, match="which a control cannot act on"):
+            _as_reading_value(raw, "hue", "temperature")
+
+    def test_the_message_names_the_field_and_source(self):
+        """The reader is an operator with a journal line, not this code."""
+        with pytest.raises(ConfigError, match="field 'status' of source 'hue'"):
+            _as_reading_value("locked", "hue", "status")
+
+    def test_the_stored_path_enforces_it(self, monkeypatch):
+        """Through handler_reading rather than the helper directly.
+
+        The helper's own tests pass whether or not either read path calls it, so on their
+        own they say nothing about the contract holding - which I checked by removing the
+        call and watching them stay green.
+        """
+        monkeypatch.setattr("toinflux.inputs.get_class", _reading_handler)
+        monkeypatch.setattr("toinflux.inputs.resolve_db", lambda *a: "db")
+        monkeypatch.setattr("toinflux.inputs.run_query", lambda *a: [])
+        monkeypatch.setattr(
+            "toinflux.inputs.single_series",
+            lambda series: (["time", "status"], [[1000, "locked"]]),
+        )
+        with pytest.raises(ConfigError, match="which a control cannot act on"):
+            stored_reading(None, SETTINGS, "hue", "status")
+
+    def test_the_live_path_enforces_it(self, monkeypatch, tmp_path):
+        """And through read_input, because the live read is a second way in."""
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        handler = _handler(data={"status": "locked"})
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: None)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        with pytest.raises(ConfigError, match="which a control cannot act on"):
+            read_input(None, SETTINGS, {"source": "hue", "field": "status", "max_age": 900})
 
 
 class TestTheDefaultMaxAge:
@@ -364,6 +432,16 @@ class TestTheFetchLockSerialisesLiveFetches:
         finally:
             holder.send_signal(signal.SIGKILL)
             holder.wait(timeout=10)
+
+
+def _reading_handler(source, settings_file=None, instance=None):
+    """A stand-in handler carrying only what a stored read asks of one."""
+    handler = MagicMock()
+    handler.MCP_MEASUREMENT = None
+    handler.source = source
+    handler.mcp_tag_filters.return_value = {}
+    handler.source_settings = {"db": "x"}
+    return handler
 
 
 def _handler(live=True, timeout=5, data=None, fails=None, timestamp=None):

@@ -137,7 +137,9 @@ class InputReading:
     "InfluxDB is unreachable", which call for different responses.
 
     Attributes:
-        value (float): the field's value.
+        value (float): the field's value, always a number. A boolean field converts to 1.0
+            or 0.0; a field holding anything else is refused when it is read, because there
+            is no PID over a string.
         timestamp (float): unix seconds the point was written at, as InfluxDB reports it.
         age (float): seconds between that timestamp and the moment of the read.
         live (bool): whether a live fetch produced it, rather than the stored point.
@@ -256,6 +258,41 @@ def _required(spec, key):
     return spec[key]
 
 
+def _as_reading_value(value, source, field):
+    """Return a field's value as the number a control can act on.
+
+    A control's process variable is a number by construction - there is no PID over a
+    string - so a field that is not one cannot be an input, and saying so beats handing the
+    loop something it will fail on later in a less obvious place. No retry fixes it either:
+    the control named a field whose type is wrong, which is a configuration fault.
+
+    A bool converts rather than being refused. InfluxDB has a boolean field type and a Hue
+    plug's on/off state arrives through it, where the value genuinely means exactly 1 or 0.
+    That is the opposite of the treatment a bool gets in a stage's ``level:``, where it is
+    an operator typo - the same type, read differently, because the two arrive from
+    different places.
+
+    Args:
+        value (object): the raw value from InfluxDB or a live read
+        source (str): the source it came from, for the message
+        field (str): the field it came from, for the message
+
+    Returns:
+        float: the value
+
+    Raises:
+        ConfigError: where the field does not hold a number
+    """
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    raise ConfigError(
+        f"field {field!r} of source {source!r} holds {type(value).__name__}, which a control "
+        f"cannot act on: an input must be a number, or a boolean meaning one and zero"
+    )
+
+
 def _refuse_reserved_field(field):
     """Refuse a field name that cannot be told apart from the timestamp column.
 
@@ -330,7 +367,12 @@ def handler_reading(session, settings, handler, field, now=None):
         # exist look like a fresh one.
         return None
     moment = time.time() if now is None else now
-    return InputReading(value=value, timestamp=float(stamp), age=moment - float(stamp), live=False)
+    return InputReading(
+        value=_as_reading_value(value, handler.source, field),
+        timestamp=float(stamp),
+        age=moment - float(stamp),
+        live=False,
+    )
 
 
 def _cell(row, index, name):
@@ -655,7 +697,9 @@ def _live_reading(handler, source, field, stored, now):
     # writes the point at that same value, so reporting age 0 here would disagree with what
     # InfluxDB now holds and would tell a control an hour-old reading was brand new.
     stamp = moment if handler.timestamp is None else float(handler.timestamp)
-    return InputReading(value=data[field], timestamp=stamp, age=moment - stamp, live=True)
+    return InputReading(
+        value=_as_reading_value(data[field], source, field), timestamp=stamp, age=moment - stamp, live=True
+    )
 
 
 def _require(reading, source, field, why):
