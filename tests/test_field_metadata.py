@@ -340,7 +340,19 @@ class TestWhatTheExampleShips:
     and nothing else notices."""
 
     @staticmethod
-    def _example_fields(source):
+    def _example_settings():
+        """Return the shipped example settings.
+
+        Returns:
+            dict: the parsed document
+        """
+        import yaml
+
+        with open(UNITS_MD.parent / "example_settings.yaml", "r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle)
+
+    @classmethod
+    def _example_fields(cls, source):
         """Return the fields the shipped example collects for one source.
 
         Args:
@@ -349,14 +361,36 @@ class TestWhatTheExampleShips:
         Returns:
             list: the field names
         """
-        import yaml
+        return list((cls._example_settings().get(source) or {}).get("fields") or [])
 
-        with open(UNITS_MD.parent / "example_settings.yaml", "r", encoding="utf-8") as handle:
-            return list((yaml.safe_load(handle).get(source) or {}).get("fields") or [])
+    @classmethod
+    def _sections_with_fields(cls):
+        """Return every settings section the example gives a fields list.
+
+        Found rather than listed, so a source added to the example is covered without
+        anybody remembering to add it here.
+
+        Returns:
+            list: section names, sorted
+        """
+        settings = cls._example_settings()
+        return sorted(
+            name
+            for name, block in settings.items()
+            if isinstance(block, dict) and isinstance(block.get("fields"), list)
+        )
+
+    def test_the_search_finds_more_than_one_section(self):
+        """A guard that searched nothing would look exactly like a clean tree - and the
+        first version of this checked only openmeteo, which is the same hole one section
+        wide."""
+        assert len(self._sections_with_fields()) >= 4, self._sections_with_fields()
 
     def test_every_field_the_example_collects_carries_metadata(self):
-        declared = {field for source, field, _meta in DECLARED if source == "openmeteo"}
-        missing = [field for field in self._example_fields("openmeteo") if field not in declared]
+        missing = []
+        for source in self._sections_with_fields():
+            declared = {field for declared_source, field, _meta in DECLARED if declared_source == source}
+            missing += [f"{source}.{field}" for field in self._example_fields(source) if field not in declared]
         assert not missing, f"shipped without units or a kind: {missing}"
 
     def test_the_dew_point_is_collected_by_default(self):
