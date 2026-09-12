@@ -271,7 +271,7 @@ class DeviceGuard:
                 self.safe_state,
             )
             return
-        logging.info("Control %r asserting %r on %s", self.name, self.safe_state, ", ".join(self.devices) or "nothing")
+        logging.info("Control %r asserting %r on %s", self.name, self.safe_state, self._device_list())
         self._command(self._commands)
 
     def stop(self, reason) -> None:
@@ -293,7 +293,7 @@ class DeviceGuard:
         atexit.unregister(self._at_exit)
         if self._commands is None:
             return
-        logging.info("Control %r applying %r on %s: %s", self.name, self.safe_state, ", ".join(self.devices), reason)
+        logging.info("Control %r applying %r on %s: %s", self.name, self.safe_state, self._device_list(), reason)
         try:
             self._command(self._commands)
         except Exception as exc:  # noqa: BLE001 - nothing above this can handle it
@@ -302,6 +302,19 @@ class DeviceGuard:
             # Logged with the underlying error because a device left energised after a
             # shutdown is exactly the failure somebody will be looking for.
             logging.error("Control %r could not apply %r on exit: %s", self.name, self.safe_state, exc)
+
+    def _device_list(self):
+        """Return the device names for a log line, each quoted.
+
+        Quoted per name rather than joined raw: a device name comes from a control document
+        an MCP client can write, and nothing constrains it to a single line. A name carrying
+        a newline would otherwise write its own entry in the journal, which is how a log
+        stops being evidence.
+
+        Returns:
+            str: the quoted names, comma-separated, or a word for the empty case
+        """
+        return ", ".join(repr(device) for device in self.devices) or "nothing"
 
     def close(self) -> None:
         """Drop the exit handler without applying anything.

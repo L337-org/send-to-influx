@@ -1472,35 +1472,166 @@ def test_the_example_settings_quote_the_real_per_source_defaults():
     assert not wrong, "example_settings.yaml disagrees with the handler classes: " + "; ".join(wrong)
 
 
-def _anchored_match_calls(source):
-    """Return every line number where an anchored pattern is checked with ``.match()``.
+def _pattern_text(node):
+    """Return the literal text of a pattern expression, or None where it cannot be read.
+
+    An f-string's constant parts count, because that is where the anchors are written: a
+    pattern spelled ``rf"^{re.escape(field)}$"`` is as anchored as a plain one, and the old
+    regex-based version of this guard could not see it at all.
+
+    Args:
+        node (ast.AST): the expression the pattern was given as
+
+    Returns:
+        str or None: the readable text, or None where there is none
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        parts = [p.value for p in node.values if isinstance(p, ast.Constant) and isinstance(p.value, str)]
+        return "".join(parts) if parts else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _pattern_text(node.left), _pattern_text(node.right)
+        return None if left is None or right is None else left + right
+    return None
+
+
+def _module_patterns(tree):
+    """Return the pattern text of every module-level name that holds one.
+
+    Both spellings are used in this project: a compiled ``re.compile(...)`` constant, and a
+    bare pattern string shared between a validator and the parser that must agree with it.
+
+    Args:
+        tree (ast.Module): the parsed module
+
+    Returns:
+        dict: name to pattern text, the text None where the pattern cannot be read
+    """
+    patterns = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "compile"
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == "re"
+        ):
+            text = _pattern_text(value.args[0]) if value.args else None
+        else:
+            text = _pattern_text(value)
+            if text is None:
+                continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                patterns[target.id] = text
+    return patterns
+
+
+def _imported_patterns(tree, patterns_by_module):
+    """Return the patterns a module imports by name, resolved to their defining module.
+
+    Resolved rather than guessed from the name alone: two modules may spell a constant the
+    same way, and a guard that answered from a global pool would eventually answer about the
+    wrong pattern.
+
+    Args:
+        tree (ast.Module): the parsed module
+        patterns_by_module (dict): dotted module name to its own ``_module_patterns``
+
+    Returns:
+        dict: local name to pattern text
+    """
+    resolved = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.module is None:
+            continue
+        source = patterns_by_module.get(node.module, {})
+        for alias in node.names:
+            if alias.name in source:
+                resolved[alias.asname or alias.name] = source[alias.name]
+    return resolved
+
+
+def _resolve_pattern(node, patterns):
+    """Return the pattern text an argument names, or None where it cannot be read.
+
+    A name is looked up rather than given up on, because the shared-constant spelling -
+    ``re.match(CONTROL_NAME_PATTERN, name)`` - is the idiom this project actually uses for
+    the patterns that decide filenames.
+
+    Args:
+        node (ast.AST): the expression the pattern was given as
+        patterns (dict): known pattern names, local and imported
+
+    Returns:
+        str or None: the pattern text, or None where it is not readable
+    """
+    if isinstance(node, ast.Name):
+        return patterns.get(node.id)
+    return _pattern_text(node)
+
+
+def _anchored_match_calls(source, imported=None):
+    """Return anchored patterns checked with ``.match()``, and the calls this cannot read.
 
     ``$`` matches before a trailing newline, so ``re.match(r"^x$", "x\\n")`` succeeds. An
     anchored pattern read with ``match()`` therefore is not the whole-string test it looks
     like, which matters most where the string becomes a filename or reaches a query.
 
-    Both spellings count, because a sweep that only looked for the first missed three sites:
-    a named compiled constant (``SOME_RE.match(...)``) and an inline literal
-    (``re.match(r"...", ...)``).
+    Parsed rather than grepped, and that is not a tidying-up. The regex this replaced read
+    the pattern literal as ``r?["']``, so every ``rf"..."`` was invisible to it - and it
+    was invisible in exactly the way the two hand sweeps before it were.
 
     Args:
         source (str): the module's source text
+        imported (dict or None): pattern text for names this module imports, from
+            :func:`_imported_patterns`
 
     Returns:
-        list: (line, snippet) for each offender
+        tuple: ``(offenders, unreadable)``, each a list of ``(line, snippet)``. A call whose
+        pattern cannot be read is reported rather than skipped silently: the one site this
+        guard could not read turned out to be a real instance of the bug.
     """
-    found = []
-    compiled = {}
-    for match in re.finditer(r"^(\w+)\s*=\s*re\.compile\(\s*(r?[\"'].*?[\"'])\s*\)", source, re.M):
-        compiled[match.group(1)] = match.group(2)
-    for match in re.finditer(r"\b(\w+)\.match\(", source):
-        pattern = compiled.get(match.group(1))
-        if pattern and ("$" in pattern or "^" in pattern):
-            found.append((source[: match.start()].count("\n") + 1, f"{match.group(1)}.match()"))
-    for match in re.finditer(r"re\.match\(\s*(r?[\"'][^\"']*[\"'])", source):
-        if "$" in match.group(1) or "^" in match.group(1):
-            found.append((source[: match.start()].count("\n") + 1, f"re.match({match.group(1)})"))
-    return found
+    tree = ast.parse(source)
+    patterns = dict(imported or {})
+    patterns.update(_module_patterns(tree))
+    offenders, unreadable = [], []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "match"):
+            continue
+        owner = node.func.value
+        if isinstance(owner, ast.Name) and owner.id == "re":
+            text = _resolve_pattern(node.args[0], patterns) if node.args else None
+            snippet = "re.match()"
+        elif isinstance(owner, ast.Name) and owner.id in patterns:
+            text = patterns[owner.id]
+            snippet = f"{owner.id}.match()"
+        elif (
+            isinstance(owner, ast.Call)
+            and isinstance(owner.func, ast.Attribute)
+            and owner.func.attr == "compile"
+            and isinstance(owner.func.value, ast.Name)
+            and owner.func.value.id == "re"
+        ):
+            text = _resolve_pattern(owner.args[0], patterns) if owner.args else None
+            snippet = "re.compile(...).match()"
+        elif isinstance(owner, ast.Name) and owner.id.isupper():
+            # A shouted name this module neither defines nor imports from one of ours.
+            # Not readable from here, and not to be passed over on that account.
+            text, snippet = None, f"{owner.id}.match()"
+        else:
+            # Somebody else's match(): a difflib matcher, a parser's own method. Not a
+            # regex question.
+            continue
+        if text is None:
+            unreadable.append((node.lineno, snippet))
+        elif "^" in text or "$" in text:
+            offenders.append((node.lineno, snippet))
+    return offenders, unreadable
 
 
 def test_no_anchored_pattern_is_read_with_match():
@@ -1511,10 +1642,10 @@ def test_no_anchored_pattern_is_read_with_match():
     canonical credential slot, and ``"1h);DROP"`` reached InfluxDB through the ``group_by``
     validator - that last one on main, for months.
 
-    This guard exists because sweeping for it by hand did not work twice. The first sweep
-    matched only ``NAME_RE.match(...)`` and missed every inline ``re.match(r"...", ...)``,
-    which is where two more were hiding. A machine reading both spellings does not have that
-    blind spot.
+    This guard exists because sweeping for it by hand did not work twice, and the first
+    machine version of it had the same shape of blind spot: it read the pattern literal with
+    a regex of its own, which could not see ``rf"^...$"``. Parsing the module is what closed
+    that, and it immediately found two more sites.
 
     ``fullmatch`` is the fix in every case, and the anchors can go with it.
 
@@ -1524,12 +1655,26 @@ def test_no_anchored_pattern_is_read_with_match():
     line parsing rather than a latent hole. Scoping this way also keeps the guard from
     reporting its own examples, which is why the subprocess guard is scoped the same way.
     """
-    offenders = []
     product = [path for path in _every_python_file() if path.relative_to(REPO_ROOT).parts[0] in PRODUCT_CODE_ROOTS]
-    for path in product:
-        for line, snippet in _anchored_match_calls(path.read_text(encoding="utf-8")):
-            offenders.append(f"{path.relative_to(REPO_ROOT)}:{line} {snippet}")
+    trees = {path: ast.parse(path.read_text(encoding="utf-8")) for path in product}
+    patterns_by_module = {
+        ".".join(path.relative_to(REPO_ROOT).with_suffix("").parts): _module_patterns(tree)
+        for path, tree in trees.items()
+    }
+    offenders, unreadable = [], []
+    for path, tree in trees.items():
+        imported = _imported_patterns(tree, patterns_by_module)
+        found, skipped = _anchored_match_calls(path.read_text(encoding="utf-8"), imported)
+        offenders += [f"{path.relative_to(REPO_ROOT)}:{line} {snippet}" for line, snippet in found]
+        unreadable += [f"{path.relative_to(REPO_ROOT)}:{line} {snippet}" for line, snippet in skipped]
     assert not offenders, "anchored patterns read with match() instead of fullmatch(): " + "; ".join(offenders)
+    # Reported as a failure rather than logged and passed over. A guard that meets a case it
+    # cannot read and says nothing is indistinguishable from one that found nothing, and the
+    # single site this could not read was a real instance of the bug.
+    assert not unreadable, (
+        "match() calls whose pattern this guard cannot read - use fullmatch(), or define the "
+        "pattern where it can be seen: " + "; ".join(unreadable)
+    )
 
 
 @pytest.mark.parametrize(
@@ -1539,12 +1684,25 @@ def test_no_anchored_pattern_is_read_with_match():
         'X_RE = re.compile(r"^\\d+")\nX_RE.match(value)\n',
         're.match(r"^[a-z]+$", value)\n',
         "re.match(r'^[a-z]+$', value)\n",
+        're.match(rf"^{re.escape(field)}$", value)\n',
+        'PATTERN = r"^[a-z]+$"\nre.match(PATTERN, value)\n',
+        'PATTERN = r"^[a-z]+$"\nre.compile(PATTERN).match(value)\n',
     ],
 )
-def test_the_anchored_match_guard_sees_both_spellings(source):
-    """The named constant and the inline literal. Missing the second is what let three sites
-    survive a sweep that reported itself complete."""
-    assert _anchored_match_calls(source), f"not detected: {source!r}"
+def test_the_anchored_match_guard_sees_every_spelling(source):
+    """Five ways to write it, and every one of them has been missed by something. The hand
+    sweeps missed the inline literal; the regex version of this guard could not see an
+    f-string prefix or a pattern held in a named constant, and two real sites were sitting
+    behind exactly those."""
+    assert _anchored_match_calls(source)[0], f"not detected: {source!r}"
+
+
+def test_the_anchored_match_guard_reports_what_it_cannot_read():
+    """A guard that meets a case it does not understand and says nothing is indistinguishable
+    from one that found nothing. The single site this could not read - a pattern imported
+    from another module - turned out to be a real instance of the bug, and it surfaced only
+    because the skip was reported rather than swallowed."""
+    assert _anchored_match_calls("IMPORTED_RE.match(value)\n") == ([], [(1, "IMPORTED_RE.match()")])
 
 
 @pytest.mark.parametrize(
@@ -1560,4 +1718,4 @@ def test_the_anchored_match_guard_sees_both_spellings(source):
 def test_the_anchored_match_guard_leaves_the_rest_alone(source):
     """fullmatch is the fix, an unanchored match is how a tokeniser works, and search is a
     different question entirely. A guard firing on those would be switched off."""
-    assert not _anchored_match_calls(source), f"false positive: {source!r}"
+    assert _anchored_match_calls(source) == ([], []), f"false positive: {source!r}"

@@ -1636,3 +1636,27 @@ class TestSpawnFailuresAlsoArriveAsCredentialCliError:
         with patch("toinflux.credential_cli.run_command", side_effect=ConfigError("not found on PATH")):
             with pytest.raises(CredentialCliError, match="influx-token"):
                 _decrypt_credential("influx-token", credstore_dir=str(credstore))
+
+
+class TestWhichFieldsMayBeCreated:
+    """Creating a field on request would destroy the refusal that catches a typo, so the
+    allow-list is the only thing standing between `--set-field hue.hsot2 <address>` and a
+    key nothing reads."""
+
+    @pytest.mark.parametrize(
+        "field,creatable",
+        [
+            pytest.param("host2", True, id="a-second-bridge"),
+            pytest.param("user10", True, id="a-tenth-one"),
+            pytest.param("host1", False, id="slot-1-is-not-a-slot-to-add"),
+            pytest.param("hsot2", False, id="a-typo"),
+            pytest.param("host2\n", False, id="a-trailing-newline"),
+        ],
+    )
+    def test_only_a_real_bridge_slot_qualifies(self, field, creatable):
+        """The last case is the anchored-match trap: `$` matches before a trailing newline,
+        so "host2\\n" was a creatable field until this read the pattern with fullmatch."""
+        assert credential_cli._is_creatable_field("hue", field) is creatable
+
+    def test_no_other_section_has_creatable_fields(self):
+        assert credential_cli._is_creatable_field("influx", "host2") is False

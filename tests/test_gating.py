@@ -288,6 +288,17 @@ class TestTheStartupAssertion:
             guard.assert_safe_state()
         guard.close()
 
+    def test_a_device_name_cannot_write_its_own_log_line(self, caplog):
+        """Device names come from a control document an MCP client can write, and nothing
+        constrains one to a single line. Joined raw, a name carrying a newline writes its
+        own entry in the journal, and the log stops being evidence."""
+        command, _ = _recorder()
+        guard = DeviceGuard("conservatory", "unenergised", ["far\nWARNING  heating disabled"], command)
+        with caplog.at_level(logging.INFO):
+            guard.assert_safe_state()
+        guard.close()
+        assert "\n" not in caplog.records[-1].getMessage()
+
     def test_an_unknown_safe_state_is_refused_when_the_guard_is_built(self):
         """Rather than at exit, which is the one path that can do nothing about it."""
         command, _ = _recorder()
