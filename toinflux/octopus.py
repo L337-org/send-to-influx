@@ -17,8 +17,8 @@ class Octopus(DataHandler):
     """Child class of DataHandler to get data from Octopus Energy.
 
     Attributes:
-        MINIMUM_INTERVAL (int): 1800 - read, but unable to cause a device read while
-            MCP_LIVE_STATE is False, and dominated by DEFAULT_MAX_AGE in the fetch trigger.
+        MINIMUM_INTERVAL (int): 1800 - read on every control input, but unable to cause a
+            device read while MCP_LIVE_STATE is False.
         DEFAULT_MAX_AGE (int): 172800 - the data is around a day behind by nature, so a
             tighter bound would put a healthy feed permanently in the fail-safe.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
@@ -28,13 +28,17 @@ class Octopus(DataHandler):
             consumption fields are per-interval rather than meter totals.
     """
 
-    # Read on every control input, but it can never cause a device read: MCP_LIVE_STATE is
+    # Read on every control input, and it can never cause a device read: MCP_LIVE_STATE is
     # False because the data is around a day behind, so nothing goes live to this source.
-    # It also happens not to change the fetch trigger, which is the larger of this and
-    # DEFAULT_MAX_AGE - and that is 172800 here, so this is always dominated.
     #
     # Declared anyway rather than left to the interval fallback, so the number is a decision
     # rather than an accident if a live read is ever added.
+    #
+    # Deliberately says nothing about how it compares with DEFAULT_MAX_AGE. Two attempts at
+    # that were wrong - "never consulted", then "always dominated" - because the trigger is
+    # max(max_age, minimum) and an input may declare its own max_age, so which one decides
+    # depends on the control. The arithmetic is in read_input; repeating it here only
+    # created something to get wrong.
     MINIMUM_INTERVAL = 1800
     # Consumption data is around a day behind by nature, so any bound near the collection
     # cadence would put a healthy feed permanently in the fail-safe. Forty-eight hours is

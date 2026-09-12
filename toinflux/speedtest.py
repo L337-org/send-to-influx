@@ -31,8 +31,8 @@ class Speedtest(DataHandler):
     """Child class of DataHandler to run a speed test and send the results to InfluxDB.
 
     Attributes:
-        MINIMUM_INTERVAL (int): 3600 - read, but unable to cause a device read while
-            MCP_LIVE_STATE is False; high on purpose for if that ever changes.
+        MINIMUM_INTERVAL (int): 3600 - read on every control input, but unable to cause a
+            device read while MCP_LIVE_STATE is False; high on purpose for if that changes.
         DEFAULT_MAX_AGE (int): 86400 - a run is every six hours and throughput does not
             change minute to minute, so a day-old figure still describes the line.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
@@ -45,7 +45,8 @@ class Speedtest(DataHandler):
     """
 
     # Read on every control input, but unable to cause a device read while MCP_LIVE_STATE
-    # is False, and dominated in the fetch trigger by DEFAULT_MAX_AGE at 86400.
+    # is False. How it compares with DEFAULT_MAX_AGE is left to read_input, which is where
+    # the trigger is computed - see the note on Octopus's for why saying it twice went wrong.
     #
     # Deliberately high rather than absent even so, because a run saturates the connection
     # for the best part of a minute: if a live read is ever added, the default must not be
