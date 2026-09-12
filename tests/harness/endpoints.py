@@ -253,10 +253,10 @@ class StubEndpoint:
                 reuse, generated when None and ``tls`` is set
         """
         self.requests = []
-        #: When a connection was accepted and dropped rather than answered, as monotonic
-        #: readings. Kept apart from `requests` because those carry what was asked and
-        #: these carry only that somebody asked: a dropped connection is read before any
-        #: request line is.
+        #: When a request arrived and was dropped rather than answered, as monotonic
+        #: readings. Kept apart from `requests`, which is the record of what the endpoint
+        #: *answered*: a dropped request never reaches the point where a stub decides what
+        #: to reply, so putting it there would mean inventing a reply that was never sent.
         self.attempts = []
         self.unreachable = False
         self.hang_seconds = 0.0
