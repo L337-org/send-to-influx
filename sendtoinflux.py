@@ -871,7 +871,11 @@ def main() -> None:
 
     _configure_logging_or_exit(settings, args)
 
-    if args.control:
+    if args.control is not None:
+        # `is not None` rather than truthiness: `--control ""` is a name somebody meant to
+        # pass, and treating it as absent would start the collector instead of saying the
+        # name is unusable. An empty name fails in the store, which is where it should.
+        #
         # Before the collector's own setup, and it never returns to it: a control process
         # collects nothing, serves no MCP, and starting a worker here would put two things
         # in one process that the supervisor expects to kill independently.

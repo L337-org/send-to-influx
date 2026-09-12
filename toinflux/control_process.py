@@ -55,7 +55,10 @@ def gather(document, settings, session, settings_file=None, now=None):
         now (float or None): the clock, for tests
 
     Returns:
-        dict: name -> value, every value a finite number
+        dict: name -> value. The values are whatever the readings and parameters hold: a
+        reading is already a number by the time it arrives, and whether it is *finite* is
+        checked by the controller before the PID sees it, because that is where a nan does
+        its damage
 
     Raises:
         RuleEvaluationError: where a reading is too old to act on. This cycle has failed,

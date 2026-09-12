@@ -2105,3 +2105,21 @@ class TestTheControlSubsystemOptIn:
         # Registered, because a signal exits through sys.exit and the daemon thread simply
         # stops - so the last word on leaving devices safe has to run either way.
         register.assert_called_once_with(supervisor.stop_all)
+
+
+class TestAnEmptyControlName:
+    def test_it_is_a_control_run_rather_than_a_collector_run(self):
+        """`--control ""` is a name somebody meant to pass. Treating it as absent would
+        start collecting instead of saying the name is unusable."""
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.register_thread_dump_handler"),
+            patch("sendtoinflux.toinflux.load_settings", return_value={"sources": []}),
+            patch("sendtoinflux._configure_logging_or_exit"),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux.py", "--control", ""]),
+            patch("sendtoinflux.run_control", side_effect=ConfigError("invalid control name ''")) as run,
+        ):
+            with pytest.raises(SystemExit) as exited:
+                sendtoinflux.main()
+        assert exited.value.code == 1
+        run.assert_called_once()
