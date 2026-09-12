@@ -51,11 +51,23 @@ def _process_table():
     # It is a child of whoever takes the census, and it is running while it lists the
     # table, so counting it makes every self-census one process too many - a measurement
     # that is wrong by exactly one is worse than one that is obviously wrong.
+    child = None
     try:
-        child = subprocess.Popen(["ps", "-Ao", "pid=,ppid="], stdout=subprocess.PIPE, text=True)
-        output, _ = child.communicate(timeout=20)
+        child = subprocess.Popen(["ps", "-Ao", "pid=,ppid="], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        output, errors = child.communicate(timeout=20)
     except (OSError, subprocess.SubprocessError) as exc:
+        # A timed-out communicate() leaves the child running, and an unreaped `ps` would
+        # then appear in the very count it was spawned to take.
+        if child is not None:
+            child.kill()
+            child.communicate()
         raise AssertionError(f"the harness could not read the process table: {exc}") from exc
+    # Raised rather than skipped, unlike the counts below. A `ps` that failed yields an
+    # empty table, an empty table yields no descendants, and no descendants reads exactly
+    # like a run that leaked nothing - the census would report the answer it was written to
+    # detect the absence of.
+    if child.returncode != 0:
+        raise AssertionError(f"ps exited {child.returncode} while listing the process table: {errors.strip()!r}")
     table = {}
     for line in output.splitlines():
         parts = line.split()

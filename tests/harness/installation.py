@@ -13,6 +13,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import copy
 import os
 
 import yaml
@@ -57,7 +58,11 @@ def conservatory(**overrides):
     Returns:
         dict: a control document
     """
-    document = {key: (value.copy() if isinstance(value, dict) else value) for key, value in CONSERVATORY.items()}
+    # Deep, not shallow: the stage ladder and the inputs are nested, so a shallow copy
+    # leaves every caller sharing one list of stages with the constant and with each other.
+    # A test that changed a stage would change it for every test that ran afterwards, and
+    # the failure would land somewhere else entirely.
+    document = copy.deepcopy(CONSERVATORY)
     document.update(overrides)
     return document
 

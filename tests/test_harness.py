@@ -193,6 +193,17 @@ class TestTheInstallation:
         assert control_dir() == os.path.join(installation.state_dir, "controls")
         assert load_control("conservatory")["pid"]["input"] == "inside"
 
+    def test_each_control_it_builds_is_its_own_document(self):
+        """Deep-copied. The stage ladder is nested, so a shallow copy would leave every
+        caller sharing one list with the constant: a test that changed a stage would change
+        it for every test that ran afterwards, and the failure would land somewhere else."""
+        first = conservatory()
+        first["output"]["stages"][0]["set"]["far"] = True
+        first["inputs"]["inside"]["source"] = "somewhere-else"
+        second = conservatory()
+        assert second["output"]["stages"][0]["set"]["far"] is False
+        assert second["inputs"]["inside"]["source"] == "hue"
+
     def test_the_document_it_ships_is_structurally_valid(self):
         """The harness's own example is the one every scenario starts from, so an invalid
         one would report the control subsystem's complaint as the scenario's result."""
@@ -240,6 +251,64 @@ class TestTheCensus:
             for child in children:
                 child.kill()
                 child.wait()
+
+    def test_a_failed_ps_raises_rather_than_reporting_an_empty_machine(self, monkeypatch):
+        """The one place in the census that raises rather than skipping. A `ps` that failed
+        yields an empty table, an empty table yields no descendants, and no descendants
+        reads exactly like a run that leaked nothing - the census would report the answer it
+        exists to detect the absence of."""
+
+        class _Failed:
+            pid = -1
+            returncode = 1
+
+            def communicate(self, timeout=None):
+                """Answer as a ps that wrote nothing and failed.
+
+                Args:
+                    timeout (float or None): ignored
+
+                Returns:
+                    tuple: empty stdout and an error on stderr
+                """
+                return "", "ps: unknown option\n"
+
+        monkeypatch.setattr(census.subprocess, "Popen", lambda *a, **k: _Failed())
+        with pytest.raises(AssertionError, match="ps exited 1"):
+            census.take(os.getpid())
+
+    def test_a_ps_that_will_not_finish_is_killed_rather_than_left_running(self, monkeypatch):
+        """An unreaped `ps` would appear in the very count it was spawned to take."""
+        killed = []
+
+        class _Hanging:
+            pid = -1
+            returncode = None
+
+            def communicate(self, timeout=None):
+                """Time out the first time, and answer once killed.
+
+                Args:
+                    timeout (float or None): present on the first call only
+
+                Returns:
+                    tuple: empty output, after the kill
+
+                Raises:
+                    subprocess.TimeoutExpired: on the call that carries a timeout
+                """
+                if timeout is not None:
+                    raise subprocess.TimeoutExpired("ps", timeout)
+                return "", ""
+
+            def kill(self):
+                """Record that the child was killed."""
+                killed.append(True)
+
+        monkeypatch.setattr(census.subprocess, "Popen", lambda *a, **k: _Hanging())
+        with pytest.raises(AssertionError, match="could not read the process table"):
+            census.take(os.getpid())
+        assert killed == [True]
 
     def test_it_says_which_counts_it_could_not_take(self):
         """A count that is not available reads exactly like a count of zero, and only one
