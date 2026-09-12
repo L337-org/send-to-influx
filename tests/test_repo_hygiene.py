@@ -1470,3 +1470,94 @@ def test_the_example_settings_quote_the_real_per_source_defaults():
                 wrong.append(f"{source}.{key}: example says {found.group(1)}/{found.group(2)}, code says {expected}")
     assert not missing, "sources documented in example_settings.yaml without these keys: " + ", ".join(missing)
     assert not wrong, "example_settings.yaml disagrees with the handler classes: " + "; ".join(wrong)
+
+
+def _anchored_match_calls(source):
+    """Return every line number where an anchored pattern is checked with ``.match()``.
+
+    ``$`` matches before a trailing newline, so ``re.match(r"^x$", "x\\n")`` succeeds. An
+    anchored pattern read with ``match()`` therefore is not the whole-string test it looks
+    like, which matters most where the string becomes a filename or reaches a query.
+
+    Both spellings count, because a sweep that only looked for the first missed three sites:
+    a named compiled constant (``SOME_RE.match(...)``) and an inline literal
+    (``re.match(r"...", ...)``).
+
+    Args:
+        source (str): the module's source text
+
+    Returns:
+        list: (line, snippet) for each offender
+    """
+    found = []
+    compiled = {}
+    for match in re.finditer(r"^(\w+)\s*=\s*re\.compile\(\s*(r?[\"'].*?[\"'])\s*\)", source, re.M):
+        compiled[match.group(1)] = match.group(2)
+    for match in re.finditer(r"\b(\w+)\.match\(", source):
+        pattern = compiled.get(match.group(1))
+        if pattern and ("$" in pattern or "^" in pattern):
+            found.append((source[: match.start()].count("\n") + 1, f"{match.group(1)}.match()"))
+    for match in re.finditer(r"re\.match\(\s*(r?[\"'][^\"']*[\"'])", source):
+        if "$" in match.group(1) or "^" in match.group(1):
+            found.append((source[: match.start()].count("\n") + 1, f"re.match({match.group(1)})"))
+    return found
+
+
+def test_no_anchored_pattern_is_read_with_match():
+    """An anchored pattern checked with ``match()`` is not a whole-string test.
+
+    ``$`` matches before a trailing newline, so ``"conservatory\\n"`` passed the control-name
+    allow-list, ``"host2\\n"`` was read as naming a second Hue bridge, ``"2\\n"`` as a
+    canonical credential slot, and ``"1h);DROP"`` reached InfluxDB through the ``group_by``
+    validator - that last one on main, for months.
+
+    This guard exists because sweeping for it by hand did not work twice. The first sweep
+    matched only ``NAME_RE.match(...)`` and missed every inline ``re.match(r"...", ...)``,
+    which is where two more were hiding. A machine reading both spellings does not have that
+    blind spot.
+
+    ``fullmatch`` is the fix in every case, and the anchors can go with it.
+
+    Product code only, for two reasons. The risk is product-side - a name that becomes a
+    filename, a value that reaches a query - and the tests that do this parse lines from
+    ``splitlines()``, which has already removed the newline, so ``match`` there is ordinary
+    line parsing rather than a latent hole. Scoping this way also keeps the guard from
+    reporting its own examples, which is why the subprocess guard is scoped the same way.
+    """
+    offenders = []
+    product = [path for path in _every_python_file() if path.relative_to(REPO_ROOT).parts[0] in PRODUCT_CODE_ROOTS]
+    for path in product:
+        for line, snippet in _anchored_match_calls(path.read_text(encoding="utf-8")):
+            offenders.append(f"{path.relative_to(REPO_ROOT)}:{line} {snippet}")
+    assert not offenders, "anchored patterns read with match() instead of fullmatch(): " + "; ".join(offenders)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'X_RE = re.compile(r"^\\d+$")\nX_RE.match(value)\n',
+        'X_RE = re.compile(r"^\\d+")\nX_RE.match(value)\n',
+        're.match(r"^[a-z]+$", value)\n',
+        "re.match(r'^[a-z]+$', value)\n",
+    ],
+)
+def test_the_anchored_match_guard_sees_both_spellings(source):
+    """The named constant and the inline literal. Missing the second is what let three sites
+    survive a sweep that reported itself complete."""
+    assert _anchored_match_calls(source), f"not detected: {source!r}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'X_RE = re.compile(r"^\\d+$")\nX_RE.fullmatch(value)\n',
+        're.fullmatch(r"^[a-z]+$", value)\n',
+        'X_RE = re.compile(r"\\d+")\nX_RE.match(value)\n',
+        're.match(r"[a-z]+", value)\n',
+        "re.search(r'^[a-z]+$', value)\n",
+    ],
+)
+def test_the_anchored_match_guard_leaves_the_rest_alone(source):
+    """fullmatch is the fix, an unanchored match is how a tokeniser works, and search is a
+    different question entirely. A guard firing on those would be switched off."""
+    assert not _anchored_match_calls(source), f"false positive: {source!r}"

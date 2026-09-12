@@ -451,7 +451,9 @@ def _check_active_period(document, errors) -> None:
         return
     for field in ("from", "to"):
         value = period.get(field)
-        if not isinstance(value, str) or not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", value):
+        # fullmatch: `$` matches before a trailing newline, so "23:35\n" passed this and
+        # became an active-period boundary carrying a line break.
+        if not isinstance(value, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
             errors.append(f"active_period.{field}: is required and must be a 24-hour HH:MM time, got {value!r}")
     end_state = period.get("end_state", SAFE_STATE_UNENERGISED)
     if end_state not in BUILT_IN_SAFE_STATES:

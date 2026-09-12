@@ -183,7 +183,9 @@ def _validate_storage_name(name):
     Raises:
         CredentialCliError: if name isn't letters/digits/underscore/hyphen
     """
-    if not re.match(r"^[A-Za-z0-9_-]+$", name):
+    # fullmatch, not match: `$` matches before a trailing newline, and this name becomes
+    # part of a credential's filename.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise CredentialCliError(
             f"'{name}' is not a valid database/bucket name - use only letters, digits, underscores, and hyphens."
         )
