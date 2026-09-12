@@ -170,7 +170,8 @@ def cap_ladder(ladder, max_level):
         tuple: Stage, never empty
 
     Raises:
-        ConfigError: where the cap is not a finite number
+        RuleEvaluationError: where the cap is not a finite number, which is a cycle that
+            cannot produce a plan rather than a document that must be fixed
     """
     if max_level is None:
         return ladder
@@ -179,7 +180,13 @@ def cap_ladder(ladder, max_level):
     # rung, so it would silently collapse the ladder to its lowest - fail-safe by accident,
     # and indistinguishable from a cap that genuinely forbids everything.
     if isinstance(max_level, bool) or not isinstance(max_level, (int, float)) or not math.isfinite(max_level):
-        raise ConfigError(f"output.max_level evaluated to {max_level!r}, which is not a level to cap at")
+        # RuleEvaluationError, not ConfigError: this is a cap that came out of evaluating a
+        # rule, so it is this cycle that failed rather than the document. The same rule may
+        # well produce a usable number next cycle, and a control that stopped for ever over
+        # one evaluation would be the wrong answer - the distinction this work set for
+        # RuleSyntaxError against RuleEvaluationError, applied to the value rather than the
+        # expression.
+        raise RuleEvaluationError(f"output.max_level evaluated to {max_level!r}, which is not a level to cap at")
     allowed = tuple(rung for rung in ladder if rung.level <= max_level)
     return allowed or ladder[:1]
 

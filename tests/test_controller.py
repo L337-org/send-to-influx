@@ -161,6 +161,36 @@ class TestABadCycleDoesNotPoisonTheLoop:
         assert math.isfinite(level), "the loop never recovered"
         assert level > 0, "a degree below target should still ask for heat"
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), 0, -900, "900", True])
+    def test_an_unusable_interval_is_refused_before_the_pid_sees_it(self, bad):
+        """dt reaches the PID too, so the check that everything is validated first has to
+        include it or the comment saying so is not true.
+
+        A nan poisons the PID exactly as a nan reading does - measured, and the next healthy
+        cycle still returns nan - while zero or a negative raises simple-pid's own
+        ValueError, a bare built-in crossing this module's boundary.
+        """
+        controller = Controller(_document())
+        with pytest.raises(RuleEvaluationError, match="interval since the last cycle"):
+            controller.step({"inside": 17.0, "target": 18.0}, dt=bad)
+
+    def test_the_loop_survives_an_unusable_interval(self):
+        """The property, again: refusing is only useful if the next good cycle works."""
+        controller = Controller(_document())
+        controller.step({"inside": 17.0, "target": 18.0}, dt=CYCLE)
+        with pytest.raises(RuleEvaluationError):
+            controller.step({"inside": 17.0, "target": 18.0}, dt=float("nan"))
+        plan = controller.step({"inside": 17.0, "target": 18.0}, dt=CYCLE)
+        level = sum(d.stage.level * d.seconds for d in plan) / sum(d.seconds for d in plan)
+        assert math.isfinite(level) and level > 0, "the loop never recovered"
+
+    def test_a_cap_that_cannot_be_evaluated_is_this_cycle_not_this_control(self):
+        """RuleEvaluationError rather than ConfigError, so the fail-safe covers the cycle
+        and the control is still there next time."""
+        controller = Controller(_document(output={"max_level": "1e400 - 1e400"}))
+        with pytest.raises(RuleEvaluationError, match="not a level to cap at"):
+            controller.step({"inside": 17.0, "target": 18.0}, dt=CYCLE)
+
     def test_the_setpoint_is_not_left_changed_by_a_refused_cycle(self):
         """Nothing is mutated before everything is checked, so a cycle that cannot run
         leaves the controller exactly as it was."""

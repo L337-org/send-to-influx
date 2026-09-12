@@ -243,8 +243,12 @@ class TestValuesThatCannotBeOrdered:
         """A cap comes from evaluating a rule, and the rule language really can produce
         these: `1e400` is inf and `1e400 - 1e400` is nan. A nan would have collapsed the
         ladder to its lowest rung - fail-safe by accident, and indistinguishable from a cap
-        that genuinely forbids everything."""
-        with pytest.raises(ConfigError, match="not a level to cap at"):
+        that genuinely forbids everything.
+
+        RuleEvaluationError rather than ConfigError: the cap came out of a rule, so it is
+        this cycle that failed and not the document. The same rule may produce a usable
+        number next cycle."""
+        with pytest.raises(RuleEvaluationError, match="not a level to cap at"):
             cap_ladder(build_ladder(CONSERVATORY), bad)
 
     def test_the_rule_language_can_actually_produce_one(self):

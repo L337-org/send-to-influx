@@ -74,7 +74,7 @@ class Controller:
         Args:
             bindings (dict): name -> value for every input and parameter the rules read
             dt (float or None): seconds since the previous cycle, for tests; None lets
-                simple-pid measure it from the clock
+                simple-pid measure it from the clock. Must be a positive finite number.
 
         Returns:
             tuple: Dwell, filling one cycle window
@@ -84,7 +84,16 @@ class Controller:
                 The controller is left untouched, so the next cycle with good data works.
             ConfigError: where the cycle window or the cap is unusable
         """
-        # Everything is evaluated and checked before the PID is touched at all, because one
+        # dt first, because it reaches the PID too. A nan poisons it exactly as a nan reading
+        # does - measured, and the next healthy cycle still returns nan - while zero or a
+        # negative raises simple-pid's own ValueError, a bare built-in crossing this module's
+        # boundary. In production dt is measured from the clock, so an unusable one means the
+        # clock moved oddly: this cycle, not this control, is what has failed.
+        if dt is not None:
+            _finite(dt, "the interval since the last cycle")
+            if dt <= 0:
+                raise RuleEvaluationError(f"the interval since the last cycle came out as {dt!r} seconds")
+        # Everything else is evaluated and checked before the PID is touched at all, because one
         # non-finite reading poisons it permanently: simple-pid folds the value into the
         # integral, the integral is nan from then on, and every later cycle returns nan
         # however good the data becomes. A control that fails safe for ever after one bad
