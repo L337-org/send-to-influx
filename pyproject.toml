@@ -48,9 +48,14 @@ testpaths = ["tests"]
 # default run - they need a real external dependency (an MQTT broker) and are run
 # explicitly with `pytest -m integration`. They also skip cleanly when the dependency is
 # absent, so an explicit run without a broker is a skip, not a failure.
-addopts = "--capture=sys -m 'not integration'"
+# Chaos runs (tests/chaos/, marked `chaos`) are excluded for a different reason from the
+# integration tests: they need nothing external, but a run long enough to find anything is
+# minutes rather than seconds, so they are scheduled rather than run per pull request. Any
+# seed that has *failed* is not excluded - those run with the ordinary suite from then on.
+addopts = "--capture=sys -m 'not integration and not chaos'"
 markers = [
     "integration: exercises a real external dependency (e.g. a live MQTT broker); excluded from the default run",
+    "chaos: a long seeded run against randomly injected faults; scheduled rather than run per pull request",
 ]
 
 [tool.ruff.lint.per-file-ignores]
