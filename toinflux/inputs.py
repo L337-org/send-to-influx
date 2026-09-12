@@ -91,9 +91,10 @@ def resolve_minimum_interval(source, settings):
     source_cfg = (settings or {}).get(source)
     if not isinstance(source_cfg, dict):
         raise ConfigError(
-            f"cannot resolve the minimum interval for source {source!r}: it has no settings section. "
-            f"Add a {source!r} section with an 'interval' in it, or set "
-            f"{f'{source}.{MINIMUM_INTERVAL_KEY}'!r} there to give the minimum directly"
+            f"cannot resolve the minimum interval for source {source!r}: it has no settings "
+            f"section. Add one, with at least an 'interval'; "
+            f"{f'{source}.{MINIMUM_INTERVAL_KEY}'!r} is optional and overrides the built-in "
+            f"minimum for that source"
         )
     if MINIMUM_INTERVAL_KEY in source_cfg:
         return _as_seconds(source_cfg[MINIMUM_INTERVAL_KEY], f"{source}.{MINIMUM_INTERVAL_KEY}")
@@ -493,10 +494,8 @@ def fetch_lock_path(source, settings_file=None):
 
     Args:
         source (str): the source name, in any case
-        settings_file (str or None): the settings path the caller was started with. Used for
-            the state directory *and* passed to the handler, so it reads the same document
-            the ``settings`` argument came from. Omitting it where the caller is not on the
-            default settings.yaml leaves the handler on a different one from the queries.
+        settings_file (str or None): the settings path the caller was started with, which
+            anchors the state directory when not running under systemd
 
     Returns:
         str: the lock file's path, which may not exist yet
@@ -539,10 +538,8 @@ def fetch_lock(  # noqa: DOC403 - a generator, but unannotated
     Args:
         source (str): the source whose lock to take
         budget (float): seconds to keep trying before giving up
-        settings_file (str or None): the settings path the caller was started with. Used for
-            the state directory *and* passed to the handler, so it reads the same document
-            the ``settings`` argument came from. Omitting it where the caller is not on the
-            default settings.yaml leaves the handler on a different one from the queries.
+        settings_file (str or None): the settings path the caller was started with, which
+            anchors the state directory when not running under systemd
         rng (random.Random or None): the randomness, injectable for tests
         sleep (callable or None): the sleep, injectable for tests
         monotonic (callable or None): the clock, injectable for tests
