@@ -18,6 +18,7 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import logging
+import math
 import os
 import re
 import stat
@@ -298,13 +299,18 @@ def _is_number(value):
     ``bool`` is excluded on purpose: it is a subclass of ``int`` in Python, so a stage
     written as ``level: true`` would otherwise validate and then sort as 1.
 
+    So are ``.nan`` and ``.inf``, which YAML represents and which are floats to
+    ``isinstance``. A nan level compares False against everything, so it neither sorts nor
+    brackets: a ladder containing one silently stops being ordered, and a demand can land
+    anywhere in it.
+
     Args:
         value (object): the parsed value
 
     Returns:
-        bool: True for an int or float that is not a bool
+        bool: True for a finite int or float that is not a bool
     """
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _check_mapping_of(document, key, errors, required_fields, optional_numbers=()):

@@ -10,3 +10,7 @@ mcp~=2.1.1
 # minor. build-deb.sh's compiled-wheel-matrix step fails the build if coverage
 # regresses, so a bump that breaks this is caught pre-merge, not on a target machine.
 rpds-py~=0.30.0
+# The PID itself. Pure Python (simple_pid-2.0.1-py3-none-any.whl), so unlike rpds-py above
+# it needs no compiled-wheel matrix: one wheel serves every supported minor and both
+# architectures the .deb is built for.
+simple-pid~=2.0.1
