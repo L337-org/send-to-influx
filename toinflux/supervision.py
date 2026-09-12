@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 
 from toinflux.control_process import command_devices
-from toinflux.controls import load_control
+from toinflux.controls import load_control, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import commands_for
 from toinflux.process import TimeoutExpired, spawn
@@ -90,6 +90,33 @@ class Child:
         return self.process is not None
 
 
+def _usable_control(name, settings_file):
+    """Read one control document and refuse it unless it is structurally sound.
+
+    Checked here rather than defended against at each use. A document that parses as YAML
+    can still be any shape at all - ``output`` a string, ``devices`` a list - and each of
+    those produces its own AttributeError or TypeError somewhere downstream, in a process
+    that is also running the collector. One check at the point of reading turns the whole
+    class into a ConfigError that names what is wrong, and the code after it can rely on the
+    shapes the store guarantees.
+
+    Args:
+        name (str): the control to read
+        settings_file (str or None): the settings path the process was started with
+
+    Returns:
+        dict: the validated document
+
+    Raises:
+        ConfigError: where it cannot be read or is not structurally valid
+    """
+    document = load_control(name, settings_file)
+    errors = validate_control(name, document)
+    if errors:
+        raise ConfigError(f"control {name!r} is not valid:\n  " + "\n  ".join(errors))
+    return document
+
+
 def stall_seconds(document):
     """Return how long a control may be silent before it is considered stalled.
 
@@ -107,7 +134,12 @@ def stall_seconds(document):
     Raises:
         ConfigError: where the control's cycle window is not a positive number of seconds
     """
-    cycle = (document.get("output") or {}).get("cycle_seconds", 900)
+    output = document.get("output")
+    if output is not None and not isinstance(output, dict):
+        # A validated document cannot reach here with this shape, but this is public and
+        # somebody will call it with a document that came from somewhere else.
+        raise ConfigError(f"output must be a mapping, got {type(output).__name__}")
+    cycle = (output or {}).get("cycle_seconds", 900)
     # Checked rather than converted. A bare float() on a stored document raises ValueError
     # or TypeError, and this runs while the supervisor is being built in the collector's own
     # main process - so one corrupt control would take the collector down with it rather
@@ -169,7 +201,7 @@ class Supervisor:
             # configuration fault, and finding that out per restart would turn it into a
             # respawn loop that logs the same message for ever.
             try:
-                document = load_control(name, settings_file)
+                document = _usable_control(name, settings_file)
                 self.children[name] = Child(name=name, stall_seconds=stall_seconds(document))
             except ConfigError as exc:
                 # That control's problem, not everybody's. Refusing to supervise anything
@@ -393,7 +425,10 @@ class Supervisor:
             name (str): the control whose devices to make safe
         """
         try:
-            document = load_control(name, self.settings_file)
+            # Re-read and re-checked rather than trusted from construction: the file can be
+            # rewritten by an MCP client while the supervisor is running, and this is the
+            # path that runs when something has *already* gone wrong.
+            document = _usable_control(name, self.settings_file)
             commands = commands_for(document.get("safe_state", "unenergised"), tuple(document.get("devices") or {}))
             if commands is None:
                 # leave_unchanged, which is an answer rather than an omission.

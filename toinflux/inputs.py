@@ -666,7 +666,14 @@ def input_max_age(spec, settings):
     # label reaches an error message. Required rather than fetched with .get, because an
     # input with no field is a declaration this cannot act on at all - and reporting the
     # staleness rule for input `None` would send the reader looking for the wrong fault.
-    return _as_seconds(spec.get("max_age", resolve_max_age(source, settings)), f"max_age for input {field!r}")
+    # Not `spec.get("max_age", resolve_max_age(...))`: a default expression is evaluated
+    # whether or not it is used, so an input that states its own max_age would still be
+    # refused when the *source's* default is unusable - and would pay for a class lookup it
+    # had no need of.
+    declared = spec.get("max_age")
+    if declared is None:
+        declared = resolve_max_age(source, settings)
+    return _as_seconds(declared, f"max_age for input {field!r}")
 
 
 def read_input(session, settings, spec, settings_file=None, now=None):

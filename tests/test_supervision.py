@@ -16,6 +16,7 @@ import time
 from collections import deque
 
 import pytest
+import yaml
 
 from tests.harness import census, faults, invariants
 from tests.harness.bridge import plug
@@ -443,3 +444,40 @@ class TestOneBadControlDocument:
             supervisor = Supervisor(["conservatory", "nosuchcontrol"], settings_file=state_directory.settings_file)
         assert list(supervisor.children) == ["conservatory"]
         assert "nosuchcontrol" in caplog.text and "skipped" in caplog.text
+
+
+class TestADocumentThatIsNotTheRightShape:
+    """A stored document parses as YAML and can still be any shape at all. Each wrong shape
+    produces its own AttributeError or TypeError somewhere downstream, in a process that is
+    also running the collector - so the check belongs where the document is read."""
+
+    @pytest.mark.parametrize(
+        "broken",
+        [
+            pytest.param({"output": "soon"}, id="output-is-a-string"),
+            pytest.param({"devices": ["far"]}, id="devices-is-a-list"),
+            pytest.param({"inputs": 7}, id="inputs-is-a-number"),
+        ],
+    )
+    def test_it_is_skipped_rather_than_crashing_the_supervisor(self, state_directory, caplog, broken):
+        _two_controls(state_directory)
+        document = dict(conservatory(), **broken)
+        path = os.path.join(state_directory.state_dir, "controls", "bent.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(document, handle)
+        with caplog.at_level(logging.ERROR):
+            supervisor = Supervisor(["conservatory", "bent"], settings_file=state_directory.settings_file)
+        assert list(supervisor.children) == ["conservatory"]
+        assert "bent" in caplog.text
+
+    def test_making_a_bent_control_safe_says_so_rather_than_raising(self, state_directory, caplog):
+        """The path that runs when something has already gone wrong, and the file can have
+        been rewritten since the supervisor read it."""
+        _two_controls(state_directory)
+        supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
+        path = os.path.join(state_directory.state_dir, "controls", "conservatory.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(dict(conservatory(), devices=["far"]), handle)
+        with caplog.at_level(logging.ERROR):
+            supervisor.make_safe("conservatory")
+        assert "Could not make control" in caplog.text
