@@ -402,6 +402,57 @@ def _pump(process, stdin_bytes, captures, timeout):
         selector.close()
 
 
+def spawn(argv, *, env_extra=None, pass_fds=(), stderr=None):
+    """Start a long-lived child and return it without waiting.
+
+    The other half of this module. :func:`run_command` is for a command that finishes and
+    whose output is the answer; this is for a process meant to outlive the call, which
+    something else then watches. Both go through the same resolution and the same
+    allow-listed environment, because those protections are about *starting* a process
+    rather than about what it is started for - and a second spawn site written by hand is
+    how one of them ends up missing.
+
+    **This is the one process call in the project with no timeout, deliberately.** A
+    mandatory deadline is meaningless for a child that is supposed to keep running, so the
+    guarantee it provides - that nothing runs unbounded and unwatched - moves to the caller:
+    a supervisor that reads this child's heartbeat and kills it when it stops beating. A
+    caller with no such watchdog must not use this.
+
+    ``pass_fds`` is how a heartbeat pipe reaches the child. Everything not named there is
+    closed in the child, which is what keeps a grandchild from holding the pipe open and
+    denying the parent its EOF.
+
+    Args:
+        argv (list): the command and its arguments; argv[0] is resolved against the child's
+            own PATH before the spawn
+        env_extra (dict or None): variables to add to the allow-listed environment
+        pass_fds (tuple): file descriptors to keep open in the child
+        stderr (int or None): what to do with the child's stderr, as subprocess takes it;
+            None leaves it attached to this process's own
+
+    Returns:
+        subprocess.Popen: the running child
+
+    Raises:
+        ConfigError: argv[0] could not be resolved, or the child could not be started
+    """
+    env = _child_environment(env_extra)
+    executable = _resolve_executable(argv[0], env.get("PATH"))
+    try:
+        return subprocess.Popen(
+            [executable, *argv[1:]],
+            env=env,
+            shell=False,
+            pass_fds=tuple(pass_fds),
+            stderr=stderr,
+            close_fds=True,
+        )
+    except OSError as exc:
+        # Permission denied, an unusable interpreter line, a directory where a binary was
+        # expected. None of these resolve by waiting, so they are configuration.
+        raise ConfigError(f"could not start {argv[0]!r}: {exc}") from exc
+
+
 def run_command(argv, *, timeout, stdin_bytes=None, env_extra=None, output_limit=MAX_CAPTURED_BYTES):
     """Run an external command and return what it produced.
 
