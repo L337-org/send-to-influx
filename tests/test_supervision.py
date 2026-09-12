@@ -12,6 +12,7 @@ __license__ = "MIT"
 import os
 import sys
 import time
+from collections import deque
 
 import pytest
 
@@ -135,10 +136,23 @@ def _wait_for(supervisor, kind, name=None, seconds=30):
     Raises:
         AssertionError: it never arrived
     """
+    # Events left over from a previous wait, kept on the supervisor so consecutive waits
+    # read one stream rather than each starting fresh. One poll can produce several events -
+    # a death and the restart that follows it land in the same pass whenever the backoff is
+    # shorter than the safe-state command takes - and a helper that returned on the first
+    # match and discarded the rest would leave the next wait looking for something that had
+    # already happened. That is exactly what failed in CI and passed here: locally the safe
+    # state is applied in under the 0.05s backoff, and under coverage on a CI runner a TLS
+    # handshake is not.
+    pending = getattr(supervisor, "_pending_events", None)
+    if pending is None:
+        pending = supervisor._pending_events = deque()
     deadline = time.monotonic() + seconds
     seen = []
     while time.monotonic() < deadline:
-        for event in supervisor.poll(timeout=0.2):
+        pending.extend(supervisor.poll(timeout=0.2))
+        while pending:
+            event = pending.popleft()
             seen.append(f"{event.kind}:{event.name}")
             if event.kind == kind and (name is None or event.name == name):
                 return event

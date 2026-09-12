@@ -31,7 +31,7 @@ from toinflux.controller import Controller
 from toinflux.controls import load_control, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import DeviceGuard, Gate, commands_for
-from toinflux.general import load_settings
+from toinflux.general import load_settings, render_values
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
 from toinflux.staging import build_ladder
@@ -103,6 +103,13 @@ def command_devices(document, commands, settings_file=None) -> None:
         spec = declared.get(name)
         if not isinstance(spec, dict):
             raise ConfigError(f"control device {name!r} is not declared in this control's devices section")
+        missing = [key for key in ("source", "device") if not spec.get(key)]
+        if missing:
+            # ConfigError rather than the KeyError a bare lookup gives: the supervisor calls
+            # this to make a dead control's devices safe and handles the project's own
+            # types, so a KeyError from one corrupt document would escape that handler and
+            # stop every other control being supervised.
+            raise ConfigError(f"control device {name!r} declares no {render_values(missing)}")
         targets.setdefault((spec["source"], spec.get("instance")), []).append((spec["device"], state))
     for (source, instance), devices in sorted(targets.items(), key=lambda item: str(item[0])):
         with source_handler(source, settings_file=settings_file, instance=instance) as handler:
@@ -168,9 +175,18 @@ class ControlProcess:
     def _apply(self, commands) -> None:
         """Command the devices, for the guard and the fail-safe alike.
 
+        None is an instruction rather than an omission: it is what ``commands_for`` returns
+        for ``leave_unchanged``, and it means "do not touch these devices". Handled here
+        because every path that can produce it comes through here - the closing edge passed
+        it straight to the commander before, so a control configured to be left alone
+        crashed at the exact moment its window closed.
+
         Args:
-            commands (dict): device name to the state it should take
+            commands (dict or None): device name to the state it should take, or None to
+                touch nothing at all
         """
+        if commands is None:
+            return
         command_devices(self.document, commands, self.settings_file)
 
     def _gather(self):
@@ -203,7 +219,9 @@ class ControlProcess:
                 window is a test rather than a wait
 
         Returns:
-            Decision: what the gate decided, so a caller can see the edges
+            Decision or None: what the gate decided, so a caller can see the edges - and
+            **None where the cycle failed and the control fell to its safe state**, which
+            is not an edge and not a decision the gate ever made
 
         Raises:
             ConfigError: where the control cannot run at all - no retry fixes one
@@ -265,7 +283,7 @@ class ControlProcess:
         logging.error("Control %r could not complete a cycle, going to its safe state: %r", self.name, reason)
         self.controller.hold()
         try:
-            self._apply(commands_for(self.guard.safe_state, tuple(self.document.get("devices") or {})) or {})
+            self._apply(commands_for(self.guard.safe_state, tuple(self.document.get("devices") or {})))
         except (SourceConnectionError, ConfigError) as exc:
             # The one place a broad-ish catch is right: the cycle has already failed, and a
             # device that cannot be reached to be made safe is exactly what the supervisor's

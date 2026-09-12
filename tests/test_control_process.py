@@ -185,11 +185,57 @@ class TestGathering:
         assert bindings["inside"] == 16.0
 
 
+class TestLeaveUnchanged:
+    """`leave_unchanged` is an instruction, not an omission - and every path that can
+    produce it has to say so, because the one that did not crashed the control at the exact
+    moment its window closed."""
+
+    @pytest.fixture
+    def left_alone(self, state_directory):
+        """Yield a control that is to be left alone at both ends.
+
+        Yields:
+            ControlProcess: the control, closed afterwards
+        """
+        document = conservatory(safe_state="leave_unchanged")
+        document["active_period"] = dict(document["active_period"], end_state="leave_unchanged")
+        state_directory.write_control(document)
+        process = ControlProcess("conservatory", settings_file=state_directory.settings_file)
+        try:
+            yield process
+        finally:
+            process.guard.close()
+            process.close()
+
+    def test_the_window_closing_touches_nothing(self, left_alone, bridge):
+        left_alone.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        bridge.clear()
+        decision = left_alone.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        assert decision.edge == "closed"
+        assert bridge.commanded() == []
+
+    def test_a_failed_cycle_touches_nothing(self, left_alone, bridge, influx):
+        left_alone.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        bridge.clear()
+        with faults.unreachable(influx):
+            assert left_alone.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+        assert bridge.commanded() == []
+
+
 class TestCommandingDevices:
     def test_a_source_with_no_write_path_is_refused(self, installation):
         document = conservatory()
         document["devices"] = {"far": {"source": "openmeteo", "device": "far"}}
         with pytest.raises(ConfigError, match="no write path"):
+            command_devices(document, {"far": True}, installation.settings_file)
+
+    def test_a_device_declaring_no_source_is_a_config_error_not_a_key_error(self, installation):
+        """The supervisor calls this to make a dead control's devices safe and handles the
+        project's own types, so a KeyError out of one corrupt document would escape that
+        handler and stop every other control being supervised."""
+        document = conservatory()
+        document["devices"] = {"far": {"device": "far"}}
+        with pytest.raises(ConfigError, match="declares no"):
             command_devices(document, {"far": True}, installation.settings_file)
 
     def test_a_device_the_document_does_not_declare_is_refused(self, installation):

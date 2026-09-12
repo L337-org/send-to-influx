@@ -55,7 +55,12 @@ class Child:
     Attributes:
         name (str): the control's name.
         process (subprocess.Popen): the running process.
-        beats (io.TextIOBase): the read end of its heartbeat pipe.
+        beats (int or None): the read end of its heartbeat pipe, as a raw descriptor. Raw
+            rather than a file object because a selector loop must never block in a read,
+            and because one owner closing one descriptor is a rule with no exceptions - a
+            buffered file closing it again from a destructor can close a descriptor that a
+            later pipe has been given.
+        pending (str): the part of a beat that has arrived without its newline yet.
         started_at (float): monotonic reading when it was started.
         last_beat (float): monotonic reading of its most recent heartbeat, or of its start.
         failures (int): consecutive failures, which sets the restart backoff.
@@ -66,7 +71,8 @@ class Child:
 
     name: str
     process: object = None
-    beats: object = None
+    beats: "int | None" = None
+    pending: str = ""
     started_at: float = 0.0
     last_beat: float = 0.0
     failures: int = 0
@@ -106,7 +112,8 @@ class Event:
     """Something the supervisor saw, for a caller that wants to assert on it.
 
     Attributes:
-        kind (str): ``started``, ``beat``, ``died`` or ``stalled``.
+        kind (str): ``started``, ``beat``, ``died``, ``stalled``, or ``start-failed`` where
+            a scheduled restart could not start the process at all.
         name (str): the control it happened to.
         detail (str): what to say about it.
     """
@@ -193,7 +200,8 @@ class Supervisor:
             # The write end goes whatever happened: while the parent holds it open, its own
             # read never reaches EOF, so a child that died would look alive for ever.
             os.close(write_fd)
-        child.beats = os.fdopen(read_fd, "r")
+        child.beats = read_fd
+        child.pending = ""
         child.started_at = child.last_beat = self._clock()
         child.restart_at = None
         self._selector.register(child.beats, selectors.EVENT_READ, child)
@@ -265,20 +273,42 @@ class Supervisor:
     def _read(self, child) -> None:
         """Read whatever one child's pipe has ready, and notice EOF.
 
+        ``os.read`` on the raw descriptor rather than ``readline()`` on a buffered file, and
+        the difference matters inside a selector loop. A pipe reported readable need not
+        hold a complete line, and ``readline()`` on a blocking descriptor waits for the
+        newline - with the whole supervisor behind it, every other control included. A read
+        of what is there cannot block, and an empty result is EOF and nothing else.
+
+        A partial beat is kept until the rest of it arrives. Read as a line, it would be a
+        heartbeat that never happened, and a control that was killed mid-write would look
+        alive until its stall threshold expired.
+
         Args:
             child (Child): the child whose pipe is readable
         """
-        line = child.beats.readline()
-        if line:
+        try:
+            chunk = os.read(child.beats, 4096)
+        except OSError:
+            # The descriptor has gone from under us. Same conclusion as EOF: whatever this
+            # child is doing, the parent can no longer hear it.
+            chunk = b""
+        if not chunk:
+            # EOF: the write end is closed everywhere, which for a child started with
+            # pass_fds means the process itself has gone.
+            self._reap(child, "the heartbeat pipe reached EOF")
+            return
+        child.pending += chunk.decode("utf-8", "replace")
+        lines = child.pending.split("\n")
+        # Whatever follows the last newline is an incomplete beat, and waits for its rest.
+        child.pending = lines.pop()
+        for line in lines:
+            if not line.strip():
+                continue
             child.last_beat = self._clock()
             # A control that is beating again has recovered, so the next failure starts its
             # backoff from the beginning rather than from where the last one left off.
             child.failures = 0
             self._record("beat", child.name, line.strip())
-            return
-        # EOF: the write end is closed everywhere, which for a child started with pass_fds
-        # means the process itself has gone.
-        self._reap(child, "the heartbeat pipe reached EOF")
 
     def _kill(self, child, reason) -> None:
         """End a control that has stopped beating, and treat it as a death.
@@ -311,7 +341,8 @@ class Supervisor:
         if status is None:
             status = child.process.wait()
         self._selector.unregister(child.beats)
-        child.beats.close()
+        os.close(child.beats)
+        child.beats = None
         pid = child.process.pid
         child.process = None
         child.failures += 1
@@ -370,7 +401,8 @@ class Supervisor:
                 child.process.kill()
                 child.process.wait()
             self._selector.unregister(child.beats)
-            child.beats.close()
+            os.close(child.beats)
+            child.beats = None
             child.process = None
             self.make_safe(child.name)
         self._selector.close()
