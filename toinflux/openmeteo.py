@@ -38,7 +38,7 @@ class OpenMeteo(DataHandler):
     # floor, which is the motivating use of this source.
     DEFAULT_MAX_AGE = 3600
 
-    MCP_DESCRIPTION = "Open-Meteo weather: temperature, humidity, precipitation, cloud, wind and radiation."
+    MCP_DESCRIPTION = "Open-Meteo weather: temperature, dew point, humidity, precipitation, cloud, wind and radiation."
     # Writes to the "weather" measurement, not "openmeteo".
     MCP_MEASUREMENT = "weather"
     # Units for the example-settings fields (see UNITS.md); other Open-Meteo
@@ -46,6 +46,11 @@ class OpenMeteo(DataHandler):
     # annotated here.
     MCP_FIELD_METADATA = {
         "temperature_2m": {"unit": "°C", "kind": "gauge"},
+        "dew_point_2m": {
+            "unit": "°C",
+            "kind": "gauge",
+            "description": "The temperature air must fall to for water to condense out of it.",
+        },
         "relative_humidity_2m": {"unit": "%", "kind": "gauge"},
         # An accumulation over the preceding interval, not a reading at an instant,
         # which "mm" alone does not say. The interval is whatever the underlying
