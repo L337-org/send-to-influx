@@ -72,10 +72,11 @@ def untouched_since(bridge, devices, since):
     Returns:
         Report: any command to those devices after that moment
     """
+    theirs = set(devices)
     disturbed = [
         f"{command.name!r} was commanded {command.state} at +{command.at - since:.2f}s"
         for command in bridge.commanded()
-        if command.name in set(devices) and command.at >= since
+        if command.name in theirs and command.at >= since
     ]
     return Report(name="a bystander control is not perturbed", violations=disturbed)
 
@@ -111,10 +112,15 @@ def states_were_declared(bridge, control, settle=2.0):
     caught here. It is the price of not failing every legitimate transition, and the window
     should be shorter than any stage the ladder can hold.
 
+    The window is measured from the **first** command of a transition rather than between
+    consecutive ones, so a slow drip of commands cannot extend one transition indefinitely
+    and hide a state that was held. A transition is a burst, and a burst is bounded from
+    where it started.
+
     Args:
         bridge (StubBridge): the bridge to read
         control (dict): the control document
-        settle (float): seconds within which commands count as one transition
+        settle (float): how long after its first command a transition may still be arriving
 
     Returns:
         Report: every settled combination that no stage declares
@@ -123,6 +129,10 @@ def states_were_declared(bridge, control, settle=2.0):
     wanted = set(bridge_names.values())
     state, violations, group_at = {}, [], None
     commands = sorted(bridge.commanded(), key=lambda c: c.at)
+    # Offsets are reported from the first command seen. A raw time.monotonic() reading is
+    # an arbitrary number of seconds since an arbitrary moment, and printing one after a
+    # "+" says nothing to somebody reading the failure.
+    origin = commands[0].at if commands else 0.0
     for index, command in enumerate(commands):
         if command.name not in wanted:
             continue
@@ -135,7 +145,7 @@ def states_were_declared(bridge, control, settle=2.0):
             continue
         group_at = None
         if set(state) == wanted and state not in allowed:
-            violations.append(f"settled at {state} at +{command.at:.2f}s, which no stage declares")
+            violations.append(f"settled at {state} at +{command.at - origin:.2f}s, which no stage declares")
     return Report(name="every settled state is one the control declared", violations=violations)
 
 

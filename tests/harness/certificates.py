@@ -11,9 +11,11 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import atexit
 import datetime
 import ipaddress
 import os
+import shutil
 import tempfile
 
 from cryptography import x509
@@ -31,7 +33,13 @@ def write_self_signed(directory=None):
     Returns:
         tuple: ``(certificate_path, key_path)``
     """
-    directory = directory or tempfile.mkdtemp(prefix="harness-tls-")
+    if directory is None:
+        directory = tempfile.mkdtemp(prefix="harness-tls-")
+        # A backstop, not the cleanup: StubEndpoint removes what it generated when it
+        # stops, and this catches a caller that never stops one, or a run that dies before
+        # it can. The same shape as the control guard's exit handler, and with the same
+        # limit - it does not run on a SIGKILL.
+        atexit.register(shutil.rmtree, directory, True)
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
     now = datetime.datetime.now(datetime.timezone.utc)

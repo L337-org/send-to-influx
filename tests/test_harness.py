@@ -15,6 +15,7 @@ import os
 import stat
 import subprocess
 import sys
+import textwrap
 import time
 
 import pytest
@@ -29,6 +30,8 @@ from toinflux.controls import control_dir, load_control, validate_control
 from toinflux.exceptions import SourceConnectionError
 from toinflux.inputs import stored_reading
 from toinflux.philipshue import Hue
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @pytest.fixture
@@ -129,6 +132,29 @@ class TestTheStubBridgeIsABridge:
         assert generated and os.path.isdir(generated)
         endpoint.stop()
         assert not os.path.exists(generated)
+
+    def test_a_generated_certificate_goes_at_exit_even_if_nobody_stops_the_endpoint(self):
+        """The backstop under `stop()`, in a real child process rather than a patched
+        atexit: a test that dies before its fixture tears down still leaves nothing behind.
+        Same shape as the control guard's exit handler, and the same limit - not on SIGKILL.
+        """
+        script = textwrap.dedent(f"""
+            import os, sys
+            sys.path.insert(0, {ROOT!r})
+            from tests.harness.certificates import write_self_signed
+            certificate, _ = write_self_signed()
+            print(os.path.dirname(certificate), flush=True)
+            """)
+        finished = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "PYTHONPATH": ""},
+            check=True,
+        )
+        directory = finished.stdout.strip()
+        assert directory and not os.path.exists(directory), directory
 
     def test_a_certificate_it_was_given_is_left_alone(self, tmp_path):
         """A shared certificate outlives the endpoint using it, and removing it would break
@@ -366,6 +392,10 @@ class TestTheInvariantsCatchViolations:
         time.sleep(0.05)
         broken = invariants.states_were_declared(bridge, control, settle=0.01).violations
         assert len(broken) == 1 and "near': True" in broken[0], broken
+        # Offset from the first command, not a raw monotonic reading: that is an arbitrary
+        # number of seconds since an arbitrary moment, and says nothing after a "+".
+        offset = float(broken[0].split("at +")[1].split("s,")[0])
+        assert 0 <= offset < 60, broken
 
     def test_a_two_device_transition_is_not_read_as_a_violation(self, installation, bridge):
         """Commands arrive one device at a time, so every legitimate transition passes
