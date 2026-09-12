@@ -83,7 +83,11 @@ def no_outbound_network(monkeypatch):
         Raises:
             AssertionError: the address is not on this machine
         """
-        host = address[0] if isinstance(address, tuple) else address
+        # A non-tuple address is a unix domain socket, which cannot leave this machine by
+        # construction - the journal, a credential helper, a container runtime.
+        if not isinstance(address, tuple):
+            return real_connect(self, address, *args, **kwargs)
+        host = address[0]
         if isinstance(host, str) and host not in ("127.0.0.1", "::1", "localhost"):
             raise AssertionError(
                 f"a test tried to connect to {host!r}, which is not this machine - point it at a "

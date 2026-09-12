@@ -12,6 +12,7 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import os
+import socket
 import ssl
 import stat
 import subprocess
@@ -320,6 +321,31 @@ class TestTheInstallation:
             check=True,
         )
         assert found.stdout.strip() == "conservatory"
+
+
+class TestTheNetworkGuard:
+    def test_a_unix_socket_is_not_the_internet(self, tmp_path, monkeypatch):
+        """Local by construction - the journal, a credential helper, a container runtime -
+        so refusing one would fail tests that never left the machine.
+
+        Connected for real rather than asserted on a refusal, because a refusal has more
+        than one cause. The path is relative, because an absolute one under the temporary
+        directory exceeds the 104 characters AF_UNIX allows on this platform - which is how
+        the first version of this test failed.
+        """
+        monkeypatch.chdir(tmp_path)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind("s.sock")
+            listener.listen(1)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect("s.sock")
+                # Connecting at all is the assertion: the guard would have raised.
+                assert client.fileno() >= 0
+
+    def test_an_address_off_this_machine_is_refused(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as outbound:
+            with pytest.raises(AssertionError, match="not this machine"):
+                outbound.connect(("93.184.216.34", 80))
 
 
 class TestTheCensus:

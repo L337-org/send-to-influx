@@ -646,7 +646,7 @@ def input_max_age(spec, settings):
     Raises:
         ConfigError: where the source is unknown or a declared duration is unusable
     """
-    source = _required(spec, "source")
+    source, field = _required(spec, "source"), _required(spec, "field")
     # max_age through the same door as the floor and the timeout. It is the third duration
     # in this expression and the one I left bare: an .inf max_age makes the trigger
     # infinite, so the input reads as perpetually fresh and is never refreshed however old
@@ -662,7 +662,11 @@ def input_max_age(spec, settings):
     # reading would be instantly too old; Octopus data is a day behind by nature, so any
     # multiple of its rate limit would put a healthy feed permanently in the fail-safe. How
     # often a source may be asked and how long its answer stays true are unrelated.
-    return _as_seconds(spec.get("max_age", resolve_max_age(source, settings)), f"max_age for input {spec.get('field')}")
+    # Quoted: the field name comes from a control document an MCP client can write, and this
+    # label reaches an error message. Required rather than fetched with .get, because an
+    # input with no field is a declaration this cannot act on at all - and reporting the
+    # staleness rule for input `None` would send the reader looking for the wrong fault.
+    return _as_seconds(spec.get("max_age", resolve_max_age(source, settings)), f"max_age for input {field!r}")
 
 
 def read_input(session, settings, spec, settings_file=None, now=None):

@@ -764,7 +764,7 @@ def _run_control_and_exit(args):
         # A configuration fault, so no retry helps and the supervisor should not respawn
         # this one until somebody has changed something. Reported as the operator's problem
         # rather than as a traceback.
-        logging.critical("Control %r cannot run: %s", args.control, exc)
+        logging.critical("Control %r cannot run: %r", args.control, exc)
         sys.exit(1)
     sys.exit(0)
 

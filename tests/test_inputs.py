@@ -937,7 +937,7 @@ class TestReadInput:
         handler = _handler()
         monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: None)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
-        with pytest.raises(ConfigError, match="max_age for input temperature"):
+        with pytest.raises(ConfigError, match="max_age for input .temperature."):
             read_input(None, SETTINGS, {**SPEC, "max_age": bad})
 
     @pytest.mark.parametrize("missing", ["source", "field"])

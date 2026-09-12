@@ -11,6 +11,7 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import datetime
+import logging
 import os
 import selectors
 import signal
@@ -22,7 +23,7 @@ import requests
 
 from tests.harness import faults, invariants
 from tests.harness.installation import conservatory
-from toinflux.control_process import ControlProcess, command_devices, gather
+from toinflux.control_process import ControlProcess, command_devices, gather, heartbeat_writer
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.rules import RuleEvaluationError, parse_rule
 
@@ -274,6 +275,26 @@ def _start_control(installation, name="conservatory", extra=()):
     )
     os.close(write_fd)
     return child, os.fdopen(read_fd, "r")
+
+
+class TestTheHeartbeatWriter:
+    def test_it_says_the_pipe_has_gone_once_rather_than_every_cycle(self, caplog):
+        """A control with a fifteen-minute cycle would otherwise log the same warning four
+        times an hour for as long as it runs, and a pipe that has gone does not come back."""
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        beat = heartbeat_writer(write_fd)
+        with caplog.at_level(logging.WARNING):
+            for _ in range(5):
+                beat()
+        assert caplog.text.count("heartbeat could not be written") == 1
+
+    def test_a_beat_reaches_the_other_end(self, tmp_path):
+        read_fd, write_fd = os.pipe()
+        beat = heartbeat_writer(write_fd)
+        beat()
+        with os.fdopen(read_fd, "r") as beats:
+            assert float(beats.readline()) > 0
 
 
 class TestAsARealProcess:

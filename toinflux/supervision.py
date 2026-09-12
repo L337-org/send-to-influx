@@ -33,7 +33,7 @@ from toinflux.control_process import command_devices
 from toinflux.controls import load_control
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import commands_for
-from toinflux.process import spawn
+from toinflux.process import TimeoutExpired, spawn
 
 #: How many cycles a control may miss before it is killed and restarted. Three, because one
 #: missed beat is a slow cycle and two is a bad afternoon, while three in a row is a control
@@ -182,10 +182,16 @@ class Supervisor:
                 [*self._argv_for(name), "--heartbeat-fd", str(write_fd)],
                 pass_fds=(write_fd,),
             )
+        except BaseException:
+            # Both ends, because there is no child to own either. A restart that keeps
+            # failing would otherwise leak one descriptor per attempt, and a supervisor that
+            # runs out of descriptors stops being able to start anything at all - the
+            # failure arriving long after the control that caused it.
+            os.close(read_fd)
+            raise
         finally:
-            # Closed in the parent whatever happened: while the parent holds the write end
-            # open, its own read never reaches EOF, so a child that died would look alive
-            # for ever.
+            # The write end goes whatever happened: while the parent holds it open, its own
+            # read never reaches EOF, so a child that died would look alive for ever.
             os.close(write_fd)
         child.beats = os.fdopen(read_fd, "r")
         child.started_at = child.last_beat = self._clock()
@@ -216,8 +222,26 @@ class Supervisor:
             if child.running and now - child.last_beat > child.stall_seconds:
                 self._kill(child, f"no heartbeat for {now - child.last_beat:.0f}s")
             elif not child.running and child.restart_at is not None and now >= child.restart_at:
-                self.start(child.name)
+                self._restart(child)
         return self.events
+
+    def _restart(self, child) -> None:
+        """Start a control again, treating a failure to start as that control's failure.
+
+        A control that cannot be started is one control's problem. Letting it out of here
+        would end the supervisor's loop and with it every *other* control's supervision -
+        one unstartable control taking the heating down with it.
+
+        Args:
+            child (Child): the control to start again
+        """
+        try:
+            self.start(child.name)
+        except ConfigError as exc:
+            child.failures += 1
+            child.restart_at = self._clock() + self._backoff(child.failures)
+            logging.error("Control %r could not be restarted: %r. Trying again later", child.name, exc)
+            self._record("start-failed", child.name, str(exc))
 
     def run(self, stop, poll_seconds=0.5) -> None:
         """Poll until asked to stop, then stop every control.
@@ -267,7 +291,7 @@ class Supervisor:
         child.process.terminate()
         try:
             child.process.wait(timeout=KILL_GRACE_SECONDS)
-        except Exception:  # noqa: BLE001 - subprocess raises its own TimeoutExpired here
+        except TimeoutExpired:
             # It ignored SIGTERM, so it does not get a say. A control that will not stop is
             # worse than one that is killed: its devices are energised and nobody is
             # deciding what they should be doing.
@@ -342,7 +366,7 @@ class Supervisor:
                 continue
             try:
                 child.process.wait(timeout=KILL_GRACE_SECONDS)
-            except Exception:  # noqa: BLE001 - subprocess raises its own TimeoutExpired here
+            except TimeoutExpired:
                 child.process.kill()
                 child.process.wait()
             self._selector.unregister(child.beats)

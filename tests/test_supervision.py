@@ -18,9 +18,23 @@ import pytest
 from tests.harness import census, faults, invariants
 from tests.harness.bridge import plug
 from tests.harness.installation import conservatory
+from toinflux.exceptions import ConfigError
 from toinflux.supervision import Supervisor, stall_seconds
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _refuse_to_spawn(*_args, **_kwargs):
+    """Fail the way an unresolvable binary does.
+
+    Args:
+        *_args: ignored
+        **_kwargs: ignored
+
+    Raises:
+        ConfigError: always
+    """
+    raise ConfigError("could not start 'send-to-influx': no such file")
 
 
 def _quick(name, devices, **overrides):
@@ -122,11 +136,27 @@ def _wait_for(supervisor, kind, name=None, seconds=30):
         AssertionError: it never arrived
     """
     deadline = time.monotonic() + seconds
+    seen = []
     while time.monotonic() < deadline:
         for event in supervisor.poll(timeout=0.2):
+            seen.append(f"{event.kind}:{event.name}")
             if event.kind == kind and (name is None or event.name == name):
                 return event
-    raise AssertionError(f"no {kind!r} event for {name or 'any control'} within {seconds}s")
+    # The state of every child, not just the timeout. A supervisor that stopped restarting
+    # says nothing about why from the outside, and a thirty-second timeout in CI with no
+    # further detail is a message that has to be reproduced before it can be read - which
+    # for a timing-dependent failure on somebody else's machine is the expensive case.
+    now = time.monotonic()
+    state = "; ".join(
+        f"{child.name}: running={child.running} failures={child.failures} "
+        f"restart_in={'-' if child.restart_at is None else f'{child.restart_at - now:.2f}s'} "
+        f"silent_for={now - child.last_beat:.1f}s"
+        for child in supervisor.children.values()
+    )
+    raise AssertionError(
+        f"no {kind!r} event for {name or 'any control'} within {seconds}s. "
+        f"Saw: {seen or 'nothing'}. Children: {state}"
+    )
 
 
 class TestStartingAndWatching:
@@ -247,3 +277,122 @@ class TestTheBackoffItself:
             moment += _default_backoff(failures)
             starts.append(moment)
         invariants.check(invariants.backoff_grew(starts, minimum=5))
+
+
+class TestTheRestartDecisionItself:
+    """The restart logic on its own, with no processes and a clock the test owns.
+
+    The scenarios above prove the whole thing works; this proves *why*, deterministically,
+    and is where a restart that quietly never fires shows up as a failure rather than as a
+    thirty-second timeout in CI.
+    """
+
+    class _Clock:
+        """A monotonic clock the test advances by hand."""
+
+        def __init__(self):
+            self.now = 1000.0
+
+        def __call__(self):
+            """Return the current reading.
+
+            Returns:
+                float: the reading
+            """
+            return self.now
+
+    def _supervisor(self, state_directory, clock):
+        """Return a supervisor over one control that will never really be started.
+
+        Args:
+            state_directory (Installation): the installation to read controls from
+            clock (callable): the clock to use
+
+        Returns:
+            Supervisor: ready to have its children driven by hand
+        """
+        _two_controls(state_directory)
+        return Supervisor(
+            ["conservatory"],
+            settings_file=state_directory.settings_file,
+            argv_for=lambda name: ["/bin/true"],
+            clock=clock,
+            backoff=lambda failures: 10.0 * failures,
+        )
+
+    def test_a_control_is_restarted_once_its_backoff_has_passed(self, state_directory, monkeypatch):
+        clock = self._Clock()
+        supervisor = self._supervisor(state_directory, clock)
+        child = supervisor.children["conservatory"]
+        child.restart_at = clock.now + 10
+        started = []
+        monkeypatch.setattr(supervisor, "start", lambda name: started.append(name))
+
+        supervisor.poll(timeout=0)
+        assert started == [], "restarted before its backoff had passed"
+        clock.now += 10
+        supervisor.poll(timeout=0)
+        assert started == ["conservatory"]
+
+    def test_a_control_that_will_not_start_does_not_take_the_others_down(self, state_directory, monkeypatch):
+        """One control that cannot be started is one control's problem. Letting the failure
+        out of poll() would end the loop and with it every other control's supervision -
+        one unstartable control taking the heating down with it."""
+        clock = self._Clock()
+        supervisor = self._supervisor(state_directory, clock)
+        child = supervisor.children["conservatory"]
+        child.restart_at = clock.now
+
+        def refuse(name):
+            """Fail to start, as an unresolvable binary would.
+
+            Args:
+                name (str): the control being started
+
+            Raises:
+                ConfigError: always
+            """
+            raise ConfigError("could not start 'send-to-influx': no such file")
+
+        monkeypatch.setattr(supervisor, "start", refuse)
+        events = supervisor.poll(timeout=0)
+        assert [event.kind for event in events] == ["start-failed"]
+        # And it backs off rather than spinning on the failure every pass.
+        assert child.restart_at > clock.now
+        assert supervisor.poll(timeout=0) == []
+
+    def test_a_failed_start_leaks_no_descriptor(self, state_directory, monkeypatch):
+        """A restart that keeps failing would otherwise leak one descriptor per attempt, and
+        a supervisor out of descriptors stops being able to start anything - the failure
+        arriving long after the control that caused it."""
+        supervisor = self._supervisor(state_directory, self._Clock())
+        handed_out = []
+        real_pipe = os.pipe
+
+        def watched_pipe():
+            """Hand out a pipe and remember both ends.
+
+            Returns:
+                tuple: the read and write descriptors
+            """
+            pair = real_pipe()
+            handed_out.append(pair)
+            return pair
+
+        monkeypatch.setattr("toinflux.supervision.os.pipe", watched_pipe)
+        monkeypatch.setattr("toinflux.supervision.spawn", _refuse_to_spawn)
+        with pytest.raises(ConfigError):
+            supervisor.start("conservatory")
+        assert handed_out, "the test did not observe a pipe being made"
+        for descriptor in handed_out[0]:
+            with pytest.raises(OSError):
+                os.fstat(descriptor)
+
+    def test_a_control_with_no_restart_due_is_left_alone(self, state_directory, monkeypatch):
+        clock = self._Clock()
+        supervisor = self._supervisor(state_directory, clock)
+        started = []
+        monkeypatch.setattr(supervisor, "start", lambda name: started.append(name))
+        clock.now += 10_000
+        supervisor.poll(timeout=0)
+        assert started == [], "started a control that had not been running"

@@ -334,19 +334,28 @@ def heartbeat_writer(descriptor):
         descriptor (int): the write end of the pipe, already inherited
 
     Returns:
-        callable: beats once per call, and is a no-op once the pipe has gone
+        callable: beats once per call, and a no-op once the pipe has gone - which it says
+        once rather than on every cycle for the life of the process
     """
     stream = os.fdopen(descriptor, "w", buffering=1)
+    # A list rather than a nonlocal, so the closure can say it has given up without the
+    # ceremony. Once is once: a control with a fifteen-minute cycle would otherwise log the
+    # same warning four times an hour for as long as it runs.
+    stopped = []
 
     def beat() -> None:
-        """Write one beat, or stop trying once nobody is listening."""
+        """Write one beat, unless the pipe has already gone."""
+        if stopped:
+            return
         try:
             stream.write(f"{time.time():.3f}\n")
             stream.flush()
         except (ValueError, OSError) as exc:
             # The parent has gone or closed its end. Not fatal to the control: a control
             # with no supervisor is still holding a room at temperature, and exiting here
-            # would turn "the watchdog went away" into "the heating stopped".
+            # would turn "the watchdog went away" into "the heating stopped". Said once,
+            # then never again - a pipe that has gone does not come back.
+            stopped.append(True)
             logging.warning("Control heartbeat could not be written, carrying on without it: %r", exc)
 
     return beat

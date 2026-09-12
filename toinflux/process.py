@@ -76,6 +76,11 @@ INHERITED_ENV_KEYS = (
 # the limit would leave the child blocked writing into a full pipe.
 MAX_CAPTURED_BYTES = 1024 * 1024
 
+#: Re-exported so a caller can wait on a child with a timeout and catch only that, without
+#: importing subprocess itself - which the hygiene guard refuses outside this module, and
+#: rightly: a bare `except Exception` around a wait turns an unrelated bug into a SIGKILL.
+TimeoutExpired = subprocess.TimeoutExpired
+
 # How long to keep draining after the child has exited. A grandchild that inherited
 # a pipe holds the write end open, so EOF never arrives; this bounds the wait rather
 # than trusting a stream nothing is going to close.
