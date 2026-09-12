@@ -183,9 +183,16 @@ def _validate_storage_name(name):
     Raises:
         CredentialCliError: if name isn't letters/digits/underscore/hyphen
     """
-    if not re.match(r"^[A-Za-z0-9_-]+$", name):
+    # fullmatch, not match: `$` matches before a trailing newline, and this name becomes
+    # part of a credential's filename.
+    #
+    # The type check is in front of the pattern for the same reason require_valid_control_name
+    # has one: re.fullmatch raises TypeError on a non-string, and a refusal this tool is
+    # meant to explain would arrive as a traceback instead. Quoted with !r rather than hand
+    # quotes, so a name carrying a control character cannot shape its own message.
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise CredentialCliError(
-            f"'{name}' is not a valid database/bucket name - use only letters, digits, underscores, and hyphens."
+            f"{name!r} is not a valid database/bucket name - use only letters, digits, underscores, and hyphens."
         )
 
 
@@ -489,7 +496,7 @@ def _is_creatable_field(top_key, field):
     if top_key != "hue":
         return False
     for stem in ("host", "user"):
-        if field.startswith(stem) and CANONICAL_SLOT_SUFFIX_RE.match(field[len(stem) :]):
+        if field.startswith(stem) and CANONICAL_SLOT_SUFFIX_RE.fullmatch(field[len(stem) :]):
             return True
     return False
 
@@ -653,7 +660,7 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value) -> None:
     # writing rather than after - a flow-style section would otherwise have its
     # `top_key: {` prefix silently overwritten by the naive `indent + field + ": " +
     # value` reconstruction below, producing invalid YAML.
-    if not re.match(rf"^{re.escape(field)}\s*:", line[len(indent) :]):
+    if not re.match(rf"{re.escape(field)}\s*:", line[len(indent) :]):
         raise CredentialCliError(
             f"{settings_path}: could not safely rewrite {top_key}.{field} automatically "
             "(unexpected line format, e.g. a flow-style mapping) - edit it by hand instead"
@@ -1193,7 +1200,7 @@ def _extract_section(text, name):
     lines = text.splitlines(keepends=True)
     start = None
     for i, line in enumerate(lines):
-        if re.match(rf"^{re.escape(name)}\s*:", line):
+        if re.match(rf"{re.escape(name)}\s*:", line):
             start = i
             break
     if start is None:

@@ -159,6 +159,19 @@ class TestValidateStorageName:
         with pytest.raises(CredentialCliError, match="not a valid database/bucket name"):
             _validate_storage_name("")
 
+    def test_rejects_a_non_string_as_a_refusal_rather_than_a_traceback(self):
+        """re.fullmatch raises TypeError on a non-string, so the refusal this tool exists to
+        explain would arrive as a stack trace instead."""
+        with pytest.raises(CredentialCliError, match="not a valid database/bucket name"):
+            _validate_storage_name(None)
+
+    def test_the_message_quotes_the_name_it_refuses(self):
+        """Hand quotes around an interpolated value do not escape a control character, and
+        this message carries a value straight from the command line."""
+        with pytest.raises(CredentialCliError) as raised:
+            _validate_storage_name("hue_db\nWARNING  created")
+        assert "\n" not in str(raised.value)
+
 
 # --------------------------------------------------------------------------- #
 # _encrypt_credential
@@ -1636,3 +1649,27 @@ class TestSpawnFailuresAlsoArriveAsCredentialCliError:
         with patch("toinflux.credential_cli.run_command", side_effect=ConfigError("not found on PATH")):
             with pytest.raises(CredentialCliError, match="influx-token"):
                 _decrypt_credential("influx-token", credstore_dir=str(credstore))
+
+
+class TestWhichFieldsMayBeCreated:
+    """Creating a field on request would destroy the refusal that catches a typo, so the
+    allow-list is the only thing standing between `--set-field hue.hsot2 <address>` and a
+    key nothing reads."""
+
+    @pytest.mark.parametrize(
+        "field,creatable",
+        [
+            pytest.param("host2", True, id="a-second-bridge"),
+            pytest.param("user10", True, id="a-tenth-one"),
+            pytest.param("host1", False, id="slot-1-is-not-a-slot-to-add"),
+            pytest.param("hsot2", False, id="a-typo"),
+            pytest.param("host2\n", False, id="a-trailing-newline"),
+        ],
+    )
+    def test_only_a_real_bridge_slot_qualifies(self, field, creatable):
+        """The last case is the anchored-match trap: `$` matches before a trailing newline,
+        so "host2\\n" was a creatable field until this read the pattern with fullmatch."""
+        assert credential_cli._is_creatable_field("hue", field) is creatable
+
+    def test_no_other_section_has_creatable_fields(self):
+        assert credential_cli._is_creatable_field("influx", "host2") is False
