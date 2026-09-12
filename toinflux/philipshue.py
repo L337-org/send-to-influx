@@ -824,6 +824,14 @@ class Hue(DataHandler):
                     timeout=self.settings["hue"].get("timeout", 5),
                     verify=not insecure,
                 )
+            # The CLIP API reports its own errors as a 200 carrying a list, so a non-200 is
+            # the transport or something in front of the bridge rather than the bridge's
+            # answer. Checked here because a JSON error body from a proxy is otherwise read
+            # as a datastore: a 503 made mcp_list_writable_devices() report no devices at
+            # all, and made a collection raise KeyError('sensors') from the parse instead of
+            # this module's own error. The write path has always checked; this is the read
+            # path catching up.
+            response.raise_for_status()
             hue_data = response.json()
         except ValueError as e:
             # response.json() raises on a non-JSON body (e.g. an HTML error page).

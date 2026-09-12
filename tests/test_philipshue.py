@@ -44,6 +44,25 @@ class TestHue:
                 with pytest.raises(SourceConnectionError):
                     hue.get_data_from_hue_bridge()
 
+    def test_get_data_from_hue_bridge_raises_on_an_error_status_carrying_json(self, sample_settings):
+        """The CLIP API reports its own errors as a 200 carrying a list, so a non-200 comes
+        from the transport or from something in front of the bridge.
+
+        Unchecked, a proxy's JSON error body was read as a datastore: against a stub bridge
+        answering 503, device discovery reported no writable devices at all and a collection
+        raised KeyError('sensors') out of the parse instead of this module's own error. The
+        write path has always called raise_for_status; this is the read path catching up.
+        """
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            hue = Hue(source="hue")
+            mock_response = MagicMock()
+            mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("503 Server Error")
+            mock_response.json.return_value = {"error": "service unavailable"}
+            with patch.object(hue.session, "get", return_value=mock_response):
+                with pytest.raises(SourceConnectionError):
+                    hue.get_data_from_hue_bridge()
+
     def test_get_data_from_hue_bridge_skips_tls_verification_by_default(self, sample_settings):
         """get_data_from_hue_bridge defaults to verify=False (backward-compatible with self-signed bridge certs)."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
