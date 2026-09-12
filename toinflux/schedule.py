@@ -13,6 +13,12 @@ here computes a transition or special-cases a date.
 That only works because the question asked is "what is the local time now", never "when does
 this window next start". The second question has no single answer on a transition day, and
 answering it is how a scheduler acquires a table of exceptions.
+
+It also only works if the zone is still a zone when the question is asked. A control that
+names no ``timezone`` keeps None rather than a captured one, because the obvious way to
+capture the machine's zone yields a *fixed offset* that reports the same value in January
+as in July - see :func:`control_zone`. A control process runs for months; a zone captured
+in summer is an hour wrong all winter.
 """
 
 __author__ = "Gavin Lucas"
@@ -40,15 +46,17 @@ class ActivePeriod:
         end_state (str): what the devices do when the window closes, which is configured
             separately from ``safe_state`` because a control can want to be left alone on
             failure and switched off at dawn.
-        zone (datetime.tzinfo): the control's time zone. Not narrowed to ``ZoneInfo``: a
-            control that names no zone gets the machine's own, which arrives as whatever
-            ``astimezone()`` produced - a fixed-offset ``timezone`` on most systems.
+        zone (datetime.tzinfo or None): the control's time zone, and **None where it named
+            no zone**, meaning the machine's local time resolved at each comparison rather
+            than a zone captured once. See :func:`control_zone` for why that distinction
+            is the difference between following daylight saving and drifting an hour
+            behind it.
     """
 
     start: datetime.time
     end: datetime.time
     end_state: str
-    zone: datetime.tzinfo
+    zone: "datetime.tzinfo | None"
 
 
 def parse_active_period(document):
@@ -88,26 +96,34 @@ def parse_active_period(document):
 
 
 def control_zone(document):
-    """Return the time zone a control's wall-clock times are read in.
+    """Return the time zone a control's wall-clock times are read in, or None for local.
 
-    The control's own ``timezone`` where it names one, and otherwise the machine's. A
-    control that does not say is assumed to mean local time, which is what somebody writing
-    "23:35" on a machine in their own house means.
+    The control's own ``timezone`` where it names one. Where it names none, **None**: the
+    machine's local time, resolved at each comparison rather than captured here.
+
+    That is not a missing value, and the difference is an hour twice a year.
+    ``datetime.now().astimezone().tzinfo`` returns a *fixed-offset* zone - measured on this
+    machine under Europe/London it is ``timezone(timedelta(hours=1), 'BST')``, which reports
+    the same offset in January as in July and carries no transition rules at all. A control
+    process runs for months, so one captured in summer would read every wall-clock time an
+    hour out for the whole winter: the drift this module says it does not have.
+
+    ``astimezone(None)`` asks the system for the offset *of the moment being converted*, so
+    the answer follows daylight saving with nothing here to maintain.
 
     Args:
         document (dict): the control document
 
     Returns:
-        datetime.tzinfo: the zone, a ``ZoneInfo`` where the control named one
+        datetime.tzinfo or None: the named zone as a ``ZoneInfo``, or None for the
+        machine's local time at the moment of comparison
 
     Raises:
         ConfigError: where the named zone is not one this machine knows
     """
     name = document.get("timezone")
     if name is None:
-        # The machine's own zone, resolved once. astimezone() on a naive datetime uses it,
-        # but naming it here keeps every comparison below working on one aware object.
-        return datetime.datetime.now().astimezone().tzinfo
+        return None
     try:
         return ZoneInfo(str(name))
     except (ZoneInfoNotFoundError, ValueError) as exc:
@@ -149,7 +165,8 @@ def is_inside(period, moment):
 
     Args:
         period (ActivePeriod or None): the window; None means always active
-        moment (datetime.datetime): an aware moment
+        moment (datetime.datetime): an aware moment, converted into the period's zone, or
+            into the machine's local time where the control named none
 
     Returns:
         bool: whether the control may act
@@ -162,6 +179,9 @@ def is_inside(period, moment):
         return True
     if moment.tzinfo is None or moment.tzinfo.utcoffset(moment) is None:
         raise ConfigError("an active period needs an aware moment: a naive one names no instant to convert")
+    # A period with no zone of its own passes None, which is astimezone's own way of
+    # saying "local time", evaluated for this moment rather than for whenever the control
+    # happened to start.
     local = moment.astimezone(period.zone).time()
     if period.start < period.end:
         return period.start <= local < period.end

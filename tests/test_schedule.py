@@ -9,6 +9,10 @@ __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
 import datetime
+import os
+import subprocess
+import sys
+import textwrap
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -17,6 +21,7 @@ from toinflux.exceptions import ConfigError
 from toinflux.schedule import control_zone, is_inside, parse_active_period
 
 LONDON = ZoneInfo("Europe/London")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _period(start, end, **extra):
@@ -173,9 +178,14 @@ class TestBuildingOne:
         with pytest.raises(ConfigError, match="not a time zone this machine knows"):
             control_zone({"timezone": "Mars/Olympus_Mons"})
 
-    def test_no_timezone_means_the_machine_s_own(self):
-        """Which is what somebody writing "23:35" on a machine in their own house means."""
-        assert control_zone({}) is not None
+    def test_no_timezone_means_local_time_rather_than_a_captured_zone(self):
+        """None, and deliberately: the machine's local time at the moment of comparison,
+        which is what somebody writing "23:35" on a machine in their own house means.
+
+        A zone captured here would be a fixed offset - `datetime.now().astimezone().tzinfo`
+        reports the same offset in January as in July - and a control process runs for
+        months. See the test below for what that costs."""
+        assert control_zone({}) is None
 
 
 class TestTheMomentMustBeAware:
@@ -193,3 +203,46 @@ class TestTheMomentMustBeAware:
         # 22:40 UTC in July is 23:40 in London: inside the window, though 22:40 is not.
         july = datetime.datetime(2026, 7, 15, 22, 40, tzinfo=datetime.timezone.utc)
         assert is_inside(period, july) is True
+
+
+class TestTheMachineSOwnZoneFollowsDaylightSaving:
+    """The property a fixed offset cannot have, measured in a child process so the zone is
+    this test's to choose on any machine - Python has no tzset on every platform, and a
+    test that only checks this where the developer happens to live checks nothing in CI."""
+
+    @staticmethod
+    def _readings():
+        """Return what a zone-less period makes of the same wall clock in winter and summer.
+
+        The window is ten minutes wide on purpose. An overnight window that wraps midnight
+        answers "inside" for both the right reading and the hour-out one, so the first
+        version of this test passed against the very bug it was written for.
+
+        Returns:
+            list: two booleans, for a January and a July moment that both read 23:40 locally
+        """
+        script = textwrap.dedent(f"""
+            import datetime, sys
+            sys.path.insert(0, {ROOT!r})
+            from toinflux.schedule import parse_active_period, is_inside
+            period = parse_active_period({{"active_period": {{"from": "23:35", "to": "23:45"}}}})
+            january = datetime.datetime(2026, 1, 15, 23, 40, tzinfo=datetime.timezone.utc)
+            july = datetime.datetime(2026, 7, 15, 22, 40, tzinfo=datetime.timezone.utc)
+            print(is_inside(period, january), is_inside(period, july))
+            """)
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "TZ": "Europe/London", "PYTHONPATH": ""},
+            check=True,
+        )
+        return result.stdout.split()
+
+    def test_both_moments_read_as_the_same_local_time(self):
+        """23:40 GMT in January and 23:40 BST in July are the same wall clock and the same
+        answer. No single fixed offset can produce both, so a zone captured at startup gets
+        one of them wrong for months - the hour of drift this module claims not to have.
+        """
+        assert self._readings() == ["True", "True"]
