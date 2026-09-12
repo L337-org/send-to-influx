@@ -10,10 +10,13 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
+import math
+
 import pytest
 
 from toinflux.controller import Controller, first_order_plant, simulate
 from toinflux.exceptions import ConfigError
+from toinflux.rules import RuleEvaluationError
 
 CYCLE = 900
 
@@ -119,6 +122,59 @@ class TestAntiWindup:
     def test_the_limits_are_the_ladder_not_a_guess(self):
         controller = Controller(_document())
         assert controller.pid.output_limits == (0.0, 1500.0)
+
+
+class TestABadCycleDoesNotPoisonTheLoop:
+    """One non-finite reading permanently ruins a PID, which is why this is checked before
+    the value reaches it rather than after.
+
+    Measured on simple-pid directly: feed one nan, and the integral is nan from then on -
+    three clean readings afterwards all return nan. A control that fails safe for ever
+    because of one bad rule evaluation is worse than one that skips a cycle.
+    """
+
+    @pytest.mark.parametrize("slot", ["setpoint", "input"])
+    def test_a_non_finite_rule_value_is_refused(self, slot):
+        """The rule language produces these from finite inputs: 1e400 is inf, and
+        1e400 - 1e400 is nan, so nothing upstream has to be wrong."""
+        controller = Controller(_document(pid={slot: "1e400 - 1e400"}))
+        with pytest.raises(RuleEvaluationError, match=f"pid.{slot}"):
+            controller.step({"inside": 17.0, "target": 18.0}, dt=CYCLE)
+
+    @pytest.mark.parametrize(
+        "slot,good",
+        [pytest.param("setpoint", "target", id="setpoint"), pytest.param("input", "inside", id="input")],
+    )
+    def test_the_loop_still_works_on_the_next_good_cycle(self, slot, good):
+        """The property the ordering exists for, rather than the check itself. A controller
+        that raised but had already handed the value to the PID would be dead for ever."""
+        controller = Controller(
+            _document(
+                pid={slot: f"if(poison > 0, 1e400 - 1e400, {good})"},
+                inputs={"poison": {"source": "hue", "field": "poison"}},
+            )
+        )
+        with pytest.raises(RuleEvaluationError):
+            controller.step({"inside": 17.0, "target": 18.0, "poison": 1.0}, dt=CYCLE)
+        plan = controller.step({"inside": 17.0, "target": 18.0, "poison": 0.0}, dt=CYCLE)
+        level = sum(d.stage.level * d.seconds for d in plan) / sum(d.seconds for d in plan)
+        assert math.isfinite(level), "the loop never recovered"
+        assert level > 0, "a degree below target should still ask for heat"
+
+    def test_the_setpoint_is_not_left_changed_by_a_refused_cycle(self):
+        """Nothing is mutated before everything is checked, so a cycle that cannot run
+        leaves the controller exactly as it was."""
+        controller = Controller(
+            _document(
+                pid={"input": "if(poison > 0, 1e400 - 1e400, inside)"},
+                inputs={"poison": {"source": "hue", "field": "poison"}},
+            )
+        )
+        controller.step({"inside": 17.0, "target": 18.0, "poison": 0.0}, dt=CYCLE)
+        before = controller.pid.setpoint
+        with pytest.raises(RuleEvaluationError):
+            controller.step({"inside": 17.0, "target": 99.0, "poison": 1.0}, dt=CYCLE)
+        assert controller.pid.setpoint == before, "a refused cycle moved the setpoint"
 
 
 class TestTheCap:

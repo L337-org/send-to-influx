@@ -18,7 +18,7 @@ import math
 from simple_pid import PID
 
 from toinflux.exceptions import ConfigError
-from toinflux.rules import parse_rule
+from toinflux.rules import RuleEvaluationError, parse_rule
 from toinflux.staging import build_ladder, cap_ladder, plan_window
 
 
@@ -80,19 +80,29 @@ class Controller:
             tuple: Dwell, filling one cycle window
 
         Raises:
-            RuleEvaluationError: where a rule could not produce a value this cycle
-            ConfigError: where the cycle window is unusable
+            RuleEvaluationError: where a rule could not produce a usable value this cycle.
+                The controller is left untouched, so the next cycle with good data works.
+            ConfigError: where the cycle window or the cap is unusable
         """
-        self.pid.setpoint = self._setpoint_rule.evaluate(bindings)
-        process_variable = self._input_rule.evaluate(bindings)
+        # Everything is evaluated and checked before the PID is touched at all, because one
+        # non-finite reading poisons it permanently: simple-pid folds the value into the
+        # integral, the integral is nan from then on, and every later cycle returns nan
+        # however good the data becomes. A control that fails safe for ever after one bad
+        # rule evaluation is worse than one that skips a cycle.
+        setpoint = _finite(self._setpoint_rule.evaluate(bindings), "pid.setpoint")
+        process_variable = _finite(self._input_rule.evaluate(bindings), "pid.input")
         ladder = self.ladder
+        limits = None
         if self._max_level_rule is not None:
             cap = self._max_level_rule.evaluate(bindings)
             ladder = cap_ladder(self.ladder, cap)
+            limits = (ladder[0].level, ladder[-1].level)
+        self.pid.setpoint = setpoint
+        if limits is not None:
             # The limits follow the cap. Left at the full ladder's range, the integral would
             # keep accumulating towards a level the cap has just forbidden, and every cycle
             # spent capped would be paid back as overshoot the moment it lifted.
-            self.pid.output_limits = (ladder[0].level, ladder[-1].level)
+            self.pid.output_limits = limits
         demand = self.pid(process_variable, dt=dt)
         return plan_window(ladder, demand, self.cycle_seconds, self.min_transition_for)
 
@@ -137,6 +147,32 @@ class Controller:
             last_output (float or None): the demand to resume from
         """
         self.pid.set_auto_mode(True, last_output=last_output)
+
+
+def _finite(value, where):
+    """Return a rule's value, refusing one the PID cannot survive.
+
+    The rule language produces non-finite numbers from finite inputs - ``1e400`` is inf and
+    ``1e400 - 1e400`` is nan - so this is reachable without anything upstream being wrong.
+
+    Checked before the PID sees it because the damage is permanent rather than momentary:
+    simple-pid folds the value into the integral, and a nan integral returns nan for every
+    later cycle however good the data becomes. Measured - one nan reading, then three clean
+    ones, all nan.
+
+    Args:
+        value (object): whatever the rule evaluated to
+        where (str): the rule slot, for the message
+
+    Returns:
+        float: the value
+
+    Raises:
+        RuleEvaluationError: where the value is not a finite number
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise RuleEvaluationError(f"{where} evaluated to {value!r}, which the loop cannot use this cycle")
+    return float(value)
 
 
 def _rule(text, names, where, optional=False):
