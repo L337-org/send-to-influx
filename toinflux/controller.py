@@ -112,7 +112,7 @@ class Controller:
         declared = (self.devices.get(device) or {}).get("min_transition_seconds")
         return float(self._default_transition if declared is None else declared)
 
-    def hold(self, last_output=None):
+    def hold(self, last_output=None) -> None:
         """Stop the integral accumulating while the control is not actuating.
 
         A control outside its active period, or gated off by ``enable_when``, is not
@@ -126,7 +126,7 @@ class Controller:
         """
         self.pid.set_auto_mode(False, last_output=last_output)
 
-    def resume(self, last_output=None):
+    def resume(self, last_output=None) -> None:
         """Start controlling again without a step change.
 
         simple-pid's ``set_auto_mode(True, last_output=...)`` back-computes the integral so
