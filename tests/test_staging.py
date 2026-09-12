@@ -191,3 +191,39 @@ class TestTheStageRecord:
         stage = build_ladder(CONSERVATORY)[0]
         with pytest.raises(AttributeError):
             stage.level = 99
+
+    def test_the_states_cannot_be_edited_either(self):
+        """frozen=True stops the attribute being rebound and does nothing about the dict
+        behind it, so this passed against a plain dict while the states stayed editable -
+        the assertion above says "immutable" and only covered half of it."""
+        stage = build_ladder(CONSERVATORY)[0]
+        with pytest.raises(TypeError):
+            stage.states["far"] = True
+
+
+class TestValuesThatCannotBeOrdered:
+    """nan compares False against everything, so it neither sorts nor brackets.
+
+    A ladder containing one is silently unordered and a demand lands wherever it happens to,
+    for ever, with nothing logged - which is why these are refused rather than tolerated.
+    """
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), True, "750", None])
+    def test_a_level_that_is_not_a_finite_number_is_refused(self, bad):
+        with pytest.raises(ConfigError, match="must be a finite number"):
+            build_ladder([{"level": 0, "set": {"far": False}}, {"level": bad, "set": {"far": True}}])
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), True, "750"])
+    def test_a_cap_that_is_not_a_finite_number_is_refused(self, bad):
+        """A cap comes from evaluating a rule, and the rule language really can produce
+        these: `1e400` is inf and `1e400 - 1e400` is nan. A nan would have collapsed the
+        ladder to its lowest rung - fail-safe by accident, and indistinguishable from a cap
+        that genuinely forbids everything."""
+        with pytest.raises(ConfigError, match="not a level to cap at"):
+            cap_ladder(build_ladder(CONSERVATORY), bad)
+
+    def test_the_rule_language_can_actually_produce_one(self):
+        """So the guard above is not defending against a value that cannot arrive."""
+        from toinflux.rules import parse_rule
+
+        assert parse_rule("1e400").evaluate({}) == float("inf")

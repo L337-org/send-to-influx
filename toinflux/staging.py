@@ -23,7 +23,9 @@ __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from toinflux.exceptions import ConfigError
 
@@ -37,13 +39,15 @@ class Stage:
         declared (int): the stage's position in the document, which breaks ties between
             equal levels - the operator writes the one that should do the steady-state work
             first.
-        states (dict): device name -> the state to command, covering every device the
-            control owns.
+        states (Mapping): device name -> the state to command, covering every device the
+            control owns. A read-only view: ``frozen=True`` stops the attribute being
+            rebound and does nothing about the dict behind it, so without this one cycle's
+            plan could be edited by another's.
     """
 
     level: float
     declared: int
-    states: dict
+    states: Mapping
 
 
 def build_ladder(stages):
@@ -72,10 +76,37 @@ def build_ladder(stages):
     if not stages:
         raise ConfigError("a control's output.stages is empty: there is no ladder to work with")
     rungs = [
-        Stage(level=float(stage["level"]), declared=index, states=dict(stage["set"]))
+        Stage(
+            level=_finite_level(stage["level"], index),
+            declared=index,
+            states=MappingProxyType(dict(stage["set"])),
+        )
         for index, stage in enumerate(stages)
     ]
     return tuple(sorted(rungs, key=lambda rung: (rung.level, rung.declared)))
+
+
+def _finite_level(level, index):
+    """Return a stage's level as a float, refusing one that cannot be ordered.
+
+    The control store rejects a non-finite level too, so this is the second line rather than
+    the first. It is here because the consequence is silent: nan compares False against
+    everything, so a ladder containing one is not sorted and a demand does not bracket
+    within it - the control simply picks the wrong rung, for ever, with nothing logged.
+
+    Args:
+        level (object): the level as the document gave it
+        index (int): the stage's position, for the message
+
+    Returns:
+        float: the level
+
+    Raises:
+        ConfigError: where the level is not a finite number
+    """
+    if isinstance(level, bool) or not isinstance(level, (int, float)) or not math.isfinite(level):
+        raise ConfigError(f"output.stages[{index}].level must be a finite number (got {level!r})")
+    return float(level)
 
 
 def bracket(ladder, demand):
@@ -129,9 +160,18 @@ def cap_ladder(ladder, max_level):
 
     Returns:
         tuple: Stage, never empty
+
+    Raises:
+        ConfigError: where the cap is not a finite number
     """
     if max_level is None:
         return ladder
+    # A cap comes from evaluating a rule, and the rule language can produce a non-finite
+    # number: `1e400` is inf and `1e400 - 1e400` is nan. A nan compares False against every
+    # rung, so it would silently collapse the ladder to its lowest - fail-safe by accident,
+    # and indistinguishable from a cap that genuinely forbids everything.
+    if isinstance(max_level, bool) or not isinstance(max_level, (int, float)) or not math.isfinite(max_level):
+        raise ConfigError(f"output.max_level evaluated to {max_level!r}, which is not a level to cap at")
     allowed = tuple(rung for rung in ladder if rung.level <= max_level)
     return allowed or ladder[:1]
 

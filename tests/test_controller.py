@@ -27,11 +27,17 @@ STAGES = [
 def _document(**overrides):
     """A conservatory control, with the tunings that converge against the plant below."""
     document = {
-        "inputs": {"inside": {}},
+        "inputs": {"inside": {"source": "hue", "field": "temperature_conservatory"}},
         "parameters": {"target": 18.0},
         "pid": {"input": "inside", "setpoint": "target", "kp": 60.0, "ki": 0.02, "kd": 0.0},
-        "output": {"cycle_seconds": CYCLE, "min_transition_seconds": 0, "stages": STAGES},
-        "devices": {"far": {}, "near": {}},
+        # min_transition_seconds is omitted rather than set to 0: the store requires it to
+        # be positive when present, so a fixture carrying 0 would be a document
+        # validate_control refuses - and a test built on one proves less than it looks.
+        "output": {"cycle_seconds": CYCLE, "stages": STAGES},
+        "devices": {
+            "far": {"source": "hue", "device": "Conservatory heater far"},
+            "near": {"source": "hue", "device": "Conservatory heater near"},
+        },
     }
     for key, value in overrides.items():
         if isinstance(value, dict) and isinstance(document.get(key), dict):
@@ -75,7 +81,9 @@ class TestTheLoopControls:
     def test_the_setpoint_is_a_rule_evaluated_every_cycle(self):
         """It is not a constant: the motivating case is max(target, dew + 5), where the
         dew point moves under the control while it runs."""
-        controller = Controller(_document(pid={"setpoint": "max(target, dew + 5)"}, inputs={"dew": {}}))
+        controller = Controller(
+            _document(pid={"setpoint": "max(target, dew + 5)"}, inputs={"dew": {"source": "openmeteo", "field": "dew"}})
+        )
         plant = _plant()
         hot = simulate(controller, plant, 20, lambda pv: {"inside": pv, "target": 18.0, "dew": 30.0}, dt=CYCLE)
         assert hot[-1][0] > 18.5, "a dew point of 30 should have lifted the setpoint well above target"
@@ -123,7 +131,10 @@ class TestTheCap:
         catches.
         """
         controller = Controller(
-            _document(output={"max_level": "if(grid_co2 > 300, 750, 1500)"}, inputs={"grid_co2": {}})
+            _document(
+                output={"max_level": "if(grid_co2 > 300, 750, 1500)"},
+                inputs={"grid_co2": {"source": "openmeteo", "field": "grid_co2"}},
+            )
         )
         trace = simulate(
             controller,
@@ -148,7 +159,9 @@ class TestTheCap:
         """Left at the full ladder's range, the integral would keep accumulating towards a
         level the cap has just forbidden, and every capped cycle would be paid back as
         overshoot the moment it lifted."""
-        controller = Controller(_document(output={"max_level": "cap"}, inputs={"cap": {}}))
+        controller = Controller(
+            _document(output={"max_level": "cap"}, inputs={"cap": {"source": "openmeteo", "field": "cap"}})
+        )
         controller.step({"inside": 10.0, "target": 18.0, "cap": 750.0}, dt=CYCLE)
         assert controller.pid.output_limits == (0.0, 750.0)
         controller.step({"inside": 10.0, "target": 18.0, "cap": 1500.0}, dt=CYCLE)
@@ -156,7 +169,9 @@ class TestTheCap:
 
     def test_lifting_a_cap_does_not_produce_a_backlog(self):
         """The behaviour the moving limits exist for, rather than the mechanism."""
-        controller = Controller(_document(output={"max_level": "cap"}, inputs={"cap": {}}))
+        controller = Controller(
+            _document(output={"max_level": "cap"}, inputs={"cap": {"source": "openmeteo", "field": "cap"}})
+        )
         plant = _plant()
         capped = simulate(controller, plant, 30, lambda pv: {"inside": pv, "target": 18.0, "cap": 750.0}, dt=CYCLE)
         assert max(level for _, level in capped) <= 750.0
@@ -194,7 +209,10 @@ class TestMinimumTransition:
         controller = Controller(
             _document(
                 output={"min_transition_seconds": 300},
-                devices={"far": {"min_transition_seconds": 900}, "near": {}},
+                devices={
+                    "far": {"source": "hue", "device": "far", "min_transition_seconds": 900},
+                    "near": {"source": "hue", "device": "near"},
+                },
             )
         )
         assert controller.min_transition_for("far") == 900.0
@@ -205,6 +223,13 @@ class TestMinimumTransition:
         control does not own, so reaching here with one is a programming error, and failing
         the cycle over it would be worse than being cautious."""
         assert Controller(_document(output={"min_transition_seconds": 42})).min_transition_for("nope") == 42.0
+
+    def test_the_fixture_is_a_document_the_store_would_accept(self):
+        """Otherwise these tests describe a control that could never exist."""
+        from toinflux.controls import validate_control
+
+        document = {"enabled": True, **_document(), "safe_state": "unenergised"}
+        assert validate_control("conservatory", document) == []
 
 
 class TestBuildingOne:
