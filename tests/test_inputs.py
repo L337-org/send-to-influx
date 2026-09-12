@@ -429,6 +429,30 @@ class TestTheFetchLockSerialisesLiveFetches:
             with fetch_lock("hue", budget=5):
                 pass
 
+    @pytest.mark.parametrize(
+        "name",
+        ["../../../evil", "../../../../../../tmp/pwned", "a/b", "", ".", "-leading", "with space"],
+    )
+    def test_a_name_that_cannot_safely_be_a_filename_is_refused(self, name, tmp_path, monkeypatch):
+        """A source name becomes part of a filename here, which is the same situation
+        controls.py answers with an allow-list for a control name.
+
+        Enough `..` segments escape the state directory entirely - the "fetch-" prefix
+        absorbs one, so six reach /tmp from a default install, which I measured rather than
+        assumed. read_input rejects an unknown source long before this, but these are public
+        helpers and the tests call them with names that are not sources at all.
+        """
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        with pytest.raises(ConfigError, match="becomes part of a filename"):
+            fetch_lock_path(name)
+
+    def test_a_lock_path_stays_inside_the_lock_directory(self, tmp_path, monkeypatch):
+        """The property behind the allow-list, asserted rather than inferred from it."""
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        locks = os.path.normpath(os.path.join(tmp_path, "locks"))
+        for name in ("hue", "probe", "carbonintensity"):
+            assert os.path.normpath(fetch_lock_path(name)).startswith(locks + os.sep)
+
     def test_each_source_has_its_own_lock(self, tmp_path, monkeypatch):
         """Two controls reading different sources have no reason to wait for each other."""
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))

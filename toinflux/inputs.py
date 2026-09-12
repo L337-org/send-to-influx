@@ -29,6 +29,7 @@ import logging
 import math
 import os
 import random
+import re
 import stat
 import time
 from contextlib import contextmanager
@@ -431,6 +432,15 @@ MAX_LOCK_BACKOFF = 0.5
 # commit by accident. One directory also makes one ignore rule enough.
 LOCK_DIR_NAME = "locks"
 
+# A source name becomes part of a filename here, so it is checked against an allow-list
+# before it is joined into a path - the same answer controls.py gives for a control name,
+# and for the same reason. Enough `..` segments escape the state directory entirely: the
+# "fetch-" prefix absorbs one, so six reach /tmp from a default install. read_input rejects
+# an unknown source before this is ever called, but these are public helpers and the tests
+# call them with names that are not sources at all.
+LOCK_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,62}$"
+_LOCK_NAME_RE = re.compile(LOCK_NAME_PATTERN)
+
 # The column InfluxDB returns a point's timestamp in. Named because a field key equal to it
 # is ambiguous rather than merely awkward, and handler_reading refuses one.
 TIME_COLUMN = "time"
@@ -451,11 +461,20 @@ def fetch_lock_path(source, settings_file=None):
 
     Returns:
         str: the lock file's path, which may not exist yet
+
+    Raises:
+        ConfigError: where the name could not safely become part of a filename
     """
     # Lowercased for the same reason resolve_minimum_interval() does it, and here it is the
     # difference between serialising and not: two controls naming the same source in
     # different cases would otherwise take two different locks and both go live.
-    return os.path.join(resolve_state_dir(settings_file), LOCK_DIR_NAME, f"fetch-{source.lower()}.lock")
+    name = source.lower()
+    if not _LOCK_NAME_RE.match(name):
+        raise ConfigError(
+            f"cannot make a lock file for {source!r}: a source name becomes part of a "
+            f"filename here, so it must match {LOCK_NAME_PATTERN!r}"
+        )
+    return os.path.join(resolve_state_dir(settings_file), LOCK_DIR_NAME, f"fetch-{name}.lock")
 
 
 @contextmanager
