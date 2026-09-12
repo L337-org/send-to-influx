@@ -12,6 +12,7 @@ __license__ = "MIT"
 import pytest
 
 from toinflux.exceptions import ConfigError
+from toinflux.rules import RuleEvaluationError
 from toinflux.staging import bracket, build_ladder, cap_ladder, plan_window
 
 # The design note's worked example: two independently switchable heaters.
@@ -82,10 +83,22 @@ class TestBracketing:
         lower, upper = bracket(self.ladder, 2000)
         assert lower is upper is self.ladder[-1]
 
+    def test_landing_exactly_on_a_rung_collapses_the_bracket(self):
+        """Like either end of the ladder does, rather than returning the next rung up with a
+        zero share.
+
+        That happened to work, because a dwell of no length was dropped downstream - but it
+        made this function correct only while that filter existed, and a caller reading "the
+        rungs a demand sits between" got two rungs for a demand sitting on one.
+        """
+        lower, upper = bracket(self.ladder, 750)
+        assert lower is upper
+        assert lower.level == 750.0
+
     def test_landing_on_a_shared_level_takes_the_earliest_declared(self):
         """Which is what the declaration order was preserved for."""
         lower, _ = bracket(self.ladder, 750)
-        assert lower.states == {"far": True, "near": False}
+        assert dict(lower.states) == {"far": True, "near": False}
 
 
 class TestCappingTheLadder:
@@ -156,6 +169,18 @@ class TestPlanningAWindow:
         """The same window, with the minimum on the device that actually changes."""
         minimums = {"far": 0, "near": 3600}
         assert len(plan_window(self.ladder, 1237, 900, lambda name: minimums[name])) == 1
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), True, "750", None])
+    def test_a_demand_that_is_not_a_finite_number_is_refused(self, bad):
+        """Not a plan this cycle, so the caller falls safe rather than acting.
+
+        A nan did not do nothing, which is what makes this worth an exception rather than a
+        filter: every comparison against it is False, so it fell through bracket() to the top
+        of the ladder and commanded a full window at maximum. The heaters full on, because of
+        arithmetic nobody could see.
+        """
+        with pytest.raises(RuleEvaluationError, match="not a level to hold"):
+            plan_window(self.ladder, bad, 900, _no_minimum)
 
     @pytest.mark.parametrize("bad", [0, -1, "900", None, True, float("nan")])
     def test_an_unusable_cycle_window_is_refused(self, bad):

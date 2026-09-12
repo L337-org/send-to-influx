@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from toinflux.exceptions import ConfigError
+from toinflux.rules import RuleEvaluationError
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,13 @@ def bracket(ladder, demand):
         return ladder[-1], ladder[-1]
     lower = ladder[0]
     for rung in ladder:
+        # An exact landing collapses, like either end of the ladder does. Returning the next
+        # rung up with a zero share happens to work, because a dwell of no length is dropped
+        # downstream - but then this function is only correct while that filter exists, and
+        # a caller reading "the rungs a demand sits between" gets two rungs for a demand
+        # that sits on one.
+        if rung.level == demand:
+            return rung, rung
         if rung.level > demand:
             return lower, rung
         # Only advance past a level once it is genuinely below the demand, so the first of
@@ -218,6 +226,8 @@ def plan_window(ladder, demand, cycle_seconds, min_transition_for):
 
     Raises:
         ConfigError: where the cycle window is not a positive number of seconds
+        RuleEvaluationError: where the demand is not a finite number, which is a cycle that
+            cannot produce a plan rather than a control that must stop
     """
     if (
         not isinstance(cycle_seconds, (int, float))
@@ -229,6 +239,12 @@ def plan_window(ladder, demand, cycle_seconds, min_transition_for):
         or cycle_seconds <= 0
     ):
         raise ConfigError(f"output.cycle_seconds must be a positive number of seconds (got {cycle_seconds!r})")
+    if isinstance(demand, bool) or not isinstance(demand, (int, float)) or not math.isfinite(demand):
+        # Not a plan this cycle, so the caller falls safe rather than acting. A nan reaching
+        # here did not do nothing: every comparison against it is False, so it fell through
+        # bracket() to the top of the ladder and commanded a full window at maximum - the
+        # heaters full on because of arithmetic nobody could see.
+        raise RuleEvaluationError(f"a control's demand came out as {demand!r}, which is not a level to hold")
     lower, upper = bracket(ladder, demand)
     if lower is upper:
         return (Dwell(stage=lower, seconds=float(cycle_seconds)),)
@@ -239,13 +255,12 @@ def plan_window(ladder, demand, cycle_seconds, min_transition_for):
     if lower_seconds < minimum or upper_seconds < minimum:
         nearer = upper if share >= 0.5 else lower
         return (Dwell(stage=nearer, seconds=float(cycle_seconds)),)
-    # A dwell of no length is not a stretch of time to command, and emitting one would put
-    # a state change into the plan that immediately reverses. A demand sitting exactly on
-    # the lower rung is the ordinary way to get here.
-    return tuple(
-        Dwell(stage=stage, seconds=seconds)
-        for stage, seconds in ((lower, lower_seconds), (upper, upper_seconds))
-        if seconds > 0
+    # Both stretches have length: bracket() collapses an exact landing, so the demand is
+    # strictly between these two rungs and the share is strictly between 0 and 1. A zero
+    # dwell would be a state change that immediately reverses.
+    return (
+        Dwell(stage=lower, seconds=lower_seconds),
+        Dwell(stage=upper, seconds=upper_seconds),
     )
 
 
