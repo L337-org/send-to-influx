@@ -22,6 +22,7 @@ __license__ = "MIT"
 
 import datetime
 import logging
+import os
 import time
 
 import requests
@@ -275,3 +276,77 @@ class ControlProcess:
         """Release what this process opened."""
         if self._owns_session:
             self._session.close()
+
+
+def run_control(name, settings_file=None, heartbeat=None, cycles=None, sleep=time.sleep) -> None:
+    """Run one control until it is stopped, or for a fixed number of cycles.
+
+    The process entry point. It asserts the safe state before the first cycle, beats once
+    per cycle so the supervisor can tell a slow control from a dead one, and leaves the
+    devices safe on the way out.
+
+    The order at startup is deliberate: the guard is built and the safe state asserted
+    *before* anything is read. A control that has just been restarted after a kill is a
+    control whose devices are in an unknown state, and finding out what the temperature is
+    can wait until they are not.
+
+    Args:
+        name (str): the control to run
+        settings_file (str or None): the settings path the process was started with
+        heartbeat (callable or None): called with no arguments after each cycle
+        cycles (int or None): stop after this many cycles; None runs until signalled
+        sleep (callable): how to wait out a dwell, injectable for tests
+
+    Raises:
+        ConfigError: where the control cannot run at all
+    """
+    control = ControlProcess(name, settings_file=settings_file)
+    try:
+        control.guard.assert_safe_state()
+        logging.info("Control %r started, cycling every %.0fs", name, control.cycle_seconds)
+        completed = 0
+        while cycles is None or completed < cycles:
+            control.cycle(sleep=sleep)
+            completed += 1
+            if heartbeat is not None:
+                heartbeat()
+    finally:
+        # The guard's own exit handler covers a signal; this covers the ordinary return and
+        # anything that escaped the loop, and is once-only either way.
+        control.guard.stop("the control is stopping")
+        control.close()
+
+
+def heartbeat_writer(descriptor):
+    """Return a callable that beats once down an inherited pipe.
+
+    A line per cycle, flushed, carrying the time it was written. The parent needs only that
+    something arrived, but a timestamp makes a journal of them readable afterwards, and a
+    line rather than a byte means a partial write cannot be mistaken for a beat.
+
+    Death detection comes free from the same pipe: the write end closes when the process
+    dies however it dies, and the parent's read reaches EOF. That is why this is a pipe the
+    parent passed rather than stdout - **stdout is inherited by every grandchild**, so a
+    child that had spawned anything would hold the pipe open after its own death and the
+    parent would wait for an EOF that never came.
+
+    Args:
+        descriptor (int): the write end of the pipe, already inherited
+
+    Returns:
+        callable: beats once per call, and is a no-op once the pipe has gone
+    """
+    stream = os.fdopen(descriptor, "w", buffering=1)
+
+    def beat() -> None:
+        """Write one beat, or stop trying once nobody is listening."""
+        try:
+            stream.write(f"{time.time():.3f}\n")
+            stream.flush()
+        except (ValueError, OSError) as exc:
+            # The parent has gone or closed its end. Not fatal to the control: a control
+            # with no supervisor is still holding a room at temperature, and exiting here
+            # would turn "the watchdog went away" into "the heating stopped".
+            logging.warning("Control heartbeat could not be written, carrying on without it: %r", exc)
+
+    return beat

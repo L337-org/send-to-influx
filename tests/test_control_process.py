@@ -11,6 +11,11 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import datetime
+import os
+import selectors
+import signal
+import subprocess
+import sys
 
 import pytest
 import requests
@@ -22,6 +27,7 @@ from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.rules import RuleEvaluationError, parse_rule
 
 # Inside the conservatory's 23:35-05:25 window, and well outside it.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NIGHT = datetime.datetime(2026, 1, 15, 2, 0, tzinfo=datetime.timezone.utc)
 DAY = datetime.datetime(2026, 1, 15, 12, 0, tzinfo=datetime.timezone.utc)
 
@@ -193,3 +199,157 @@ class TestCommandingDevices:
         with faults.erroring(bridge, 503):
             with pytest.raises(SourceConnectionError):
                 command_devices(conservatory(), {"far": True}, installation.settings_file)
+
+
+def _quick_control(**overrides):
+    """Return the example control with a window short enough to watch.
+
+    Args:
+        **overrides: top-level keys to replace
+
+    Returns:
+        dict: a control document
+    """
+    document = conservatory(**overrides)
+    document["output"] = dict(document["output"], cycle_seconds=1, min_transition_seconds=1)
+    # No window, so the child acts whatever time the test happens to run at. The period is
+    # covered in process by the tests above; what this file's child processes are for is
+    # everything that only exists once there is a process.
+    document.pop("active_period", None)
+    return document
+
+
+def _next_beat(beats, timeout=15):
+    """Return the next heartbeat line, or fail if none arrives in time.
+
+    Bounded, and every read of the pipe goes through it. A bare ``readline()`` on a control
+    that has stopped beating blocks for ever, so a regression in the heartbeat hangs the
+    suite instead of failing it - which is how the first version of these tests behaved when
+    the beat was deliberately removed to check they would notice.
+
+    Args:
+        beats (io.TextIOBase): the read end of the heartbeat pipe
+        timeout (float): how long to wait
+
+    Returns:
+        str: the line, without its newline
+
+    Raises:
+        AssertionError: nothing arrived, or the pipe reached EOF
+    """
+    selector = selectors.DefaultSelector()
+    selector.register(beats, selectors.EVENT_READ)
+    try:
+        assert selector.select(timeout=timeout), f"no heartbeat within {timeout}s"
+    finally:
+        selector.close()
+    line = beats.readline()
+    assert line, "the heartbeat pipe reached EOF instead of beating"
+    return line.strip()
+
+
+def _start_control(installation, name="conservatory", extra=()):
+    """Start a real control process with a heartbeat pipe, and return it.
+
+    Returns:
+        tuple: the child and the read end of its heartbeat pipe, as a file object
+    """
+    read_fd, write_fd = os.pipe()
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            os.path.join(ROOT, "sendtoinflux.py"),
+            "--control",
+            name,
+            "--settings",
+            installation.settings_file,
+            "--heartbeat-fd",
+            str(write_fd),
+            *extra,
+        ],
+        pass_fds=(write_fd,),
+        stderr=subprocess.PIPE,
+        text=True,
+        env=installation.environment(),
+    )
+    os.close(write_fd)
+    return child, os.fdopen(read_fd, "r")
+
+
+class TestAsARealProcess:
+    """Everything that only exists once there is a process: the entry point, the heartbeat,
+    and what a signal leaves behind."""
+
+    def test_it_beats_once_a_cycle_and_commands_the_bridge(self, installation, bridge):
+        installation.write_control(_quick_control())
+        child, beats = _start_control(installation)
+        try:
+            first, second = _next_beat(beats), _next_beat(beats)
+            assert float(first) > 0 and float(second) >= float(first)
+            assert bridge.commanded(), "the control never reached the bridge"
+        finally:
+            child.kill()
+            child.wait(timeout=30)
+            beats.close()
+
+    def test_the_safe_state_is_asserted_before_anything_is_read(self, installation, bridge, influx):
+        """A control that has just been restarted after a kill has devices in an unknown
+        state, and finding out what the temperature is can wait until they are not."""
+        installation.write_control(_quick_control())
+        influx.clear()
+        child, beats = _start_control(installation)
+        try:
+            _next_beat(beats)
+            first = bridge.commanded()[0]
+            assert first.state == {"on": False}, bridge.commanded()[:3]
+        finally:
+            child.kill()
+            child.wait(timeout=30)
+            beats.close()
+
+    def test_a_handled_signal_leaves_the_devices_safe(self, installation, bridge):
+        """systemctl stop signals every process in the unit's cgroup at once, so a control
+        handles its own SIGTERM - and the exit handler only runs because that handler exits
+        rather than letting the default action kill the process."""
+        installation.write_control(_quick_control())
+        child, beats = _start_control(installation)
+        try:
+            _next_beat(beats)
+            child.send_signal(signal.SIGTERM)
+            assert child.wait(timeout=30) == 0
+            assert bridge.energised() == {"far": False, "near": False}
+        finally:
+            child.kill()
+            beats.close()
+
+    def test_the_pipe_reaches_eof_when_the_control_dies(self, installation):
+        """Death detection, free: the write end closes however the process dies, so a parent
+        blocked on the read gets told without asking anybody."""
+        installation.write_control(_quick_control())
+        child, beats = _start_control(installation)
+        try:
+            _next_beat(beats)
+            child.kill()
+            child.wait(timeout=30)
+            # Bounded, and the same way a supervisor will wait: a readable pipe that yields
+            # nothing is EOF. A bare read() would prove the same thing by hanging for ever
+            # when it is wrong, which is not a test result.
+            selector = selectors.DefaultSelector()
+            selector.register(beats, selectors.EVENT_READ)
+            try:
+                assert selector.select(timeout=10), "the pipe never became readable"
+                assert beats.readline() == "", "the pipe never reached EOF"
+            finally:
+                selector.close()
+        finally:
+            beats.close()
+
+    def test_a_control_that_cannot_run_says_so_and_exits_rather_than_looping(self, installation):
+        """A configuration fault is not something a respawn fixes, so it must be
+        distinguishable from a crash - the operator's problem, reported as theirs."""
+        child, beats = _start_control(installation, name="nosuchcontrol")
+        try:
+            assert child.wait(timeout=30) == 1
+            assert "cannot run" in child.stderr.read()
+        finally:
+            beats.close()

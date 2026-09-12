@@ -19,6 +19,7 @@ import toinflux
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.controls import validate_stored_controls
+from toinflux.control_process import heartbeat_writer, run_control
 
 try:
     __version__ = version("send-to-influx")
@@ -700,6 +701,24 @@ def _check_config_and_exit(settings, args):
     sys.exit(0)
 
 
+def _run_control_and_exit(args):
+    """Run one control as this process, and exit with what it did.
+
+    Args:
+        args (argparse.Namespace): the parsed command line
+    """
+    beat = heartbeat_writer(args.heartbeat_fd) if args.heartbeat_fd is not None else None
+    try:
+        run_control(args.control, settings_file=args.settings, heartbeat=beat)
+    except ConfigError as exc:
+        # A configuration fault, so no retry helps and the supervisor should not respawn
+        # this one until somebody has changed something. Reported as the operator's problem
+        # rather than as a traceback.
+        logging.critical("Control %r cannot run: %s", args.control, exc)
+        sys.exit(1)
+    sys.exit(0)
+
+
 def main() -> None:
     """Run the collector until it is asked to stop.
 
@@ -766,6 +785,26 @@ def main() -> None:
             "If no sources are configured, the process logs that plainly and exits."
         ),
     )
+    arg_parse.add_argument(
+        "--control",
+        required=False,
+        dest="control",
+        type=str,
+        help=(
+            "run one stored control as this process, rather than collecting. "
+            "One process per control; the supervisor starts these, and an operator rarely does"
+        ),
+    )
+    arg_parse.add_argument(
+        "--heartbeat-fd",
+        required=False,
+        dest="heartbeat_fd",
+        type=int,
+        help=(
+            "an inherited pipe to beat down once per cycle, so a supervisor can tell a slow "
+            "control from a dead one. Set by the supervisor when it starts a control"
+        ),
+    )
     args = arg_parse.parse_args()
 
     # load settings once for defaults and configured source list
@@ -780,6 +819,12 @@ def main() -> None:
         _check_config_and_exit(settings, args)
 
     _configure_logging_or_exit(settings, args)
+
+    if args.control:
+        # Before the collector's own setup, and it never returns to it: a control process
+        # collects nothing, serves no MCP, and starting a worker here would put two things
+        # in one process that the supervisor expects to kill independently.
+        _run_control_and_exit(args)
 
     requested = _requested_sources(settings, args)
     units = toinflux.expand_sources(requested, settings)
