@@ -1020,11 +1020,18 @@ def _validate_duration(source, source_cfg, key):
     because neither fails loudly later - a nan bound never holds and an inf one always
     does, so the setting silently means its own opposite.
 
-    Zero is allowed, unlike the collection ``interval``, which would spin a worker. It
-    means opposite things for the two keys and is meaningful for both: a
-    ``minimum_interval`` of zero says the source may be read whenever a control wants it,
-    while a ``max_age`` of zero says no stored reading is ever fresh enough - every cycle
-    goes live, and falls to the safe state if it cannot.
+    Zero is allowed, unlike the collection ``interval``, which would spin a worker. It means
+    different things for the two keys and is meaningful for both.
+
+    ``minimum_interval: 0`` says the source may be read live whenever a control wants it,
+    which is right for one that costs nothing to ask - Nuki's state has already arrived over
+    an open subscription.
+
+    ``max_age: 0`` says the input tolerates no staleness of its own. It does **not** mean a
+    live read every cycle: the trigger is the larger of this and the source's minimum
+    interval, so with a minimum of 900 a stored point is still used until it is 900 seconds
+    old. What it does is hand the decision entirely to the source, and - once the control
+    loop exists - leave nothing fresh enough to act on, so the safe state applies.
 
     Args:
         source (str): the source name, for the message
