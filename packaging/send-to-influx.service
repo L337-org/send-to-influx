@@ -43,6 +43,14 @@ ProtectHome=true
 StateDirectory=send-to-influx
 StateDirectoryMode=0700
 
+# Pinned rather than left to systemd's default, which derives it from the executable name.
+# A control runs as its own child process of this service, and the shipped rsyslog rule
+# matches the identifier exactly (:programname, isequal, "send-to-influx") - so a child that
+# arrived under any other name would have its logs escape the rule entirely and land back in
+# the shared daemon.log this package exists to keep them out of. Children inherit this
+# service's journal stream, so one identifier here covers the collector and every control.
+SyslogIdentifier=send-to-influx
+
 # Sandbox hardening. Especially relevant since the MCP server made this the
 # project's first inbound-network-facing service (it binds a loopback TCP port).
 # This set is deliberately the well-established, low-risk directives that don't

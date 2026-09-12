@@ -499,3 +499,33 @@ class TestADocumentThatIsNotTheRightShape:
         with caplog.at_level(logging.ERROR):
             supervisor.make_safe("conservatory")
         assert "Could not make control" in caplog.text
+
+
+class TestFindingTheConsoleScript:
+    """Where the supervisor looks for the thing it starts. On the packaged install the
+    console script is not on the PATH at all - it lives in /opt/send-to-influx/venv/bin and
+    only send-to-influx-set-credential is symlinked into /usr/sbin, while the unit sets no
+    Environment=PATH. Resolving by name alone means no control ever starts there, and every
+    test in this file passes anyway because a checkout has it on the PATH."""
+
+    def test_it_looks_beside_the_running_interpreter_first(self, state_directory, tmp_path, monkeypatch):
+        interpreter = tmp_path / "bin" / "python3"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.touch()
+        script = tmp_path / "bin" / "send-to-influx"
+        script.touch()
+        monkeypatch.setattr("toinflux.supervision.sys.executable", str(interpreter))
+        _two_controls(state_directory)
+        supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
+        assert supervisor._default_argv("conservatory")[0] == str(script)
+
+    def test_it_falls_back_to_the_path_where_there_is_no_such_script(self, state_directory, tmp_path, monkeypatch):
+        """A layout this does not know about is not a reason to refuse: the PATH is still
+        where a console script usually is."""
+        interpreter = tmp_path / "elsewhere" / "python3"
+        interpreter.parent.mkdir(parents=True)
+        interpreter.touch()
+        monkeypatch.setattr("toinflux.supervision.sys.executable", str(interpreter))
+        _two_controls(state_directory)
+        supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
+        assert supervisor._default_argv("conservatory")[0] == "send-to-influx"

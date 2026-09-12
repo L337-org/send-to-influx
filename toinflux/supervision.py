@@ -27,6 +27,7 @@ import math
 import os
 import selectors
 import signal
+import sys
 import time
 from dataclasses import dataclass
 
@@ -212,13 +213,26 @@ class Supervisor:
     def _default_argv(self, name):
         """Return the argv that starts one control through the installed console script.
 
+        Looked for **next to the running interpreter** before the PATH, because on the
+        packaged install it is not on the PATH at all: the script lives in
+        ``/opt/send-to-influx/venv/bin`` and only ``send-to-influx-set-credential`` is
+        symlinked into ``/usr/sbin``, while the unit sets no ``Environment=PATH``. Resolving
+        by name alone would mean no control ever started on a packaged install, and every
+        test here passes because a checkout has it on the PATH.
+
+        The interpreter's own directory is the right place to look in every case this runs
+        in - a packaged venv, a development venv, a source checkout - because that is where
+        the console script for *this* interpreter is installed.
+
         Args:
             name (str): the control to start
 
         Returns:
             list: the command to run
         """
-        argv = ["send-to-influx", "--control", name]
+        beside_interpreter = os.path.join(os.path.dirname(sys.executable), "send-to-influx")
+        command = beside_interpreter if os.path.isfile(beside_interpreter) else "send-to-influx"
+        argv = [command, "--control", name]
         if self.settings_file:
             argv += ["--settings", self.settings_file]
         return argv
