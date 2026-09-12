@@ -1020,9 +1020,11 @@ def _validate_duration(source, source_cfg, key):
     because neither fails loudly later - a nan bound never holds and an inf one always
     does, so the setting silently means its own opposite.
 
-    Zero is allowed, unlike the collection ``interval``: it is a meaningful bound here
-    ("ask whenever you like", "nothing is ever stale enough to matter") where as a
-    collection interval it would spin a worker.
+    Zero is allowed, unlike the collection ``interval``, which would spin a worker. It
+    means opposite things for the two keys and is meaningful for both: a
+    ``minimum_interval`` of zero says the source may be read whenever a control wants it,
+    while a ``max_age`` of zero says no stored reading is ever fresh enough - every cycle
+    goes live, and falls to the safe state if it cannot.
 
     Args:
         source (str): the source name, for the message

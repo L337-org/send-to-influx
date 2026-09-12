@@ -379,7 +379,7 @@ def handler_reading(session, settings, handler, field, now=None):
     _refuse_reserved_field(field)
     measurement = handler.MCP_MEASUREMENT or handler.source
     try:
-        query = build_latest_query(measurement, handler.mcp_tag_filters(), {field})
+        query = build_latest_query(measurement, _read_filters(handler), {field})
     except ToolParamError as exc:
         # Quoted, like every other exception this module reports: the message carries the
         # field name straight from a control document, so a newline in it would otherwise
@@ -410,6 +410,32 @@ def handler_reading(session, settings, handler, field, now=None):
         age=moment - float(stamp),
         live=False,
     )
+
+
+def _read_filters(handler):
+    """Return the tag filters scoping a stored read to one producer.
+
+    A handler's own ``mcp_tag_filters`` where it scopes itself: Hue resolves its bridge's
+    host through ``bridge()`` and myenergi its device, and both know the tag value better
+    than this does - Hue's instance identifies a configured bridge, which is not the same
+    string as the ``host`` tag its points carry.
+
+    Where a source has an instance tag and no such override - Nuki and Speedtest - the
+    filter is added here. Without it, a control asking for one lock read the newest point
+    across every lock, which is not an error at any point in the chain and is simply the
+    wrong value.
+
+    Args:
+        handler (DataHandler): the source's handler, built for a particular instance or not
+
+    Returns:
+        dict: tag filters for the query
+    """
+    filters = dict(handler.mcp_tag_filters())
+    tag = handler.MCP_INSTANCE_TAG
+    if tag and handler.instance is not None and tag not in filters:
+        filters[tag] = handler.instance
+    return filters
 
 
 def _cell(row, index, name):

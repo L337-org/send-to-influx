@@ -33,11 +33,13 @@ from toinflux.inputs import (
     MAX_LOCK_BACKOFF,
     MIN_LOCK_BACKOFF,
     InputReading,
+    _as_reading_value,
+    _read_filters,
     fetch_lock,
     fetch_lock_path,
-    _as_reading_value,
-    resolve_max_age,
+    handler_reading,
     read_input,
+    resolve_max_age,
     resolve_minimum_interval,
     stored_reading,
 )
@@ -177,6 +179,62 @@ class TestResolveMinimumInterval:
         monkeypatch.setattr("toinflux.inputs.source_class", lambda source: handler)
         with pytest.raises(ConfigError, match="'hue.interval' must be a number of seconds"):
             resolve_minimum_interval("hue", {"hue": {"interval": "300"}})
+
+
+class TestAStoredReadIsScopedToItsInstance:
+    """A control asking for one lock must not get the newest point across every lock.
+
+    Hue and myenergi scope themselves through mcp_tag_filters and know their tag values
+    better than this does - Hue's instance names a configured bridge, which is not the same
+    string as the `host` tag its points carry. Nuki and Speedtest have an instance tag and
+    no such override, so nothing scoped their reads at all.
+    """
+
+    def _filters(self, instance_tag, instance, own_filters):
+        handler = MagicMock()
+        handler.MCP_INSTANCE_TAG = instance_tag
+        handler.instance = instance
+        handler.mcp_tag_filters.return_value = own_filters
+        return _read_filters(handler)
+
+    def test_an_instance_tag_with_no_override_is_filled_in(self):
+        assert self._filters("device", "Front_Door", {}) == {"device": "Front_Door"}
+
+    def test_a_handler_that_scopes_itself_is_left_alone(self):
+        """Hue's own filter is the resolved host; overwriting it with the instance name
+        would query for a bridge identifier that no point carries."""
+        assert self._filters("host", "bridge1", {"host": "a.example.com"}) == {"host": "a.example.com"}
+
+    def test_a_handler_serving_no_instance_stays_unscoped(self):
+        """Deliberately: an unqualified read still returns the whole estate."""
+        assert self._filters("device", None, {}) == {}
+
+    def test_a_source_with_no_instance_tag_is_untouched(self):
+        assert self._filters(None, None, {"kind": "weather"}) == {"kind": "weather"}
+
+    def test_the_filter_reaches_the_query(self, monkeypatch):
+        """Through handler_reading, because the unit test above passes whether or not the
+        helper is wired in - which is the shape of decorative test this branch keeps
+        producing."""
+        seen = {}
+
+        def fake_build(measurement, filters, fields):
+            seen.update(filters=dict(filters))
+            return "SELECT 1"
+
+        handler = MagicMock()
+        handler.MCP_MEASUREMENT = None
+        handler.source = "nuki"
+        handler.MCP_INSTANCE_TAG = "device"
+        handler.instance = "Front_Door"
+        handler.mcp_tag_filters.return_value = {}
+        handler.source_settings = {"db": "x"}
+        monkeypatch.setattr("toinflux.inputs.build_latest_query", fake_build)
+        monkeypatch.setattr("toinflux.inputs.resolve_db", lambda *a: "db")
+        monkeypatch.setattr("toinflux.inputs.run_query", lambda *a: [])
+        monkeypatch.setattr("toinflux.inputs.single_series", lambda series: ([], []))
+        handler_reading(None, SETTINGS, handler, "stateValue")
+        assert seen["filters"] == {"device": "Front_Door"}
 
 
 class TestASourceWhoseLiveReadCoversEveryInstance:
@@ -542,13 +600,44 @@ class TestTheFetchLockSerialisesLiveFetches:
 
 
 def _reading_handler(source, settings_file=None, instance=None):
-    """A stand-in handler carrying only what a stored read asks of one."""
+    """A stand-in handler carrying only what a stored read asks of one.
+
+    Every attribute the code reads is set explicitly, for the reason given on _handler: a
+    MagicMock invents truthy values for anything unset, so an unset MCP_INSTANCE_TAG became
+    a Mock used as a tag name and the query builder rejected it. That was this stub's turn
+    to be caught by it, one round after the other one was.
+    """
     handler = MagicMock()
     handler.MCP_MEASUREMENT = None
     handler.source = source
+    handler.MCP_INSTANCE_TAG = None
+    handler.instance = instance
     handler.mcp_tag_filters.return_value = {}
     handler.source_settings = {"db": "x"}
     return handler
+
+
+def _recording_handler(seen=None):
+    """Return a get_class stand-in that records what it was called with.
+
+    One stub for every stored-read test. There were three inline copies, and when
+    _read_filters started reading MCP_INSTANCE_TAG only two of them had been taught to set
+    it - the third failed with a MagicMock used as a tag name, which is the same trap for
+    the third time on this branch.
+
+    Args:
+        seen (dict or None): updated with the call's arguments, when given
+
+    Returns:
+        callable: a get_class replacement
+    """
+
+    def get_class(source, settings_file=None, instance=None):
+        if seen is not None:
+            seen.update(source=source, settings_file=settings_file, instance=instance)
+        return _reading_handler(source, settings_file, instance)
+
+    return get_class
 
 
 def _handler(live=True, timeout=5, data=None, fails=None, timestamp=None, instance_tag=None, covers_all=False):
@@ -583,16 +672,7 @@ class TestStoredReading:
         control document, so it is a configuration fault: stop, and no retry helps. A caller
         catching ConfigError to mean "stop" would otherwise miss it entirely.
         """
-
-        def fake_get_class(source, settings_file=None, instance=None):
-            handler = MagicMock()
-            handler.MCP_MEASUREMENT = None
-            handler.source = source
-            handler.mcp_tag_filters.return_value = {}
-            handler.source_settings = {"db": "x"}
-            return handler
-
-        monkeypatch.setattr("toinflux.inputs.get_class", fake_get_class)
+        monkeypatch.setattr("toinflux.inputs.get_class", _recording_handler())
         with pytest.raises(ConfigError, match="unusable field"):
             stored_reading(None, SETTINGS, "hue", "temp\nDROP MEASUREMENT hue")
 
@@ -621,16 +701,7 @@ class TestStoredReading:
         The outer quoting guards against the inner message format changing, so the test has
         to supply an inner exception whose text is genuinely raw.
         """
-
-        def fake_get_class(source, settings_file=None, instance=None):
-            handler = MagicMock()
-            handler.MCP_MEASUREMENT = None
-            handler.source = source
-            handler.mcp_tag_filters.return_value = {}
-            handler.source_settings = {"db": "x"}
-            return handler
-
-        monkeypatch.setattr("toinflux.inputs.get_class", fake_get_class)
+        monkeypatch.setattr("toinflux.inputs.get_class", _recording_handler())
         monkeypatch.setattr(
             "toinflux.inputs.build_latest_query",
             MagicMock(side_effect=ToolParamError("invalid field name: temp\nDROP MEASUREMENT hue")),
@@ -645,16 +716,7 @@ class TestStoredReading:
         until someone runs with -s, and then wrong rather than broken."""
         seen = {}
 
-        def fake_get_class(source, settings_file=None, instance=None):
-            seen.update(source=source, settings_file=settings_file, instance=instance)
-            handler = MagicMock()
-            handler.MCP_MEASUREMENT = None
-            handler.source = source
-            handler.mcp_tag_filters.return_value = {}
-            handler.source_settings = {"db": "x"}
-            return handler
-
-        monkeypatch.setattr("toinflux.inputs.get_class", fake_get_class)
+        monkeypatch.setattr("toinflux.inputs.get_class", _recording_handler(seen))
         monkeypatch.setattr("toinflux.inputs.resolve_db", lambda *a: "db")
         monkeypatch.setattr("toinflux.inputs.run_query", lambda *a: [])
         monkeypatch.setattr("toinflux.inputs.single_series", lambda series: ([], []))
