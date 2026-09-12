@@ -2079,6 +2079,8 @@ class TestTheControlSubsystemOptIn:
             def __init__(self, names, settings_file=None):
                 started["names"] = list(names)
                 started["settings_file"] = settings_file
+                # What the supervisor actually took on, which is what the banner counts.
+                self.children = {name: object() for name in names}
 
             def run(self, stop, poll_seconds=0.5):
                 """Record that the thread ran, and return.
@@ -2123,3 +2125,68 @@ class TestAnEmptyControlName:
                 sendtoinflux.main()
         assert exited.value.code == 1
         run.assert_called_once()
+
+
+class TestTheSupervisorBanner:
+    """A control skipped for being unreadable says so on its own line. A banner counting it
+    as well would have an operator looking for a process that was never started."""
+
+    def test_it_counts_what_is_supervised_rather_than_what_was_found(self, caplog):
+        class _Supervisor:
+            children = {"conservatory": object()}
+
+            def __init__(self, names, settings_file=None):
+                """Accept the names and supervise only some of them.
+
+                Args:
+                    names (iterable): what was found on disk
+                    settings_file (str or None): unused here
+                """
+
+            def run(self, stop, poll_seconds=0.5):
+                """Do nothing, as a stand-in.
+
+                Args:
+                    stop (threading.Event): unused
+                    poll_seconds (float): unused
+                """
+
+            def stop_all(self):
+                """Do nothing, as a stand-in."""
+
+        args = argparse.Namespace(settings=None)
+        with (
+            patch("sendtoinflux.Supervisor", _Supervisor),
+            patch("sendtoinflux.list_controls", return_value=["conservatory", "bent"]),
+            patch("sendtoinflux.atexit.register"),
+        ):
+            with caplog.at_level(logging.INFO):
+                sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)
+        assert "Supervising 1 control(s)" in caplog.text
+        assert "bent" not in caplog.text
+
+    def test_nothing_starts_when_no_control_survives(self, caplog):
+        class _Supervisor:
+            children = {}
+
+            def __init__(self, names, settings_file=None):
+                """Supervise nothing at all.
+
+                Args:
+                    names (iterable): what was found on disk
+                    settings_file (str or None): unused here
+                """
+
+            def stop_all(self):
+                """Do nothing, as a stand-in."""
+
+        args = argparse.Namespace(settings=None)
+        with (
+            patch("sendtoinflux.Supervisor", _Supervisor),
+            patch("sendtoinflux.list_controls", return_value=["bent"]),
+            patch("sendtoinflux.atexit.register") as register,
+        ):
+            with caplog.at_level(logging.ERROR):
+                assert sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args) is None
+        assert "No stored control could be supervised" in caplog.text
+        register.assert_not_called()

@@ -742,13 +742,22 @@ def _start_control_supervisor(settings, args):
         logging.warning("controls.enabled is true but no controls are stored, so none will run")
         return None
     supervisor = Supervisor(names, settings_file=args.settings)
+    supervised = list(supervisor.children)
+    if not supervised:
+        # Every stored control was unusable, and each said so as it was skipped. A
+        # supervisor with nothing to supervise is a thread and a banner about nothing.
+        logging.error("No stored control could be supervised, so none are running")
+        return None
     thread = threading.Thread(target=supervisor.run, args=(SHUTDOWN,), name="control-supervisor", daemon=True)
     thread.start()
     # The supervisor's own loop stops its controls when SHUTDOWN is set, but a signal exits
     # this process through sys.exit and the daemon thread simply stops - so the last word on
     # leaving devices safe belongs here, where it runs either way. stop_all is idempotent.
     atexit.register(supervisor.stop_all)
-    logging.info("Supervising %s control(s): %s", len(names), render_values(names))
+    # From what is actually being supervised rather than from what was found on disk: a
+    # control skipped for being unreadable said so on its own line, and a banner counting it
+    # too would have an operator looking for a process that was never started.
+    logging.info("Supervising %s control(s): %s", len(supervised), render_values(supervised))
     return supervisor
 
 

@@ -408,6 +408,24 @@ class TestTheRestartDecisionItself:
             with pytest.raises(OSError):
                 os.fstat(descriptor)
 
+    def test_running_out_of_descriptors_is_that_control_s_failure(self, state_directory, monkeypatch):
+        """An OSError from os.pipe would go straight past the restart path, which handles
+        this project's own types - one control's exhaustion becoming every control's
+        outage. It arrives as a ConfigError, so the restart logic isolates it."""
+        supervisor = self._supervisor(state_directory, self._Clock())
+
+        def refuse():
+            """Fail the way a process out of descriptors does.
+
+            Raises:
+                OSError: always
+            """
+            raise OSError(24, "Too many open files")
+
+        monkeypatch.setattr("toinflux.supervision.os.pipe", refuse)
+        with pytest.raises(ConfigError, match="heartbeat pipe"):
+            supervisor.start("conservatory")
+
     def test_a_control_with_no_restart_due_is_left_alone(self, state_directory, monkeypatch):
         clock = self._Clock()
         supervisor = self._supervisor(state_directory, clock)

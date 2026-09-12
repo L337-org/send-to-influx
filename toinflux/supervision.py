@@ -233,7 +233,14 @@ class Supervisor:
             ConfigError: where the process could not be started at all
         """
         child = self.children[name]
-        read_fd, write_fd = os.pipe()
+        try:
+            read_fd, write_fd = os.pipe()
+        except OSError as exc:
+            # Out of descriptors, most likely. Translated rather than left raw because the
+            # restart path handles this project's own type: an OSError from here would go
+            # straight past it and end the loop, which is one control's exhaustion becoming
+            # every control's outage.
+            raise ConfigError(f"could not make a heartbeat pipe for control {name!r}: {exc}") from exc
         try:
             child.process = spawn(
                 [*self._argv_for(name), "--heartbeat-fd", str(write_fd)],
