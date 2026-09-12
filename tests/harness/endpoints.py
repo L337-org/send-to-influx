@@ -35,6 +35,7 @@ import os
 import shutil
 import socket
 import ssl
+import sys
 import threading
 import time
 import urllib.parse
@@ -67,18 +68,24 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
 
-    def handle(self):
-        """Serve this connection, or drop it where the endpoint is playing unreachable."""
-        if self.server.endpoint.unreachable:
-            try:
-                self.connection.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                # The client may have gone already. Nothing to do either way: the point is
-                # that no response is sent.
-                pass
-            self.close_connection = True
-            return
-        super().handle()
+    def _drop(self):
+        """Record an attempt and close the connection without answering.
+
+        Recorded before it is dropped: a control that keeps trying through an unreachable
+        fault *is* still cycling, and an endpoint that recorded nothing would let
+        ``kept_cycling`` report a stall that never happened - failing a correct run, which
+        is how an invariant ends up switched off.
+        """
+        endpoint = self.server.endpoint
+        with endpoint.lock:
+            endpoint.attempts.append(time.monotonic())
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            # The client may have gone already. Nothing to do either way: the point is
+            # that no response is sent.
+            pass
+        self.close_connection = True
 
     def log_message(self, format, *args):  # noqa: A002 - the base class names it `format`
         """Discard the default stderr access log.
@@ -123,6 +130,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             body (object): the parsed request body
         """
         endpoint = self.server.endpoint
+        # Checked here, where the request has arrived, rather than anywhere earlier in the
+        # connection's life. HTTP/1.1 keeps a connection open for many requests, and the
+        # server thread sits *inside* its request loop blocked on reading the next request
+        # line - so a check made before that read has already been passed by the time the
+        # request exists. Every client in this project holds a requests.Session, so with
+        # the check one level out a control that had already talked to the bridge sailed
+        # straight through an unreachable fault: measured at four answered requests with
+        # the fault switched on throughout, which would have proved a control resilient to
+        # an outage that never happened.
+        if endpoint.unreachable:
+            self._drop()
+            return
         parsed = urllib.parse.urlparse(self.path)
         request = Request(
             at=time.monotonic(),
@@ -149,6 +168,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             code (int): the HTTP status
             payload (object): the body, serialised as JSON
         """
+        # 204 carries no body, and InfluxDB's /write really does answer 204: a stub that
+        # sent JSON there would let code under test come to depend on a parseable body that
+        # the real server never sends.
+        if code == 204:
+            self.send_response(code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         encoded = json.dumps(payload).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -162,6 +189,28 @@ class _Server(http.server.ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        """Report a handler failure, unless it is the client having gone away.
+
+        The ``hanging`` fault exists to make a client give up mid-request, which leaves the
+        handler writing to a socket that is no longer there. http.server prints a full
+        traceback for each one, and those say nothing: the disconnect is what the test asked
+        for. Measured before this was added - one `ConnectionResetError` traceback per
+        timed-out request, from a background thread, landing in whichever test happened to
+        be running.
+
+        Only the disconnect family is swallowed. Anything else is a fault in the harness
+        itself and still gets printed, because a stub that hides its own errors is worse
+        than a noisy one.
+
+        Args:
+            request (socket.socket): the connection that failed
+            client_address (tuple): where it came from
+        """
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
 
     def __init__(self, endpoint):
         """Bind to an ephemeral loopback port.
@@ -192,6 +241,11 @@ class StubEndpoint:
                 reuse, generated when None and ``tls`` is set
         """
         self.requests = []
+        #: When a connection was accepted and dropped rather than answered, as monotonic
+        #: readings. Kept apart from `requests` because those carry what was asked and
+        #: these carry only that somebody asked: a dropped connection is read before any
+        #: request line is.
+        self.attempts = []
         self.unreachable = False
         self.hang_seconds = 0.0
         self.status = None
@@ -246,9 +300,22 @@ class StubEndpoint:
         raise NotImplementedError
 
     def clear(self) -> None:
-        """Forget every request recorded so far."""
+        """Forget every request and attempt recorded so far."""
         with self.lock:
             self.requests.clear()
+            self.attempts.clear()
+
+    def contacts(self):
+        """Return when the endpoint was reached at all, answered or not.
+
+        What "the loop is still running" is measured against: a control talking to an
+        endpoint that is refusing to answer is still a control that is running.
+
+        Returns:
+            list: monotonic readings, oldest first
+        """
+        with self.lock:
+            return sorted([r.at for r in self.requests] + list(self.attempts))
 
     def paths(self, method=None):
         """Return the paths requested so far, in order.

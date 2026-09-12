@@ -110,6 +110,22 @@ class TestTheStubBridgeIsABridge:
             with pytest.raises(SourceConnectionError):
                 _hue(installation).mcp_list_writable_devices()
 
+    def test_an_unreachable_bridge_stays_unreachable_to_a_client_that_is_already_talking(self, installation, bridge):
+        """The case that matters, and the one a fresh handler per call cannot see. Every
+        client here holds a requests.Session, so its connection is already open when the
+        fault arrives - and a check made anywhere earlier in that connection's life has
+        already been passed by the time the next request exists. Measured at four answered
+        requests with the fault on throughout, which would have proved a control resilient
+        to an outage that never happened."""
+        handler = _hue(installation)
+        handler.mcp_list_writable_devices()
+        answered_before = len(bridge.requests)
+        with faults.unreachable(bridge):
+            for _ in range(3):
+                with pytest.raises(SourceConnectionError):
+                    handler.mcp_list_writable_devices()
+        assert len(bridge.requests) == answered_before, "the bridge answered during an outage"
+
     def test_a_bridge_slower_than_the_timeout_raises(self, installation, bridge):
         """The fault that finds a missing timeout, which is why it is a number rather than
         a flag: it has to be settable either side of the client's own."""
@@ -117,6 +133,19 @@ class TestTheStubBridgeIsABridge:
         with faults.hanging(bridge, 1.0):
             with pytest.raises(SourceConnectionError):
                 _hue(installation).mcp_list_writable_devices()
+
+    def test_a_client_that_gives_up_leaves_no_traceback_behind(self, installation, bridge, capfd):
+        """The `hanging` fault exists to make a client give up mid-request, which leaves the
+        handler writing to a socket that is gone. Unhandled, http.server prints a full
+        traceback per occurrence from a background thread, landing in whichever test happens
+        to be running - measured as one ConnectionResetError traceback per timed-out
+        request before this was handled."""
+        installation.set_settings("hue", timeout=0.2)
+        with faults.hanging(bridge, 0.4):
+            with pytest.raises(SourceConnectionError):
+                _hue(installation).mcp_list_writable_devices()
+        time.sleep(0.8)
+        assert "Traceback" not in capfd.readouterr().err
 
     def test_a_bridge_answering_an_error_status_raises(self, installation, bridge):
         with faults.erroring(bridge, 503):
@@ -470,6 +499,19 @@ class TestTheInvariantsCatchViolations:
         bridge.requests[-1].at -= 600
         broken = invariants.kept_cycling(bridge, period=1, tolerance=3).violations
         assert len(broken) == 1 and "the last" in broken[0], broken
+
+    def test_a_control_trying_against_an_unreachable_endpoint_has_not_stalled(self, installation, bridge):
+        """A refused connection is still the loop running. Counting only answered requests
+        would report a stall for the whole duration of every unreachable fault - failing a
+        correct run, which is how an invariant ends up switched off."""
+        handler = _hue(installation)
+        handler.mcp_list_writable_devices()
+        with faults.unreachable(bridge):
+            for _ in range(3):
+                with pytest.raises(SourceConnectionError):
+                    handler.mcp_list_writable_devices()
+        assert invariants.kept_cycling(bridge, period=60, tolerance=3).violations == []
+        assert len(bridge.attempts) == 3
 
     def test_an_endpoint_nobody_asked_anything_is_a_violation(self, bridge):
         """Silence is not success: a control that never started would satisfy every other

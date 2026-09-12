@@ -205,6 +205,11 @@ def kept_cycling(endpoint, period, tolerance=3.0, ignore_before=None, until=None
     subject's own account of itself. A loop that stopped doing any work while continuing to
     say it was alive is exactly the failure this is looking for.
 
+    Counted as *contacts*, answered or not. A control talking to an endpoint that is
+    refusing to answer has not stalled, and counting only answered requests would report
+    one for the whole duration of every unreachable fault - failing a correct run, which is
+    how an invariant ends up switched off.
+
     **The silence after the last request counts too.** A loop that stalls at the end of the
     window leaves no later request to make an oversized gap with, so checking only the gaps
     between requests reports success for the one shape of stall a scenario is most likely to
@@ -222,7 +227,10 @@ def kept_cycling(endpoint, period, tolerance=3.0, ignore_before=None, until=None
     Returns:
         Report: each silence that was too long
     """
-    moments = [r.at for r in endpoint.requests if ignore_before is None or r.at >= ignore_before]
+    # Contacts rather than requests: a control still trying against an endpoint that is
+    # refusing to answer is still a control that is running, and reading only answered
+    # requests would report a stall for the duration of every unreachable fault.
+    moments = [at for at in endpoint.contacts() if ignore_before is None or at >= ignore_before]
     ended = time.monotonic() if until is None else until
     violations = []
     for earlier, later in zip(moments, moments[1:]):
