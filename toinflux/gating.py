@@ -14,12 +14,19 @@ The safe state is separate from the end state, and the distinction is not fussin
 control that wants to be left alone when something breaks may well want to be switched off
 at dawn: one is about failure, the other about a schedule, and a device wired to a
 contactor can reasonably want opposite things from them.
+
+**The same safe state also governs the two ends of the process**, through
+:class:`DeviceGuard`: asserted before the first cycle and applied again on the way out.
+The startup half is the one that has to exist, because the exit half cannot run after a
+SIGKILL, an OOM kill or a power cut.
 """
 
 __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
+import atexit
+import logging
 import math
 from dataclasses import dataclass
 
@@ -204,3 +211,107 @@ def commands_for(state, devices):
     if state != UNENERGISED:
         raise ConfigError(f"{state!r} is not a safe state this knows: expected one of {BUILT_IN_SAFE_STATES}")
     return {name: False for name in devices}
+
+
+class DeviceGuard:
+    """Puts a control's devices in a known state when its process starts and when it ends.
+
+    Two halves of one promise, and the startup half is the one that has to exist. The
+    exit half is best effort: an atexit handler does not run on SIGKILL, an OOM kill or a
+    power cut, so a control that only tidied up on the way out would leave heaters running
+    after any of those until somebody noticed. Asserting the safe state on the way *in*
+    closes all three at once, because a process that died without cleaning up is a process
+    that is about to be restarted.
+
+    ``leave_unchanged`` opts out of both halves, which is the point of it being opt-in: it
+    means "this device's state is not mine to reset", and a control that said so at 03:00
+    did not mean something different at startup.
+    """
+
+    def __init__(self, name, safe_state, devices, command):
+        """Prepare a guard and register its exit handler.
+
+        Registered here rather than after a successful start, so that a failure between
+        construction and the first cycle still reaches the safe state on the way out.
+
+        Args:
+            name (str): the control's name, for the log lines
+            safe_state (str): one of the built-in safe states
+            devices (iterable): the device names the control owns
+            command (callable): applied to a device -> state mapping; whatever it raises
+                is what the caller sees
+
+        Raises:
+            ConfigError: where the safe state is not one of the built-in names
+        """
+        self.name = name
+        self.safe_state = safe_state
+        self.devices = tuple(devices)
+        self._command = command
+        # Computed now rather than at exit: an unknown state should stop the control
+        # starting, not surface as a failure on the one path that cannot do anything
+        # about it.
+        self._commands = commands_for(safe_state, self.devices)
+        self._stopped = False
+        atexit.register(self._at_exit)
+
+    def assert_safe_state(self) -> None:
+        """Command the devices into the safe state before the loop runs.
+
+        Raises:
+            Exception: whatever ``command`` raises, unwrapped - a device that is missing
+                and a bridge that is unreachable want different responses, and the caller
+                is the one that can tell them apart.
+        """
+        if self._commands is None:
+            logging.warning(
+                "Control %r starts with safe_state %r, so its devices keep whatever state they "
+                "were left in, including after a crash or a power cut",
+                self.name,
+                self.safe_state,
+            )
+            return
+        logging.info("Control %r asserting %r on %s", self.name, self.safe_state, ", ".join(self.devices) or "nothing")
+        self._command(self._commands)
+
+    def stop(self, reason) -> None:
+        """Put the devices in the safe state on the way out, once.
+
+        Once, because a second command after the normal shutdown path has already run
+        would fail against a torn-down connection and log as though the safe state had not
+        been applied, which is the opposite of what happened.
+
+        Args:
+            reason (str): why the control is stopping, for the log line
+        """
+        if self._stopped:
+            return
+        self._stopped = True
+        # Nothing left for the exit handler to do, and an entry that has already run is an
+        # entry that outlives its guard: a control reloaded in a long-lived process would
+        # otherwise leave one registered per document it has ever had.
+        atexit.unregister(self._at_exit)
+        if self._commands is None:
+            return
+        logging.info("Control %r applying %r on %s: %s", self.name, self.safe_state, ", ".join(self.devices), reason)
+        try:
+            self._command(self._commands)
+        except Exception as exc:  # noqa: BLE001 - nothing above this can handle it
+            # Caught rather than raised because this is the last thing the process does:
+            # an exception here becomes a traceback printed by atexit and nothing else.
+            # Logged with the underlying error because a device left energised after a
+            # shutdown is exactly the failure somebody will be looking for.
+            logging.error("Control %r could not apply %r on exit: %s", self.name, self.safe_state, exc)
+
+    def close(self) -> None:
+        """Drop the exit handler without applying anything.
+
+        For a guard that has been replaced rather than stopped: the devices are now some
+        other guard's business, and an abandoned one would still command them at exit.
+        """
+        self._stopped = True
+        atexit.unregister(self._at_exit)
+
+    def _at_exit(self) -> None:
+        """Apply the safe state if nothing else already has."""
+        self.stop("the process is exiting")
