@@ -35,7 +35,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
-from toinflux.general import MINIMUM_INTERVAL_KEY, get_class, resolve_state_dir, source_class
+from toinflux.general import (
+    MINIMUM_INTERVAL_KEY,
+    get_class,
+    known_sources,
+    render_values,
+    resolve_state_dir,
+    source_class,
+)
 from toinflux.influx import InfluxWriteError, build_latest_query, resolve_db, run_query, single_series
 
 
@@ -71,12 +78,20 @@ def resolve_minimum_interval(source, settings):
     # because validate_settings() matches them against known_sources(). Normalising here
     # rather than at one call site keeps every caller on the same convention.
     source = source.lower()
+    known = known_sources()
+    if source not in known:
+        # Checked before the settings section, because a misspelled source is the likelier
+        # fault and "add a huee section" sends the reader off to write configuration for
+        # something that can never collect - validate_settings would refuse it too.
+        raise ConfigError(
+            f"control input names {source!r}, which is not a known source (known: {render_values(known)})"
+        )
     source_cfg = (settings or {}).get(source)
     if not isinstance(source_cfg, dict):
         raise ConfigError(
-            f"cannot resolve the live-fetch floor for source {source!r}: it has no settings section. "
+            f"cannot resolve the minimum interval for source {source!r}: it has no settings section. "
             f"Add a {source!r} section with an 'interval' in it, or set "
-            f"{f'{source}.{MINIMUM_INTERVAL_KEY}'!r} there to give the floor directly"
+            f"{f'{source}.{MINIMUM_INTERVAL_KEY}'!r} there to give the minimum directly"
         )
     if MINIMUM_INTERVAL_KEY in source_cfg:
         return _as_seconds(source_cfg[MINIMUM_INTERVAL_KEY], f"{source}.{MINIMUM_INTERVAL_KEY}")
@@ -669,7 +684,6 @@ def _live_reading(handler, source, field, stored, now):
     Note:
         A failed write-back is logged rather than raised: the reading is still returned.
     """
-    moment = time.time() if now is None else now
     try:
         data = handler.get_data()
     except SourceConnectionError as exc:
@@ -687,11 +701,21 @@ def _live_reading(handler, source, field, stored, now):
             exc,
         )
         return _require(stored, source, field, f"the live read failed ({exc!r}) and InfluxDB holds no point for it")
+    # The clock is read after the fetch, not before. get_data can take seconds against a
+    # slow API, and a moment captured beforehand would date the point earlier than it is.
+    moment = time.time() if now is None else now
+    # The point's own time where the handler set one - get_data does that when the reading
+    # is older than the request, as Nuki's and Octopus's do - and otherwise this moment.
+    #
+    # Passed to send_data rather than left to it. Its own fallback is int(time.time()),
+    # evaluated later and separately, so the stored point and the reading returned here
+    # would carry different timestamps and a freshness check could straddle them.
+    written_at = int(moment) if handler.timestamp is None else handler.timestamp
     # Write back every field the fetch returned, not just the one asked for: the round trip
     # has already been paid for, and another control reading a different field of this
-    # source is the case the floor exists to serve.
+    # source is the case the minimum interval exists to serve.
     try:
-        handler.send_data(data)
+        handler.send_data(data, timestamp=written_at)
     except InfluxWriteError as exc:
         # The value in hand is good; only the coordination failed. Raising here would throw
         # away a fresh reading because a best-effort write missed, and the caller's response
@@ -704,11 +728,7 @@ def _live_reading(handler, source, field, stored, now):
         logging.warning("Could not write back the live read of %r for %r: %r", source, field, exc)
     if field not in data:
         return _require(stored, source, field, "the live read returned no such field")
-    # The point's own time, not the time we asked for it. get_data() sets handler.timestamp
-    # where the reading is older than the request - Nuki does, Octopus does - and send_data
-    # writes the point at that same value, so reporting age 0 here would disagree with what
-    # InfluxDB now holds and would tell a control an hour-old reading was brand new.
-    stamp = moment if handler.timestamp is None else float(handler.timestamp)
+    stamp = float(written_at)
     return InputReading(
         value=_as_reading_value(data[field], source, field), timestamp=stamp, age=moment - stamp, live=True
     )

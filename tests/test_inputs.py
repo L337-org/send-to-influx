@@ -118,6 +118,14 @@ class TestResolveMinimumInterval:
         assert resolve_minimum_interval("hue", settings) == 10.0
         assert resolve_minimum_interval("openmeteo", settings) == 1200.0
 
+    def test_an_unknown_source_says_so_rather_than_asking_for_a_section(self):
+        """A misspelled source is the likelier fault, and "add a 'huee' section" sends the
+        reader off to write configuration for something that can never collect -
+        validate_settings would refuse it too. Checked before the settings section for that
+        reason."""
+        with pytest.raises(ConfigError, match="not a known source"):
+            resolve_minimum_interval("huee", {"huee": {"interval": 300}})
+
     def test_the_source_name_is_case_insensitive(self):
         """get_class() accepts any case and lowercases, and settings sections are
         canonically lowercase because validate_settings matches them against
@@ -128,7 +136,7 @@ class TestResolveMinimumInterval:
     def test_a_source_without_a_usable_section_is_a_config_error(self, settings):
         """Including a section present but empty, which is what commenting out every field
         leaves behind and parses as null."""
-        with pytest.raises(ConfigError, match="cannot resolve the live-fetch floor"):
+        with pytest.raises(ConfigError, match="cannot resolve the minimum interval"):
             resolve_minimum_interval("hue", settings)
 
     def test_a_section_with_nothing_usable_names_the_setting_to_add(self, monkeypatch):
@@ -569,7 +577,7 @@ class TestReadInput:
         reading = read_input(None, SETTINGS, SPEC, now=9999.0)
         # Age 0 because this handler set no timestamp of its own; see the two tests below.
         assert (reading.value, reading.live, reading.age) == (21.0, True, 0.0)
-        handler.send_data.assert_called_once_with({"temperature": 21.0, "humidity": 55.0})
+        handler.send_data.assert_called_once_with({"temperature": 21.0, "humidity": 55.0}, timestamp=int(9999.0))
 
     def test_the_minimum_interval_beats_a_shorter_max_age(self, monkeypatch):
         """A control wanting fresher data than the source's floor allows gets the stored
@@ -659,6 +667,24 @@ class TestReadInput:
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         reading = read_input(None, SETTINGS, SPEC, now=9600.0)
         assert (reading.timestamp, reading.age, reading.live) == (6000.0, 3600.0, True)
+
+    def test_the_stored_point_and_the_returned_reading_share_one_timestamp(self, monkeypatch, tmp_path):
+        """send_data's own fallback is int(time.time()), evaluated later and separately, so
+        leaving it to decide meant the point in InfluxDB and the reading returned here could
+        carry different times and a freshness check could straddle them.
+
+        The clock is also read after the fetch rather than before: get_data can take seconds
+        against a slow API, and a moment captured beforehand dates the point earlier than it
+        is.
+        """
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        handler = _handler(data={"temperature": 21.0})
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: None)
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        reading = read_input(None, SETTINGS, SPEC, now=9600.5)
+        written_at = handler.send_data.call_args.kwargs["timestamp"]
+        assert written_at == 9600, "the point should be written at the moment it was read"
+        assert reading.timestamp == float(written_at), "the reading must match what was stored"
 
     def test_a_live_reading_with_no_handler_timestamp_is_now(self, monkeypatch, tmp_path):
         """The ordinary case: the handler read the device and the point is the moment."""
