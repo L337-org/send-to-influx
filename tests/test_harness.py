@@ -22,7 +22,7 @@ import pytest
 import requests
 
 from tests.harness import census, faults, invariants
-from tests.harness.bridge import StubBridge
+from tests.harness.bridge import StubBridge, plug
 from tests.harness.certificates import write_self_signed
 from tests.harness.influxdb import StubInflux
 from tests.harness.installation import Installation, conservatory
@@ -396,6 +396,21 @@ class TestTheInvariantsCatchViolations:
         # number of seconds since an arbitrary moment, and says nothing after a "+".
         offset = float(broken[0].split("at +")[1].split("s,")[0])
         assert 0 <= offset < 60, broken
+
+    def test_another_control_s_command_cannot_hide_a_bad_state(self, installation, bridge):
+        """The transition was settled against the next command on the *bridge*, which in a
+        two-control scenario is somebody else's device. A foreign command arriving inside
+        the settle window, with nothing of ours after it, left our last transition never
+        settled and so never checked - in exactly the scenario this harness exists for."""
+        bridge.lights["9"] = plug("someone-elses")
+        handler = _hue(installation)
+        # Both of ours, so the combination is complete, and it is one no stage declares:
+        # the ladder goes nothing, far, far and near - never near alone.
+        handler.mcp_set_device_state("far", on=False)
+        handler.mcp_set_device_state("near", on=True)
+        handler.mcp_set_device_state("someone-elses", on=True)
+        broken = invariants.states_were_declared(bridge, conservatory(), settle=5.0).violations
+        assert len(broken) == 1 and "near': True" in broken[0], broken
 
     def test_a_two_device_transition_is_not_read_as_a_violation(self, installation, bridge):
         """Commands arrive one device at a time, so every legitimate transition passes

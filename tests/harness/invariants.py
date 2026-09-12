@@ -128,14 +128,17 @@ def states_were_declared(bridge, control, settle=2.0):
     bridge_names, allowed = declared_states(control)
     wanted = set(bridge_names.values())
     state, violations, group_at = {}, [], None
-    commands = sorted(bridge.commanded(), key=lambda c: c.at)
+    # This control's own commands, before anything is decided. Reading "has it settled" off
+    # the next command on the *bridge* meant another control could answer for this one: a
+    # foreign command inside the settle window, with nothing of ours after it, left the last
+    # transition never settled and so never checked - in exactly the two-control scenario
+    # the harness exists for, and confirmed by a test before this was changed.
+    commands = [c for c in sorted(bridge.commanded(), key=lambda c: c.at) if c.name in wanted]
     # Offsets are reported from the first command seen. A raw time.monotonic() reading is
     # an arbitrary number of seconds since an arbitrary moment, and printing one after a
     # "+" says nothing to somebody reading the failure.
     origin = commands[0].at if commands else 0.0
     for index, command in enumerate(commands):
-        if command.name not in wanted:
-            continue
         if group_at is None:
             group_at = command.at
         if "on" in command.state:
