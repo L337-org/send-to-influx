@@ -954,8 +954,7 @@ def _validate_source_block(source, settings, is_v2):
         return [unusable]
     errors = []
     source_cfg = settings[source]
-    if "interval" not in source_cfg:
-        errors.append(f"{source}.interval is required")
+    errors.extend(_validate_interval(source, source_cfg))
     if is_v2:
         if "db" not in source_cfg and "bucket" not in source_cfg:
             errors.append(f"{source}.db (or {source}.bucket for InfluxDB v2) is required")
@@ -968,6 +967,35 @@ def _validate_source_block(source, settings, is_v2):
         errors.append(f"{source}.mcp_read_write must be true or false (got {source_cfg['mcp_read_write']!r})")
     errors.extend(_validate_minimum_interval(source, source_cfg))
     return errors
+
+
+def _validate_interval(source, source_cfg):
+    """Return errors for a source's collection interval.
+
+    Previously checked only for presence, so `interval: .nan` passed --check-config and then
+    reached a worker's `time.sleep`, which raises. The same is true of a string, a bool or a
+    negative number, all of which a YAML file can hold and none of which `sleep` accepts.
+
+    The accepted shape is the one `_stall_threshold_seconds` in sendtoinflux.py already
+    requires before it will use the value: a real number, finite, and greater than zero.
+
+    Args:
+        source (str): the source name, for the message
+        source_cfg (dict): that source's settings section
+
+    Returns:
+        list: error strings, empty when the interval is usable
+    """
+    if "interval" not in source_cfg:
+        return [f"{source}.interval is required"]
+    value = source_cfg["interval"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return [f"{source}.interval must be a number of seconds (got {value!r})"]
+    if not math.isfinite(value):
+        return [f"{source}.interval must be a finite number of seconds (got {value!r})"]
+    if value <= 0:
+        return [f"{source}.interval must be greater than zero (got {value!r})"]
+    return []
 
 
 def _validate_minimum_interval(source, source_cfg):
@@ -995,11 +1023,10 @@ def _validate_minimum_interval(source, source_cfg):
     # .nan and .inf are floats as far as YAML and isinstance are concerned, and neither
     # fails loudly later: a nan floor never holds so every cycle goes live, and an inf one
     # always holds so nothing ever does.
-    #
-    # `interval` above gets no such check - only that it is present - so a `.nan` there
-    # still reaches a worker's sleep. That is a gap in existing validation rather than
-    # something this key introduced, and it is raised separately rather than widened into
-    # here. Said explicitly because the obvious assumption is that the two match.
+    # `interval` gets the same treatment in _validate_interval, which it did not until this
+    # key went in and the mismatch became obvious. The two differ in one respect only:
+    # zero is a legitimate minimum interval, meaning "ask whenever you like", and is not a
+    # legitimate collection interval, because a worker would spin.
     if not math.isfinite(value):
         return [f"{source}.{MINIMUM_INTERVAL_KEY} must be a finite number of seconds (got {value!r})"]
     if value < 0:

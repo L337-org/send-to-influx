@@ -591,6 +591,32 @@ class TestReadInput:
         assert (reading.value, reading.live) == (21.0, True)
         assert "write back" in caplog.text
 
+    @pytest.mark.parametrize(
+        "age,refreshes",
+        [
+            pytest.param(2600.0, False, id="inside-three-intervals"),
+            pytest.param(2800.0, True, id="past-three-intervals"),
+        ],
+    )
+    def test_an_absent_max_age_tolerates_three_intervals_not_one(self, monkeypatch, age, refreshes):
+        """max_age stays optional - it arrived late enough that requiring it would break
+        documents people already have - so an absent one needs an internal default.
+
+        Three times the source's minimum interval, matching STALL_INTERVAL_MULTIPLIER. It
+        changes nothing about the fetch trigger, since the minimum dominates; it matters
+        because max_age is also the staleness past which a control stops acting, and one
+        interval would trip on a single missed collection.
+        """
+        handler = _handler()
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
+        settings = {**SETTINGS, "carbonintensity": {"interval": 1800, "db": "x"}}
+        spec = {"source": "carbonintensity", "field": "intensity_actual"}
+        # carbonintensity's minimum interval is 900, so the default tolerance is 2700.
+        reading = InputReading(value=1.0, timestamp=0.0, age=age, live=False)
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: reading)
+        read_input(None, settings, spec)
+        assert handler.get_data.called is refreshes
+
     def test_an_input_without_a_max_age_falls_back_to_the_source_floor(self, monkeypatch):
         """max_age is optional in a control document, so requiring it here would make
         --check-config pass a control that then failed at runtime. An input declaring no

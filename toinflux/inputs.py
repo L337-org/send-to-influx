@@ -347,6 +347,12 @@ MAX_LOCK_BACKOFF = 0.5
 # commit by accident. One directory also makes one ignore rule enough.
 LOCK_DIR_NAME = "locks"
 
+# How many of a source's minimum intervals an input tolerates when it declares no max_age
+# of its own. Three, matching sendtoinflux.STALL_INTERVAL_MULTIPLIER: one interval would
+# make a single missed collection look like a fault, which is the same reasoning that set
+# the stall threshold there.
+MAX_AGE_INTERVALS = 3
+
 # The column InfluxDB returns a point's timestamp in. Named because a field key equal to it
 # is ambiguous rather than merely awkward, and handler_reading refuses one.
 TIME_COLUMN = "time"
@@ -526,12 +532,19 @@ def read_input(session, settings, spec, settings_file=None, now=None):
     # max_age through the same door as the floor and the timeout. It is the third duration
     # in this expression and the one I left bare: an .inf max_age makes the trigger infinite,
     # so the input reads as perpetually fresh and is never refreshed however old it gets.
-    # max_age is optional in a control document, so an absent one means "no tolerance of my
-    # own": the trigger falls back to the source's floor, which is as fresh as anything can
-    # ask for anyway. Required here instead would make --check-config pass documents that
-    # then failed at runtime, and the validator is the contract.
-    max_age = _as_seconds(spec.get("max_age", 0), f"max_age for input {field}")
-    trigger = max(max_age, resolve_minimum_interval(source, settings))
+    minimum = resolve_minimum_interval(source, settings)
+    # max_age is optional in a control document and stays that way: it arrived late enough
+    # that requiring it would break documents people already have. An absent one gets three
+    # times the source's minimum interval, mirroring STALL_INTERVAL_MULTIPLIER, which is
+    # this project's existing answer to "how many missed cycles before we call it wrong".
+    #
+    # It makes no difference to the trigger below, since the minimum dominates any value
+    # this small. It matters to the caller: max_age is also the staleness past which a
+    # control stops acting and applies its safe state, and defaulting that to one interval
+    # would trip on a single missed collection.
+    default_max_age = MAX_AGE_INTERVALS * minimum
+    max_age = _as_seconds(spec.get("max_age", default_max_age), f"max_age for input {field}")
+    trigger = max(max_age, minimum)
     # One handler for the whole call, closed on the way out. Every path here needs one -
     # even the stored read, for the measurement, tags and database - and each build opens a
     # session nothing closes.

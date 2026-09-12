@@ -219,6 +219,35 @@ class TestValidateSettings:
         sample_settings["hue"]["mcp_read_write"] = True
         validate_settings(sample_settings)
 
+    @pytest.mark.parametrize(
+        "bad,expected",
+        [
+            (float("nan"), "interval must be a finite number"),
+            (float("inf"), "interval must be a finite number"),
+            ("300", "interval must be a number of seconds"),
+            (True, "interval must be a number of seconds"),
+            (0, "interval must be greater than zero"),
+            (-5, "interval must be greater than zero"),
+        ],
+    )
+    def test_an_unusable_interval_raises_config_error(self, sample_settings, bad, expected):
+        """Presence was the only check, so `interval: .nan` passed --check-config and then
+        reached a worker's time.sleep, which raises. The same is true of a string, a bool
+        and anything at or below zero, none of which sleep accepts and all of which a YAML
+        file can hold.
+
+        The accepted shape is the one _stall_threshold_seconds already requires before it
+        will use the value.
+        """
+        sample_settings["hue"]["interval"] = bad
+        with pytest.raises(ConfigError, match=expected):
+            validate_settings(sample_settings)
+
+    def test_a_usable_interval_is_accepted(self, sample_settings):
+        for value in (1, 300, 12.5):
+            sample_settings["hue"]["interval"] = value
+            validate_settings(sample_settings)
+
     def test_non_numeric_minimum_interval_raises_config_error(self, sample_settings):
         """The live-fetch floor is reported at --check-config, not at a control's startup.
 
