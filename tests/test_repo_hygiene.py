@@ -1418,3 +1418,24 @@ def test_every_source_declares_a_minimum_interval():
         f"these sources inherit the interval fallback instead of declaring a minimum interval: "
         f"{', '.join(missing)}. Set MINIMUM_INTERVAL on each class, with the reasoning beside it"
     )
+
+
+def test_every_source_declares_a_default_max_age():
+    """A source must say how long its readings stay worth acting on.
+
+    Deliberately separate from ``MINIMUM_INTERVAL``, and the first attempt derived one from
+    the other, which is wrong in both directions. Nuki's minimum interval is 0 because an
+    MQTT read sends nothing, so a multiple of it made every reading instantly stale; Octopus
+    data is around a day behind by nature, so a multiple of its rate limit would have put a
+    healthy feed permanently in the fail-safe.
+
+    How often a source may be asked and how long its answer stays true are unrelated
+    questions, so each gets its own answer and each has to be chosen.
+    """
+    from toinflux.general import known_sources, source_class
+
+    missing = sorted(source for source in known_sources() if source_class(source).DEFAULT_MAX_AGE is None)
+    assert not missing, (
+        f"these sources declare no default max age: {', '.join(missing)}. Set DEFAULT_MAX_AGE on "
+        f"each class, reasoned from how long its readings stay true rather than from its rate limit"
+    )

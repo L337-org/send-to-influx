@@ -20,6 +20,8 @@ class OpenMeteo(DataHandler):
     Attributes:
         MINIMUM_INTERVAL (int): 600 - a free public API used without a key, and about
             the resolution of the data, so asking faster returns the same numbers.
+        DEFAULT_MAX_AGE (int): 3600 - conditions update about every fifteen minutes and
+            outdoor dew point moves slowly, so an hour-old figure is still sound.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_MEASUREMENT (str): "weather" - this source's measurement is not its own name.
         MCP_FIELD_METADATA (dict): units and aggregation kinds for the example-settings
@@ -31,6 +33,10 @@ class OpenMeteo(DataHandler):
     # faster than that, so a shorter interval spends someone else's capacity to receive the
     # same numbers back. The shipped collection interval is 900.
     MINIMUM_INTERVAL = 600
+    # Current conditions update roughly every fifteen minutes, and outdoor temperature and
+    # dew point move slowly. An hour-old dew point is still a sound basis for a condensation
+    # floor, which is the motivating use of this source.
+    DEFAULT_MAX_AGE = 3600
 
     MCP_DESCRIPTION = "Open-Meteo weather: temperature, humidity, precipitation, cloud, wind and radiation."
     # Writes to the "weather" measurement, not "openmeteo".

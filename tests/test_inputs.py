@@ -35,6 +35,7 @@ from toinflux.inputs import (
     InputReading,
     fetch_lock,
     fetch_lock_path,
+    _default_max_age,
     read_input,
     resolve_minimum_interval,
     stored_reading,
@@ -167,6 +168,38 @@ class TestResolveMinimumInterval:
         monkeypatch.setattr("toinflux.inputs.source_class", lambda source: handler)
         with pytest.raises(ConfigError, match="'hue.interval' must be a number of seconds"):
             resolve_minimum_interval("hue", {"hue": {"interval": "300"}})
+
+
+class TestTheDefaultMaxAge:
+    """How long a source's readings stay worth acting on, per source.
+
+    Separate from MINIMUM_INTERVAL on purpose: how often a source may be asked and how long
+    its answer stays true are unrelated, and deriving one from the other is wrong at both
+    ends of the range.
+    """
+
+    @pytest.mark.parametrize(
+        "source,expected",
+        [
+            pytest.param("nuki", 900.0, id="event-driven-state-stays-true-until-something-happens"),
+            pytest.param("hue", 900.0, id="liveness-of-the-bridge-rather-than-the-value-moving"),
+            pytest.param("zappi", 300.0, id="live-power-where-a-stale-value-is-worse-than-none"),
+            pytest.param("openmeteo", 3600.0, id="outdoor-conditions-move-slowly"),
+            pytest.param("carbonintensity", 3600.0, id="half-hourly-settlement-periods"),
+            pytest.param("speedtest", 86400.0, id="a-run-every-six-hours-still-describes-the-line"),
+            pytest.param("octopus", 172800.0, id="data-is-a-day-behind-by-nature"),
+        ],
+    )
+    def test_each_source_declares_its_own(self, source, expected):
+        assert _default_max_age(source) == expected
+
+    def test_it_is_not_a_multiple_of_the_minimum_interval(self):
+        """The property, not the numbers. Nuki may be asked as often as you like and its
+        state stays true for hours; Octopus must not be asked often and its data is a day
+        behind. Any formula relating the two gets at least one of them badly wrong."""
+        assert resolve_minimum_interval("nuki", {"nuki": {"interval": 300}}) == 0.0
+        assert _default_max_age("nuki") > 0, "a zero rate limit must not mean zero tolerance"
+        assert _default_max_age("octopus") > 24 * 3600, "a day-behind feed must not read as stale"
 
 
 class TestTheFetchLockSerialisesLiveFetches:
@@ -591,31 +624,21 @@ class TestReadInput:
         assert (reading.value, reading.live) == (21.0, True)
         assert "write back" in caplog.text
 
-    @pytest.mark.parametrize(
-        "age,refreshes",
-        [
-            pytest.param(2600.0, False, id="inside-three-intervals"),
-            pytest.param(2800.0, True, id="past-three-intervals"),
-        ],
-    )
-    def test_an_absent_max_age_tolerates_three_intervals_not_one(self, monkeypatch, age, refreshes):
-        """max_age stays optional - it arrived late enough that requiring it would break
-        documents people already have - so an absent one needs an internal default.
+    def test_an_absent_max_age_takes_the_source_default_not_a_multiple_of_its_rate_limit(self, monkeypatch):
+        """Nuki is the case that killed the first attempt.
 
-        Three times the source's minimum interval, matching STALL_INTERVAL_MULTIPLIER. It
-        changes nothing about the fetch trigger, since the minimum dominates; it matters
-        because max_age is also the staleness past which a control stops acting, and one
-        interval would trip on a single missed collection.
+        Its minimum interval is 0, because reading an MQTT subscription sends nothing. Any
+        multiple of that is 0, so every stored reading was instantly too old: the control
+        would have live-fetched every cycle and, once max_age drives the fail-safe, sat in
+        it for ever. A lock unchanged for a hundred seconds is not stale.
         """
+        stored = InputReading(value=1.0, timestamp=0.0, age=100.0, live=False)
         handler = _handler()
+        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: stored)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
-        settings = {**SETTINGS, "carbonintensity": {"interval": 1800, "db": "x"}}
-        spec = {"source": "carbonintensity", "field": "intensity_actual"}
-        # carbonintensity's minimum interval is 900, so the default tolerance is 2700.
-        reading = InputReading(value=1.0, timestamp=0.0, age=age, live=False)
-        monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: reading)
-        read_input(None, settings, spec)
-        assert handler.get_data.called is refreshes
+        settings = {**SETTINGS, "nuki": {"interval": 300, "db": "x"}}
+        assert read_input(None, settings, {"source": "nuki", "field": "Front_Door_stateValue"}) is stored
+        handler.get_data.assert_not_called()
 
     def test_an_input_without_a_max_age_falls_back_to_the_source_floor(self, monkeypatch):
         """max_age is optional in a control document, so requiring it here would make

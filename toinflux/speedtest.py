@@ -33,6 +33,8 @@ class Speedtest(DataHandler):
     Attributes:
         MINIMUM_INTERVAL (int): 3600 - never consulted today, and high on purpose:
             a run saturates the link, so a live read must never be cheap to repeat.
+        DEFAULT_MAX_AGE (int): 86400 - a run is every six hours and throughput does not
+            change minute to minute, so a day-old figure still describes the line.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_LIVE_STATE (bool): False - a run takes minutes and saturates the link, so
             current-state reads the latest recorded run rather than triggering one.
@@ -47,6 +49,10 @@ class Speedtest(DataHandler):
     # If a live read is ever added, the default must not be one that a control could invoke
     # every cycle.
     MINIMUM_INTERVAL = 3600
+    # A run happens every six hours by default and throughput does not change minute to
+    # minute; a day-old figure still describes the line. Anything tighter would report a
+    # fault every time a scheduled run was skipped.
+    DEFAULT_MAX_AGE = 86400
 
     MCP_DESCRIPTION = "Internet speed test: download/upload throughput and latency."
     # get_data() runs a full download/upload test (minutes, saturates the link),

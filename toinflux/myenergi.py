@@ -349,6 +349,8 @@ class MyEnergi(DataHandler):
     Attributes:
         MINIMUM_INTERVAL (int): 60 - myenergi's cloud API rather than the hardware, and
             one known to be unreliable under load; shared by zappi, harvi and eddi.
+        DEFAULT_MAX_AGE (int): 300 - live power, changing second to second; the one
+            quantity here where a stale value is worse than none.
         MCP_INSTANCE_TAG (str): "device" - the trio share one measurement, so each point names
             which device produced it.
         MCP_TAG_FILTERS (dict): empty on this shared parent; each concrete device sets its own.
@@ -359,6 +361,10 @@ class MyEnergi(DataHandler):
     # shipped 300 while leaving a control real headroom, and applies to zappi, harvi and
     # eddi alike because they share this base and the same endpoint.
     MINIMUM_INTERVAL = 60
+    # Live power, changing second to second as the sun goes behind a cloud or a car starts
+    # charging. The one quantity here where a stale value is worse than no value: acting on
+    # five-minute-old import power can mean doing exactly the wrong thing.
+    DEFAULT_MAX_AGE = 300
 
     # All three types share the `myenergi` measurement, and `device` is the tag that tells
     # them apart - now carrying the operator's label rather than the type name. Naming it as

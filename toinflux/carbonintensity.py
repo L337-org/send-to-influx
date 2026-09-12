@@ -19,6 +19,8 @@ class CarbonIntensity(DataHandler):
     Attributes:
         MINIMUM_INTERVAL (int): 900 - the grid publishes on half-hourly
             settlement periods, so this is already twice as often as the figure moves.
+        DEFAULT_MAX_AGE (int): 3600 - half-hourly settlement periods, and the
+            figure caps output rather than holding a setpoint.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_FIELD_METADATA (dict): unit and aggregation kind for the two intensity
             fields; the ``gen_<fuel>`` fields carry none, and UNITS.md documents them.
@@ -28,6 +30,10 @@ class CarbonIntensity(DataHandler):
     # already twice as often as the underlying figure can move. Free public API, no key,
     # same courtesy as Open-Meteo. The shipped collection interval is 1800.
     MINIMUM_INTERVAL = 900
+    # Half-hourly settlement periods, so an hour spans two of them. This figure caps output
+    # rather than holding a setpoint - a control uses it to decide whether to run one heater
+    # or two - so a little staleness costs efficiency rather than correctness.
+    DEFAULT_MAX_AGE = 3600
 
     MCP_DESCRIPTION = "UK carbon intensity (actual/forecast gCO2/kWh) and the generation fuel mix."
     # Only the two intensity fields carry a unit here. The gen_<fuel>

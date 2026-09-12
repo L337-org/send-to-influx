@@ -199,6 +199,10 @@ class DataHandler:
         MINIMUM_INTERVAL (int or None): None on the base - the shortest interval, in
             seconds, at which anything may go live to this source. Every shipped source
             names one; None falls back to the operator's collection ``interval``.
+        DEFAULT_MAX_AGE (int or None): None on the base - how long a reading stays worth
+            acting on, and the default for a control input that declares no ``max_age``.
+            Not derived from MINIMUM_INTERVAL: how often a source may be asked and how
+            long its answer stays true are unrelated.
         MCP_WRITABLE (bool): False - whether this source offers a write action at all. The
             operator still has to opt in per source; see ``mcp_write_enabled()``.
         MCP_INSTANCE_TAG (str or None): None for a single-target source - the tag naming which
@@ -270,6 +274,16 @@ class DataHandler:
     # answer rather than a good one - every shipped source names a number, and
     # tests/test_repo_hygiene.py::test_every_source_declares_a_minimum_interval says so.
     MINIMUM_INTERVAL: "int | None" = None
+    # How long a reading from this source stays worth acting on, in seconds - the default a
+    # control input takes when it declares no max_age of its own, and the age past which a
+    # control stops acting and applies its safe state.
+    #
+    # Deliberately NOT derived from MINIMUM_INTERVAL, which answers a different question.
+    # That one is how often the far end may be asked; this is how long what it said stays
+    # true, and the two are unrelated. Nuki may be asked as often as you like (0) and its
+    # state stays true for hours; Octopus must not be asked often and its data is a day
+    # behind by nature, so any bound derived from a rate limit would fail-safe for ever.
+    DEFAULT_MAX_AGE: "int | None" = None
     # Whether this source implements a write/control path the MCP server can
     # expose. A subclass with MCP_WRITABLE = True provides its own vendor write
     # method(s) - the shape is per source, e.g. Hue's mcp_set_device_state()/

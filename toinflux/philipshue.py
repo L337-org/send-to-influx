@@ -444,6 +444,8 @@ class Hue(DataHandler):
     Attributes:
         MINIMUM_INTERVAL (int): 10 - a bridge on the local network with no third party
             in the way; enough to stop a runaway loop without constraining a control.
+        DEFAULT_MAX_AGE (int): 900 - sensors report on change and the collector writes on
+            its own cycle, so an older reading means the bridge or collector stopped.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_WRITABLE (bool): True - lights and plugs can be actuated, opt-in per install.
         MCP_INSTANCE_TAG (str): the tag naming which bridge a point came from.
@@ -458,6 +460,11 @@ class Hue(DataHandler):
     # is enough to stop a misconfigured loop hammering the bridge without constraining any
     # realistic control, whose process variable is a temperature or a light level.
     MINIMUM_INTERVAL = 10
+    # Sensors report on change and the collector writes on its own cycle (300 shipped), so a
+    # reading older than fifteen minutes does not mean the room stopped changing - it means
+    # the bridge or the collector stopped. Temperature itself moves slowly, so this bound is
+    # about liveness rather than about the value going out of date.
+    DEFAULT_MAX_AGE = 900
 
     MCP_DESCRIPTION = "Philips Hue: lights and smart plugs (on/off, brightness) and motion/temperature/light sensors."
 

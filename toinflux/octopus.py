@@ -19,6 +19,8 @@ class Octopus(DataHandler):
     Attributes:
         MINIMUM_INTERVAL (int): 1800 - never consulted, since MCP_LIVE_STATE is False;
             declared so the number is a decision rather than an accident if that changes.
+        DEFAULT_MAX_AGE (int): 172800 - the data is around a day behind by nature, so a
+            tighter bound would put a healthy feed permanently in the fail-safe.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_LIVE_STATE (bool): False - readings arrive up to 24 h late, so a live API call is
             no fresher than InfluxDB and current-state reads the latest recorded point instead.
@@ -31,6 +33,11 @@ class Octopus(DataHandler):
     # the interval fallback, so that the number is a decision rather than an accident if a
     # live read is ever added.
     MINIMUM_INTERVAL = 1800
+    # Consumption data is around a day behind by nature, so any bound near the collection
+    # cadence would put a healthy feed permanently in the fail-safe. Forty-eight hours is
+    # long enough to tolerate the normal delay and a late publication, and short enough that
+    # a genuinely dead feed is still noticed.
+    DEFAULT_MAX_AGE = 172800
 
     MCP_DESCRIPTION = "Octopus Energy smart meter: latest electricity/gas consumption and unit rate."
     # ~24 h delayed, so a live API read is no fresher than InfluxDB - current-state

@@ -214,6 +214,25 @@ def stored_reading(session, settings, source, field, instance=None, settings_fil
         return handler_reading(session, settings, handler, field, now)
 
 
+def _default_max_age(source):
+    """Return how long a source's readings stay worth acting on.
+
+    The source class's ``DEFAULT_MAX_AGE``. Every shipped source declares one, and a hygiene
+    test says so; a source under development that has not gets the conservative answer,
+    since acting on data of unknown age is the failure this bound exists to prevent.
+
+    Args:
+        source (str): the source name, in any case
+
+    Returns:
+        float: seconds
+    """
+    declared = source_class(source).DEFAULT_MAX_AGE
+    if declared is None:
+        return 0.0
+    return float(declared)
+
+
 def _required(spec, key):
     """Return one key of an input declaration, or say which is missing.
 
@@ -346,12 +365,6 @@ MAX_LOCK_BACKOFF = 0.5
 # is the repository root, and loose fetch-<source>.lock files landing there are easy to
 # commit by accident. One directory also makes one ignore rule enough.
 LOCK_DIR_NAME = "locks"
-
-# How many of a source's minimum intervals an input tolerates when it declares no max_age
-# of its own. Three, matching sendtoinflux.STALL_INTERVAL_MULTIPLIER: one interval would
-# make a single missed collection look like a fault, which is the same reasoning that set
-# the stall threshold there.
-MAX_AGE_INTERVALS = 3
 
 # The column InfluxDB returns a point's timestamp in. Named because a field key equal to it
 # is ambiguous rather than merely awkward, and handler_reading refuses one.
@@ -534,16 +547,16 @@ def read_input(session, settings, spec, settings_file=None, now=None):
     # so the input reads as perpetually fresh and is never refreshed however old it gets.
     minimum = resolve_minimum_interval(source, settings)
     # max_age is optional in a control document and stays that way: it arrived late enough
-    # that requiring it would break documents people already have. An absent one gets three
-    # times the source's minimum interval, mirroring STALL_INTERVAL_MULTIPLIER, which is
-    # this project's existing answer to "how many missed cycles before we call it wrong".
+    # that requiring it would break documents people already have. An absent one takes the
+    # source's own DEFAULT_MAX_AGE, which is how long that source's readings stay worth
+    # acting on.
     #
-    # It makes no difference to the trigger below, since the minimum dominates any value
-    # this small. It matters to the caller: max_age is also the staleness past which a
-    # control stops acting and applies its safe state, and defaulting that to one interval
-    # would trip on a single missed collection.
-    default_max_age = MAX_AGE_INTERVALS * minimum
-    max_age = _as_seconds(spec.get("max_age", default_max_age), f"max_age for input {field}")
+    # Not a multiple of the minimum interval, which was the first attempt and is wrong in
+    # both directions. Nuki's minimum interval is 0, so any multiple of it is 0 and every
+    # reading would be instantly too old; Octopus data is a day behind by nature, so any
+    # multiple of its rate limit would put a healthy feed permanently in the fail-safe. How
+    # often a source may be asked and how long its answer stays true are unrelated.
+    max_age = _as_seconds(spec.get("max_age", _default_max_age(source)), f"max_age for input {field}")
     trigger = max(max_age, minimum)
     # One handler for the whole call, closed on the way out. Every path here needs one -
     # even the stored read, for the measurement, tags and database - and each build opens a
