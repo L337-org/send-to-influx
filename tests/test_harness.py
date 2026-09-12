@@ -12,6 +12,7 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import os
+import ssl
 import stat
 import subprocess
 import sys
@@ -146,6 +147,30 @@ class TestTheStubBridgeIsABridge:
                 _hue(installation).mcp_list_writable_devices()
         time.sleep(0.8)
         assert "Traceback" not in capfd.readouterr().err
+
+    @pytest.mark.parametrize(
+        "exception,silent",
+        [
+            pytest.param(ConnectionResetError("gone"), True, id="reset-by-peer"),
+            pytest.param(BrokenPipeError("gone"), True, id="broken-pipe"),
+            pytest.param(ssl.SSLEOFError("gone"), True, id="tls-eof"),
+            pytest.param(ssl.SSLError("handshake failure"), False, id="a-real-tls-fault"),
+            pytest.param(ValueError("a bug in the stub"), False, id="a-bug-in-the-harness"),
+        ],
+    )
+    def test_only_the_disconnect_family_is_swallowed(self, bridge, exception, silent, capfd):
+        """Which exception a vanished peer produces depends on the Python version: 3.10-3.12
+        raise SSLEOFError, which is not a ConnectionError, while 3.13 and later raise
+        ConnectionResetError. Filtering on ConnectionError alone was silent on the two
+        versions this was written on and noisy on the three older ones. Asserted directly
+        rather than through a timed-out request, so it does not depend on the platform's
+        TLS stack to reach the interesting case."""
+        capfd.readouterr()
+        try:
+            raise exception
+        except Exception:
+            bridge._server.handle_error(None, ("127.0.0.1", 1))
+        assert ("Traceback" not in capfd.readouterr().err) is silent
 
     def test_a_bridge_answering_an_error_status_raises(self, installation, bridge):
         with faults.erroring(bridge, 503):

@@ -43,6 +43,11 @@ from dataclasses import dataclass, field
 
 from tests.harness.certificates import write_self_signed
 
+#: What "the client went away" looks like, which is not one exception type. The TLS ones
+#: are not ConnectionErrors, and which of them a dead peer produces depends on the Python
+#: version: 3.10-3.12 raise SSLEOFError where 3.13 and later raise ConnectionResetError.
+DISCONNECTED = (ConnectionError, ssl.SSLEOFError, ssl.SSLZeroReturnError)
+
 
 @dataclass
 class Request:
@@ -204,11 +209,18 @@ class _Server(http.server.ThreadingHTTPServer):
         itself and still gets printed, because a stub that hides its own errors is worse
         than a noisy one.
 
+        ``SSLEOFError`` is in that family and is not a ``ConnectionError``: a peer that
+        vanishes mid-TLS raises it on Python 3.10 to 3.12, while 3.13 and later map the
+        same event onto ``ConnectionResetError``. Filtering on ``ConnectionError`` alone
+        was therefore silent on the two versions this was written on and noisy on the three
+        older ones - which is exactly what CI reported. Not ``SSLError`` wholesale, because
+        a real handshake or certificate fault should still be heard.
+
         Args:
             request (socket.socket): the connection that failed
             client_address (tuple): where it came from
         """
-        if isinstance(sys.exc_info()[1], ConnectionError):
+        if isinstance(sys.exc_info()[1], DISCONNECTED):
             return
         super().handle_error(request, client_address)
 
