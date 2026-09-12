@@ -82,7 +82,9 @@ def _slot_suffix(text, prefix):
     if not isinstance(text, str) or not text.startswith(prefix):
         return None
     suffix = text[len(prefix) :]
-    return suffix if CANONICAL_SLOT_SUFFIX_RE.match(suffix) else None
+    # fullmatch: `$` matches before a trailing newline, so match() would accept "2\n" as a
+    # canonical slot suffix and the name it came from would be treated as slot 2.
+    return suffix if CANONICAL_SLOT_SUFFIX_RE.fullmatch(suffix) else None
 
 
 def credential_field(name):

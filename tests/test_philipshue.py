@@ -465,6 +465,28 @@ class TestHueTokenRedaction:
         assert cleaned.count("<redacted>") == 2
 
 
+class TestASlotFieldIsWholeString:
+    """`$` matches before a trailing newline, so an anchored pattern checked with match() is
+    not a whole-string test - and this one decides which bridge a settings key addresses.
+
+    Tested against _slot_field directly rather than through enumerate_bridges: the first
+    version of this test went through the public path, and passed with the fix reverted
+    because an incomplete slot never becomes a bridge anyway. It proved nothing.
+    """
+
+    @pytest.mark.parametrize("field", ["host2\n", "user2\n", "host\n", "host2 "])
+    def test_a_field_with_trailing_text_names_no_slot(self, field):
+        from toinflux.philipshue import _parse_slot_field
+
+        assert _parse_slot_field(field) == (None, None)
+
+    @pytest.mark.parametrize("field,slot", [("host", 1), ("host2", 2), ("user17", 17)])
+    def test_a_plain_field_still_names_its_slot(self, field, slot):
+        from toinflux.philipshue import _parse_slot_field
+
+        assert _parse_slot_field(field)[0] == slot
+
+
 class TestEnumerateBridges:
     """enumerate_bridges is the single source of truth for "which bridges are
     configured" - shared by validate_settings, the worker spawner and the CLI modes, so

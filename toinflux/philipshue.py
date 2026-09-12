@@ -118,11 +118,13 @@ def _parse_slot_field(field):
         tuple: ``(slot, error)`` - ``(None, None)`` when the field doesn't name a slot at all, ``(None, message)`` when
             it looks like one but isn't canonical
     """
-    match = _SLOT_FIELD_RE.match(str(field))
+    # fullmatch throughout: `$` matches before a trailing newline, so match() would read
+    # "host2\n" as naming bridge slot 2 rather than as the malformed key it is.
+    match = _SLOT_FIELD_RE.fullmatch(str(field))
     if not match:
         return (None, None)
     suffix = match.group("suffix")
-    if suffix and not CANONICAL_SLOT_SUFFIX_RE.match(suffix):
+    if suffix and not CANONICAL_SLOT_SUFFIX_RE.fullmatch(suffix):
         return (
             None,
             f"hue.{field} is not a valid bridge slot - the first bridge is hue.host/hue.user, and "

@@ -431,7 +431,17 @@ class TestTheFetchLockSerialisesLiveFetches:
 
     @pytest.mark.parametrize(
         "name",
-        ["../../../evil", "../../../../../../tmp/pwned", "a/b", "", ".", "-leading", "with space"],
+        [
+            "../../../evil",
+            "../../../../../../tmp/pwned",
+            "a/b",
+            "",
+            ".",
+            "-leading",
+            "with space",
+            "hue\n",
+            "hue\nrm -rf",
+        ],
     )
     def test_a_name_that_cannot_safely_be_a_filename_is_refused(self, name, tmp_path, monkeypatch):
         """A source name becomes part of a filename here, which is the same situation

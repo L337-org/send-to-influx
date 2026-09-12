@@ -469,7 +469,10 @@ def fetch_lock_path(source, settings_file=None):
     # difference between serialising and not: two controls naming the same source in
     # different cases would otherwise take two different locks and both go live.
     name = source.lower()
-    if not _LOCK_NAME_RE.match(name):
+    # fullmatch, not match: `$` matches before a trailing newline, so anchors alone do not
+    # make match() a whole-string test. Exactly the trap fixed in the group_by validator
+    # earlier in this work, and I put it straight back into a new allow-list.
+    if not _LOCK_NAME_RE.fullmatch(name):
         raise ConfigError(
             f"cannot make a lock file for {source!r}: a source name becomes part of a "
             f"filename here, so it must match {LOCK_NAME_PATTERN!r}"

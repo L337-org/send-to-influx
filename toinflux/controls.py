@@ -115,7 +115,10 @@ def require_valid_control_name(name) -> None:
     Raises:
         ConfigError: the name is empty, not a string, or outside the accepted pattern
     """
-    if not isinstance(name, str) or not re.match(CONTROL_NAME_PATTERN, name):
+    # fullmatch, not match: `$` matches before a trailing newline, so "conservatory\n" passed
+    # this allow-list - and a control name becomes a filename an MCP client chooses, which is
+    # the whole reason the allow-list exists.
+    if not isinstance(name, str) or not re.fullmatch(CONTROL_NAME_PATTERN, name):
         raise ConfigError(
             f"invalid control name {name!r}: use 1-63 characters, lower-case letters, "
             f"digits, underscore or hyphen, starting with a letter or digit"
