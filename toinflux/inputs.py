@@ -4,16 +4,18 @@ A control loop needs a recent value for each of its declared inputs. It reads th
 InfluxDB rather than from the device, because the collector is already writing them there
 and because several controls sharing an input must not each go to the device for it.
 
-A live fetch happens only when the newest stored point is older than that input's
-``max_age``, and when it does, the value is written back. That write-back is what makes the
-database the shared state: the next control to ask reads what this one just stored, so no
-other coordination is needed for the ordinary case.
+A live fetch happens only when the newest stored point is older than **both** that input's
+``max_age`` and the source's minimum interval, whichever is larger - so a control cannot
+reach a device more often than the source allows by asking for fresher data. When it does
+fetch, the value is written back. That write-back is what makes the database the shared
+state: the next control to ask reads what this one just stored, so no other coordination is
+needed for the ordinary case.
 
 This module deliberately imports nothing from the MCP layer. A control runs with the MCP
 server absent entirely, and importing ``toinflux.mcp_read`` would pull an HTTP server stack
 into every control process to ask what the last temperature reading was.
 
-The floor's settings key is ``general.MINIMUM_INTERVAL_KEY``, declared there because
+The minimum interval's settings key is ``general.MINIMUM_INTERVAL_KEY``, declared there because
 ``--check-config`` validates it and this module imports ``influx``, which imports
 ``general``: owning the name here and importing it back would be a cycle.
 """
@@ -170,6 +172,9 @@ def source_handler(source, settings_file=None, instance=None):  # noqa: DOC403 -
 
     Yields:
         DataHandler: the handler, valid for the duration of the block
+
+    Raises:
+        ConfigError: where the source is not a known one, from get_class
     """
     # Keywords at every call site. This module's functions do not agree on the order of
     # these two - stored_reading takes instance first, this takes settings_file first - and
@@ -228,6 +233,9 @@ def _default_max_age(source):
 
     Returns:
         float: seconds
+
+    Raises:
+        ConfigError: where the source is not a known one, from source_class
     """
     declared = source_class(source).DEFAULT_MAX_AGE
     if declared is None:
@@ -553,12 +561,12 @@ def read_input(session, settings, spec, settings_file=None, now=None):
     input can use, and it writes its result back, which is what lets the next control read
     it rather than going to the device itself.
 
-    **The poll floor takes precedence over the input's own max_age.** The trigger is
-    whichever is larger, and that is the same thing as "do not fetch if the newest point is
-    younger than the floor" precisely because a live fetch writes back: a control asking
-    sooner reads the value the previous one stored. Wanting fresher data than the floor
-    allows is not an error, it just does not get it - and if the value is then too stale to
-    act on, that is the control's fail-safe rather than this function's problem.
+    **The source's minimum interval takes precedence over the input's own max_age.** The
+    trigger is whichever is larger, and that is the same thing as "do not fetch if the newest
+    point is younger than the minimum interval" precisely because a live fetch writes back: a
+    control asking sooner reads the value the previous one stored. Wanting fresher data than
+    the source allows is not an error, it just does not get it - and if the value is then too
+    stale to act on, that is the control's fail-safe rather than this function's problem.
 
     A source that declares ``MCP_LIVE_STATE = False`` is never fetched live. Octopus is a
     day behind and Speedtest is expensive, so going to the device would cost something and
@@ -569,7 +577,8 @@ def read_input(session, settings, spec, settings_file=None, now=None):
         settings (dict): the whole parsed settings document
         spec (dict): one input declaration. ``source`` and ``field`` are required;
             ``max_age`` and ``instance`` are optional, matching what the control store
-            validates. An absent ``max_age`` leaves the source's floor as the trigger.
+            validates. An absent ``max_age`` takes the source's ``DEFAULT_MAX_AGE``, which
+            the trigger then combines with the minimum interval as above.
         settings_file (str or None): the settings path the caller was started with. Used for
             the state directory *and* passed to the handler, so it reads the same document
             the ``settings`` argument came from. Omitting it where the caller is not on the
@@ -581,7 +590,10 @@ def read_input(session, settings, spec, settings_file=None, now=None):
 
     Raises:
         SourceConnectionError: where no value could be obtained at all
-        ConfigError: where the source has no usable settings section
+        ConfigError: for anything about the configuration that no retry would fix - an
+            incomplete declaration, an unusable source section or duration, a field this
+            cannot read, a field holding something other than a number, or a lock that
+            cannot be taken
     """
     source, field = _required(spec, "source"), _required(spec, "field")
     # max_age through the same door as the floor and the timeout. It is the third duration
