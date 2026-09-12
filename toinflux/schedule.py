@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from toinflux.controls import BUILT_IN_SAFE_STATES, CLOCK_TIME_PATTERN, SAFE_STATE_UNENERGISED
 from toinflux.exceptions import ConfigError
+from toinflux.general import render_values
 
 
 @dataclass(frozen=True)
@@ -39,13 +40,15 @@ class ActivePeriod:
         end_state (str): what the devices do when the window closes, which is configured
             separately from ``safe_state`` because a control can want to be left alone on
             failure and switched off at dawn.
-        zone (zoneinfo.ZoneInfo): the control's time zone.
+        zone (datetime.tzinfo): the control's time zone. Not narrowed to ``ZoneInfo``: a
+            control that names no zone gets the machine's own, which arrives as whatever
+            ``astimezone()`` produced - a fixed-offset ``timezone`` on most systems.
     """
 
     start: datetime.time
     end: datetime.time
     end_state: str
-    zone: ZoneInfo
+    zone: datetime.tzinfo
 
 
 def parse_active_period(document):
@@ -78,7 +81,9 @@ def parse_active_period(document):
         )
     end_state = period.get("end_state", SAFE_STATE_UNENERGISED)
     if end_state not in BUILT_IN_SAFE_STATES:
-        raise ConfigError(f"active_period.end_state must be one of {BUILT_IN_SAFE_STATES}, got {end_state!r}")
+        raise ConfigError(
+            f"active_period.end_state must be one of {render_values(BUILT_IN_SAFE_STATES)}, got {end_state!r}"
+        )
     return ActivePeriod(start=start, end=end, end_state=end_state, zone=control_zone(document))
 
 
@@ -93,7 +98,7 @@ def control_zone(document):
         document (dict): the control document
 
     Returns:
-        zoneinfo.ZoneInfo or datetime.tzinfo: the zone
+        datetime.tzinfo: the zone, a ``ZoneInfo`` where the control named one
 
     Raises:
         ConfigError: where the named zone is not one this machine knows

@@ -1054,6 +1054,58 @@ def _joins_inside_raises(source):
     return found
 
 
+def _collection_constants(tree):
+    """Return the module-level names bound to a collection literal.
+
+    Args:
+        tree (ast.Module): the parsed module
+
+    Returns:
+        set: the names
+    """
+    names = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        built = (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id in ("frozenset", "set", "list", "tuple", "dict")
+        )
+        if isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict)) or built:
+            names.update(target.id for target in node.targets if isinstance(target, ast.Name))
+    return names
+
+
+def _collections_inside_raises(source, imported=()):
+    """Find collection constants interpolated straight into the message of a raise.
+
+    The other half of the join check. ``f"must be one of {SOME_TUPLE}"`` renders a Python
+    tuple repr into a message a user reads, with the same two failure modes the renderer
+    exists for, and the join detector cannot see it because there is no join.
+
+    Args:
+        source (str): the module's text
+        imported (iterable): collection names this module imports from another of ours
+
+    Returns:
+        list: ``(line, name)`` for each offending interpolation
+    """
+    tree = ast.parse(source)
+    collections = _collection_constants(tree) | set(imported)
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise):
+            continue
+        for piece in ast.walk(node):
+            if not isinstance(piece, ast.FormattedValue):
+                continue
+            if isinstance(piece.value, ast.Name) and piece.value.id in collections:
+                found.append((piece.lineno, piece.value.id))
+    return found
+
+
 def test_every_collection_interpolated_into_an_error_is_rendered_safely():
     """A collection *interpolated into* an error message goes through ``render_values``.
 
@@ -1062,7 +1114,12 @@ def test_every_collection_interpolated_into_an_error_is_rendered_safely():
 
     It covers a collection interpolated into an f-string inside a ``raise`` - a list of
     identifiers, field keys, device names, bridge names - which is where both real
-    defects were.
+    defects were. Two shapes: a bare ``", ".join(...)``, and a name bound to a collection
+    constant, resolved across modules because the three sites review found had imported
+    theirs from another module and a per-module view could not see them.
+
+    It does not cover a collection built inline in the message, or one arriving through a
+    parameter, because neither is recognisable from the raise itself.
 
     It does not cover ``raise ConfigError("; ".join(errors))``, where the items are
     prose we wrote: "mqtt.broker_host is required for MQTT-based sources". Rendering
@@ -1099,11 +1156,26 @@ def test_every_collection_interpolated_into_an_error_is_rendered_safely():
     # A guard that searched nothing looks identical to a clean tree.
     assert len(candidates) >= 15, f"only found {len(candidates)} module(s) to check, so discovery is broken"
 
+    trees = {path: ast.parse(path.read_text(encoding="utf-8")) for path in candidates}
+    # Resolved across modules, because the collection that went wrong here was imported:
+    # BUILT_IN_SAFE_STATES is defined in controls.py and interpolated raw in two others,
+    # which a per-module view cannot see at all.
+    constants_by_module = {
+        ".".join(path.relative_to(REPO_ROOT).with_suffix("").parts): {
+            name: True for name in _collection_constants(tree)
+        }
+        for path, tree in trees.items()
+    }
+
     offenders = []
     for path in candidates:
         relative = path.relative_to(REPO_ROOT)
-        for line, expression in _joins_inside_raises(path.read_text(encoding="utf-8")):
+        text = path.read_text(encoding="utf-8")
+        for line, expression in _joins_inside_raises(text):
             offenders.append(f"{relative}:{line}  {expression}")
+        imported = _imported_names(trees[path], constants_by_module)
+        for line, name in _collections_inside_raises(text, imported):
+            offenders.append(f"{relative}:{line}  {{{name}}}")
     assert not offenders, (
         f"these raise a message built with a bare join; use {VALUE_RENDERER}() so a "
         f"non-string value cannot crash the report and a newline cannot forge a log "
@@ -1531,25 +1603,26 @@ def _module_patterns(tree):
     return patterns
 
 
-def _imported_patterns(tree, patterns_by_module):
-    """Return the patterns a module imports by name, resolved to their defining module.
+def _imported_names(tree, by_module):
+    """Return what a module imports, resolved through the module that defines it.
 
     Resolved rather than guessed from the name alone: two modules may spell a constant the
-    same way, and a guard that answered from a global pool would eventually answer about the
-    wrong pattern.
+    same way, and a guard that answered from a global pool of names would eventually answer
+    about the wrong one.
 
     Args:
         tree (ast.Module): the parsed module
-        patterns_by_module (dict): dotted module name to its own ``_module_patterns``
+        by_module (dict): dotted module name to that module's own map of name to whatever
+            the caller is tracking
 
     Returns:
-        dict: local name to pattern text
+        dict: local name to the defining module's value for it
     """
     resolved = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom) or node.module is None:
             continue
-        source = patterns_by_module.get(node.module, {})
+        source = by_module.get(node.module, {})
         for alias in node.names:
             if alias.name in source:
                 resolved[alias.asname or alias.name] = source[alias.name]
@@ -1575,6 +1648,25 @@ def _resolve_pattern(node, patterns):
     return _pattern_text(node)
 
 
+def _is_anchored(text):
+    """Whether a pattern carries a real anchor.
+
+    A bare ``"^" in text`` would fire on ``[^a-z]``, where the caret negates a character
+    class and anchors nothing, and on an escaped literal caret. A guard that refuses a
+    legitimate pattern is a guard somebody switches off, so escapes and character classes
+    come out before the question is asked.
+
+    Args:
+        text (str): the pattern
+
+    Returns:
+        bool: whether it anchors either end
+    """
+    without_escapes = re.sub(r"\\.", "", text)
+    without_classes = re.sub(r"\[[^]]*]", "", without_escapes)
+    return "^" in without_classes or "$" in without_classes
+
+
 def _anchored_match_calls(source, imported=None):
     """Return anchored patterns checked with ``.match()``, and the calls this cannot read.
 
@@ -1589,7 +1681,7 @@ def _anchored_match_calls(source, imported=None):
     Args:
         source (str): the module's source text
         imported (dict or None): pattern text for names this module imports, from
-            :func:`_imported_patterns`
+            :func:`_imported_names`
 
     Returns:
         tuple: ``(offenders, unreadable)``, each a list of ``(line, snippet)``. A call whose
@@ -1629,7 +1721,7 @@ def _anchored_match_calls(source, imported=None):
             continue
         if text is None:
             unreadable.append((node.lineno, snippet))
-        elif "^" in text or "$" in text:
+        elif _is_anchored(text):
             offenders.append((node.lineno, snippet))
     return offenders, unreadable
 
@@ -1663,7 +1755,7 @@ def test_no_anchored_pattern_is_read_with_match():
     }
     offenders, unreadable = [], []
     for path, tree in trees.items():
-        imported = _imported_patterns(tree, patterns_by_module)
+        imported = _imported_names(tree, patterns_by_module)
         found, skipped = _anchored_match_calls(path.read_text(encoding="utf-8"), imported)
         offenders += [f"{path.relative_to(REPO_ROOT)}:{line} {snippet}" for line, snippet in found]
         unreadable += [f"{path.relative_to(REPO_ROOT)}:{line} {snippet}" for line, snippet in skipped]
@@ -1713,9 +1805,15 @@ def test_the_anchored_match_guard_reports_what_it_cannot_read():
         'X_RE = re.compile(r"\\d+")\nX_RE.match(value)\n',
         're.match(r"[a-z]+", value)\n',
         "re.search(r'^[a-z]+$', value)\n",
+        're.match(r"[^a-z]+", value)\n',
+        'X_RE = re.compile(r"[^,]+")\nX_RE.match(value)\n',
     ],
 )
 def test_the_anchored_match_guard_leaves_the_rest_alone(source):
     """fullmatch is the fix, an unanchored match is how a tokeniser works, and search is a
-    different question entirely. A guard firing on those would be switched off."""
+    different question entirely. A guard firing on those would be switched off.
+
+    The last two are the caret that anchors nothing: inside a character class it negates,
+    and reading it as an anchor would refuse the ordinary way to write "up to the next
+    comma"."""
     assert _anchored_match_calls(source) == ([], []), f"false positive: {source!r}"
