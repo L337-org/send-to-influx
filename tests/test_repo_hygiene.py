@@ -1817,3 +1817,43 @@ def test_the_anchored_match_guard_leaves_the_rest_alone(source):
     and reading it as an anchor would refuse the ordinary way to write "up to the next
     comma"."""
     assert _anchored_match_calls(source) == ([], []), f"false positive: {source!r}"
+
+
+def test_the_runtime_state_a_control_writes_is_ignored():
+    """Off systemd, a control writes beside settings.yaml - which in a checkout is the
+    repository root, so running one leaves its directories here.
+
+    Asked of git rather than by reading .gitignore, because what matters is the answer git
+    gives: a later rule can re-include a path, and a pattern that looks right can be wrong
+    about a directory. The names come from the constants the code actually uses, so renaming
+    one and forgetting the ignore rule fails here rather than in somebody's `git status`.
+    """
+    from toinflux.controls import CONTROL_DIR_NAME
+    from toinflux.inputs import LOCK_DIR_NAME
+
+    for name in (CONTROL_DIR_NAME, LOCK_DIR_NAME):
+        try:
+            finished = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "check-ignore", f"{name}/"],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+        except OSError as exc:
+            finished = None
+            failure = str(exc)
+        # check-ignore answers 0 for ignored and 1 for not; anything else is git declining to
+        # answer at all. Same handling as `_tracked_files` above, and for the same reason: no
+        # git or no checkout is a fact about the environment rather than about this repo, but
+        # a skip must never be how a merge gate quietly stops running - so under CI it fails.
+        if finished is None or finished.returncode not in (0, 1):
+            failure = failure if finished is None else (finished.stderr.strip() or f"exit {finished.returncode}")
+            if os.environ.get("CI"):
+                raise RuntimeError(
+                    f"cannot ask git whether {name}/ is ignored ({failure}), and CI is set - this "
+                    f"check is a merge gate there, so it must fail rather than skip"
+                )
+            pytest.skip(
+                f"not a git checkout, or git is unavailable ({failure}) - the ignore rules are not checkable here"
+            )
+        assert finished.returncode == 0, f"{name}/ is runtime state the code writes, and is not in .gitignore"
