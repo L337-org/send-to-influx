@@ -140,7 +140,10 @@ class ChaosDriver:
                 self._active.__enter__()
                 self.run.ticks.append(Tick(tick, "started a fault:", choice[0]))
                 return self._active
-            self.run.ticks.append(Tick(tick, "left everything alone"))
+            # Not recorded: `story` is one line per change, and "nothing happened" is not
+            # one. The closing note already tells a reader that an unlisted tick ran with
+            # the state above unchanged, so an entry saying the same thing would only make a
+            # long run longer.
             return None
         alive = [child for child in self.supervisor.children.values() if child.running]
         if alive and self.random.random() < 0.3:

@@ -1,9 +1,13 @@
 """Many controls, seeded random faults, and the same invariants the static scenarios use.
 
-Excluded from the default run and scheduled instead, because a run long enough to be worth
-anything is minutes rather than seconds. What is *not* excluded is any seed that has failed:
-those live in `SEEDS_THAT_FAILED` and run with the ordinary suite from then on, which is how
-a chaos failure becomes a permanent regression test instead of an anecdote.
+The long seeded run is excluded from the default suite and scheduled instead, because a run
+long enough to be worth anything is minutes rather than seconds.
+
+Two things here are *not* excluded, and run with the ordinary suite. Any seed that has failed,
+from `SEEDS_THAT_FAILED` - which is how a chaos failure becomes a permanent regression test
+instead of an anecdote. And the driver's own guards below, which take seconds and check the
+things a scheduled job would be the wrong place to find out about: that a fault never outlives
+the run that injected it, and that the story says when something happened.
 """
 
 __author__ = "Gavin Lucas"
@@ -303,3 +307,21 @@ class TestAFaultNeverOutlivesTheRun:
         cleared = [tick for tick in driver.run.ticks if "cleared" in tick.action]
         assert cleared[-1].number == driver._tick
         assert [tick.number for tick in driver.run.ticks] == sorted(t.number for t in driver.run.ticks)
+
+    def test_a_tick_that_changes_nothing_is_not_recorded(self, bridge, influx):
+        """`story` is one line per change, and "nothing happened" is not one. An entry for it
+        would contradict the format and make a three-hundred-tick run longer without making
+        it more reproducible - the closing note already explains a gap."""
+        driver = ChaosDriver(1, self._NoChildren(), bridge, influx)
+        driver.random = type(
+            "_AlwaysNothing",
+            (),
+            {
+                "random": staticmethod(lambda: 1.0),
+                "choice": staticmethod(lambda options: next(o for o in options if o[1] is None)),
+            },
+        )()
+        for number in range(1, 6):
+            driver.tick(number, {})
+        assert driver.run.ticks == [], driver.run.story()
+        assert driver.run.story() == "nothing was injected before it failed"
