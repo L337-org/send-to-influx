@@ -1857,3 +1857,71 @@ def test_the_runtime_state_a_control_writes_is_ignored():
                 f"not a git checkout, or git is unavailable ({failure}) - the ignore rules are not checkable here"
             )
         assert finished.returncode == 0, f"{name}/ is runtime state the code writes, and is not in .gitignore"
+
+
+def _rule_call_sites(relative):
+    """Return the rule-slot parse sites in one module, and why any were unreadable.
+
+    A *slot* is a place the runtime turns a piece of a control document into a rule. The
+    shared helper's own call to the parser is not one: it is the mechanism every slot goes
+    through, so counting it would report one slot more than exist.
+
+    Args:
+        relative (str): the module's path relative to the repository root
+
+    Returns:
+        tuple: the number of slot call sites found, and a reason string where the module
+        could not be read at all
+
+    Raises:
+        AssertionError: never; an unreadable module is reported rather than raised
+    """
+    path = REPO_ROOT / relative
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError) as exc:
+        return 0, f"{relative} could not be parsed: {exc!r}"
+    sites = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        # Inside the shared helper, the parse call is the mechanism rather than a slot.
+        if node.name == "_rule":
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name):
+                if inner.func.id in ("_rule", "parse_rule"):
+                    sites += 1
+    return sites, ""
+
+
+def test_the_rule_slot_table_describes_every_slot_the_runtime_parses():
+    """A rule slot the runtime honours and `CONTROL_RULE_SLOTS` has never heard of passes
+    `--check-config` and kills the control at startup - which is the exact failure the
+    table exists to prevent, arriving through the table itself being incomplete.
+
+    Counted rather than matched by name: the runtime binds each slot to its own attribute,
+    so there is no shared loop to read the list off. A guard that cannot find the call
+    sites at all fails saying so rather than passing on a count of zero.
+    """
+    from toinflux.controls import CONTROL_RULE_SLOTS
+
+    found = 0
+    unreadable = []
+    for relative in ("toinflux/controller.py", "toinflux/gating.py"):
+        sites, reason = _rule_call_sites(relative)
+        found += sites
+        if reason:
+            unreadable.append(reason)
+
+    assert not unreadable, "; ".join(unreadable)
+    assert found, (
+        "no rule parse sites were found in the runtime at all, so this guard is no longer "
+        "guarding anything - it looks for calls to `_rule` or `parse_rule`, and one of "
+        "those has been renamed"
+    )
+    assert found == len(CONTROL_RULE_SLOTS), (
+        f"the runtime parses {found} rule slot(s) but CONTROL_RULE_SLOTS describes "
+        f"{len(CONTROL_RULE_SLOTS)}. A slot the validator does not know about is one that "
+        f"passes --check-config and fails at startup instead"
+    )

@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from toinflux.controls import BUILT_IN_SAFE_STATES, SAFE_STATE_LEAVE_UNCHANGED, SAFE_STATE_UNENERGISED
 from toinflux.exceptions import ConfigError
 from toinflux.general import render_values
+from toinflux.controls import rule_names
 from toinflux.rules import RuleEvaluationError, parse_rule
 from toinflux.schedule import is_inside, parse_active_period
 
@@ -88,7 +89,7 @@ class Gate:
             raise ConfigError(
                 f"safe_state must be one of {render_values(BUILT_IN_SAFE_STATES)}, got {self.safe_state!r}"
             )
-        names = tuple(document.get("inputs") or ()) + tuple(document.get("parameters") or ())
+        names = rule_names(document)
         text = document.get("enable_when")
         self._enable_when = None if text is None else parse_rule(str(text), allowed_names=names)
         # None rather than False, so the first cycle is not read as an edge. A control

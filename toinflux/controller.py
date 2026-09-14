@@ -18,6 +18,7 @@ import math
 from simple_pid import PID
 
 from toinflux.exceptions import ConfigError
+from toinflux.controls import rule_names
 from toinflux.rules import RuleEvaluationError, parse_rule
 from toinflux.staging import build_ladder, cap_ladder, plan_window
 
@@ -46,7 +47,7 @@ class Controller:
         self.devices = document.get("devices") or {}
         self.cycle_seconds = output.get("cycle_seconds")
         self._default_transition = output.get("min_transition_seconds", 0)
-        names = tuple(document.get("inputs") or ()) + tuple(document.get("parameters") or ())
+        names = rule_names(document)
         self._setpoint_rule = _rule(document.get("pid", {}).get("setpoint"), names, "pid.setpoint")
         self._input_rule = _rule(document.get("pid", {}).get("input"), names, "pid.input")
         self._max_level_rule = _rule(output.get("max_level"), names, "output.max_level", optional=True)
