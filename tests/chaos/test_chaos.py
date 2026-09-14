@@ -325,3 +325,56 @@ class TestAFaultNeverOutlivesTheRun:
             driver.tick(number, {})
         assert driver.run.ticks == [], driver.run.story()
         assert driver.run.story() == "nothing was injected before it failed"
+
+
+class TestWhatTheDriverCanReach:
+    """A chaos driver that cannot reach a state never tests it, and says nothing about that
+    in a passing run - which is the failure mode this class exists for."""
+
+    class _Child:
+        """A control that can be killed without a process behind it."""
+
+        def __init__(self, name):
+            self.name = name
+            self.running = True
+            self.process = type("_Process", (), {"kill": lambda self: None})()
+
+    class _Supervisor:
+        """Four killable controls and a poll that does nothing."""
+
+        def __init__(self):
+            self.children = {f"c{index}": TestWhatTheDriverCanReach._Child(f"c{index}") for index in range(4)}
+
+        def poll(self, timeout=0.2):
+            """Do nothing, as a stand-in.
+
+            Args:
+                timeout (float): ignored
+
+            Returns:
+                list: no events
+            """
+            return []
+
+    class _Endpoint:
+        """An endpoint whose fault switches can be set and read, and nothing else."""
+
+        unreachable = False
+        hang_seconds = 0.0
+        status = None
+        frozen = False
+
+    def test_a_control_can_die_while_everything_else_is_healthy(self):
+        """The commonest real failure, and one the driver could not reach: a kill used to be
+        possible only while a fault was already running, because the fault branch returned
+        first. Sixty seeds produce none of these against that version."""
+        reached = 0
+        for seed in range(60):
+            driver = ChaosDriver(seed, self._Supervisor(), self._Endpoint(), self._Endpoint())
+            for tick in range(1, 12):
+                had_fault = driver._active is not None
+                driver._choose(tick)
+                killed = any(t.number == tick and t.action == "killed" for t in driver.run.ticks)
+                if killed and not had_fault and driver._active is None:
+                    reached += 1
+        assert reached, "no seed killed a control while nothing was faulted"

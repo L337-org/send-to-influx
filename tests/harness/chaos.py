@@ -109,22 +109,23 @@ class ChaosDriver:
         self._poll = poll or supervisor.poll
         self._active = None
 
-    def _choose(self, tick):
-        """Start a fault, clear one, or kill a control, at random.
+    def _choose(self, tick) -> None:
+        """Decide what this tick does to the world.
+
+        Two independent decisions, and they were not independent to begin with: a kill could
+        only happen while a fault was already running, because the fault branch returned
+        early. That left the commonest real failure - a control dying while everything else
+        is healthy - outside everything a chaos run could reach, and the docstring claimed
+        otherwise. A tick may now clear a fault or start one, *and* separately kill a
+        control.
 
         Args:
             tick (int): which tick this is
-
-        Returns:
-            contextlib.AbstractContextManager or None: a fault that has been entered, or
-            None where this tick did something else
         """
-        if self._active is not None and self.random.random() < 0.4:
-            self._active.__exit__(None, None, None)
-            self._active = None
-            self.run.ticks.append(Tick(tick, "cleared the fault"))
-            return None
-        if self._active is None:
+        if self._active is not None:
+            if self.random.random() < 0.4:
+                self.clear_fault()
+        else:
             choice = self.random.choice(
                 [
                     ("the bridge is unreachable", lambda: faults.unreachable(self.bridge)),
@@ -139,18 +140,14 @@ class ChaosDriver:
                 self._active = choice[1]()
                 self._active.__enter__()
                 self.run.ticks.append(Tick(tick, "started a fault:", choice[0]))
-                return self._active
-            # Not recorded: `story` is one line per change, and "nothing happened" is not
-            # one. The closing note already tells a reader that an unlisted tick ran with
-            # the state above unchanged, so an entry saying the same thing would only make a
-            # long run longer.
-            return None
+            # A tick that started nothing is not recorded: `story` is one line per change,
+            # and "nothing happened" is not one. The closing note already tells a reader that
+            # an unlisted tick ran with the state above unchanged.
         alive = [child for child in self.supervisor.children.values() if child.running]
         if alive and self.random.random() < 0.3:
             victim = self.random.choice(alive)
             victim.process.kill()
             self.run.ticks.append(Tick(tick, "killed", victim.name))
-        return None
 
     def tick(self, number, documents) -> None:
         """Advance one tick: choose something to do, poll, and check what must hold.
