@@ -123,16 +123,18 @@ WRITE_EFFECT_PHRASES = {
 # Recorded ceilings, not predictions - see the table in this module's docstring for
 # what is actually measured. Raising one is a deliberate decision that belongs in the
 # commit message with its reason.
-# Raised from 13,550 when the two read-only control tools were added: 1,708 bytes for
-# `list_controls` and `get_control` together, which is under the per-tool average the
-# surface already carries. The three-valued `running` paragraph is the largest single
-# thing bought here and is worth it - without it, "nothing is supervising" reads as
-# "the control is stopped", and a caller goes looking for a crash that never happened.
-MAX_TOOL_BYTES = 15_250
+# Raised from 13,550 when the two read-only control tools were added: 1,951 bytes for
+# `list_controls` and `get_control` together, a little over the per-tool average the
+# surface already carries. Two things are bought with it, both of which stop a caller
+# drawing a wrong conclusion rather than merely informing it. The three-valued `running`
+# paragraph: without it, "nothing is supervising" reads as "the control is stopped" and a
+# caller goes looking for a crash that never happened. And the `readable`/`valid` pair:
+# a control listed with neither would look like one that simply has no devices.
+MAX_TOOL_BYTES = 15_500
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 17_500
+MAX_TOTAL_BYTES = 17_750
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],

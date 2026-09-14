@@ -195,6 +195,39 @@ class ControlStatus:
     restart_in: "float | None"
 
 
+def _snapshot(child, now):
+    """Describe one child as it is at a single instant.
+
+    **Every field is read once.** The supervisor's own thread clears ``process`` and
+    ``restart_at`` as a control dies and starts again, and a ternary that tests an
+    attribute and then reads it again tests one value and uses another: ``child.process``
+    passing the None check and being None by the time ``.pid`` is asked for is an
+    AttributeError on the MCP thread, which is one control's restart breaking every
+    caller's listing. Reading into a local first is enough, because a single attribute read
+    cannot see a half-written value - it is the *pair* of reads that has no guarantee, not
+    either one of them.
+
+    Args:
+        child (Child): the control to describe
+        now (float): the monotonic reading to measure ages against
+
+    Returns:
+        ControlStatus: what was true at the moment each field was read
+    """
+    process = child.process
+    restart_at = child.restart_at
+    started_at = child.started_at
+    return ControlStatus(
+        name=child.name,
+        # From the same local as the pid, so the two cannot contradict each other.
+        running=process is not None,
+        pid=None if process is None else process.pid,
+        failures=child.failures,
+        silent_for=None if started_at == 0.0 else max(0.0, now - child.last_beat),
+        restart_in=None if restart_at is None else max(0.0, restart_at - now),
+    )
+
+
 @dataclass
 class Event:
     """Something the supervisor saw, for a caller that wants to assert on it.
@@ -430,17 +463,7 @@ class Supervisor:
         now = self._clock()
         with self._children_lock:
             children = list(self.children.values())
-        return tuple(
-            ControlStatus(
-                name=child.name,
-                running=child.running,
-                pid=child.process.pid if child.process is not None else None,
-                failures=child.failures,
-                silent_for=None if child.started_at == 0.0 else max(0.0, now - child.last_beat),
-                restart_in=None if child.restart_at is None else max(0.0, child.restart_at - now),
-            )
-            for child in sorted(children, key=lambda one: one.name)
-        )
+        return tuple(_snapshot(child, now) for child in sorted(children, key=lambda one: one.name))
 
     def request_reload(self, name) -> None:
         """Ask for a control to be reconciled with its stored document.

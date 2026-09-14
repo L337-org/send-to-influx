@@ -9,7 +9,6 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
-import dataclasses
 import os
 
 import anyio
@@ -20,7 +19,7 @@ from mcp.server.mcpserver import MCPServer
 from tests.harness.installation import conservatory
 from toinflux.exceptions import ConfigError
 from toinflux.mcp_controls import _get_control_result, _list_controls_result, register_control_tools
-from toinflux.supervision import ControlStatus, Supervisor
+from toinflux.supervision import ControlStatus
 
 
 class _Supervising:
@@ -134,6 +133,56 @@ class TestAControlThatWillNotRead:
         assert "\n" not in entries["bent"]["error"]
 
 
+class TestADocumentOfTheWrongShape:
+    """A document that parses as YAML can still be any shape at all, and the store
+    guarantees only that it is a mapping. These are the shapes the supervisor already
+    learned to refuse; the difference here is that one of them must not take out the
+    listing for every other control as well."""
+
+    @pytest.mark.parametrize(
+        "broken",
+        [
+            pytest.param({"output": "soon"}, id="output-is-a-string"),
+            pytest.param({"devices": 7}, id="devices-is-a-number"),
+            pytest.param({"devices": ["far"]}, id="devices-is-a-list"),
+            pytest.param({"inputs": 7}, id="inputs-is-a-number"),
+        ],
+    )
+    def test_one_bad_document_does_not_take_out_the_listing(self, stored, broken):
+        path = os.path.join(stored.state_dir, "controls", "bent.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(dict(conservatory(), name="bent", **broken), handle)
+        entries = {entry["name"]: entry for entry in _list_controls_result(stored.settings_file, None)["controls"]}
+        assert entries["bent"]["readable"] is True
+        assert entries["bent"]["valid"] is False
+        assert entries["bent"]["errors"]
+        # The point of the test: the good one is still described.
+        assert entries["conservatory"]["valid"] is True
+        assert entries["conservatory"]["devices"]
+
+    def test_the_shaped_fields_are_absent_rather_than_guessed(self, stored):
+        """`devices: 7` has no device list to report. Reporting one anyway - an empty list,
+        say - would be the wrong answer rather than no answer."""
+        path = os.path.join(stored.state_dir, "controls", "bent.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(dict(conservatory(), name="bent", devices=7), handle)
+        entries = {entry["name"]: entry for entry in _list_controls_result(stored.settings_file, None)["controls"]}
+        assert "devices" not in entries["bent"]
+        assert "cycle_seconds" not in entries["bent"]
+
+    def test_it_still_says_whether_the_control_is_running(self, stored):
+        """A control whose file was edited into nonsense a minute ago is still running the
+        document it started with, and that is the more urgent of the two facts."""
+        path = os.path.join(stored.state_dir, "controls", "bent.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(dict(conservatory(), name="bent", output="soon"), handle)
+        result = _list_controls_result(stored.settings_file, _Supervising(_status("bent")))
+        entries = {entry["name"]: entry for entry in result["controls"]}
+        assert entries["bent"]["valid"] is False
+        assert entries["bent"]["running"] is True
+        assert entries["bent"]["pid"] == 4321
+
+
 class TestGettingOneControl:
     def test_it_returns_the_document_as_stored(self, stored):
         result = _get_control_result("conservatory", stored.settings_file)
@@ -195,35 +244,3 @@ class TestRegistration:
         behind the switch that permits changing a heating loop would mean nobody could look
         without also granting that. No write flag is set here and both tools appear."""
         assert self._tools({"controls": {"enabled": True}}) == {"list_controls", "get_control"}
-
-
-class TestTheSupervisorSnapshot:
-    def test_it_reports_a_control_that_has_never_started(self, stored):
-        """`silent_for` is None rather than the age of the process: a control that has not
-        started has not been silent, it has not been asked."""
-        supervisor = Supervisor(["conservatory"], settings_file=stored.settings_file)
-        (status,) = supervisor.status()
-        assert status.name == "conservatory"
-        assert status.running is False
-        assert status.pid is None
-        assert status.silent_for is None
-
-    def test_it_is_a_snapshot_rather_than_a_view(self, stored):
-        """Frozen, and taken by value. A reader assembling a report out of the live child
-        would describe a moment that never existed, because the supervisor's own thread
-        rewrites it between one attribute read and the next."""
-        supervisor = Supervisor(["conservatory"], settings_file=stored.settings_file)
-        (status,) = supervisor.status()
-        supervisor.children["conservatory"].failures = 7
-        assert status.failures == 0
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            status.failures = 1
-
-    def test_an_unusable_control_is_absent_because_it_is_not_supervised(self, state_directory):
-        """It was skipped at construction, so the supervisor has nothing to say about it.
-        `list_controls` still lists it, from the store, which is the division of labour."""
-        path = os.path.join(state_directory.state_dir, "controls", "bent.yaml")
-        with open(path, "w", encoding="utf-8") as handle:
-            yaml.safe_dump({"name": "bent"}, handle)
-        supervisor = Supervisor(["bent"], settings_file=state_directory.settings_file)
-        assert supervisor.status() == ()

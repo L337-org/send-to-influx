@@ -24,7 +24,7 @@ __license__ = "MIT"
 
 import logging
 
-from toinflux.controls import controls_enabled, load_control
+from toinflux.controls import controls_enabled, load_control, validate_control
 from toinflux.controls import list_controls as stored_control_names
 from toinflux.exceptions import ConfigError
 from toinflux.mcp_common import register_tool
@@ -47,11 +47,24 @@ def _supervision_by_name(supervisor):
 
 
 def _describe(name, settings_file, supervision):
-    """Return one control's entry for the list, including why it cannot be read.
+    """Return one control's entry for the list, including why it cannot be used.
 
-    A control whose document will not parse is reported rather than omitted. Left out, it
-    would read as "no such control" to a caller that had just been told the name by
-    somebody else, and the next question would be about the wrong thing entirely.
+    A control that cannot be read, or that reads and is the wrong shape, is reported rather
+    than omitted. Left out, it would read as "no such control" to a caller that had just
+    been told the name by somebody else, and the next question would be about the wrong
+    thing entirely.
+
+    **The shaped fields are only read once the document has been validated.** A document
+    that parses as YAML can still be any shape at all - ``output`` a string, ``devices`` a
+    number - and the store guarantees only that it is a mapping. Reaching into one of those
+    raises an AttributeError or a TypeError, which here would take out the whole listing
+    for every *other* control as well: one bad document becoming everybody's outage, which
+    is the failure this subsystem is organised against.
+
+    **Supervision is reported whatever the document says.** A control whose file was edited
+    into nonsense a minute ago is still running the document it started with, and "this is
+    unusable" and "this is currently actuating your heaters" are both true and the second
+    is the more urgent.
 
     Args:
         name (str): the control's name
@@ -62,6 +75,7 @@ def _describe(name, settings_file, supervision):
         dict: the control's entry
     """
     entry: dict = {"name": name}
+    entry.update(_supervision_of(name, supervision))
     try:
         document = load_control(name, settings_file)
     except ConfigError as exc:
@@ -69,29 +83,51 @@ def _describe(name, settings_file, supervision):
         entry["error"] = repr(exc)
         return entry
     entry["readable"] = True
+    errors = validate_control(name, document)
+    entry["valid"] = not errors
+    if errors:
+        entry["errors"] = errors
+        return entry
     entry["enabled"] = document.get("enabled", True)
     entry["devices"] = sorted(document.get("devices") or {})
     entry["cycle_seconds"] = (document.get("output") or {}).get("cycle_seconds")
+    return entry
+
+
+def _supervision_of(name, supervision):
+    """Return what the supervisor has to say about one control, in its own right.
+
+    Separated from reading the document because the two are independent: a control can be
+    running from a document that has since been edited into nonsense, and the answer to
+    "is it actuating" does not depend on the answer to "can this file be used".
+
+    Args:
+        name (str): the control's name
+        supervision (dict or None): name to status, or None where nothing is supervising
+
+    Returns:
+        dict: the supervision fields for this control's entry
+    """
     if supervision is None:
         # Not false: nothing is watching, so nothing knows. See the module docstring.
-        entry["running"] = None
-        return entry
+        return {"running": None}
     status = supervision.get(name)
     if status is None:
         # Stored but not supervised, which is what a control added since the collector
-        # started looks like where no reload has reached the supervisor yet.
-        entry["running"] = False
-        entry["supervised"] = False
-        return entry
-    entry["supervised"] = True
-    entry["running"] = status.running
-    entry["pid"] = status.pid
-    entry["failures"] = status.failures
+        # started looks like where no reload has reached the supervisor yet, and what an
+        # unusable one looks like because the supervisor skipped it.
+        return {"running": False, "supervised": False}
+    fields = {
+        "supervised": True,
+        "running": status.running,
+        "pid": status.pid,
+        "failures": status.failures,
+    }
     if status.silent_for is not None:
-        entry["silent_for_seconds"] = round(status.silent_for, 1)
+        fields["silent_for_seconds"] = round(status.silent_for, 1)
     if status.restart_in is not None:
-        entry["restart_in_seconds"] = round(status.restart_in, 1)
-    return entry
+        fields["restart_in_seconds"] = round(status.restart_in, 1)
+    return fields
 
 
 def register_control_tools(server, settings, settings_file=None, supervisor=None):
@@ -136,9 +172,12 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
         `supervised: false` on a control that is stored means the supervisor has not taken
         it on yet.
 
-        A control whose document will not parse is listed with `readable: false` and the
-        reason, rather than omitted, so a name you were given does not simply vanish.
-        Reads stored files and changes nothing.
+        A control that cannot be used is listed rather than omitted, so a name you were
+        given does not simply vanish: `readable: false` with the reason where the file will
+        not parse, or `valid: false` with `errors` where it parses and is the wrong shape.
+        Either way its supervision fields are still reported, because a control whose file
+        was edited into nonsense is still running the document it started with. Reads
+        stored files and changes nothing.
         """
         return await anyio.to_thread.run_sync(_list_controls_result, settings_file, supervisor)
 
