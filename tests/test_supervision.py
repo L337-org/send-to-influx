@@ -529,3 +529,26 @@ class TestFindingTheConsoleScript:
         _two_controls(state_directory)
         supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
         assert supervisor._default_argv("conservatory")[0] == "send-to-influx"
+
+
+class TestStoppingTwice:
+    """Two callers reach `stop_all` in an ordinary shutdown: the supervisor's own loop when
+    SHUTDOWN is set, and the atexit handler covering a signal. It was idempotent by accident
+    of the selector implementations rather than by anything in this code."""
+
+    def test_the_second_call_closes_nothing_a_second_time(self, supervisor, bridge, monkeypatch):
+        """Counted at the selector, because that is the only thing the second call would
+        otherwise touch: every child is already stopped, so asserting no devices were
+        commanded passes with or without the guard - which is what the first version of this
+        test did.
+        """
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        closes = []
+        real_close = supervisor._selector.close
+        monkeypatch.setattr(supervisor._selector, "close", lambda: (closes.append(True), real_close())[1])
+
+        supervisor.stop_all()
+        supervisor.stop_all()
+        assert len(closes) == 1, f"the selector was closed {len(closes)} times"
+        assert all(child.process is None for child in supervisor.children.values())
