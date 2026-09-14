@@ -113,7 +113,10 @@ def command_devices(document, commands, settings_file=None) -> None:
             # types, so a KeyError from one corrupt document would escape that handler and
             # stop every other control being supervised.
             raise ConfigError(f"control device {name!r} declares no {render_values(missing)}")
-        targets.setdefault((spec["source"], spec.get("instance")), []).append((spec["device"], state))
+        # The control's own key travels with the bridge-side name, because it is the one an
+        # operator can act on: a fault with this declaration is fixed by editing the entry
+        # they wrote, not the device name the far end knows it by.
+        targets.setdefault((spec["source"], spec.get("instance")), []).append((name, spec["device"], state))
     for (source, instance), devices in sorted(targets.items(), key=lambda item: str(item[0])):
         with source_handler(source, settings_file=settings_file, instance=instance) as handler:
             if not getattr(handler, "MCP_ACTUATES_DEVICES", False):
@@ -122,11 +125,17 @@ def command_devices(document, commands, settings_file=None) -> None:
                 # passed and the call below then raised AttributeError - which is not one of
                 # the types the supervisor's safe-state pass handles, so one control's
                 # document could end the thread supervising all of them.
+                #
+                # Named by the control's own device keys rather than by the instance. The
+                # instance is what the grouping is keyed on, but it cannot be the fault
+                # here: actuating is a property of the source, so every instance of it
+                # answers the same way, and naming one would point at the wrong thing.
                 raise ConfigError(
-                    f"control device source {source!r} cannot switch a device on and off, "
-                    f"so a control cannot actuate it"
+                    f"control device {render_values(sorted(key for key, _name, _state in devices))} "
+                    f"names source {source!r}, which cannot switch a device on and off. A "
+                    f"control's devices must name a source that can"
                 )
-            for device, state in devices:
+            for _key, device, state in devices:
                 handler.mcp_set_device_state(device, on=bool(state))
 
 

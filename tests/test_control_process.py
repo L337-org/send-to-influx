@@ -252,6 +252,21 @@ class TestCommandingDevices:
         with pytest.raises(ConfigError, match="cannot switch a device"):
             command_devices(document, {"far": True}, installation.settings_file)
 
+    def test_the_refusal_names_the_control_s_own_device_keys(self, installation):
+        """What an operator edits is the entry they wrote, not the name the far end knows
+        the device by - and not the instance, which cannot be the fault here: actuating is
+        a property of the source, so every instance of it answers the same way."""
+        installation.set_settings("speedtest", db="speedtest_db")
+        document = conservatory()
+        document["devices"] = {
+            "upstairs": {"source": "speedtest", "device": "line-1"},
+            "downstairs": {"source": "speedtest", "device": "line-2"},
+        }
+        with pytest.raises(ConfigError) as exc:
+            command_devices(document, {"upstairs": True, "downstairs": False}, installation.settings_file)
+        assert "'downstairs'" in str(exc.value) and "'upstairs'" in str(exc.value)
+        assert "line-1" not in str(exc.value)
+
     def test_a_device_declaring_no_source_is_a_config_error_not_a_key_error(self, installation):
         """The supervisor calls this to make a dead control's devices safe and handles the
         project's own types, so a KeyError out of one corrupt document would escape that
