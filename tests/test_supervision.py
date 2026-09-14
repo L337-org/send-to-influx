@@ -66,6 +66,18 @@ def _quick(name, devices, **overrides):
     return document
 
 
+def _bend(installation, name) -> None:
+    """Overwrite one control's document with something that will not parse.
+
+    Args:
+        installation (Installation): the installation holding the control store
+        name (str): the control whose document to break
+    """
+    path = os.path.join(installation.state_dir, "controls", f"{name}.yaml")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("output: [not a control\n")
+
+
 def _two_controls(installation):
     """Write two controls that share a bridge but no devices.
 
@@ -257,6 +269,214 @@ class TestWhenOneDies:
             event = _wait_for(supervisor, "stalled", "conservatory")
         assert "no heartbeat" in event.detail
         _wait_for(supervisor, "started", "conservatory")
+
+
+class TestADocumentThatChanged:
+    """A control edited while it is running. The parent stops it with the signal the child
+    already handles, and starts it again from the new document - so every assertion here is
+    about a *deliberate* stop: what the bridge was commanded afterwards, and that nothing
+    treated the exit as a failure."""
+
+    def test_the_new_document_is_what_comes_back(self, supervisor, state_directory, bridge):
+        """A second device, which the document it was started with could not name at all.
+        Asserting on the pid alone would pass for a supervisor that restarted the control
+        from the old document, which is the bug worth catching."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        first = supervisor.children["conservatory"].process.pid
+        bridge.lights["10"] = plug("spare-heater")
+        state_directory.write_control(
+            _quick(
+                "conservatory",
+                {"far": {"source": "hue", "device": "far"}, "spare": {"source": "hue", "device": "spare-heater"}},
+            )
+        )
+        bridge.clear()
+        supervisor.request_reload("conservatory")
+        _wait_for(supervisor, "reloaded", "conservatory")
+        _wait_for(supervisor, "beat", "conservatory")
+        assert supervisor.children["conservatory"].process.pid != first
+        assert "spare-heater" in {command.name for command in bridge.commanded()}
+        # The operating system's account rather than the supervisor's. A reload that started
+        # the new process without stopping the old one would satisfy every assertion above
+        # and leave two controls commanding the same heater from different documents, which
+        # is the one outcome worse than the edit not taking effect at all.
+        with pytest.raises(ProcessLookupError):
+            os.kill(first, 0)
+
+    def test_it_is_not_counted_against_the_control(self, supervisor, caplog):
+        """The whole point of a deliberate stop. Left to the ordinary death path, the exit
+        would be an ERROR in the journal, a failure on the child, and a new document that
+        waits out a backoff earned by the old one."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        supervisor.children["conservatory"].failures = 4
+        with caplog.at_level(logging.ERROR, logger="root"):
+            supervisor.request_reload("conservatory")
+            _wait_for(supervisor, "started", "conservatory")
+        assert supervisor.children["conservatory"].failures == 0
+        assert "conservatory" not in caplog.text
+
+    def test_a_death_is_still_a_death(self, supervisor):
+        """The other half of the same claim: the deliberate path must not have made every
+        exit free. A control that is killed still counts a failure and still backs off."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        supervisor.children["conservatory"].process.kill()
+        _wait_for(supervisor, "died", "conservatory")
+        assert supervisor.children["conservatory"].failures == 1
+
+    def test_a_run_of_saves_restarts_it_once(self, supervisor):
+        """A client saving three edits in a row should not stop and start a heater three
+        times, and the document on disk now is the only one any of them was asking for."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        for _ in range(3):
+            supervisor.request_reload("conservatory")
+        events = supervisor.poll(timeout=0.2)
+        assert [event.kind for event in events].count("reloaded") == 1
+
+    def test_a_newly_stored_control_is_taken_on(self, supervisor, state_directory, bridge):
+        """Without this a control saved while the collector is running does nothing at all
+        until somebody restarts the service, which is the surprise the restart-on-edit
+        design exists to avoid."""
+        bridge.lights["11"] = plug("study-heater")
+        state_directory.write_control(_quick("study", {"study": {"source": "hue", "device": "study-heater"}}))
+        assert "study" not in supervisor.children
+        supervisor.request_reload("study")
+        _wait_for(supervisor, "beat", "study")
+        assert supervisor.children["study"].running
+
+    def test_a_deleted_document_stops_the_control_and_forgets_it(self, supervisor, state_directory, bridge):
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        os.remove(os.path.join(state_directory.state_dir, "controls", "conservatory.yaml"))
+        supervisor.request_reload("conservatory")
+        _wait_for(supervisor, "dropped", "conservatory")
+        assert "conservatory" not in supervisor.children
+        _wait_for(supervisor, "beat", "porch")
+
+    def test_a_deleted_document_still_makes_its_devices_safe(self, supervisor, state_directory, bridge):
+        """The case the started-from copy exists for. The process is killed, so its own
+        guard never ran, and the document is gone, so there is nothing on disk to read - the
+        only description of which devices this control owned is the one the parent kept."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        bridge.lights[bridge.id_of("far")]["state"]["on"] = True
+        supervisor.children["conservatory"].process.kill()
+        os.remove(os.path.join(state_directory.state_dir, "controls", "conservatory.yaml"))
+        bridge.clear()
+        supervisor.request_reload("conservatory")
+        _wait_for(supervisor, "dropped", "conservatory")
+        assert bridge.energised()["far"] is False
+        # Not an exhaustive list: the other control is still running and commanding its own
+        # device throughout. That `far` was commanded at all is the claim, because the only
+        # thing that could have done it is the parent working from its kept copy.
+        assert "far" in [command.name for command in bridge.commanded()]
+
+    def test_a_document_that_will_not_read_leaves_the_control_running(self, supervisor, state_directory, caplog):
+        """A half-finished hand edit is not a reason to stop a control that is holding a
+        room at temperature. The next reload gets another go."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        running = supervisor.children["conservatory"].process.pid
+        _bend(state_directory, "conservatory")
+        with caplog.at_level(logging.ERROR):
+            supervisor.request_reload("conservatory")
+            event = _wait_for(supervisor, "reload-failed", "conservatory")
+        assert supervisor.children["conservatory"].process.pid == running
+        assert "not valid YAML" in event.detail
+        assert "still running the document it started with" in caplog.text
+        _wait_for(supervisor, "beat", "conservatory")
+
+    def test_an_ordinary_restart_picks_up_an_edit_nobody_announced(self, supervisor, state_directory):
+        """A control can be edited by hand and then die on its own, with no reload asked for.
+        The child re-reads its own document on the way up either way, so a parent still
+        working from the copy it read at construction would hold a stall threshold computed
+        from a cycle window that no longer exists - and kill the control for silence it is
+        entitled to."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        assert supervisor.children["conservatory"].stall_seconds == 30.0
+        edited = _quick("conservatory", {"far": {"source": "hue", "device": "far"}})
+        edited["output"]["cycle_seconds"] = 20
+        state_directory.write_control(edited)
+        supervisor.children["conservatory"].process.kill()
+        _wait_for(supervisor, "died", "conservatory")
+        _wait_for(supervisor, "started", "conservatory")
+        assert supervisor.children["conservatory"].stall_seconds == 60.0
+
+    def test_an_ordinary_restart_lets_go_of_a_device_the_control_gave_up(self, supervisor, state_directory, bridge):
+        """The same staleness at the bridge rather than in an attribute. Making a control
+        safe commands the devices its process was started with as well as the ones the file
+        names now, so a parent holding a copy from before the edit would keep switching off
+        a device this control no longer owns - and would do it to whichever control owns it
+        next."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        bridge.lights["13"] = plug("annexe-heater")
+        state_directory.write_control(_quick("conservatory", {"annexe": {"source": "hue", "device": "annexe-heater"}}))
+        supervisor.children["conservatory"].process.kill()
+        _wait_for(supervisor, "died", "conservatory")
+        _wait_for(supervisor, "started", "conservatory")
+        _wait_for(supervisor, "beat", "conservatory")
+        bridge.clear()
+        supervisor.make_safe("conservatory")
+        # Membership rather than an exact list: the other control is running throughout and
+        # commands its own device on its own cycle. `far` is the claim - a parent still
+        # holding the copy from before the edit would switch off a device this control has
+        # given up, and would do it to whichever control owns it next.
+        commanded = {command.name for command in bridge.commanded()}
+        assert "annexe-heater" in commanded
+        assert "far" not in commanded
+
+    def test_a_start_that_cannot_re_read_keeps_the_copy_it_has_and_says_so(self, supervisor, state_directory, caplog):
+        """A document that will not read does not stop the control being started: the child
+        reads the same file and fails on it in its own process, where the restart path
+        already handles it."""
+        _bend(state_directory, "conservatory")
+        with caplog.at_level(logging.WARNING):
+            supervisor.start("conservatory")
+        assert supervisor.children["conservatory"].running
+        assert "still working from the document it last read" in caplog.text
+
+    def test_a_start_that_cannot_re_read_and_has_no_copy_says_that_instead(self, supervisor, state_directory, caplog):
+        """The same failure with nothing to fall back on, which is the case an operator
+        actually needs woken up for: the parent has no description of this control's devices
+        and cannot make them safe. Reachable because a control taken on by a reload is built
+        with no document and its file was readable only a moment earlier.
+
+        `document` is cleared by hand because that is the state `_reload` builds. Racing the
+        window between its read and the start would be a race rather than a test.
+        """
+        _bend(state_directory, "conservatory")
+        supervisor.children["conservatory"].document = None
+        with caplog.at_level(logging.WARNING):
+            supervisor.start("conservatory")
+        assert "no description of this control at all" in caplog.text
+        assert "still working from the document it last read" not in caplog.text
+
+    def test_a_reload_asked_for_while_stopping_is_refused_and_says_so(
+        self, supervisor, state_directory, bridge, caplog
+    ):
+        """The request arrives from another thread, so it can arrive during shutdown. It is
+        refused rather than queued, because a control started after stop_all would outlive
+        the supervisor with nothing watching it - and refused audibly, because a save that
+        appears to have been accepted and was not is the worse failure.
+
+        Asserted on the log rather than on a later poll: stop_all closes the selector, so
+        there is no later poll to make. That is the shape of the real shutdown too, where
+        the loop's own finally calls it and the loop has already ended.
+        """
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        supervisor.stop_all()
+        bridge.lights["12"] = plug("late-heater")
+        state_directory.write_control(_quick("late", {"late": {"source": "hue", "device": "late-heater"}}))
+        with caplog.at_level(logging.DEBUG):
+            supervisor.request_reload("late")
+        assert "the supervisor is stopping" in caplog.text
+        assert "late" not in supervisor.children
 
 
 class TestTheRunAsAWhole:
@@ -488,17 +708,36 @@ class TestADocumentThatIsNotTheRightShape:
         assert list(supervisor.children) == ["conservatory"]
         assert "bent" in caplog.text
 
-    def test_making_a_bent_control_safe_says_so_rather_than_raising(self, state_directory, caplog):
-        """The path that runs when something has already gone wrong, and the file can have
-        been rewritten since the supervisor read it."""
+    def test_a_bent_document_falls_back_to_the_one_the_process_was_started_with(self, state_directory, bridge, caplog):
+        """The path that runs when something has already gone wrong, and the file has been
+        rewritten since the supervisor read it. Reading the file is how the parent learns
+        about a device that has just been *added*; the copy the process was started with is
+        how it still knows about the ones that were there all along. A bent file leaves only
+        the second, and a heater is not left on because a YAML document lost its shape."""
         _two_controls(state_directory)
         supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
         path = os.path.join(state_directory.state_dir, "controls", "conservatory.yaml")
         with open(path, "w", encoding="utf-8") as handle:
             yaml.safe_dump(dict(conservatory(), devices=["far"]), handle)
+        bridge.lights[bridge.id_of("far")]["state"]["on"] = True
+        bridge.clear()
+        with caplog.at_level(logging.WARNING):
+            supervisor.make_safe("conservatory")
+        assert bridge.energised()["far"] is False
+        assert [command.name for command in bridge.commanded()] == ["far"]
+        assert "made safe from the document it was started with" in caplog.text
+
+    def test_a_bent_document_with_nothing_to_fall_back_on_says_so_rather_than_raising(self, state_directory, caplog):
+        """No supervised child means no started-from copy, so the file is the only
+        description there was and there is now nothing to command."""
+        _two_controls(state_directory)
+        supervisor = Supervisor([], settings_file=state_directory.settings_file)
+        path = os.path.join(state_directory.state_dir, "controls", "conservatory.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(dict(conservatory(), devices=["far"]), handle)
         with caplog.at_level(logging.ERROR):
             supervisor.make_safe("conservatory")
-        assert "Could not make control" in caplog.text
+        assert "made safe from nothing at all" in caplog.text
 
 
 class TestFindingTheConsoleScript:
