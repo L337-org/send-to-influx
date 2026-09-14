@@ -195,6 +195,7 @@ class Supervisor:
         self._argv_for = argv_for or self._default_argv
         self._backoff = backoff or _default_backoff
         self._selector = selectors.DefaultSelector()
+        self._stopped = False
         self.children = {}
         self.events = []
         for name in names:
@@ -461,7 +462,18 @@ class Supervisor:
             logging.error("Could not make control %r safe after it died: %r", name, exc)
 
     def stop_all(self) -> None:
-        """Stop every running control and leave its devices safe."""
+        """Stop every running control and leave its devices safe, once.
+
+        Once, explicitly. Two callers reach this in the ordinary shutdown of the collector -
+        the supervisor's own loop when SHUTDOWN is set, and the atexit handler that covers a
+        signal exiting through sys.exit - and a second pass closes an already-closed
+        selector. That happens to be harmless on both selector implementations this runs on,
+        which is not the same as being safe: it was idempotent by accident of somebody
+        else's internals, while a comment at the call site asserted it as a property.
+        """
+        if self._stopped:
+            return
+        self._stopped = True
         for child in self.children.values():
             if not child.running:
                 continue
