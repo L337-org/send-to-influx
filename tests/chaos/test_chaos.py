@@ -158,6 +158,12 @@ def _chaos_run(installation, seed, ticks):
                 # job nobody watches is the worst place for that difference to be invisible.
                 warnings.warn(f"chaos run with seed {seed} skipped a check: {reason}", stacklevel=2)
     finally:
+        # Before stop_all, and whatever went wrong. A tick that raises leaves the fault it
+        # injected still entered: the next scenario then fails for a reason that has nothing
+        # to do with it, and - worse here - stop_all cannot make the devices safe through a
+        # bridge this run is still holding unreachable. The harness's own rule, which the
+        # driver was breaking.
+        driver.clear_fault()
         supervisor.stop_all()
 
 
@@ -183,3 +189,77 @@ def test_a_seed_that_failed_before(state_directory, seed):
     placeholder seed would only assert that the harness starts.
     """
     _chaos_run(state_directory, seed, ticks=25)
+
+
+class TestAFaultNeverOutlivesTheRun:
+    """The harness's own rule, which the driver was breaking. A tick that raises leaves the
+    fault it injected still entered: the next scenario then fails for a reason that has
+    nothing to do with it, and stop_all cannot make the devices safe through a bridge this
+    run is still holding unreachable."""
+
+    class _NoChildren:
+        """A supervisor with nothing to kill, so the driver's choices stay to faults."""
+
+        children: dict = {}
+
+        def poll(self, timeout=0.2):
+            """Do nothing, as a stand-in.
+
+            Args:
+                timeout (float): ignored
+
+            Returns:
+                list: no events
+            """
+            return []
+
+    def _driver_with_a_fault(self, bridge, influx):
+        """Return a driver that has entered a fault, and the endpoint it broke.
+
+        Args:
+            bridge (StubBridge): the devices' far end
+            influx (StubInflux): the readings' far end
+
+        Returns:
+            ChaosDriver: with one fault active
+        """
+        driver = ChaosDriver(1, self._NoChildren(), bridge, influx)
+        for tick in range(1, 40):
+            driver._choose(tick)
+            if driver._active is not None:
+                return driver
+        raise AssertionError("no seed choice produced a fault to clear")
+
+    def test_clearing_puts_the_endpoints_back(self, bridge, influx):
+        driver = self._driver_with_a_fault(bridge, influx)
+        driver.clear_fault()
+        for endpoint in (bridge, influx):
+            assert endpoint.unreachable is False
+            assert endpoint.hang_seconds == 0.0
+            assert endpoint.status is None
+        assert influx.frozen is False
+
+    def test_clearing_twice_is_not_an_error(self, bridge, influx):
+        """The unwind path runs it, and so does settle. Neither knows what the other did."""
+        driver = self._driver_with_a_fault(bridge, influx)
+        driver.clear_fault()
+        driver.clear_fault()
+        assert driver._active is None
+
+    def test_the_unwind_records_the_clearing_it_did(self, bridge, influx):
+        """The end-to-end version of this test cannot fail, and is not here.
+
+        A fault is a `@contextmanager` generator, so when the driver is collected, closing
+        the suspended generator runs its `finally` and puts the endpoint back. Measured: with
+        the explicit clearing removed, a failed run still ended with every fault off. So
+        CPython's refcounting was masking the omission, and an end-to-end assertion about
+        endpoint state passes whether or not the unwind does its job.
+
+        The explicit call stays, because correctness resting on when an object happens to be
+        collected is not correctness - a reference cycle, or a traceback holding the frame,
+        and the fault outlives the run. What is asserted here is the thing only the explicit
+        call produces: an entry in the story saying it happened.
+        """
+        driver = self._driver_with_a_fault(bridge, influx)
+        driver.clear_fault()
+        assert any("cleared the fault" in tick.action for tick in driver.run.ticks)

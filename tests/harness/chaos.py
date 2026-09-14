@@ -65,10 +65,18 @@ class Run:
     def story(self):
         """Return the run as something readable in a failure message.
 
+        One line per *change* rather than per tick, with the tick number on each, and a note
+        saying so. A three-hundred-tick run padded with "nothing happened" is not more
+        reproducible, only longer - but a reader has to be told that a gap in the numbering
+        means the state above it persisted, rather than that something went unrecorded.
+
         Returns:
-            str: one line per tick
+            str: one line per change, oldest first
         """
-        return "\n  ".join(f"tick {tick.number}: {tick.action} {tick.detail}".rstrip() for tick in self.ticks)
+        lines = [f"tick {tick.number}: {tick.action} {tick.detail}".rstrip() for tick in self.ticks]
+        if not lines:
+            return "nothing was injected before it failed"
+        return "\n  ".join(lines + ["(ticks not listed ran with the state above unchanged)"])
 
 
 class ChaosDriver:
@@ -164,16 +172,25 @@ class ChaosDriver:
                 f"Add {self.seed} to SEEDS_THAT_FAILED so this runs from now on."
             )
 
+    def clear_fault(self) -> None:
+        """Exit whatever fault is active, without polling or judging anything.
+
+        Separate from :meth:`settle` so a caller unwinding from a failure can put the world
+        back without also asking the supervisor to make progress - which, mid-failure, is
+        neither wanted nor necessarily possible.
+        """
+        if self._active is not None:
+            self._active.__exit__(None, None, None)
+            self._active = None
+            self.run.ticks.append(Tick(len(self.run.ticks), "cleared the fault"))
+
     def settle(self, seconds=2.0) -> None:
         """Clear any fault and let the system reach a state worth judging.
 
         Args:
             seconds (float): how long to keep polling after the faults are cleared
         """
-        if self._active is not None:
-            self._active.__exit__(None, None, None)
-            self._active = None
-            self.run.ticks.append(Tick(len(self.run.ticks), "cleared the fault to settle"))
+        self.clear_fault()
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             self._poll(timeout=0.1)
