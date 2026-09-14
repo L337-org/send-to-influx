@@ -131,9 +131,9 @@ def command_devices(document, commands, settings_file=None) -> None:
                 # here: actuating is a property of the source, so every instance of it
                 # answers the same way, and naming one would point at the wrong thing.
                 raise ConfigError(
-                    f"control device {render_values(sorted(key for key, _name, _state in devices))} "
-                    f"names source {source!r}, which cannot switch a device on and off. A "
-                    f"control's devices must name a source that can"
+                    f"control device {render_values(sorted(key for key, _device, _state in devices))} "
+                    f"names source {source!r}, which cannot switch a device on and off. Name a "
+                    f"source that can, or remove the device from this control"
                 )
             for _key, device, state in devices:
                 handler.mcp_set_device_state(device, on=bool(state))

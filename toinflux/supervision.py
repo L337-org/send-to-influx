@@ -212,8 +212,11 @@ def _snapshot(child, now):
     other value, and the arithmetic is clamped - but an invariant that holds only while
     nobody reorders the expression is not an invariant.
 
-    Reading into locals first is enough, and the lock stays narrow: a single attribute read
-    cannot see a half-written value, so it is only ever the combination that needs pinning.
+    Reading into locals first is enough on its own - this function takes no lock, and does
+    not need one: a single attribute read cannot see a half-written value, so it is only
+    ever the combination that needs pinning to one moment. The lock :meth:`Supervisor.status`
+    holds while it collects the children is a different concern, and covers only the mapping
+    being resized underneath it.
 
     Args:
         child (Child): the control to describe
