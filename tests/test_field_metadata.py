@@ -383,8 +383,15 @@ class TestWhatTheExampleShips:
     def test_the_search_finds_more_than_one_section(self):
         """A guard that searched nothing would look exactly like a clean tree - and the
         first version of this checked only openmeteo, which is the same hole one section
-        wide."""
-        assert len(self._sections_with_fields()) >= 4, self._sections_with_fields()
+        wide.
+
+        Two, not the five the example ships today. The claim being made is that discovery is
+        not one section wide; asserting the current count would additionally assert a fact
+        about the example file that is none of this test's business, and would fail on a
+        legitimate edit that dropped a source from it.
+        """
+        found = self._sections_with_fields()
+        assert len(found) >= 2, f"discovery found {found}, which cannot show it is not one section wide"
 
     def test_every_field_the_example_collects_carries_metadata(self):
         missing = []
