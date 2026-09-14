@@ -20,7 +20,7 @@ import toinflux
 from toinflux.general import render_values
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
-from toinflux.controls import list_controls, validate_stored_controls
+from toinflux.controls import controls_enabled, list_controls, validate_stored_controls
 from toinflux.control_process import heartbeat_writer, run_control
 from toinflux.supervision import Supervisor
 
@@ -502,7 +502,7 @@ def signal_handler(sig, _frame):
     sys.exit(0)
 
 
-def maybe_start_mcp_server(settings, args):
+def maybe_start_mcp_server(settings, args, supervisor=None):
     """Start the embedded MCP server thread when enabled and in a collection mode.
 
     ``--print`` and ``--dump`` are interactive debugging modes that never touch
@@ -514,6 +514,8 @@ def maybe_start_mcp_server(settings, args):
     Args:
         settings (dict): loaded settings dict
         args (argparse.Namespace): parsed CLI arguments
+        supervisor (Supervisor or None): the running control supervisor, where there is
+            one, so the control tools can report whether a control's process is up
 
     Returns:
         threading.Thread or None: the server thread, or None when not started
@@ -524,7 +526,7 @@ def maybe_start_mcp_server(settings, args):
         return None
     from toinflux.mcpserver import start_mcp_server_thread
 
-    return start_mcp_server_thread(settings, args.settings)
+    return start_mcp_server_thread(settings, args.settings, supervisor=supervisor)
 
 
 def _configure_logging_or_exit(settings, args):
@@ -704,24 +706,6 @@ def _check_config_and_exit(settings, args):
     sys.exit(0)
 
 
-def _controls_enabled(settings):
-    """Whether this installation runs the control subsystem at all.
-
-    Off unless it is switched on. Controls actuate devices unattended, so an installation
-    that has not said it wants that does not get it - and this is deliberately not the
-    collector's ``mcp_read_write`` flag, because wanting a heating loop is not the same as
-    granting a model device-write access.
-
-    Args:
-        settings (dict): the parsed settings document
-
-    Returns:
-        bool: True where ``controls.enabled`` is exactly true
-    """
-    block = settings.get("controls")
-    return isinstance(block, dict) and block.get("enabled") is True
-
-
 def _start_control_supervisor(settings, args):
     """Start the control supervisor in its own thread, or return None.
 
@@ -735,7 +719,7 @@ def _start_control_supervisor(settings, args):
     Returns:
         Supervisor or None: the running supervisor, already started
     """
-    if not _controls_enabled(settings):
+    if not controls_enabled(settings):
         return None
     names = list_controls(args.settings)
     if not names:
@@ -890,7 +874,10 @@ def main() -> None:
         # in one process that the supervisor expects to kill independently.
         _run_control_and_exit(args)
 
-    _start_control_supervisor(settings, args)
+    # Kept, because the MCP control tools report on it. Started here rather than after the
+    # server so that a client connecting immediately is told what is running rather than
+    # that nothing is.
+    supervisor = _start_control_supervisor(settings, args)
 
     requested = _requested_sources(settings, args)
     units = toinflux.expand_sources(requested, settings)
@@ -910,7 +897,7 @@ def main() -> None:
     # server here would only be a brief bind/log-noise/state-file-write cycle on a
     # path meant to be a clean early exit.
     _exit_if_nothing_to_collect(units, requested, settings, args)
-    maybe_start_mcp_server(settings, args)
+    maybe_start_mcp_server(settings, args, supervisor=supervisor)
     if args.dump:
         if len(requested) > 1:
             logging.error("The --dump option requires --source when running in multi-source mode.")

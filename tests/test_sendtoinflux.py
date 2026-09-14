@@ -12,6 +12,7 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 import pytest
 import sendtoinflux
+from toinflux.controls import controls_enabled
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.speedtest import Speedtest
 from toinflux.influx import DataHandler, InfluxWriteError
@@ -1405,7 +1406,7 @@ class TestMaybeStartMcpServer:
         args = SimpleNamespace(print=False, dump=False, settings="/etc/send-to-influx/settings.yaml")
         with patch("toinflux.mcpserver.start_mcp_server_thread") as start:
             result = sendtoinflux.maybe_start_mcp_server(self.ENABLED_SETTINGS, args)
-        start.assert_called_once_with(self.ENABLED_SETTINGS, "/etc/send-to-influx/settings.yaml")
+        start.assert_called_once_with(self.ENABLED_SETTINGS, "/etc/send-to-influx/settings.yaml", supervisor=None)
         assert result is start.return_value
 
     def test_main_does_not_start_mcp_server_when_nothing_configured(self):
@@ -2057,7 +2058,7 @@ class TestTheControlSubsystemOptIn:
     def test_only_an_explicit_true_switches_it_on(self, settings, enabled):
         """`enabled: "true"` is a string and truthy, so a loose check would start unattended
         actuation for somebody who quoted a YAML boolean."""
-        assert sendtoinflux._controls_enabled(settings) is enabled
+        assert controls_enabled(settings) is enabled
 
     def test_nothing_starts_when_it_is_switched_off(self):
         args = argparse.Namespace(settings=None)

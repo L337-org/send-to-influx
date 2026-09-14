@@ -432,7 +432,7 @@ def run_options(settings):  # noqa: DOC502 - ConfigError propagates from parse_m
     return {**app_options(settings), "port": port}
 
 
-def build_mcp_server(settings, settings_file=None):
+def build_mcp_server(settings, settings_file=None, supervisor=None):
     """Construct the MCPServer application for the given settings.
 
     Everything SDK-related is imported here, not at module level - see the
@@ -448,6 +448,10 @@ def build_mcp_server(settings, settings_file=None):
     Args:
         settings (dict): parsed settings dictionary (validated, post-substitution)
         settings_file (str or None): settings path, for anchoring the default state file
+        supervisor (Supervisor or None): the running control supervisor, where there is
+            one, so the control tools can say whether a control's process is up. Passed in
+            rather than looked up: it runs in a thread of this same process, and None is a
+            third answer rather than "nothing is running"
 
     Returns:
         mcp.server.mcpserver.MCPServer: a configured MCPServer instance
@@ -541,6 +545,7 @@ def build_mcp_server(settings, settings_file=None):
     # registered. The control_device prompt and the device-write tools are only
     # registered when a source is opted in via <source>.mcp_read_write - when none
     # is, neither appears on the server at all (least privilege).
+    from toinflux.mcp_controls import register_control_tools
     from toinflux.mcp_dashboards import register_dashboard_tools
     from toinflux.mcp_prompts import register_prompts
     from toinflux.mcp_read import register_read_tools
@@ -557,6 +562,7 @@ def build_mcp_server(settings, settings_file=None):
     register_resources(server, settings, settings_file)
     register_prompts(server, settings, settings_file, enabled_sources=enabled_sources)
     register_write_tools(server, settings, settings_file, enabled_sources=enabled_sources)
+    register_control_tools(server, settings, settings_file, supervisor=supervisor)
 
     return server
 
@@ -903,7 +909,7 @@ class SendToInfluxOAuthProvider:
             del self._auth_codes[key]
 
 
-def start_mcp_server_thread(settings, settings_file=None):
+def start_mcp_server_thread(settings, settings_file=None, supervisor=None):
     """Start the MCP server in a daemon thread and return the thread.
 
     Config-shaped failures (ConfigError from build_mcp_server) are logged as
@@ -915,6 +921,7 @@ def start_mcp_server_thread(settings, settings_file=None):
     Args:
         settings (dict): parsed settings dictionary (validated)
         settings_file (str or None): settings path, threaded through for the state file default
+        supervisor (Supervisor or None): the running control supervisor, where there is one
 
     Returns:
         threading.Thread: the started daemon thread running the server
@@ -924,7 +931,7 @@ def start_mcp_server_thread(settings, settings_file=None):
     def server_worker():
         while True:
             try:
-                server = build_mcp_server(settings, settings_file)
+                server = build_mcp_server(settings, settings_file, supervisor=supervisor)
                 logging.info(
                     "MCP server listening on %s:%s (public URL %s)",
                     host,

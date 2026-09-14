@@ -572,3 +572,25 @@ def validate_stored_controls(settings_file=None) -> None:
         problems.extend(f"control {name!r}: {error}" for error in validate_control(name, document))
     if problems:
         raise ConfigError("\n  ".join(["control configuration is invalid:"] + problems))
+
+
+def controls_enabled(settings):
+    """Whether this installation runs the control subsystem at all.
+
+    Off unless it is switched on. Controls actuate devices unattended, so an installation
+    that has not said it wants that does not get it - and this is deliberately not the
+    collector's ``mcp_read_write`` flag, because wanting a heating loop is not the same as
+    granting a model device-write access.
+
+    Exactly ``true`` and nothing else. ``enabled: "true"`` is a string, and a string is
+    truthy, so a loose check would start unattended actuation for somebody who quoted a
+    YAML boolean.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        bool: True where ``controls.enabled`` is exactly true
+    """
+    block = settings.get("controls")
+    return isinstance(block, dict) and block.get("enabled") is True

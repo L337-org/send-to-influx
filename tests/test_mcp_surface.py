@@ -44,6 +44,7 @@ import anyio
 import pytest
 
 from toinflux.mcp_common import TRANSLATES_FAILURES
+from toinflux.mcp_controls import register_control_tools
 from toinflux.mcp_dashboards import register_dashboard_tools
 from toinflux.mcp_prompts import register_prompts
 from toinflux.mcp_read import register_read_tools
@@ -70,6 +71,11 @@ SIBLINGS = {
     "hue_list_devices": {"hue_set_light", "get_current_state"},
     "hue_set_light": {"hue_list_devices", "get_current_state", "query_history"},
     "speedtest_run": {"get_current_state", "query_history", "get_data_range"},
+    # The control pair's confusable neighbour is not each other, it is "what is the
+    # device doing now": a control describes what *should* happen, and a caller asked
+    # whether the heating is on wants the device rather than the loop.
+    "list_controls": {"get_control", "get_current_state"},
+    "get_control": {"list_controls", "get_current_state"},
 }
 
 # Backticked identifiers that are payload keys, parameters or settings - not tools. The
@@ -117,17 +123,26 @@ WRITE_EFFECT_PHRASES = {
 # Recorded ceilings, not predictions - see the table in this module's docstring for
 # what is actually measured. Raising one is a deliberate decision that belongs in the
 # commit message with its reason.
-MAX_TOOL_BYTES = 13_550
+# Raised from 13,550 when the two read-only control tools were added: 1,708 bytes for
+# `list_controls` and `get_control` together, which is under the per-tool average the
+# surface already carries. The three-valued `running` paragraph is the largest single
+# thing bought here and is worth it - without it, "nothing is supervising" reads as
+# "the control is stopped", and a caller goes looking for a crash that never happened.
+MAX_TOOL_BYTES = 15_250
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 15_750
+MAX_TOTAL_BYTES = 17_500
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],
     "influx": {"url": "http://influx.example", "user": "u", "password": "p"},
     "hue": {"host": "hue.example", "user": "abc", "db": "hue_db", "mcp_read_write": True},
     "speedtest": {"db": "speedtest_db", "mcp_read_write": True},
+    # On, because this module measures the whole advertised surface and a capability
+    # switched off is absent from it. With controls off the two control tools would not
+    # register and every guard below would pass by not looking at them.
+    "controls": {"enabled": True},
 }
 
 
@@ -137,7 +152,8 @@ def _server():
 
     Needs no mocking - registration reads settings and class metadata only, and
     ``enabled_sources`` is passed so the write/prompt gate does not construct
-    handlers to decide.
+    handlers to decide, and ``controls.enabled`` is set in SETTINGS so the control
+    tools register - registration reads no control document, so no store is needed.
     """
     server = MCPServer(name="surface")
     register_read_tools(server, SETTINGS, None)
@@ -145,6 +161,7 @@ def _server():
     register_write_tools(server, SETTINGS, None, enabled_sources=["hue", "speedtest"])
     register_prompts(server, SETTINGS, None, enabled_sources=["hue", "speedtest"])
     register_resources(server, SETTINGS, None)
+    register_control_tools(server, SETTINGS, None)
     return server
 
 

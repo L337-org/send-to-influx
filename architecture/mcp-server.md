@@ -212,6 +212,26 @@ in the credstore and not in plaintext) and, where real systemd is present, asser
 actually binds `127.0.0.1:8420` under the full hardened sandbox (the real test that the hardening +
 `LoadCredentialEncrypted` don't break the network-facing server).
 
+**Control tools** (`toinflux/mcp_controls.py`, registered by `register_control_tools()`): read-only,
+`list_controls` and `get_control`, and registered **only where `controls.enabled` is true** - a
+capability that is switched off is absent from the advertised surface rather than present and
+refusing, because a tool a model can see is a tool it will try. Deliberately not behind the flag that
+will permit *writing* controls: a control document holds no secrets, and gating "what is this install
+controlling, and is it running" behind the switch that permits changing a heating loop would mean
+nobody could look without also granting that.
+
+The supervisor is **passed in** to `build_mcp_server()` rather than looked up. It runs in a thread of
+this same process, so reading it is an ordinary method call - but it is read from the MCP server's
+thread while the supervisor's own thread mutates it, so `Supervisor.status()` returns an immutable
+snapshot under a lock rather than a view of the live `Child` objects. The lock covers the children
+mapping gaining or losing a key and nothing else: a status reader that sees a counter a moment late
+is reading a report, while a mapping resized underneath it is a `RuntimeError`.
+
+`None` for the supervisor is a **third answer**, not "not running": the server can run with controls
+switched off, or with every stored control unusable. `list_controls` reports `running: null` there,
+because a caller told a control is stopped when in truth nothing was ever asked would go looking for
+a crash that never happened.
+
 **Read tools** (`toinflux/mcp_read.py`, registered onto the server by `register_read_tools()`):
 the read-only tools - `list_sources`, `list_fields`, `query_history`, `get_current_state`,
 `get_data_range`, and `get_documentation` - exposing each configured collector's live and historical
