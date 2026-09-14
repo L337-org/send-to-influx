@@ -1817,3 +1817,28 @@ def test_the_anchored_match_guard_leaves_the_rest_alone(source):
     and reading it as an anchor would refuse the ordinary way to write "up to the next
     comma"."""
     assert _anchored_match_calls(source) == ([], []), f"false positive: {source!r}"
+
+
+def test_the_runtime_state_a_control_writes_is_ignored():
+    """Off systemd, a control writes beside settings.yaml - which in a checkout is the
+    repository root, so running one leaves its directories here.
+
+    Asked of git rather than by reading .gitignore, because what matters is the answer git
+    gives: a later rule can re-include a path, and a pattern that looks right can be wrong
+    about a directory. The names come from the constants the code actually uses, so renaming
+    one and forgetting the ignore rule fails here rather than in somebody's `git status`.
+    """
+    from toinflux.controls import CONTROL_DIR_NAME
+    from toinflux.inputs import LOCK_DIR_NAME
+
+    for name in (CONTROL_DIR_NAME, LOCK_DIR_NAME):
+        finished = subprocess.run(
+            ["git", "check-ignore", "-q", f"{name}/"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+        )
+        # 0 is ignored, 1 is not ignored, anything else is git failing to answer - which is
+        # reported rather than read as a pass.
+        assert finished.returncode in (0, 1), f"git could not say whether {name}/ is ignored: {finished.stderr!r}"
+        assert finished.returncode == 0, f"{name}/ is runtime state and is not in .gitignore"
