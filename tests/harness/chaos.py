@@ -102,6 +102,10 @@ class ChaosDriver:
         self.bridge = bridge
         self.influx = influx
         self.run = Run(seed=seed)
+        # The tick being driven, so anything recorded outside `_choose` - the unwind, the
+        # settle - stamps the story with *when* it happened rather than with how many
+        # entries happen to be in it.
+        self._tick = 0
         self._poll = poll or supervisor.poll
         self._active = None
 
@@ -155,6 +159,7 @@ class ChaosDriver:
         Raises:
             AssertionError: an invariant that holds under a fault was violated
         """
+        self._tick = number
         self._choose(number)
         self._poll(timeout=0.2)
         reports = [
@@ -178,11 +183,15 @@ class ChaosDriver:
         Separate from :meth:`settle` so a caller unwinding from a failure can put the world
         back without also asking the supervisor to make progress - which, mid-failure, is
         neither wanted nor necessarily possible.
+
+        Recorded against the tick being driven. Numbering it by how many entries the story
+        already had - which is what this did when it was extracted - makes the numbers jump
+        and run backwards, which is precisely what a story exists not to do.
         """
         if self._active is not None:
             self._active.__exit__(None, None, None)
             self._active = None
-            self.run.ticks.append(Tick(len(self.run.ticks), "cleared the fault"))
+            self.run.ticks.append(Tick(self._tick, "cleared the fault"))
 
     def settle(self, seconds=2.0) -> None:
         """Clear any fault and let the system reach a state worth judging.

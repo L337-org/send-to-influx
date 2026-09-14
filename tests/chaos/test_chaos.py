@@ -263,3 +263,43 @@ class TestAFaultNeverOutlivesTheRun:
         driver = self._driver_with_a_fault(bridge, influx)
         driver.clear_fault()
         assert any("cleared the fault" in tick.action for tick in driver.run.ticks)
+
+    def test_the_story_stamps_when_a_fault_cleared_not_how_many_entries_it_had(self, bridge, influx):
+        """Numbering by the length of the record makes tick numbers jump and run backwards,
+        which is precisely what a story exists not to do.
+
+        The two are forced apart rather than left to a seed. They coincide whenever the fault
+        starts on the tick whose number equals the entry count, which is common enough that
+        the first version of this test passed against the bug it was written for: quiet ticks
+        are what makes the count lag the number, so the driver is held quiet deliberately.
+        """
+        driver = ChaosDriver(1, self._NoChildren(), bridge, influx)
+        for number in range(1, 25):
+            driver.tick(number, {})
+            if driver._active is not None:
+                break
+        assert driver._active is not None, "no fault was injected, so this tested nothing"
+
+        class _NeverChooses:
+            """A generator that declines every probability, so nothing more is recorded."""
+
+            @staticmethod
+            def random():
+                """Return a value above every threshold the driver tests.
+
+                Returns:
+                    float: 1.0
+                """
+                return 1.0
+
+        driver.random = _NeverChooses()
+        entries_before = len(driver.run.ticks)
+        for number in range(driver._tick + 1, driver._tick + 9):
+            driver.tick(number, {})
+        assert len(driver.run.ticks) == entries_before, "the quiet ticks were not quiet"
+        assert driver._tick > len(driver.run.ticks), "the count and the number did not diverge"
+
+        driver.clear_fault()
+        cleared = [tick for tick in driver.run.ticks if "cleared" in tick.action]
+        assert cleared[-1].number == driver._tick
+        assert [tick.number for tick in driver.run.ticks] == sorted(t.number for t in driver.run.ticks)
