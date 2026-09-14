@@ -268,6 +268,9 @@ class Supervisor:
             ConfigError: where the process could not be started at all
         """
         child = self.children[name]
+        # Before the spawn, because the child reads the same file for itself and the two
+        # must agree from the first beat.
+        self._refresh(child)
         try:
             read_fd, write_fd = os.pipe()
         except OSError as exc:
@@ -298,6 +301,39 @@ class Supervisor:
         child.restart_at = None
         self._selector.register(child.beats, selectors.EVENT_READ, child)
         self._record("started", name, f"pid {child.process.pid}")
+
+    def _refresh(self, child) -> None:
+        """Re-read the document a control is about to be started from.
+
+        The child reads its own document at startup, so anything the parent derived from an
+        older copy describes a process that no longer exists. The stall window is the one
+        that bites: a control whose ``cycle_seconds`` has been lengthened would be killed
+        for silence it is entitled to, on a threshold computed from the document before the
+        edit. A reload refreshes this too, but a control can be edited by hand and then die
+        on its own, and the restart after that goes through here and nowhere else.
+
+        A document that will not read keeps the previous copy rather than refusing to start.
+        The child reads the same file and will fail on it in its own process, where it is
+        one control's failure and the restart path already handles it; raising here would
+        put it on the path ``start_all`` takes, which runs before the loop that would clean
+        up after it.
+
+        Args:
+            child (Child): the control about to be started
+        """
+        try:
+            document = _usable_control(child.name, self.settings_file)
+            window = stall_seconds(document)
+        except ConfigError as exc:
+            logging.warning(
+                "Control %r could not be re-read before starting it, so the parent is still "
+                "working from the document it last read: %r",
+                child.name,
+                exc,
+            )
+            return
+        child.document = document
+        child.stall_seconds = window
 
     def start_all(self) -> None:
         """Start every control that is not already running."""
@@ -393,8 +429,9 @@ class Supervisor:
             self._drop(child, name)
             return
         try:
-            document = _usable_control(name, self.settings_file)
-            window = stall_seconds(document)
+            # Read here only to decide whether to stop what is running. An unusable document
+            # must not cost a working control its process.
+            _usable_control(name, self.settings_file)
         except ConfigError as exc:
             logging.error(
                 "Control %r was not reloaded and is still running the document it started with: %r", name, exc
@@ -408,8 +445,9 @@ class Supervisor:
             child = self.children[name] = Child(name=name)
         elif child.running:
             self._stop(child, "its document changed")
-        child.document = document
-        child.stall_seconds = window
+        # The snapshot itself is refreshed by start(), which is the only place a process is
+        # created and so the only place it can be made to agree with one.
+        #
         # Not a failure, so the new document does not wait out a backoff earned by the old
         # one - and an edit is the usual way a failing control gets fixed, so its history
         # starts again here.

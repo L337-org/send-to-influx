@@ -379,6 +379,41 @@ class TestADocumentThatChanged:
         assert "still running the document it started with" in caplog.text
         _wait_for(supervisor, "beat", "conservatory")
 
+    def test_an_ordinary_restart_picks_up_an_edit_nobody_announced(self, supervisor, state_directory):
+        """A control can be edited by hand and then die on its own, with no reload asked for.
+        The child re-reads its own document on the way up either way, so a parent still
+        working from the copy it read at construction would hold a stall threshold computed
+        from a cycle window that no longer exists - and kill the control for silence it is
+        entitled to."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        assert supervisor.children["conservatory"].stall_seconds == 30.0
+        edited = _quick("conservatory", {"far": {"source": "hue", "device": "far"}})
+        edited["output"]["cycle_seconds"] = 20
+        state_directory.write_control(edited)
+        supervisor.children["conservatory"].process.kill()
+        _wait_for(supervisor, "died", "conservatory")
+        _wait_for(supervisor, "started", "conservatory")
+        assert supervisor.children["conservatory"].stall_seconds == 60.0
+
+    def test_an_ordinary_restart_lets_go_of_a_device_the_control_gave_up(self, supervisor, state_directory, bridge):
+        """The same staleness at the bridge rather than in an attribute. Making a control
+        safe commands the devices its process was started with as well as the ones the file
+        names now, so a parent holding a copy from before the edit would keep switching off
+        a device this control no longer owns - and would do it to whichever control owns it
+        next."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        bridge.lights["13"] = plug("annexe-heater")
+        state_directory.write_control(_quick("conservatory", {"annexe": {"source": "hue", "device": "annexe-heater"}}))
+        supervisor.children["conservatory"].process.kill()
+        _wait_for(supervisor, "died", "conservatory")
+        _wait_for(supervisor, "started", "conservatory")
+        _wait_for(supervisor, "beat", "conservatory")
+        bridge.clear()
+        supervisor.make_safe("conservatory")
+        assert [command.name for command in bridge.commanded()] == ["annexe-heater"]
+
     def test_a_reload_asked_for_while_stopping_is_refused_and_says_so(
         self, supervisor, state_directory, bridge, caplog
     ):
