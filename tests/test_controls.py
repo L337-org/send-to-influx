@@ -356,6 +356,34 @@ class TestActivePeriod:
         assert any("active_period.end_state" in error for error in validate_control("conservatory", document))
 
 
+class TestARequiredSectionWithNothingUnderIt:
+    """`inputs:` with nothing indented under it parses to None, so the key is present and
+    the section is not. Every shape check treats None as absent and says nothing, and the
+    rule check skips because there are no names to resolve against - so the document passed
+    with no complaint at all while naming inputs that can never exist."""
+
+    @pytest.mark.parametrize("key", ["inputs", "pid", "output", "devices"])
+    def test_it_is_refused(self, key):
+        document = a_valid_control()
+        document[key] = None
+        errors = validate_control_structure("conservatory", document)
+        assert any(key in error and "nothing under it" in error for error in errors), errors
+
+    def test_the_whole_document_does_not_pass_silently(self):
+        """Read from YAML rather than built as a dict, because the shape only arises from
+        someone writing `inputs:` and forgetting to indent the block under it."""
+        document = yaml.safe_load(
+            "name: conservatory\n"
+            "inputs:\n"
+            'pid: {input: "inside", setpoint: "max(target, dew + 5)"}\n'
+            "output: {cycle_seconds: 900, min_transition_seconds: 60, "
+            "stages: [{level: 0, set: {far: false}}]}\n"
+            'devices: {far: {source: hue, device: "Far"}}\n'
+        )
+        assert document["inputs"] is None
+        assert validate_control("conservatory", document)
+
+
 class TestValidatingTheRules:
     """The half that only ran when a control process started. A document with a malformed
     expression passed every structural check, was written, and killed the control at
