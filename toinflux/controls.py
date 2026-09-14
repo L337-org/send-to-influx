@@ -76,6 +76,43 @@ CONTROL_KEYS = frozenset(
 
 REQUIRED_CONTROL_KEYS = ("inputs", "pid", "output", "devices")
 
+#: Every slot in a control document holding a rule expression: where it lives, the name to
+#: call it in a message, and whether it may be absent. One table, because the runtime parses
+#: these in two other modules and a validator with its own private list would be a second
+#: copy that drifts - a rule slot the runtime honours and the validator has never heard of
+#: passes `--check-config` and kills the control at startup, which is the failure this table
+#: exists to make impossible. ``tests/test_repo_hygiene.py`` fails the build where the
+#: runtime parses a number of slots this table does not describe.
+CONTROL_RULE_SLOTS = (
+    (("pid", "setpoint"), "pid.setpoint", False),
+    (("pid", "input"), "pid.input", False),
+    (("output", "max_level"), "output.max_level", True),
+    (("enable_when",), "enable_when", True),
+)
+
+
+def rule_names(document):
+    """Return the names a control's rules may reference, in the order the runtime builds them.
+
+    Inputs then parameters, which is the order both the controller and the gate use. The
+    order is not arbitrary even though the parser only needs the set: the store refuses a
+    name declared as both, and if that were ever relaxed this ordering is what decides
+    which one wins - so the three places that build it must agree, which is why they share
+    this one.
+
+    Args:
+        document (dict): the control document
+
+    Returns:
+        tuple: the declared input and parameter names, or empty where neither is a mapping
+    """
+    names: tuple = ()
+    for key in ("inputs", "parameters"):
+        section = document.get(key)
+        if isinstance(section, dict):
+            names += tuple(section)
+    return names
+
 
 def control_dir(settings_file=None):
     """Return the directory control documents are stored in.
@@ -519,11 +556,79 @@ def _check_scalars(name, document, errors) -> None:
 
 
 def validate_control(name, document):
+    """Check one control document completely: its shape, then its rules.
+
+    The one call a caller should make. Everything that reads a stored document goes
+    through here - ``--check-config``, the supervisor, a control process starting, the
+    test harness - so that "is this document usable" has a single answer rather than each
+    caller assembling its own and getting a different one.
+
+    Args:
+        name (str): the control's name, which its ``name`` key must agree with
+        document (dict): the parsed document
+
+    Returns:
+        list: human-readable problems, empty when the document is sound
+    """
+    return validate_control_structure(name, document) + validate_control_rules(document)
+
+
+def validate_control_rules(document):
+    """Parse every rule a control declares, returning what would not parse.
+
+    Separate from the structural check because the two are answered by different code: the
+    store knows which keys must be present and what shape they take, and the parser knows
+    what a rule may say. They were separate before this existed too - the difference is
+    that the parser was only reached when a control process started, so a document with a
+    malformed expression passed ``--check-config``, was written, and killed the control at
+    startup instead.
+
+    **Skipped entirely where the name sources are the wrong shape.** Names come from the
+    ``inputs`` and ``parameters`` sections, so with either of those not a mapping every
+    rule would report every name it uses as undeclared - a cascade of consequences from one
+    fault the structural check already names precisely.
+
+    Takes no ``name``: a rule does not know which control it is in, and every message here
+    names its slot instead, which is what an operator needs to find it.
+
+    Args:
+        document (dict): the parsed document
+
+    Returns:
+        list: human-readable problems, empty when every rule parses
+    """
+    from toinflux.rules import RuleSyntaxError, parse_rule
+
+    for key in ("inputs", "parameters"):
+        section = document.get(key)
+        if section is not None and not isinstance(section, dict):
+            return []
+    names = rule_names(document)
+    errors = []
+    for path, where, _optional in CONTROL_RULE_SLOTS:
+        text = document
+        for key in path:
+            text = text.get(key) if isinstance(text, dict) else None
+        # A slot that is absent, or holds something that is not text, is the structural
+        # check's to report - and it already does, naming the same slot. Reporting it twice
+        # would have an operator looking for two faults.
+        if not isinstance(text, str):
+            continue
+        try:
+            parse_rule(text, allowed_names=names)
+        except RuleSyntaxError as exc:
+            errors.append(f"{where}: {exc}")
+    return errors
+
+
+def validate_control_structure(name, document):
     """Check one control document's shape, returning every problem found.
 
     Structure only. A rule expression is checked to be a string and nothing more: the
     parser reports its own syntax errors, so that a missing key and a malformed
-    expression are each described by the code that understands them.
+    expression are each described by the code that understands them. See
+    :func:`validate_control_rules` for the other half, and :func:`validate_control` for
+    both together, which is what a caller normally wants.
 
     Every problem is collected rather than raising on the first, because an operator
     writing a control by hand would otherwise fix one typo per run.

@@ -13,7 +13,10 @@ from toinflux.controls import (
     load_control,
     require_valid_control_name,
     save_control,
+    rule_names,
     validate_control,
+    validate_control_rules,
+    validate_control_structure,
     validate_stored_controls,
 )
 from toinflux.exceptions import ConfigError
@@ -37,6 +40,12 @@ def a_valid_control():
         "inputs": {
             "inside": {"source": "hue", "field": "temperature_conservatory", "instance": "bridge1", "max_age": 900},
             "dew": {"source": "openmeteo", "field": "dew_point_2m", "max_age": 1800},
+            # `outside` and `grid_co2` are declared because `enable_when` and `max_level`
+            # read them. They were missing until the rule check existed, so this fixture -
+            # and the design-note example it mirrors - described a control that passed
+            # every structural check and would have died at startup naming them.
+            "outside": {"source": "openmeteo", "field": "temperature_2m", "max_age": 1800},
+            "grid_co2": {"source": "carbonintensity", "field": "intensity_actual", "max_age": 3600},
         },
         "pid": {"input": "inside", "setpoint": "max(target, dew + 5)", "kp": 12.0, "ki": 0.02, "kd": 0.0},
         "output": {
@@ -347,6 +356,78 @@ class TestActivePeriod:
         assert any("active_period.end_state" in error for error in validate_control("conservatory", document))
 
 
+class TestValidatingTheRules:
+    """The half that only ran when a control process started. A document with a malformed
+    expression passed every structural check, was written, and killed the control at
+    startup - so the operator learned about a typo from a dead heater rather than from the
+    command whose whole job is to say whether the configuration is usable."""
+
+    @pytest.mark.parametrize(
+        "slot,put",
+        [
+            pytest.param("pid.setpoint", lambda d, v: d["pid"].__setitem__("setpoint", v), id="setpoint"),
+            pytest.param("pid.input", lambda d, v: d["pid"].__setitem__("input", v), id="input"),
+            pytest.param("output.max_level", lambda d, v: d["output"].__setitem__("max_level", v), id="max-level"),
+            pytest.param("enable_when", lambda d, v: d.__setitem__("enable_when", v), id="enable-when"),
+        ],
+    )
+    def test_every_slot_the_runtime_parses_is_checked(self, slot, put):
+        document = a_valid_control()
+        put(document, "max(target, dew +")
+        errors = validate_control_rules(document)
+        assert [error for error in errors if error.startswith(f"{slot}:")], errors
+
+    def test_a_name_nothing_declares_is_reported_with_what_is_declared(self):
+        """The fault this found on its first run, in this file's own fixture and in the
+        design note's worked example: an `enable_when` reading a name no input declares."""
+        document = a_valid_control()
+        document["enable_when"] = "nosuchreading < 15"
+        (error,) = validate_control_rules(document)
+        assert "nosuchreading" in error and "enable_when" in error
+
+    def test_an_absent_optional_slot_is_not_a_problem(self):
+        document = a_valid_control()
+        del document["output"]["max_level"]
+        del document["enable_when"]
+        assert validate_control_rules(document) == []
+
+    def test_a_slot_that_is_not_text_is_left_to_the_structural_check(self):
+        """Reported once, by the half that understands it. Twice would have an operator
+        looking for two faults."""
+        document = a_valid_control()
+        document["pid"]["setpoint"] = 18.0
+        assert validate_control_rules(document) == []
+        assert any("pid.setpoint" in error for error in validate_control_structure("conservatory", document))
+
+    def test_a_broken_name_source_stops_the_rule_check_rather_than_cascading(self):
+        """With `inputs` not a mapping there are no declared names, so every rule would
+        report every name it uses as undeclared - a cascade of consequences from the one
+        fault the structural check already names precisely."""
+        document = a_valid_control()
+        document["inputs"] = 7
+        assert validate_control_rules(document) == []
+        assert any("inputs" in error for error in validate_control_structure("conservatory", document))
+
+    def test_the_wrapper_reports_both_halves_at_once(self):
+        document = a_valid_control()
+        document["enabled"] = "yes"
+        document["enable_when"] = "nosuchreading < 15"
+        errors = validate_control("conservatory", document)
+        assert any("enabled" in error for error in errors)
+        assert any("enable_when" in error for error in errors)
+
+    def test_the_names_a_rule_may_use_are_the_inputs_then_the_parameters(self):
+        """Shared with the controller and the gate, which both used to build it themselves.
+        The order matters even though the parser only needs the set: the store refuses a
+        name declared as both, and this ordering is what would decide the winner if that
+        were ever relaxed."""
+        document = {"inputs": {"inside": {}, "dew": {}}, "parameters": {"target": 1}}
+        assert rule_names(document) == ("inside", "dew", "target")
+
+    def test_no_names_where_a_section_is_the_wrong_shape(self):
+        assert rule_names({"inputs": 7, "parameters": None}) == ()
+
+
 class TestValidatingTheWholeStore:
     def test_a_store_with_nothing_in_it_passes(self, state_dir):
         validate_stored_controls()
@@ -372,6 +453,25 @@ class TestValidatingTheWholeStore:
         with pytest.raises(ConfigError) as exc:
             validate_stored_controls()
         assert "landing" in str(exc.value) and "porch" in str(exc.value)
+
+    def test_a_control_whose_rule_will_not_parse_fails_the_check(self, state_dir):
+        """The acceptance behaviour the design note has always claimed and the code did
+        not do: until the rule check existed this document passed --check-config, was
+        written, and killed the control at startup instead."""
+        document = a_valid_control()
+        document["pid"]["setpoint"] = "max(target, dew +"
+        save_control("conservatory", document)
+        with pytest.raises(ConfigError) as exc:
+            validate_stored_controls()
+        assert "pid.setpoint" in str(exc.value)
+
+    def test_a_control_naming_an_undeclared_input_fails_the_check(self, state_dir):
+        document = a_valid_control()
+        document["enable_when"] = "nosuchreading < 15"
+        save_control("conservatory", document)
+        with pytest.raises(ConfigError) as exc:
+            validate_stored_controls()
+        assert "nosuchreading" in str(exc.value)
 
     def test_an_unparseable_document_is_reported_rather_than_crashing_the_check(self, state_dir):
         os.makedirs(control_dir(), exist_ok=True)

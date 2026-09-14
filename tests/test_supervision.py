@@ -843,12 +843,9 @@ class TestTheStatusSnapshot:
             """A child that answers differently each time it is asked."""
 
             name = "flip"
-            failures = 2
-            started_at = 1.0
-            last_beat = 2.0
 
             def __init__(self):
-                self.reads = {"process": 0, "restart_at": 0}
+                self.reads = {"process": 0, "restart_at": 0, "started_at": 0, "last_beat": 0, "failures": 0}
 
             @property
             def process(self):
@@ -870,10 +867,45 @@ class TestTheStatusSnapshot:
                 self.reads["restart_at"] += 1
                 return 12.0 if self.reads["restart_at"] == 1 else None
 
+            @property
+            def started_at(self):
+                """Report a started control the first time and a never-started one after.
+
+                Returns:
+                    float: the start reading, then zero
+                """
+                self.reads["started_at"] += 1
+                return 1.0 if self.reads["started_at"] == 1 else 0.0
+
+            @property
+            def last_beat(self):
+                """Return a beat time the first time and something absurd afterwards.
+
+                Returns:
+                    float: the beat reading, then a value from the future
+                """
+                self.reads["last_beat"] += 1
+                return 4.0 if self.reads["last_beat"] == 1 else 1e9
+
+            @property
+            def failures(self):
+                """Return a count the first time and a different one afterwards.
+
+                Returns:
+                    int: the count, then a different count
+                """
+                self.reads["failures"] += 1
+                return 2 if self.reads["failures"] == 1 else 99
+
         child = Flipping()
         status = _snapshot(child, now=10.0)
-        assert child.reads == {"process": 1, "restart_at": 1}
+        assert child.reads == {"process": 1, "restart_at": 1, "started_at": 1, "last_beat": 1, "failures": 1}
         # Consistent with each other, because they came from the same read.
         assert status.running is True
         assert status.pid == 99
         assert status.restart_in == 2.0
+        # `started_at` decided the branch and `last_beat` supplied the value, and the two
+        # have to be from the same moment or the control is simultaneously never started
+        # and beating.
+        assert status.silent_for == 6.0
+        assert status.failures == 2
