@@ -399,6 +399,24 @@ class TestValidatingTheRules:
         assert validate_control_rules(document) == []
         assert any("pid.setpoint" in error for error in validate_control_structure("conservatory", document))
 
+    def test_a_missing_required_name_source_stops_it_too(self):
+        """`inputs` is required, so a document without it has none of the names its rules
+        will read - every one of them would be reported as undeclared on top of the single
+        structural error saying the section is missing."""
+        document = a_valid_control()
+        del document["inputs"]
+        assert validate_control_rules(document) == []
+        assert any("inputs" in error for error in validate_control_structure("conservatory", document))
+
+    def test_an_absent_optional_name_source_suppresses_nothing(self):
+        """`parameters` is optional, so an absent one is ordinary rather than a fault, and
+        must not stop the rules being checked - which is the other half of the same rule and
+        the one a blanket "not a mapping" test would get wrong."""
+        document = a_valid_control()
+        del document["parameters"]
+        document["pid"]["setpoint"] = "max(nosuchname, dew + 5)"
+        assert any("nosuchname" in error for error in validate_control_rules(document))
+
     def test_a_broken_name_source_stops_the_rule_check_rather_than_cascading(self):
         """With `inputs` not a mapping there are no declared names, so every rule would
         report every name it uses as undeclared - a cascade of consequences from the one
