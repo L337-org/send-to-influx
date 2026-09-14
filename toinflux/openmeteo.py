@@ -49,7 +49,7 @@ class OpenMeteo(DataHandler):
         "dew_point_2m": {
             "unit": "°C",
             "kind": "gauge",
-            "description": "The temperature air must fall to for water to condense out of it.",
+            "description": "The temperature the air must fall to for water to condense out of it.",
         },
         "relative_humidity_2m": {"unit": "%", "kind": "gauge"},
         # An accumulation over the preceding interval, not a reading at an instant,
