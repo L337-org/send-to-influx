@@ -222,13 +222,18 @@ def _snapshot(child, now):
     Returns:
         ControlStatus: what was true at the moment each field was read
     """
+    # `name` is fixed when the child is built and never rewritten, so pinning it changes
+    # no outcome. It is pinned anyway because "every field, before any is used" is a rule
+    # somebody can keep, and "every field except the one that happens to be immutable" is
+    # one they have to re-derive - and would get wrong the day a rename makes it mutable.
+    name = child.name
     process = child.process
     restart_at = child.restart_at
     started_at = child.started_at
     last_beat = child.last_beat
     failures = child.failures
     return ControlStatus(
-        name=child.name,
+        name=name,
         # From the same local as the pid, so the two cannot contradict each other.
         running=process is not None,
         pid=None if process is None else process.pid,
