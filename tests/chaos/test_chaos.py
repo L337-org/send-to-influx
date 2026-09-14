@@ -378,3 +378,12 @@ class TestWhatTheDriverCanReach:
                 if killed and not had_fault and driver._active is None:
                     reached += 1
         assert reached, "no seed killed a control while nothing was faulted"
+
+
+def test_the_failed_seed_list_is_a_list_of_seeds():
+    """Guards a constant designed to be edited by hand, in a hurry, by somebody who has just
+    been handed a failing seed. A wrong shape here breaks collection for the whole suite
+    rather than failing one test, so it is worth one assertion that says what is wrong."""
+    assert isinstance(SEEDS_THAT_FAILED, list), f"SEEDS_THAT_FAILED must be a list, got {type(SEEDS_THAT_FAILED)}"
+    wrong = [seed for seed in SEEDS_THAT_FAILED if not isinstance(seed, int) or isinstance(seed, bool)]
+    assert not wrong, f"every entry must be an integer seed, got {wrong}"

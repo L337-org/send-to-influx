@@ -31,8 +31,14 @@ from tests.harness import faults, invariants
 
 #: Seeds that have failed a chaos run. Add one here when a run fails, with a comment saying
 #: what it found, and it runs from then on whether or not anybody schedules a chaos job. An
-#: empty tuple is the honest state before the first failure rather than a placeholder.
-SEEDS_THAT_FAILED = ()
+#: empty list is the honest state before a first failure rather than a placeholder.
+#:
+#: A list rather than a tuple because this is *meant* to be hand-edited, and the failure
+#: message tells whoever hits one to edit it: `(123)` is an int and `(123,)` is a tuple, and
+#: the difference is one character in a file somebody is touching once, in a hurry, having
+#: just been handed a failing seed. A list literal has no such trap, and the guard below
+#: catches the rest.
+SEEDS_THAT_FAILED: "list[int]" = []
 
 
 @dataclass
