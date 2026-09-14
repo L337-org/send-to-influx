@@ -879,6 +879,14 @@ An active period is a wall-clock window in the control's own timezone, and it fo
 saving the way a wall clock does: a window inside the hour the clocks skip does not happen that day,
 and one inside the hour they repeat happens twice.
 
+**Controls are visible over MCP when both `controls.enabled` and the MCP server are on.** Two
+read-only tools: `list_controls` gives each control's name, whether it is enabled, the devices it
+actuates, its cycle length and whether its process is running; `get_control` returns one control's
+stored document. With the subsystem switched off they are not registered at all, so a connected model
+does not see tools it cannot use. Reading a control is deliberately not gated behind anything beyond
+the MCP server itself - a control document holds no secrets, and being able to ask what is being
+controlled and whether it is running should not require granting a model the ability to change it.
+
 Usage
 -----
 >$ ./.venv/bin/python ./sendtoinflux.py --help  

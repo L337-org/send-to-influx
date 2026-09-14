@@ -39,6 +39,7 @@ import queue
 import selectors
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -166,6 +167,67 @@ def stall_seconds(document):
     return max(MINIMUM_STALL_SECONDS, MISSED_BEATS_BEFORE_KILL * float(cycle))
 
 
+@dataclass(frozen=True)
+class ControlStatus:
+    """What the supervisor can say about one control, for a reader on another thread.
+
+    A snapshot rather than a view of the :class:`Child`: the child is mutated by the
+    supervisor's own thread between one attribute read and the next, and a reader
+    assembling a report out of it would describe a moment that never existed.
+
+    Attributes:
+        name (str): the control's name.
+        running (bool): whether it has a process right now.
+        pid (int or None): that process's pid, or None where it is not running.
+        failures (int): consecutive failures, which is what sets its restart backoff.
+        silent_for (float or None): seconds since its last heartbeat, or None where it has
+            not started. Seconds rather than a timestamp because the reader cannot know
+            which clock the number came from.
+        restart_in (float or None): seconds until it may next be started, or None where it
+            is running or has no restart scheduled.
+    """
+
+    name: str
+    running: bool
+    pid: "int | None"
+    failures: int
+    silent_for: "float | None"
+    restart_in: "float | None"
+
+
+def _snapshot(child, now):
+    """Describe one child as it is at a single instant.
+
+    **Every field is read once.** The supervisor's own thread clears ``process`` and
+    ``restart_at`` as a control dies and starts again, and a ternary that tests an
+    attribute and then reads it again tests one value and uses another: ``child.process``
+    passing the None check and being None by the time ``.pid`` is asked for is an
+    AttributeError on the MCP thread, which is one control's restart breaking every
+    caller's listing. Reading into a local first is enough, because a single attribute read
+    cannot see a half-written value - it is the *pair* of reads that has no guarantee, not
+    either one of them.
+
+    Args:
+        child (Child): the control to describe
+        now (float): the monotonic reading to measure ages against
+
+    Returns:
+        ControlStatus: what was true at the moment each field was read
+    """
+    process = child.process
+    restart_at = child.restart_at
+    started_at = child.started_at
+    return ControlStatus(
+        name=child.name,
+        # From the same local as the pid, so the two cannot contradict each other.
+        running=process is not None,
+        pid=None if process is None else process.pid,
+        failures=child.failures,
+        silent_for=None if started_at == 0.0 else max(0.0, now - child.last_beat),
+        restart_in=None if restart_at is None else max(0.0, restart_at - now),
+    )
+
+
 @dataclass
 class Event:
     """Something the supervisor saw, for a caller that wants to assert on it.
@@ -220,9 +282,18 @@ class Supervisor:
         self._backoff = backoff or _default_backoff
         self._selector = selectors.DefaultSelector()
         self._reload_requests = queue.SimpleQueue()
+        # Held only where the children mapping gains or loses a key, and while a status
+        # snapshot is taken. It is not a lock on a control's state: the supervisor's own
+        # thread rewrites a child's process and counters constantly, and a reader that
+        # sees one of those a moment late is reading a report, not making a decision. What
+        # it cannot survive is the mapping being resized underneath it, which is a
+        # RuntimeError rather than a stale number.
+        self._children_lock = threading.Lock()
         self._stopped = False
         self.children = {}
         self.events = []
+        # No lock around this one: the supervisor is not reachable from another thread
+        # until its constructor has returned.
         for name in names:
             # Read now rather than at each start: a control that cannot be read is a
             # configuration fault, and finding that out per restart would turn it into a
@@ -380,6 +451,20 @@ class Supervisor:
                 self._restart(child)
         return self.events
 
+    def status(self):
+        """Return what is being supervised right now, safe to read from another thread.
+
+        The MCP server runs in a thread of this process and answers "what is this install
+        controlling, and is it running" from here.
+
+        Returns:
+            tuple: one :class:`ControlStatus` per supervised control, in name order
+        """
+        now = self._clock()
+        with self._children_lock:
+            children = list(self.children.values())
+        return tuple(_snapshot(child, now) for child in sorted(children, key=lambda one: one.name))
+
     def request_reload(self, name) -> None:
         """Ask for a control to be reconciled with its stored document.
 
@@ -457,7 +542,9 @@ class Supervisor:
         if not known:
             # A control that did not exist when the supervisor started. Taking it on here is
             # what lets a newly stored control run without restarting the collector.
-            child = self.children[name] = Child(name=name)
+            child = Child(name=name)
+            with self._children_lock:
+                self.children[name] = child
         elif child.running:
             self._stop(child, "its document changed")
         # The snapshot itself is refreshed by start(), which is the only place a process is
@@ -488,7 +575,8 @@ class Supervisor:
             self._stop(child, "its document has been deleted")
         else:
             self.make_safe(name)
-        del self.children[name]
+        with self._children_lock:
+            del self.children[name]
         logging.info("Control %r has been deleted, so it is no longer supervised", name)
         self._record("dropped", name, "its document has been deleted")
 

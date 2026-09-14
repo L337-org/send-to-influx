@@ -9,11 +9,13 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import dataclasses
 import logging
 import os
 import sys
 import time
 from collections import deque
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -22,7 +24,7 @@ from tests.harness import census, faults, invariants
 from tests.harness.bridge import plug
 from tests.harness.installation import conservatory
 from toinflux.exceptions import ConfigError
-from toinflux.supervision import Supervisor, stall_seconds
+from toinflux.supervision import Supervisor, _snapshot, stall_seconds
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -791,3 +793,87 @@ class TestStoppingTwice:
         supervisor.stop_all()
         assert len(closes) == 1, f"the selector was closed {len(closes)} times"
         assert all(child.process is None for child in supervisor.children.values())
+
+
+class TestTheStatusSnapshot:
+    def test_it_reports_a_control_that_has_never_started(self, state_directory):
+        """`silent_for` is None rather than the age of the process: a control that has not
+        started has not been silent, it has not been asked."""
+        _two_controls(state_directory)
+        supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
+        (status,) = supervisor.status()
+        assert status.name == "conservatory"
+        assert status.running is False
+        assert status.pid is None
+        assert status.silent_for is None
+
+    def test_it_is_a_snapshot_rather_than_a_view(self, state_directory):
+        """Frozen, and taken by value. A reader assembling a report out of the live child
+        would describe a moment that never existed, because the supervisor's own thread
+        rewrites it between one attribute read and the next."""
+        _two_controls(state_directory)
+        supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
+        (status,) = supervisor.status()
+        supervisor.children["conservatory"].failures = 7
+        assert status.failures == 0
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            status.failures = 1
+
+    def test_an_unusable_control_is_absent_because_it_is_not_supervised(self, state_directory):
+        """It was skipped at construction, so the supervisor has nothing to say about it.
+        `list_controls` still lists it, from the store, which is the division of labour."""
+        path = os.path.join(state_directory.state_dir, "controls", "bent.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump({"name": "bent"}, handle)
+        supervisor = Supervisor(["bent"], settings_file=state_directory.settings_file)
+        assert supervisor.status() == ()
+
+    def test_every_field_is_read_once(self):
+        """The supervisor's own thread clears `process` and `restart_at` as a control dies
+        and starts again. A ternary that tests an attribute and then reads it again tests
+        one value and uses another - `process` passing the None check and being None by the
+        time `.pid` is asked for is an AttributeError on the MCP thread, which is one
+        control's restart breaking every caller's listing.
+
+        A child whose attributes change on every access, so a second read cannot be
+        mistaken for the first.
+        """
+
+        class Flipping:
+            """A child that answers differently each time it is asked."""
+
+            name = "flip"
+            failures = 2
+            started_at = 1.0
+            last_beat = 2.0
+
+            def __init__(self):
+                self.reads = {"process": 0, "restart_at": 0}
+
+            @property
+            def process(self):
+                """Return a process the first time and None afterwards.
+
+                Returns:
+                    object or None: the stand-in process, then None
+                """
+                self.reads["process"] += 1
+                return SimpleNamespace(pid=99) if self.reads["process"] == 1 else None
+
+            @property
+            def restart_at(self):
+                """Return a deadline the first time and None afterwards.
+
+                Returns:
+                    float or None: the deadline, then None
+                """
+                self.reads["restart_at"] += 1
+                return 12.0 if self.reads["restart_at"] == 1 else None
+
+        child = Flipping()
+        status = _snapshot(child, now=10.0)
+        assert child.reads == {"process": 1, "restart_at": 1}
+        # Consistent with each other, because they came from the same read.
+        assert status.running is True
+        assert status.pid == 99
+        assert status.restart_in == 2.0
