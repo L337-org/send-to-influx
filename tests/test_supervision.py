@@ -412,7 +412,13 @@ class TestADocumentThatChanged:
         _wait_for(supervisor, "beat", "conservatory")
         bridge.clear()
         supervisor.make_safe("conservatory")
-        assert [command.name for command in bridge.commanded()] == ["annexe-heater"]
+        # Membership rather than an exact list: the other control is running throughout and
+        # commands its own device on its own cycle. `far` is the claim - a parent still
+        # holding the copy from before the edit would switch off a device this control has
+        # given up, and would do it to whichever control owns it next.
+        commanded = {command.name for command in bridge.commanded()}
+        assert "annexe-heater" in commanded
+        assert "far" not in commanded
 
     def test_a_reload_asked_for_while_stopping_is_refused_and_says_so(
         self, supervisor, state_directory, bridge, caplog

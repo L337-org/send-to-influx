@@ -178,7 +178,12 @@ class Event:
             ``reload-failed`` where the changed document could not be used and whatever was
             running was left alone.
         name (str): the control it happened to.
-        detail (str): what to say about it.
+        detail (str): what to say about it. The only field that can carry a value from
+            outside, because the failure kinds put an exception here - and it holds
+            ``repr(exc)`` rather than ``str(exc)``, the same form the log lines beside it
+            use. A YAML parser quotes the offending line from the document in its own
+            message, so the bare string carries newlines and whatever was in the file, and
+            this is meant to be surfaced to a caller.
     """
 
     kind: str
@@ -423,7 +428,7 @@ class Supervisor:
         except ConfigError as exc:
             # The name itself is unusable, so there is no file to look for.
             logging.error("Control %r cannot be reloaded: %r", name, exc)
-            self._record("reload-failed", name, str(exc))
+            self._record("reload-failed", name, repr(exc))
             return
         if not os.path.exists(path):
             self._drop(child, name)
@@ -436,7 +441,7 @@ class Supervisor:
             logging.error(
                 "Control %r was not reloaded and is still running the document it started with: %r", name, exc
             )
-            self._record("reload-failed", name, str(exc))
+            self._record("reload-failed", name, repr(exc))
             return
         known = child is not None
         if not known:
@@ -517,7 +522,7 @@ class Supervisor:
             child.failures += 1
             child.restart_at = self._clock() + self._backoff(child.failures)
             logging.error("Control %r could not be restarted: %r. Trying again later", child.name, exc)
-            self._record("start-failed", child.name, str(exc))
+            self._record("start-failed", child.name, repr(exc))
 
     def run(self, stop, poll_seconds=0.5) -> None:
         """Poll until asked to stop, then stop every control.
