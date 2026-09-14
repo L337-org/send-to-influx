@@ -1925,3 +1925,40 @@ def test_the_rule_slot_table_describes_every_slot_the_runtime_parses():
         f"{len(CONTROL_RULE_SLOTS)}. A slot the validator does not know about is one that "
         f"passes --check-config and fails at startup instead"
     )
+
+
+def test_every_source_that_claims_to_actuate_devices_can():
+    """`MCP_ACTUATES_DEVICES` is a promise that `mcp_set_device_state()` exists, and a
+    control calls that method on the strength of the flag alone.
+
+    The reverse of this pair is how the flag came to exist. `command_devices` tested
+    `MCP_WRITABLE`, which says only that *some* write path exists - Speedtest's is
+    `mcp_trigger_run()` - so a control naming Speedtest as a device source passed the check
+    and raised AttributeError on the next line. That is not one of the types the
+    supervisor's safe-state pass handles, so one control's document could end the thread
+    supervising all of them.
+
+    A flag and the method it promises, in different files, is exactly the pair a machine
+    should be comparing rather than a reviewer.
+
+    Read from the source registry rather than by walking `DataHandler.__subclasses__()`.
+    The registry is what decides whether a name in a control document resolves at all, so
+    a handler it does not list cannot be reached by a control and does not need the promise
+    kept; and reaching every subclass would mean importing every module first, which is a
+    larger claim about the tree than this guard needs to make.
+    """
+    from toinflux.general import known_sources, source_class
+
+    names = known_sources()
+    assert names, "the source registry is empty, so this guard is guarding nothing"
+
+    liars = []
+    for name in names:
+        handler = source_class(name)
+        if getattr(handler, "MCP_ACTUATES_DEVICES", False) and not hasattr(handler, "mcp_set_device_state"):
+            liars.append(name)
+    liars.sort()
+    assert not liars, (
+        f"{', '.join(liars)} declare MCP_ACTUATES_DEVICES without defining "
+        f"mcp_set_device_state(), which a control calls on the strength of that flag alone"
+    )

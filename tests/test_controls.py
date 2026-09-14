@@ -356,6 +356,34 @@ class TestActivePeriod:
         assert any("active_period.end_state" in error for error in validate_control("conservatory", document))
 
 
+class TestARequiredSectionWithNothingUnderIt:
+    """`inputs:` with nothing indented under it parses to None, so the key is present and
+    the section is not. Every shape check treats None as absent and says nothing, and the
+    rule check skips because there are no names to resolve against - so the document passed
+    with no complaint at all while naming inputs that can never exist."""
+
+    @pytest.mark.parametrize("key", ["inputs", "pid", "output", "devices"])
+    def test_it_is_refused(self, key):
+        document = a_valid_control()
+        document[key] = None
+        errors = validate_control_structure("conservatory", document)
+        assert any(key in error and "nothing under it" in error for error in errors), errors
+
+    def test_the_whole_document_does_not_pass_silently(self):
+        """Read from YAML rather than built as a dict, because the shape only arises from
+        someone writing `inputs:` and forgetting to indent the block under it."""
+        document = yaml.safe_load(
+            "name: conservatory\n"
+            "inputs:\n"
+            'pid: {input: "inside", setpoint: "max(target, dew + 5)"}\n'
+            "output: {cycle_seconds: 900, min_transition_seconds: 60, "
+            "stages: [{level: 0, set: {far: false}}]}\n"
+            'devices: {far: {source: hue, device: "Far"}}\n'
+        )
+        assert document["inputs"] is None
+        assert validate_control("conservatory", document)
+
+
 class TestValidatingTheRules:
     """The half that only ran when a control process started. A document with a malformed
     expression passed every structural check, was written, and killed the control at
@@ -398,6 +426,24 @@ class TestValidatingTheRules:
         document["pid"]["setpoint"] = 18.0
         assert validate_control_rules(document) == []
         assert any("pid.setpoint" in error for error in validate_control_structure("conservatory", document))
+
+    def test_a_missing_required_name_source_stops_it_too(self):
+        """`inputs` is required, so a document without it has none of the names its rules
+        will read - every one of them would be reported as undeclared on top of the single
+        structural error saying the section is missing."""
+        document = a_valid_control()
+        del document["inputs"]
+        assert validate_control_rules(document) == []
+        assert any("inputs" in error for error in validate_control_structure("conservatory", document))
+
+    def test_an_absent_optional_name_source_suppresses_nothing(self):
+        """`parameters` is optional, so an absent one is ordinary rather than a fault, and
+        must not stop the rules being checked - which is the other half of the same rule and
+        the one a blanket "not a mapping" test would get wrong."""
+        document = a_valid_control()
+        del document["parameters"]
+        document["pid"]["setpoint"] = "max(nosuchname, dew + 5)"
+        assert any("nosuchname" in error for error in validate_control_rules(document))
 
     def test_a_broken_name_source_stops_the_rule_check_rather_than_cascading(self):
         """With `inputs` not a mapping there are no declared names, so every rule would
