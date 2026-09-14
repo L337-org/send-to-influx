@@ -198,14 +198,22 @@ class ControlStatus:
 def _snapshot(child, now):
     """Describe one child as it is at a single instant.
 
-    **Every field is read once.** The supervisor's own thread clears ``process`` and
-    ``restart_at`` as a control dies and starts again, and a ternary that tests an
-    attribute and then reads it again tests one value and uses another: ``child.process``
-    passing the None check and being None by the time ``.pid`` is asked for is an
-    AttributeError on the MCP thread, which is one control's restart breaking every
-    caller's listing. Reading into a local first is enough, because a single attribute read
-    cannot see a half-written value - it is the *pair* of reads that has no guarantee, not
-    either one of them.
+    **Every field this describes is read once, before any of it is used.** The supervisor's
+    own thread rewrites a child as it dies and starts again, and two reads of the same
+    attribute are not one value seen twice: ``child.process`` can pass a None check and be
+    None by the time ``.pid`` is asked for, which is an AttributeError on the MCP thread and
+    one control's restart breaking every caller's listing.
+
+    The same applies to two *different* attributes that together decide one answer.
+    ``started_at`` says whether a control has ever been started and ``last_beat`` says when
+    it last spoke; ``start()`` sets both, so reading one before that and the other after
+    would describe a control that was simultaneously never started and beating. Neither of
+    those orderings produces a wrong number today - the branch not taken does not use the
+    other value, and the arithmetic is clamped - but an invariant that holds only while
+    nobody reorders the expression is not an invariant.
+
+    Reading into locals first is enough, and the lock stays narrow: a single attribute read
+    cannot see a half-written value, so it is only ever the combination that needs pinning.
 
     Args:
         child (Child): the control to describe
@@ -217,13 +225,15 @@ def _snapshot(child, now):
     process = child.process
     restart_at = child.restart_at
     started_at = child.started_at
+    last_beat = child.last_beat
+    failures = child.failures
     return ControlStatus(
         name=child.name,
         # From the same local as the pid, so the two cannot contradict each other.
         running=process is not None,
         pid=None if process is None else process.pid,
-        failures=child.failures,
-        silent_for=None if started_at == 0.0 else max(0.0, now - child.last_beat),
+        failures=failures,
+        silent_for=None if started_at == 0.0 else max(0.0, now - last_beat),
         restart_in=None if restart_at is None else max(0.0, restart_at - now),
     )
 
