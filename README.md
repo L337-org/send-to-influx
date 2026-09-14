@@ -831,6 +831,54 @@ History queries run against InfluxDB through a fixed, parameterised query builde
 query from the model - with field names checked against the measurement's live field list, time
 ranges normalised in the app, and a capped result size.
 
+Control loops
+-------------
+
+A **control** holds something at a target by switching devices: a conservatory at a temperature,
+using two heaters on smart plugs. It reads its inputs from the data already being collected, runs a
+PID, and spends each cycle window across the rungs of a stage ladder - so two heaters can average a
+demand that neither of them can produce on its own.
+
+Controls are **off unless you switch them on**, because a control actuates devices with nobody
+watching:
+
+```yaml
+controls:
+  enabled: true
+```
+
+That is deliberately not the per-source `mcp_read_write` flag. Wanting a heating loop is not the
+same as granting a connected model device-write access, and one setting governing both would force
+anyone wanting the first to accept the second.
+
+Each control is its own YAML document under the state directory (`/var/lib/send-to-influx/controls`
+on the packaged install), not part of `settings.yaml`: they are created and edited by the running
+service rather than by hand. Each names its inputs, its PID gains, its devices, and a ladder of
+stages saying what the devices do at each level.
+
+**One process per control, supervised.** The main process starts one child per stored control,
+watches a heartbeat from each, and restarts one that dies or stops beating with a growing backoff.
+Every death is followed by the parent putting that control's devices into their safe state itself -
+a child that was killed or lost power did not get the chance.
+
+Three settings decide what "safe" means, and they are separate because they answer different
+questions:
+
+| Setting | When it applies |
+|---------|-----------------|
+| `safe_state` | at startup, on failure, and at shutdown |
+| `active_period.end_state` | when the control's daily window closes |
+| `enable_when` | a rule gating actuation while everything else is running |
+
+`safe_state: unenergised` is the default and switches every device the control owns off by name,
+rather than meaning "the lowest stage" - so it does not depend on a zero stage having been declared
+correctly. `leave_unchanged` is the opt-out and means exactly that: the devices keep whatever state
+they were in, including after a crash.
+
+An active period is a wall-clock window in the control's own timezone, and it follows daylight
+saving the way a wall clock does: a window inside the hour the clocks skip does not happen that day,
+and one inside the hour they repeat happens twice.
+
 Usage
 -----
 >$ ./.venv/bin/python ./sendtoinflux.py --help  
@@ -847,7 +895,11 @@ Usage
 > &emsp; -d, --dump            dump the data to the console one time and exit. This requires a source to be specified  
 > &emsp; -p, --print           print the raw data rather than sending it to InfluxDB  
 > &emsp; -s, --source SOURCE   the source of the data to send to InfluxDB (hue, zappi, etc.). If this parameter is omitted, all sources in the settings file
-> &emsp;                       'sources' list are started. If no sources are configured, the process logs that plainly and exits.
+> &emsp;                       'sources' list are started. If no sources are configured, the process logs that plainly and exits.  
+> &emsp; --control CONTROL     run one stored control as this process, rather than collecting. One process per control; the supervisor starts these, and an
+> &emsp;                       operator rarely does  
+> &emsp; --heartbeat-fd FD     an inherited pipe to beat down once per cycle, so a supervisor can tell a slow control from a dead one. Set by the supervisor
+> &emsp;                       when it starts a control
 
 ### Exit codes
 

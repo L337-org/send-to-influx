@@ -46,6 +46,10 @@ CONSERVATORY = {
         ],
     },
     "safe_state": "unenergised",
+    # The design's own case: overnight, so the glass is not streaming by morning. Carried by
+    # the example because a control with no window exercises the gate's easiest path only,
+    # and the daylight-saving edges live on this one.
+    "active_period": {"from": "23:35", "to": "05:25", "end_state": "unenergised"},
 }
 
 

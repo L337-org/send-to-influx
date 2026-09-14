@@ -16,6 +16,7 @@ __license__ = "MIT"
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 
 
@@ -145,6 +146,59 @@ def _descriptors(pid):
         except OSError as exc:
             return None, f"descriptors: {directory} could not be listed: {exc}"
     return None, f"descriptors: no /proc/<pid>/fd on {sys.platform}"
+
+
+def quiet_after(before, pid, attempts=50, pause=0.1):
+    """Return a census taken once nothing exceeds an earlier one, or the last one taken.
+
+    **A leak is growth that stays.** A census raced against work that is still finishing
+    counts the transient rather than the state: one device command leaves the stub bridge's
+    connection thread and its socket alive for a moment after the call returns, and
+    comparing that against a quiet earlier reading reports a handshake as a leak. That is
+    what failed in CI while passing on a machine whose census cannot count descriptors at
+    all.
+
+    Re-reads until nothing has grown, rather than waiting for two readings to agree - which
+    was the first attempt here and is fooled by any transient that outlasts the gap between
+    samples, as a four-hundred-millisecond thread demonstrated.
+
+    Where growth persists for the whole window it is returned as it is, which is the finding
+    the invariant exists to report.
+
+    Args:
+        before (Census): the earlier reading to get back to
+        pid (int): the process at the top
+        attempts (int): how many times to re-read before accepting what it sees
+        pause (float): seconds between readings
+
+    Returns:
+        Census: the first reading that does not exceed ``before``, or the last taken
+    """
+    current = take(pid)
+    for _ in range(attempts):
+        if not _grew(before, current):
+            return current
+        time.sleep(pause)
+        current = take(pid)
+    return current
+
+
+def _grew(before, after):
+    """Whether any counted thing is larger than it was.
+
+    Args:
+        before (Census): the earlier reading
+        after (Census): the later one
+
+    Returns:
+        bool: True where a count that exists on both sides has grown
+    """
+    return any(
+        getattr(before, name) is not None
+        and getattr(after, name) is not None
+        and getattr(after, name) > getattr(before, name)
+        for name in ("processes", "threads", "descriptors")
+    )
 
 
 def take(pid):

@@ -108,6 +108,22 @@ mcp:
   # started the process can write there. Set this only to override both.
   # state_file: "/var/lib/send-to-influx/mcp-oauth-state.json"
 
+# Unattended control loops: one process per stored control, each holding something at a
+# target by switching devices. Off unless switched on here, because a control actuates
+# devices on its own, and an install that has not asked for that does not get it.
+#
+# This is deliberately not the per-source mcp_read_write flag. Wanting a heating loop is
+# not the same as granting a connected model device-write access, and one setting quietly
+# governing both would force anyone wanting the first to accept the second.
+#
+# The controls themselves are not configured here: each is its own YAML document under the
+# state directory (/var/lib/send-to-influx/controls on the packaged install), created and
+# edited by the running service or by an MCP client on its behalf. See the README's
+# "Control loops" section.
+controls:
+  # Uncomment the line below to run the stored controls (default: off)
+  # enabled: true
+
 # Hue bridge settings
 hue:
   # The database to use

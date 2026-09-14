@@ -76,6 +76,11 @@ INHERITED_ENV_KEYS = (
 # the limit would leave the child blocked writing into a full pipe.
 MAX_CAPTURED_BYTES = 1024 * 1024
 
+#: Re-exported so a caller can wait on a child with a timeout and catch only that, without
+#: importing subprocess itself - which the hygiene guard refuses outside this module, and
+#: rightly: a bare `except Exception` around a wait turns an unrelated bug into a SIGKILL.
+TimeoutExpired = subprocess.TimeoutExpired
+
 # How long to keep draining after the child has exited. A grandchild that inherited
 # a pipe holds the write end open, so EOF never arrives; this bounds the wait rather
 # than trusting a stream nothing is going to close.
@@ -400,6 +405,58 @@ def _pump(process, stdin_bytes, captures, timeout):
                 time.sleep(_POLL_SECONDS)
     finally:
         selector.close()
+
+
+def spawn(argv, *, env_extra=None, pass_fds=(), stderr=None):
+    """Start a long-lived child and return it without waiting.
+
+    The other half of this module. :func:`run_command` is for a command that finishes and
+    whose output is the answer; this is for a process meant to outlive the call, which
+    something else then watches. Both go through the same resolution and the same
+    allow-listed environment, because those protections are about *starting* a process
+    rather than about what it is started for - and a second spawn site written by hand is
+    how one of them ends up missing.
+
+    **The timeout here is the watchdog, not a deadline to finish by.** The mandatory-timeout
+    rule is about a command that completes and returns, where the timeout bounds how long
+    the caller waits for an answer; a child meant to keep running has no such moment. What
+    bounds this one is the heartbeat: it must refresh the watchdog within its stall
+    threshold or the supervisor kills it, so it is no more unbounded than a command with a
+    deadline - the deadline simply repeats. A caller with no such watchdog must not use this.
+
+    ``pass_fds`` is how a heartbeat pipe reaches the child. Everything not named there is
+    closed in the child, which is what keeps a grandchild from holding the pipe open and
+    denying the parent its EOF.
+
+    Args:
+        argv (list): the command and its arguments; argv[0] is resolved against the child's
+            own PATH before the spawn
+        env_extra (dict or None): variables to add to the allow-listed environment
+        pass_fds (tuple): file descriptors to keep open in the child
+        stderr (int or None): what to do with the child's stderr, as subprocess takes it;
+            None leaves it attached to this process's own
+
+    Returns:
+        subprocess.Popen: the running child
+
+    Raises:
+        ConfigError: argv[0] could not be resolved, or the child could not be started
+    """
+    env = _child_environment(env_extra)
+    executable = _resolve_executable(argv[0], env.get("PATH"))
+    try:
+        return subprocess.Popen(
+            [executable, *argv[1:]],
+            env=env,
+            shell=False,
+            pass_fds=tuple(pass_fds),
+            stderr=stderr,
+            close_fds=True,
+        )
+    except OSError as exc:
+        # Permission denied, an unusable interpreter line, a directory where a binary was
+        # expected. None of these resolve by waiting, so they are configuration.
+        raise ConfigError(f"could not start {argv[0]!r}: {exc}") from exc
 
 
 def run_command(argv, *, timeout, stdin_bytes=None, env_extra=None, output_limit=MAX_CAPTURED_BYTES):

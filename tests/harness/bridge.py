@@ -162,6 +162,18 @@ class StubBridge(StubEndpoint):
         # One item per key, which is the shape the handler scans for errors.
         return 200, [{"success": {f"/lights/{light_id}/state/{key}": value}} for key, value in body.items()]
 
+    def clear(self) -> None:
+        """Forget every request, attempt and command recorded so far.
+
+        The commands too, which the base class knows nothing about. A ``clear`` that left
+        half the record behind is worse than none: a test that clears and then asserts on
+        what followed would be reading the previous cycle's commands and calling them this
+        one's.
+        """
+        super().clear()
+        with self.lock:
+            self.commands.clear()
+
     def energised(self):
         """Return which lights are on right now, by name.
 

@@ -8,6 +8,7 @@ __license__ = "MIT"
 import sys
 import time
 import json
+import atexit
 import math
 import signal
 import logging
@@ -16,9 +17,12 @@ import threading
 import faulthandler
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
+from toinflux.general import render_values
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
-from toinflux.controls import validate_stored_controls
+from toinflux.controls import list_controls, validate_stored_controls
+from toinflux.control_process import heartbeat_writer, run_control
+from toinflux.supervision import Supervisor
 
 try:
     __version__ = version("send-to-influx")
@@ -700,6 +704,81 @@ def _check_config_and_exit(settings, args):
     sys.exit(0)
 
 
+def _controls_enabled(settings):
+    """Whether this installation runs the control subsystem at all.
+
+    Off unless it is switched on. Controls actuate devices unattended, so an installation
+    that has not said it wants that does not get it - and this is deliberately not the
+    collector's ``mcp_read_write`` flag, because wanting a heating loop is not the same as
+    granting a model device-write access.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        bool: True where ``controls.enabled`` is exactly true
+    """
+    block = settings.get("controls")
+    return isinstance(block, dict) and block.get("enabled") is True
+
+
+def _start_control_supervisor(settings, args):
+    """Start the control supervisor in its own thread, or return None.
+
+    Returns None where the subsystem is switched off or no controls are stored, so the
+    ordinary collector install starts nothing and says nothing.
+
+    Args:
+        settings (dict): the parsed settings document
+        args (argparse.Namespace): the parsed command line
+
+    Returns:
+        Supervisor or None: the running supervisor, already started
+    """
+    if not _controls_enabled(settings):
+        return None
+    names = list_controls(args.settings)
+    if not names:
+        logging.warning("controls.enabled is true but no controls are stored, so none will run")
+        return None
+    supervisor = Supervisor(names, settings_file=args.settings)
+    supervised = list(supervisor.children)
+    if not supervised:
+        # Every stored control was unusable, and each said so as it was skipped. A
+        # supervisor with nothing to supervise is a thread and a banner about nothing.
+        logging.error("No stored control could be supervised, so none are running")
+        return None
+    thread = threading.Thread(target=supervisor.run, args=(SHUTDOWN,), name="control-supervisor", daemon=True)
+    thread.start()
+    # The supervisor's own loop stops its controls when SHUTDOWN is set, but a signal exits
+    # this process through sys.exit and the daemon thread simply stops - so the last word on
+    # leaving devices safe belongs here, where it runs either way. stop_all is idempotent.
+    atexit.register(supervisor.stop_all)
+    # From what is actually being supervised rather than from what was found on disk: a
+    # control skipped for being unreadable said so on its own line, and a banner counting it
+    # too would have an operator looking for a process that was never started.
+    logging.info("Supervising %s control(s): %s", len(supervised), render_values(supervised))
+    return supervisor
+
+
+def _run_control_and_exit(args):
+    """Run one control as this process, and exit with what it did.
+
+    Args:
+        args (argparse.Namespace): the parsed command line
+    """
+    beat = heartbeat_writer(args.heartbeat_fd) if args.heartbeat_fd is not None else None
+    try:
+        run_control(args.control, settings_file=args.settings, heartbeat=beat)
+    except ConfigError as exc:
+        # A configuration fault, so no retry helps and the supervisor should not respawn
+        # this one until somebody has changed something. Reported as the operator's problem
+        # rather than as a traceback.
+        logging.critical("Control %r cannot run: %r", args.control, exc)
+        sys.exit(1)
+    sys.exit(0)
+
+
 def main() -> None:
     """Run the collector until it is asked to stop.
 
@@ -766,6 +845,26 @@ def main() -> None:
             "If no sources are configured, the process logs that plainly and exits."
         ),
     )
+    arg_parse.add_argument(
+        "--control",
+        required=False,
+        dest="control",
+        type=str,
+        help=(
+            "run one stored control as this process, rather than collecting. "
+            "One process per control; the supervisor starts these, and an operator rarely does"
+        ),
+    )
+    arg_parse.add_argument(
+        "--heartbeat-fd",
+        required=False,
+        dest="heartbeat_fd",
+        type=int,
+        help=(
+            "an inherited pipe to beat down once per cycle, so a supervisor can tell a slow "
+            "control from a dead one. Set by the supervisor when it starts a control"
+        ),
+    )
     args = arg_parse.parse_args()
 
     # load settings once for defaults and configured source list
@@ -780,6 +879,18 @@ def main() -> None:
         _check_config_and_exit(settings, args)
 
     _configure_logging_or_exit(settings, args)
+
+    if args.control is not None:
+        # `is not None` rather than truthiness: `--control ""` is a name somebody meant to
+        # pass, and treating it as absent would start the collector instead of saying the
+        # name is unusable. An empty name fails in the store, which is where it should.
+        #
+        # Before the collector's own setup, and it never returns to it: a control process
+        # collects nothing, serves no MCP, and starting a worker here would put two things
+        # in one process that the supervisor expects to kill independently.
+        _run_control_and_exit(args)
+
+    _start_control_supervisor(settings, args)
 
     requested = _requested_sources(settings, args)
     units = toinflux.expand_sources(requested, settings)

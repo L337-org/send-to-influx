@@ -7,6 +7,10 @@ import logging
 import pytest
 from toinflux.influx import DataHandler
 
+# The process harness's own fixtures, registered here rather than copied into each module
+# that drives a real control: a stub bridge defined twice is two bridges that drift apart.
+pytest_plugins = ["tests.harness.fixtures"]
+
 
 @pytest.fixture(autouse=True)
 def _reset_influx_write_buffers():
