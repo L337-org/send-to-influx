@@ -16,6 +16,16 @@ threads to bound.
 on the way out, but a child that was killed, hit an OOM or lost power did not get to. The
 parent applies it again after every death it sees: commanding a device off twice is free,
 and assuming the child managed it is how a heater stays on.
+
+**An edited document is a restart, not a re-read.** A control whose document changes is sent
+the signal it already handles, and started again from the new one. Re-reading in place was
+the alternative and is not cheaper: a handler that sets a flag and returns does not shorten
+a control's cycle sleep at all, because Python retries an interrupted sleep with the time
+remaining (PEP 475), so nothing would take effect until the window ended - a quarter of an
+hour, by default. A handler that raises instead is already unwinding the loop, and from
+there starting a fresh process costs one exec and buys back the startup safe-state
+assertion. The integral goes, which a control rebuilds in a few cycles and which every
+restart already costs.
 """
 
 __author__ = "Gavin Lucas"
@@ -25,6 +35,7 @@ __license__ = "MIT"
 import logging
 import math
 import os
+import queue
 import selectors
 import signal
 import sys
@@ -32,7 +43,7 @@ import time
 from dataclasses import dataclass
 
 from toinflux.control_process import command_devices
-from toinflux.controls import load_control, validate_control
+from toinflux.controls import control_path, load_control, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import commands_for
 from toinflux.process import TimeoutExpired, spawn
@@ -56,6 +67,9 @@ class Child:
 
     Attributes:
         name (str): the control's name.
+        document (dict or None): the validated document this process was started from. Kept
+            rather than re-read on demand because it names the devices *this* process may
+            have energised, and after a delete it is the only description of them left.
         process (subprocess.Popen): the running process.
         beats (int or None): the read end of its heartbeat pipe, as a raw descriptor. Raw
             rather than a file object because a selector loop must never block in a read,
@@ -72,6 +86,7 @@ class Child:
     """
 
     name: str
+    document: "dict | None" = None
     process: object = None
     beats: "int | None" = None
     pending: str = ""
@@ -156,8 +171,12 @@ class Event:
     """Something the supervisor saw, for a caller that wants to assert on it.
 
     Attributes:
-        kind (str): ``started``, ``beat``, ``died``, ``stalled``, or ``start-failed`` where
-            a scheduled restart could not start the process at all.
+        kind (str): ``started``, ``beat``, ``died``, ``stalled``, ``start-failed`` where a
+            scheduled restart could not start the process at all, ``reloaded`` where a
+            control was stopped deliberately to pick up its changed document, ``dropped``
+            where its document has gone and it is no longer supervised, or
+            ``reload-failed`` where the changed document could not be used and whatever was
+            running was left alone.
         name (str): the control it happened to.
         detail (str): what to say about it.
     """
@@ -195,6 +214,7 @@ class Supervisor:
         self._argv_for = argv_for or self._default_argv
         self._backoff = backoff or _default_backoff
         self._selector = selectors.DefaultSelector()
+        self._reload_requests = queue.SimpleQueue()
         self._stopped = False
         self.children = {}
         self.events = []
@@ -204,7 +224,7 @@ class Supervisor:
             # respawn loop that logs the same message for ever.
             try:
                 document = _usable_control(name, settings_file)
-                self.children[name] = Child(name=name, stall_seconds=stall_seconds(document))
+                self.children[name] = Child(name=name, document=document, stall_seconds=stall_seconds(document))
             except ConfigError as exc:
                 # That control's problem, not everybody's. Refusing to supervise anything
                 # because one stored document is corrupt would stop the heating over a file
@@ -286,7 +306,7 @@ class Supervisor:
                 self.start(name)
 
     def poll(self, timeout=0.5):
-        """Take one pass: read what arrived, notice deaths and stalls, restart what is due.
+        """Take one pass: reload what changed, read what arrived, notice deaths, restart.
 
         Args:
             timeout (float): how long to wait for a pipe to become readable
@@ -295,6 +315,10 @@ class Supervisor:
             list: the events this pass produced
         """
         self.events = []
+        # First, so that a control stopped by a reload has already left the selector before
+        # this pass waits on it, and so that the one it was replaced by is registered in
+        # time to be read.
+        self._apply_reload_requests()
         for key, _mask in self._selector.select(timeout=timeout):
             self._read(key.data)
         now = self._clock()
@@ -304,6 +328,140 @@ class Supervisor:
             elif not child.running and child.restart_at is not None and now >= child.restart_at:
                 self._restart(child)
         return self.events
+
+    def request_reload(self, name) -> None:
+        """Ask for a control to be reconciled with its stored document.
+
+        Called from whichever thread wrote the document, which is not this one: the MCP
+        server runs in a thread of the collector and the supervisor loop in another. So this
+        queues a name and nothing else. Every touch of a child, a process or the selector
+        happens on the supervisor's own thread in :meth:`poll`, because registering a
+        descriptor while another thread is blocked in ``select`` is not safe.
+
+        The request says only that the document changed. What that means is worked out when
+        it is drained, from the document itself.
+
+        Args:
+            name (str): the control whose document changed
+        """
+        if self._stopped:
+            # Shutting down. Starting a control here would leave a process behind with
+            # nothing watching it, which is the one outcome worse than ignoring the request.
+            logging.debug("Ignoring a reload of control %r: the supervisor is stopping", name)
+            return
+        self._reload_requests.put(name)
+
+    def _apply_reload_requests(self) -> None:
+        """Act on everything queued since the last pass, once per control.
+
+        De-duplicated deliberately. A client saving three edits in a row would otherwise
+        stop and start a heater three times, and the document on disk now is the only one
+        any of those requests was asking for.
+        """
+        names: dict = {}
+        while True:
+            try:
+                # A dict rather than a set: acting in the order the requests arrived makes
+                # the journal read the way it happened.
+                names[self._reload_requests.get_nowait()] = None
+            except queue.Empty:
+                break
+        for name in names:
+            self._reload(name)
+
+    def _reload(self, name) -> None:
+        """Make one control's running state match its stored document.
+
+        The document on disk decides which of three things this is. Gone means the control
+        has been deleted: stop it, make its devices safe, forget it. Unreadable or invalid
+        means change nothing, because killing a control that is holding a room at
+        temperature over a file somebody is halfway through editing is the worst of the
+        three outcomes, and the next reload gets another go. Anything else is a restart.
+
+        Args:
+            name (str): the control to reconcile
+        """
+        child = self.children.get(name)
+        try:
+            path = control_path(name, self.settings_file)
+        except ConfigError as exc:
+            # The name itself is unusable, so there is no file to look for.
+            logging.error("Control %r cannot be reloaded: %r", name, exc)
+            self._record("reload-failed", name, str(exc))
+            return
+        if not os.path.exists(path):
+            self._drop(child, name)
+            return
+        try:
+            document = _usable_control(name, self.settings_file)
+            window = stall_seconds(document)
+        except ConfigError as exc:
+            logging.error(
+                "Control %r was not reloaded and is still running the document it started with: %r", name, exc
+            )
+            self._record("reload-failed", name, str(exc))
+            return
+        known = child is not None
+        if not known:
+            # A control that did not exist when the supervisor started. Taking it on here is
+            # what lets a newly stored control run without restarting the collector.
+            child = self.children[name] = Child(name=name)
+        elif child.running:
+            self._stop(child, "its document changed")
+        child.document = document
+        child.stall_seconds = window
+        # Not a failure, so the new document does not wait out a backoff earned by the old
+        # one - and an edit is the usual way a failing control gets fixed, so its history
+        # starts again here.
+        child.failures = 0
+        child.restart_at = self._clock()
+        self._record("reloaded", name, "its document changed" if known else "it is newly stored")
+        self._restart(child)
+
+    def _drop(self, child, name) -> None:
+        """Stop supervising a control whose document has been deleted.
+
+        Args:
+            child (Child or None): the control, where there was one
+            name (str): its name, for the log line and the event
+        """
+        if child is None:
+            # Nothing was supervising it, so there is nothing to stop. Recorded anyway, so a
+            # caller waiting on the event does not wait out its timeout because the delete
+            # arrived twice.
+            self._record("dropped", name, "it was not being supervised")
+            return
+        if child.running:
+            self._stop(child, "its document has been deleted")
+        else:
+            self.make_safe(name)
+        del self.children[name]
+        logging.info("Control %r has been deleted, so it is no longer supervised", name)
+        self._record("dropped", name, "its document has been deleted")
+
+    def _stop(self, child, reason) -> None:
+        """End a control the parent meant to end, and do not hold it against it.
+
+        The same signal a stalled control gets and the same teardown, with none of the
+        bookkeeping: no failure counted, no backoff, and an INFO line rather than an ERROR.
+        A control that exited because it was asked to did nothing wrong, and treating it as
+        a death would make the new document wait out a growing delay while the journal said
+        a working control keeps failing.
+
+        Args:
+            child (Child): the control to stop
+            reason (str): why, for the log line
+        """
+        self._terminate(child)
+        pid, status = self._release(child)
+        logging.info(
+            "Control %r (pid %s) was stopped because %s, and %s",
+            child.name,
+            pid,
+            reason,
+            f"was killed by signal {-status}" if status < 0 else f"exited {status}",
+        )
+        self.make_safe(child.name)
 
     def _restart(self, child) -> None:
         """Start a control again, treating a failure to start as that control's failure.
@@ -390,6 +548,15 @@ class Supervisor:
             reason (str): why, for the log line
         """
         logging.warning("Control %r is not responding (%s), killing it", child.name, reason)
+        self._terminate(child)
+        self._reap(child, reason, kind="stalled")
+
+    def _terminate(self, child) -> None:
+        """End a child's process, escalating if it will not go.
+
+        Args:
+            child (Child): the control whose process to end
+        """
         child.process.terminate()
         try:
             child.process.wait(timeout=KILL_GRACE_SECONDS)
@@ -399,15 +566,15 @@ class Supervisor:
             # deciding what they should be doing.
             child.process.kill()
             child.process.wait()
-        self._reap(child, reason, kind="stalled")
 
-    def _reap(self, child, reason, kind="died") -> None:
-        """Record a control's death, make its devices safe, and schedule a restart.
+    def _release(self, child):
+        """Let go of the parent's side of a child that has ended.
 
         Args:
-            child (Child): the child that has gone
-            reason (str): what happened, for the log line
-            kind (str): the event kind to record
+            child (Child): the control that has gone
+
+        Returns:
+            tuple: the pid it had, and the status it ended with
         """
         status = child.process.poll()
         if status is None:
@@ -417,6 +584,17 @@ class Supervisor:
         child.beats = None
         pid = child.process.pid
         child.process = None
+        return pid, status
+
+    def _reap(self, child, reason, kind="died") -> None:
+        """Record a control's death, make its devices safe, and schedule a restart.
+
+        Args:
+            child (Child): the child that has gone
+            reason (str): what happened, for the log line
+            kind (str): the event kind to record
+        """
+        pid, status = self._release(child)
         child.failures += 1
         delay = self._backoff(child.failures)
         child.restart_at = self._clock() + delay
@@ -441,25 +619,86 @@ class Supervisor:
         The child applies its own on the way out, and this does it again. A child that was
         killed, hit an OOM or lost power did not get to, and commanding a device off twice
         costs nothing next to a heater that stays on because everyone assumed somebody else
-        had dealt with it.
+        had dealt with it. It runs after every exit for the same reason, deliberate or not:
+        a control stopped to pick up a changed document has exited exactly as thoroughly as
+        one that crashed.
 
         Args:
             name (str): the control whose devices to make safe
         """
+        for document in self._documents_for(name):
+            try:
+                commands = commands_for(document.get("safe_state", "unenergised"), tuple(document.get("devices") or {}))
+                if commands is None:
+                    # leave_unchanged, which is an answer rather than an omission.
+                    continue
+                command_devices(document, commands, self.settings_file)
+            except (ConfigError, SourceConnectionError) as exc:
+                # Logged rather than raised: the supervisor's job is to keep going, and a
+                # bridge that cannot be reached now is one the next restart will try again.
+                logging.error("Could not make control %r safe: %r", name, exc)
+
+    def _documents_for(self, name):
+        """Return every document worth making this control's devices safe against.
+
+        Two of them, where they differ. The document the process was started from names the
+        devices *it* could have energised; the one on disk now names the devices the next
+        process will own. They differ exactly when somebody has edited the control, which is
+        the case this has to get right: reading the file alone strands a device that has
+        just been removed from the document, and trusting the started-from copy alone misses
+        one that has just been added. Where they are the same document, which is almost
+        always, this returns one - commanding twice would be harmless but would also make
+        every log of what the bridge was asked to do twice as long as what happened.
+
+        Args:
+            name (str): the control to describe
+
+        Returns:
+            list: the documents to act on, which is empty only where there is no description
+            of this control left anywhere
+        """
+        documents = []
+        child = self.children.get(name)
+        if child is not None and child.document is not None:
+            documents.append(child.document)
         try:
-            # Re-read and re-checked rather than trusted from construction: the file can be
-            # rewritten by an MCP client while the supervisor is running, and this is the
-            # path that runs when something has *already* gone wrong.
-            document = _usable_control(name, self.settings_file)
-            commands = commands_for(document.get("safe_state", "unenergised"), tuple(document.get("devices") or {}))
-            if commands is None:
-                # leave_unchanged, which is an answer rather than an omission.
-                return
-            command_devices(document, commands, self.settings_file)
-        except (ConfigError, SourceConnectionError) as exc:
-            # Logged rather than raised: the supervisor's job is to keep going, and a
-            # bridge that cannot be reached now is one the next restart will try again.
-            logging.error("Could not make control %r safe after it died: %r", name, exc)
+            path = control_path(name, self.settings_file)
+            stored = os.path.exists(path)
+        except ConfigError as exc:
+            logging.error("Could not read control %r to make its devices safe: %r", name, exc)
+            return documents
+        if not stored:
+            # Deleted, which is something an operator does on purpose rather than a fault to
+            # report. The copy the process was started with is the only description of its
+            # devices left anywhere, and is exactly what it is kept for.
+            if not documents:
+                logging.error(
+                    "Control %r is not stored at %r and was not started from here, so there is nothing "
+                    "left that says which devices it owns",
+                    name,
+                    path,
+                )
+            return documents
+        try:
+            current = _usable_control(name, self.settings_file)
+        except ConfigError as exc:
+            # The file is there and cannot be used, which is a fault. Said rather than
+            # passed over: nothing is stranded, because the copy this process was started
+            # with still names its devices, but the file an operator would go and look at is
+            # not the one that just acted - and the next reload will refuse for the same
+            # reason.
+            level = logging.WARNING if documents else logging.ERROR
+            logging.log(
+                level,
+                "Control %r could not be read, so its devices were made safe from %s: %r",
+                name,
+                "the document it was started with" if documents else "nothing at all",
+                exc,
+            )
+            return documents
+        if current not in documents:
+            documents.append(current)
+        return documents
 
     def stop_all(self) -> None:
         """Stop every running control and leave its devices safe, once.
@@ -486,10 +725,7 @@ class Supervisor:
             except TimeoutExpired:
                 child.process.kill()
                 child.process.wait()
-            self._selector.unregister(child.beats)
-            os.close(child.beats)
-            child.beats = None
-            child.process = None
+            self._release(child)
             self.make_safe(child.name)
         self._selector.close()
 
