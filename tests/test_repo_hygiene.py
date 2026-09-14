@@ -1952,12 +1952,12 @@ def test_every_source_that_claims_to_actuate_devices_can():
     names = known_sources()
     assert names, "the source registry is empty, so this guard is guarding nothing"
 
-    liars = sorted(
-        name
-        for name in names
-        if getattr(source_class(name), "MCP_ACTUATES_DEVICES", False)
-        and not hasattr(source_class(name), "mcp_set_device_state")
-    )
+    liars = []
+    for name in names:
+        handler = source_class(name)
+        if getattr(handler, "MCP_ACTUATES_DEVICES", False) and not hasattr(handler, "mcp_set_device_state"):
+            liars.append(name)
+    liars.sort()
     assert not liars, (
         f"{', '.join(liars)} declare MCP_ACTUATES_DEVICES without defining "
         f"mcp_set_device_state(), which a control calls on the strength of that flag alone"
