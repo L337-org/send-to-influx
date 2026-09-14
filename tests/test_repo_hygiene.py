@@ -21,6 +21,7 @@ here are shipped.
 """
 
 import ast
+import importlib
 import os
 import re
 import subprocess
@@ -1924,4 +1925,55 @@ def test_the_rule_slot_table_describes_every_slot_the_runtime_parses():
         f"the runtime parses {found} rule slot(s) but CONTROL_RULE_SLOTS describes "
         f"{len(CONTROL_RULE_SLOTS)}. A slot the validator does not know about is one that "
         f"passes --check-config and fails at startup instead"
+    )
+
+
+def test_every_source_that_claims_to_actuate_devices_can():
+    """`MCP_ACTUATES_DEVICES` is a promise that `mcp_set_device_state()` exists, and a
+    control calls that method on the strength of the flag alone.
+
+    The reverse of this pair is how the flag came to exist. `command_devices` tested
+    `MCP_WRITABLE`, which says only that *some* write path exists - Speedtest's is
+    `mcp_trigger_run()` - so a control naming Speedtest as a device source passed the check
+    and raised AttributeError on the next line. That is not one of the types the
+    supervisor's safe-state pass handles, so one control's document could end the thread
+    supervising all of them.
+
+    A flag and the method it promises, in different files, is exactly the pair a machine
+    should be comparing rather than a reviewer.
+    """
+    from toinflux.influx import DataHandler
+
+    def subclasses(cls):
+        """Return every subclass of a class, however deeply nested.
+
+        Args:
+            cls (type): the base class
+
+        Returns:
+            set: every subclass found
+        """
+        found = set()
+        for subclass in cls.__subclasses__():
+            found.add(subclass)
+            found |= subclasses(subclass)
+        return found
+
+    # Import every source module so the subclass registry is complete: a handler nobody
+    # has imported is a handler this guard cannot see.
+    for name in sorted(path.stem for path in (REPO_ROOT / "toinflux").glob("*.py")):
+        if not name.startswith("_"):
+            importlib.import_module(f"toinflux.{name}")
+
+    handlers = subclasses(DataHandler)
+    assert handlers, "no DataHandler subclasses were found, so this guard is guarding nothing"
+
+    liars = sorted(
+        handler.__name__
+        for handler in handlers
+        if getattr(handler, "MCP_ACTUATES_DEVICES", False) and not hasattr(handler, "mcp_set_device_state")
+    )
+    assert not liars, (
+        f"{', '.join(liars)} declare MCP_ACTUATES_DEVICES without defining "
+        f"mcp_set_device_state(), which a control calls on the strength of that flag alone"
     )

@@ -116,8 +116,16 @@ def command_devices(document, commands, settings_file=None) -> None:
         targets.setdefault((spec["source"], spec.get("instance")), []).append((spec["device"], state))
     for (source, instance), devices in sorted(targets.items(), key=lambda item: str(item[0])):
         with source_handler(source, settings_file=settings_file, instance=instance) as handler:
-            if not getattr(handler, "MCP_WRITABLE", False):
-                raise ConfigError(f"control device source {source!r} has no write path, so a control cannot actuate it")
+            if not getattr(handler, "MCP_ACTUATES_DEVICES", False):
+                # Not MCP_WRITABLE, which says only that *some* write path exists and is
+                # satisfied by a source whose write path triggers a speed test. That check
+                # passed and the call below then raised AttributeError - which is not one of
+                # the types the supervisor's safe-state pass handles, so one control's
+                # document could end the thread supervising all of them.
+                raise ConfigError(
+                    f"control device source {source!r} cannot switch a device on and off, "
+                    f"so a control cannot actuate it"
+                )
             for device, state in devices:
                 handler.mcp_set_device_state(device, on=bool(state))
 
