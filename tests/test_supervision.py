@@ -66,6 +66,18 @@ def _quick(name, devices, **overrides):
     return document
 
 
+def _bend(installation, name) -> None:
+    """Overwrite one control's document with something that will not parse.
+
+    Args:
+        installation (Installation): the installation holding the control store
+        name (str): the control whose document to break
+    """
+    path = os.path.join(installation.state_dir, "controls", f"{name}.yaml")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("output: [not a control\n")
+
+
 def _two_controls(installation):
     """Write two controls that share a bridge but no devices.
 
@@ -368,9 +380,7 @@ class TestADocumentThatChanged:
         supervisor.start_all()
         _wait_for(supervisor, "beat", "conservatory")
         running = supervisor.children["conservatory"].process.pid
-        path = os.path.join(state_directory.state_dir, "controls", "conservatory.yaml")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write("output: [this is not a control\n")
+        _bend(state_directory, "conservatory")
         with caplog.at_level(logging.ERROR):
             supervisor.request_reload("conservatory")
             event = _wait_for(supervisor, "reload-failed", "conservatory")
@@ -419,6 +429,32 @@ class TestADocumentThatChanged:
         commanded = {command.name for command in bridge.commanded()}
         assert "annexe-heater" in commanded
         assert "far" not in commanded
+
+    def test_a_start_that_cannot_re_read_keeps_the_copy_it_has_and_says_so(self, supervisor, state_directory, caplog):
+        """A document that will not read does not stop the control being started: the child
+        reads the same file and fails on it in its own process, where the restart path
+        already handles it."""
+        _bend(state_directory, "conservatory")
+        with caplog.at_level(logging.WARNING):
+            supervisor.start("conservatory")
+        assert supervisor.children["conservatory"].running
+        assert "still working from the document it last read" in caplog.text
+
+    def test_a_start_that_cannot_re_read_and_has_no_copy_says_that_instead(self, supervisor, state_directory, caplog):
+        """The same failure with nothing to fall back on, which is the case an operator
+        actually needs woken up for: the parent has no description of this control's devices
+        and cannot make them safe. Reachable because a control taken on by a reload is built
+        with no document and its file was readable only a moment earlier.
+
+        `document` is cleared by hand because that is the state `_reload` builds. Racing the
+        window between its read and the start would be a race rather than a test.
+        """
+        _bend(state_directory, "conservatory")
+        supervisor.children["conservatory"].document = None
+        with caplog.at_level(logging.WARNING):
+            supervisor.start("conservatory")
+        assert "no description of this control at all" in caplog.text
+        assert "still working from the document it last read" not in caplog.text
 
     def test_a_reload_asked_for_while_stopping_is_refused_and_says_so(
         self, supervisor, state_directory, bridge, caplog

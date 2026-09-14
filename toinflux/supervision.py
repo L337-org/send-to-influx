@@ -323,6 +323,12 @@ class Supervisor:
         put it on the path ``start_all`` takes, which runs before the loop that would clean
         up after it.
 
+        There may be no previous copy to keep. A control taken on by a reload is built with
+        none, and its document was readable a moment earlier when the reload decided to
+        start it - so a failure here means the file changed again in between. The two cases
+        are said differently because they are differently bad: one leaves the parent an
+        older description of the control's devices, and the other leaves it none at all.
+
         Args:
             child (Child): the control about to be started
         """
@@ -331,9 +337,13 @@ class Supervisor:
             window = stall_seconds(document)
         except ConfigError as exc:
             logging.warning(
-                "Control %r could not be re-read before starting it, so the parent is still "
-                "working from the document it last read: %r",
+                "Control %r could not be re-read before starting it, so %s: %r",
                 child.name,
+                (
+                    "the parent is still working from the document it last read"
+                    if child.document is not None
+                    else "the parent has no description of this control at all and cannot make its devices safe"
+                ),
                 exc,
             )
             return
