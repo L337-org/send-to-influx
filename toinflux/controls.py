@@ -653,6 +653,14 @@ def validate_control_structure(name, document):
     for key in REQUIRED_CONTROL_KEYS:
         if key not in document:
             errors.append(f"{key}: is required")
+        elif document[key] is None:
+            # `inputs:` with nothing indented under it is a mapping key whose value is None,
+            # so the presence check above is satisfied by a section that is not there. Every
+            # shape check further down then treats None as "absent" and says nothing, and
+            # the document passes with no inputs, no devices or no loop at all. Named as its
+            # own case because the cause is almost always a block that was not indented,
+            # which "is required" alone does not point at.
+            errors.append(f"{key}: is required and has nothing under it")
 
     _check_scalars(name, document, errors)
     _check_mapping_of(document, "inputs", errors, ("source", "field"), ("max_age",))
