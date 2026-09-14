@@ -21,7 +21,6 @@ here are shipped.
 """
 
 import ast
-import importlib
 import os
 import re
 import subprocess
@@ -1941,37 +1940,23 @@ def test_every_source_that_claims_to_actuate_devices_can():
 
     A flag and the method it promises, in different files, is exactly the pair a machine
     should be comparing rather than a reviewer.
+
+    Read from the source registry rather than by walking `DataHandler.__subclasses__()`.
+    The registry is what decides whether a name in a control document resolves at all, so
+    a handler it does not list cannot be reached by a control and does not need the promise
+    kept; and reaching every subclass would mean importing every module first, which is a
+    larger claim about the tree than this guard needs to make.
     """
-    from toinflux.influx import DataHandler
+    from toinflux.general import known_sources, source_class
 
-    def subclasses(cls):
-        """Return every subclass of a class, however deeply nested.
-
-        Args:
-            cls (type): the base class
-
-        Returns:
-            set: every subclass found
-        """
-        found = set()
-        for subclass in cls.__subclasses__():
-            found.add(subclass)
-            found |= subclasses(subclass)
-        return found
-
-    # Import every source module so the subclass registry is complete: a handler nobody
-    # has imported is a handler this guard cannot see.
-    for name in sorted(path.stem for path in (REPO_ROOT / "toinflux").glob("*.py")):
-        if not name.startswith("_"):
-            importlib.import_module(f"toinflux.{name}")
-
-    handlers = subclasses(DataHandler)
-    assert handlers, "no DataHandler subclasses were found, so this guard is guarding nothing"
+    names = known_sources()
+    assert names, "the source registry is empty, so this guard is guarding nothing"
 
     liars = sorted(
-        handler.__name__
-        for handler in handlers
-        if getattr(handler, "MCP_ACTUATES_DEVICES", False) and not hasattr(handler, "mcp_set_device_state")
+        name
+        for name in names
+        if getattr(source_class(name), "MCP_ACTUATES_DEVICES", False)
+        and not hasattr(source_class(name), "mcp_set_device_state")
     )
     assert not liars, (
         f"{', '.join(liars)} declare MCP_ACTUATES_DEVICES without defining "
