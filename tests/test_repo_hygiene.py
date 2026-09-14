@@ -1832,13 +1832,28 @@ def test_the_runtime_state_a_control_writes_is_ignored():
     from toinflux.inputs import LOCK_DIR_NAME
 
     for name in (CONTROL_DIR_NAME, LOCK_DIR_NAME):
-        finished = subprocess.run(
-            ["git", "check-ignore", "-q", f"{name}/"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            check=False,
-        )
-        # 0 is ignored, 1 is not ignored, anything else is git failing to answer - which is
-        # reported rather than read as a pass.
-        assert finished.returncode in (0, 1), f"git could not say whether {name}/ is ignored: {finished.stderr!r}"
-        assert finished.returncode == 0, f"{name}/ is runtime state and is not in .gitignore"
+        try:
+            finished = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "check-ignore", f"{name}/"],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+        except OSError as exc:
+            finished = None
+            failure = str(exc)
+        # check-ignore answers 0 for ignored and 1 for not; anything else is git declining to
+        # answer at all. Same handling as `_tracked_files` above, and for the same reason: no
+        # git or no checkout is a fact about the environment rather than about this repo, but
+        # a skip must never be how a merge gate quietly stops running - so under CI it fails.
+        if finished is None or finished.returncode not in (0, 1):
+            failure = failure if finished is None else (finished.stderr.strip() or f"exit {finished.returncode}")
+            if os.environ.get("CI"):
+                raise RuntimeError(
+                    f"cannot ask git whether {name}/ is ignored ({failure}), and CI is set - this "
+                    f"check is a merge gate there, so it must fail rather than skip"
+                )
+            pytest.skip(
+                f"not a git checkout, or git is unavailable ({failure}) - the ignore rules are not checkable here"
+            )
+        assert finished.returncode == 0, f"{name}/ is runtime state the code writes, and is not in .gitignore"
