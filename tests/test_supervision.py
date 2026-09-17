@@ -481,6 +481,56 @@ class TestADocumentThatChanged:
         assert "late" not in supervisor.children
 
 
+class TestNothingOneControlDoesUnsupervisesTheRest:
+    """The floor under every specific fix. `make_safe` runs on the supervisor's own thread,
+    inside its poll loop, and calls into a per-source handler and whatever library that
+    handler uses. Anything unexpected from there used to escape make_safe, then _reap, then
+    poll, and end the thread - leaving every other control with no heartbeat checking, no
+    restart and no safe state on death."""
+
+    def test_an_unexpected_failure_making_one_safe_does_not_end_the_loop(self, supervisor, monkeypatch, caplog):
+        """A handler raising something that is neither of the two types the supervisor
+        expects. AttributeError is the one that actually happened, from a capability that
+        turned out not to be there."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+
+        def explode(*_args, **_kwargs):
+            """Fail the way a handler with a missing capability did.
+
+            Args:
+                *_args: ignored
+                **_kwargs: ignored
+
+            Raises:
+                AttributeError: always
+            """
+            raise AttributeError("'Speedtest' object has no attribute 'mcp_set_device_state'")
+
+        monkeypatch.setattr("toinflux.supervision.command_devices", explode)
+        with caplog.at_level(logging.ERROR):
+            supervisor.children["conservatory"].process.kill()
+            _wait_for(supervisor, "died", "conservatory")
+
+        assert "was unexpected" in caplog.text
+        # The claim: the loop is still running and still supervising the other control.
+        monkeypatch.undo()
+        _wait_for(supervisor, "beat", "porch")
+        _wait_for(supervisor, "started", "conservatory")
+
+    def test_the_expected_failures_keep_their_own_message(self, supervisor, state_directory, bridge, caplog):
+        """The broad catch must not swallow the two cases that have a precise thing to say.
+        A bridge that cannot be reached is one the next restart will try again, and saying
+        "unexpected" about it would send an operator looking for a defect."""
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        with faults.unreachable(bridge):
+            with caplog.at_level(logging.ERROR):
+                supervisor.make_safe("conservatory")
+        assert "Could not make control" in caplog.text
+        assert "was unexpected" not in caplog.text
+
+
 class TestTheRunAsAWhole:
     def test_nothing_leaks_across_a_kill_and_restart(self, supervisor):
         """A supervisor that leaked a descriptor or a zombie per restart would report itself

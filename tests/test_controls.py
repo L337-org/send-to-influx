@@ -18,6 +18,7 @@ from toinflux.controls import (
     CONTROL_EXAMPLE,
     validate_control,
     validate_control_rules,
+    validate_control_sources,
     validate_control_structure,
     validate_stored_controls,
 )
@@ -441,6 +442,58 @@ class TestValidatingTheRules:
 
     def test_no_names_where_a_section_is_the_wrong_shape(self):
         assert rule_names({"inputs": 7, "parameters": None}) == ()
+
+
+class TestValidatingTheSources:
+    """Whether a source exists, and whether it can switch a device, are facts about the
+    code rather than about the document - so the file cannot answer them about itself, and
+    nothing did until a control failed on its first command."""
+
+    def test_a_device_source_that_cannot_actuate_is_refused(self):
+        document = a_valid_control()
+        document["devices"]["heater_far"]["source"] = "speedtest"
+        (error,) = validate_control_sources(document)
+        assert "devices['heater_far']" in error
+        assert "cannot switch a device" in error
+
+    def test_a_writable_source_is_not_enough(self):
+        """The distinction the whole check exists for: Speedtest offers a write path, and it
+        triggers a speed test. `MCP_WRITABLE` is the wrong question for a devices entry."""
+        from toinflux.general import source_class
+
+        assert source_class("speedtest").MCP_WRITABLE is True
+        assert getattr(source_class("speedtest"), "MCP_ACTUATES_DEVICES", False) is False
+
+    def test_a_source_this_build_does_not_collect_from_is_refused(self):
+        document = a_valid_control()
+        document["inputs"]["inside"]["source"] = "nosuchsource"
+        (error,) = validate_control_sources(document)
+        assert "inputs['inside']" in error and "nosuchsource" in error
+
+    def test_an_input_source_need_not_actuate(self):
+        """Only a devices entry needs the narrow capability. An input is read, not switched,
+        so every collected source is fair game - and requiring otherwise would leave a
+        control unable to read the weather."""
+        document = a_valid_control()
+        assert any(spec["source"] == "openmeteo" for spec in document["inputs"].values())
+        assert validate_control_sources(document) == []
+
+    def test_structure_is_not_reported_twice(self):
+        """Each of these is named precisely by the structural check. Said twice, an operator
+        looks for two faults."""
+        for broken in ({"devices": 7}, {"devices": {"far": 7}}, {"devices": {"far": {"device": "x"}}}):
+            document = a_valid_control() | broken
+            assert validate_control_sources(document) == [], broken
+
+    def test_the_wrapper_runs_all_three_halves(self):
+        document = a_valid_control()
+        document["enabled"] = "yes"
+        document["enable_when"] = "nosuchreading < 15"
+        document["devices"]["heater_far"]["source"] = "speedtest"
+        errors = validate_control("conservatory", document)
+        assert any("enabled" in error for error in errors)
+        assert any("enable_when" in error for error in errors)
+        assert any("cannot switch a device" in error for error in errors)
 
 
 class TestValidatingTheWholeStore:

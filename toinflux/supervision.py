@@ -796,6 +796,24 @@ class Supervisor:
                 # Logged rather than raised: the supervisor's job is to keep going, and a
                 # bridge that cannot be reached now is one the next restart will try again.
                 logging.error("Could not make control %r safe: %r", name, exc)
+            except Exception as exc:
+                # The one deliberately broad catch in this subsystem, and it is what makes
+                # "one control's failure is never every control's" true by construction
+                # rather than by having fixed each specific case.
+                #
+                # This runs on the supervisor's own thread, inside its poll loop, and it
+                # calls into a per-source handler and whatever library that handler uses.
+                # Anything those raise that is not one of the two types above - an
+                # AttributeError from a capability that turned out not to be there, a
+                # vendor client's own exception class - escapes make_safe, then _reap, then
+                # poll, and ends the thread. Every other control is then running with
+                # nothing watching it: no heartbeat, no restart, no safe state on death.
+                # That is a far worse outcome than one control's devices staying as they
+                # are, which is what tolerating this costs.
+                #
+                # Not a substitute for the specific fixes: the case that prompted it is
+                # refused at validation now. It is the floor under them.
+                logging.exception("Could not make control %r safe, and the reason was unexpected: %r", name, exc)
 
     def _documents_for(self, name):
         """Return every document worth making this control's devices safe against.
