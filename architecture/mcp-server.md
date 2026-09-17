@@ -35,6 +35,21 @@ decisions:
   address. The SDK's DNS-rebinding protection stays enabled with the public hostname allowlisted
   (a reverse-proxied request carries the public Host header, which the SDK's localhost-only
   default would reject).
+- **Tokens are bound to this server's resource** (RFC 8707). Every access token is stamped
+  with `resource_server_url`, and the SDK's bearer middleware refuses one issued for anything
+  else, so a token obtained here cannot be replayed against another resource and one obtained
+  elsewhere cannot be presented here. The check was off by omission until the mcp 2.2.0 bump
+  warned about it; 2.2.0 also makes it the default in 3.0 wherever `resource_server_url` is
+  set, at which point a server that had not stamped its tokens would refuse every token it had
+  itself issued - so stamping and enabling are one change, not two.
+  **That URL is computed once** in `build_mcp_server()` and handed to both the provider and
+  `AuthSettings`: two spellings of the same URL, a trailing slash apart, would mean nobody
+  could connect and nothing would say why.
+  *Accepted limitation:* a client asking for a different resource is not refused at the
+  authorization endpoint, it is issued a token for this one. This server protects exactly one
+  resource and can honestly assert no other, and keeping the URL comparison in a single place -
+  the SDK's middleware - is worth more than refusing earlier with a second copy of the matching
+  rules that could disagree with it.
 - **OAuth storage** (`SendToInfluxOAuthProvider` + `OAuthStateStore`): dynamic client
   registrations and refresh tokens persist across restarts in `mcp.state_file` (default
   `mcp-oauth-state.json` next to settings.yaml - the one path the packaged service's sandbox
