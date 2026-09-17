@@ -1,9 +1,16 @@
 """Reading the control loops over MCP: what this installation controls, and whether it is.
 
-Two tools, both read-only. They are registered only where ``controls.enabled`` is true,
-because a capability that is switched off should be absent from the advertised surface
-rather than present and refusing - a tool a model can see is a tool it will try, and a
-refusal costs a round trip to learn what the tool list could have said for free.
+Three tools, all read-only: ``list_controls`` for what is stored and what is running,
+``get_control`` for one document as held on disk, and ``get_control_schema`` for the format
+itself. They are registered only where ``controls.enabled`` is true, because a capability
+that is switched off should be absent from the advertised surface rather than present and
+refusing - a tool a model can see is a tool it will try, and a refusal costs a round trip to
+learn what the tool list could have said for free.
+
+**The schema is here rather than behind the write flag**, even though its reason for
+existing is to serve writing. An installation where nothing may write controls can still be
+asked for a document to paste in by hand, or to explain one already written - and the format
+is not a secret in any case.
 
 **Reading is not behind the write flag.** A control document holds no secrets: it says
 what is held at what, and which devices move. Being able to ask "what is this install
