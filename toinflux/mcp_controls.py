@@ -1,6 +1,6 @@
 """Reading the control loops over MCP: what this installation controls, and whether it is.
 
-Three tools, all read-only: ``list_controls`` for what is stored and what is running,
+Read-only, all of them: ``list_controls`` for what is stored and what is running,
 ``get_control`` for one document as held on disk, and ``get_control_schema`` for the format
 itself. They are registered only where ``controls.enabled`` is true, because a capability
 that is switched off should be absent from the advertised surface rather than present and
@@ -224,14 +224,14 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
     )
     async def get_control_schema() -> dict:  # noqa: DOC201
         """Return the format of a control loop document: every permitted key with what it
-        means, which keys are required, the four rule slots, the rule language a slot may
+        means, which keys are required, every slot that holds a rule, the language a slot may
         use, the safe states, which of this installation's sources can be read as inputs and
         which can switch devices, and a complete worked example that is known to be valid.
 
         Read this before composing a control. The rule language is small and deliberate -
-        arithmetic over numbers, five functions, no strings and no attribute access - and a
-        rule naming an input the document does not declare is refused rather than ignored,
-        so guessing the format costs a round trip per mistake.
+        arithmetic over numbers, a fixed table of functions, no strings and no attribute
+        access - and a rule naming an input the document does not declare is refused rather
+        than ignored, so guessing the format costs a round trip per mistake.
 
         The example is the one the project tests itself against, so it is valid by
         construction rather than by having been checked once. Use `list_controls` for what

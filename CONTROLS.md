@@ -63,7 +63,7 @@ actually looks like.
 The rule language
 -----------------
 
-Four slots hold an expression:
+These slots hold an expression:
 
 | Slot | |
 | --- | --- |
