@@ -226,8 +226,60 @@ class TestCommandingDevices:
     def test_a_source_with_no_write_path_is_refused(self, installation):
         document = conservatory()
         document["devices"] = {"far": {"source": "openmeteo", "device": "far"}}
-        with pytest.raises(ConfigError, match="no write path"):
+        with pytest.raises(ConfigError, match="cannot switch a device"):
             command_devices(document, {"far": True}, installation.settings_file)
+
+    def test_a_writable_source_that_cannot_switch_a_device_is_refused_too(self, installation):
+        """The case the old check let through. `MCP_WRITABLE` says only that *some* write
+        path exists, and the shapes differ per source: Speedtest's is `mcp_trigger_run()`,
+        which cannot actuate anything. It passed the check and raised AttributeError on the
+        next line - and AttributeError is not one of the types the supervisor's safe-state
+        pass handles, so one control's document could end the thread supervising all of
+        them.
+
+        Asserted against the real handler rather than a stub, because the claim is about
+        what this project actually ships: a source that is writable and cannot switch a
+        device.
+        """
+        from toinflux.speedtest import Speedtest
+
+        assert Speedtest.MCP_WRITABLE is True
+        assert not hasattr(Speedtest, "mcp_set_device_state")
+
+        document = conservatory()
+        document["devices"] = {"far": {"source": "speedtest", "device": "far"}}
+        with pytest.raises(ConfigError, match="cannot switch a device"):
+            command_devices(document, {"far": True}, installation.settings_file)
+
+    def test_the_refusal_names_the_control_s_own_device_keys(self, installation):
+        """What an operator edits is the entry they wrote, not the name the far end knows
+        the device by - and not the instance, which cannot be the fault here: actuating is
+        a property of the source, so every instance of it answers the same way."""
+        document = conservatory()
+        document["devices"] = {
+            "upstairs": {"source": "speedtest", "device": "line-1"},
+            "downstairs": {"source": "speedtest", "device": "line-2"},
+        }
+        with pytest.raises(ConfigError) as exc:
+            command_devices(document, {"upstairs": True, "downstairs": False}, installation.settings_file)
+        assert "'downstairs'" in str(exc.value) and "'upstairs'" in str(exc.value)
+        assert "line-1" not in str(exc.value)
+
+    def test_it_refuses_before_building_a_handler(self, installation):
+        """Speedtest is deliberately *not* configured on this installation. Asked of the
+        class, the refusal names the real fault; asked of a constructed handler, settings
+        are loaded first and the answer is "not found in settings" - which sends an operator
+        off to configure a source that could never have worked anyway.
+
+        Building one also opens a session, and the supervisor calls this on every death.
+        """
+        assert "speedtest" not in installation.settings
+        document = conservatory()
+        document["devices"] = {"far": {"source": "speedtest", "device": "far"}}
+        with pytest.raises(ConfigError) as exc:
+            command_devices(document, {"far": True}, installation.settings_file)
+        assert "cannot switch a device" in str(exc.value)
+        assert "not found in settings" not in str(exc.value)
 
     def test_a_device_declaring_no_source_is_a_config_error_not_a_key_error(self, installation):
         """The supervisor calls this to make a dead control's devices safe and handles the

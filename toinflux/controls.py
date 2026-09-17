@@ -583,10 +583,15 @@ def validate_control_rules(document):
     malformed expression passed ``--check-config``, was written, and killed the control at
     startup instead.
 
-    **Skipped entirely where the name sources are the wrong shape.** Names come from the
-    ``inputs`` and ``parameters`` sections, so with either of those not a mapping every
-    rule would report every name it uses as undeclared - a cascade of consequences from one
-    fault the structural check already names precisely.
+    **Skipped entirely where a name source is unusable.** Names come from the ``inputs``
+    and ``parameters`` sections, so without them every rule reports every name it uses as
+    undeclared - a cascade of consequences from one fault the structural check already
+    names precisely.
+
+    Unusable means two different things for the two sections, because one is required and
+    one is not. ``inputs`` must be a mapping, and a document without it has none of the
+    names its rules will read; ``parameters`` is optional, so an absent one is ordinary and
+    must not suppress anything.
 
     Takes no ``name``: a rule does not know which control it is in, and every message here
     names its slot instead, which is what an operator needs to find it.
@@ -601,7 +606,7 @@ def validate_control_rules(document):
 
     for key in ("inputs", "parameters"):
         section = document.get(key)
-        if section is not None and not isinstance(section, dict):
+        if not isinstance(section, dict) and (key in REQUIRED_CONTROL_KEYS or section is not None):
             return []
     names = rule_names(document)
     errors = []
@@ -648,6 +653,14 @@ def validate_control_structure(name, document):
     for key in REQUIRED_CONTROL_KEYS:
         if key not in document:
             errors.append(f"{key}: is required")
+        elif document[key] is None:
+            # `inputs:` with nothing indented under it is a mapping key whose value is None,
+            # so the presence check above is satisfied by a section that is not there. Every
+            # shape check further down then treats None as "absent" and says nothing, and
+            # the document passes with no inputs, no devices or no loop at all. Named as its
+            # own case because the cause is almost always a block that was not indented,
+            # which "is required" alone does not point at.
+            errors.append(f"{key}: is required and has nothing under it")
 
     _check_scalars(name, document, errors)
     _check_mapping_of(document, "inputs", errors, ("source", "field"), ("max_age",))

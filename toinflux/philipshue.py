@@ -453,6 +453,8 @@ class Hue(DataHandler):
             its own cycle, so an older reading means the bridge or collector stopped.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_WRITABLE (bool): True - lights and plugs can be actuated, opt-in per install.
+        MCP_ACTUATES_DEVICES (bool): True - a named light or plug can be switched, which is
+            what a control's devices section needs and is not implied by MCP_WRITABLE.
         MCP_INSTANCE_TAG (str): the tag naming which bridge a point came from.
         HUE_BRI_MIN (int): the lowest brightness the bridge accepts that is still on.
         HUE_BRI_MAX (int): the highest brightness the bridge accepts.
@@ -478,6 +480,7 @@ class Hue(DataHandler):
     # already uses). The MCP write tool is still only registered when the
     # operator sets hue.mcp_read_write: true - see DataHandler.mcp_write_enabled.
     MCP_WRITABLE = True
+    MCP_ACTUATES_DEVICES = True
     # Every point carries host=<the bridge it came from>, which with more than one bridge
     # is what separates them: field names are unprefixed, so two bridges with a light of
     # the same name write the same field key under different host tags. Naming the axis

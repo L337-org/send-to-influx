@@ -205,6 +205,9 @@ class DataHandler:
             long its answer stays true are unrelated.
         MCP_WRITABLE (bool): False - whether this source offers a write action at all. The
             operator still has to opt in per source; see ``mcp_write_enabled()``.
+        MCP_ACTUATES_DEVICES (bool): False - whether this source can switch a named device
+            on and off, which is narrower than ``MCP_WRITABLE`` and is what a control's
+            devices section requires.
         MCP_INSTANCE_TAG (str or None): None for a single-target source - the tag naming which
             instance produced a point, where one source has several.
         MCP_LIVE_STATE_COVERS_ALL_INSTANCES (bool): False - whether one live read returns every
@@ -295,6 +298,14 @@ class DataHandler:
     # disabled capability isn't registered at all (least privilege), never
     # registered-and-refusing.
     MCP_WRITABLE = False
+    # Whether this source can switch a named device on and off - which is a narrower
+    # claim than MCP_WRITABLE above, and the distinction is load-bearing. MCP_WRITABLE
+    # says only that *some* write path exists, and the shapes differ per source:
+    # Speedtest's is mcp_trigger_run(), which cannot actuate anything. A control's
+    # devices section needs this one, and testing MCP_WRITABLE instead let a control
+    # naming Speedtest as a device source past the check and into an AttributeError.
+    # tests/test_repo_hygiene.py fails any source declaring this without the method.
+    MCP_ACTUATES_DEVICES = False
     # The tag key that distinguishes *producers* within this source's measurement,
     # or None when the measurement has only one. This is the tag as an **axis** -
     # something to enumerate and scope by - as opposed to MCP_TAG_FILTERS above,
