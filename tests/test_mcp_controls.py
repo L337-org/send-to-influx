@@ -241,13 +241,15 @@ class TestRegistration:
         refusal costs a round trip to learn what the tool list could have said for free."""
         assert self._tools(settings) == set()
 
-    def test_both_tools_are_registered_when_controls_are_on(self):
+    def test_every_read_tool_is_registered_when_controls_are_on(self):
         assert self._tools({"controls": {"enabled": True}}) == {"list_controls", "get_control", "get_control_schema"}
 
     def test_reading_is_not_gated_behind_the_write_flag(self):
         """A control document holds no secrets, and gating "what is this install controlling"
         behind the switch that permits changing a heating loop would mean nobody could look
-        without also granting that. No write flag is set here and both tools appear."""
+        without also granting that. No write flag is set here and every read tool appears,
+        `get_control_schema` included - so an installation where nothing may write controls can
+        still be asked for a document to paste in, or to explain one written by hand."""
         assert self._tools({"controls": {"enabled": True}}) == {"list_controls", "get_control", "get_control_schema"}
 
 
