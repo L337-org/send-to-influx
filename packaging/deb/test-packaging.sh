@@ -716,6 +716,22 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
              "(rsyslogd=$(pgrep -x rsyslogd >/dev/null 2>&1 && echo running || echo 'not running'))," \
              "so the logfile route cannot be exercised. Independent of the stdout/stderr split."
     fi
+    # The log-line wait above (and the restart it follows, when the journald_forward branch
+    # ran) only proves the process started - not that the unit has finished the activating ->
+    # active transition. postinst's own restart-on-upgrade decision below hinges on
+    # `systemctl is-active --quiet` at the moment dpkg invokes it, and on a slower runner
+    # (observed on arm64) that check can still land mid-transition, reading the service as not
+    # running and silently skipping the restart - the failure looks like a missing "has been
+    # restarted" message with no other symptom. Wait for "active" specifically, the same state
+    # postinst tests, rather than inferring it from the log line.
+    active_ok=0
+    for _ in $(seq 1 15); do
+        if systemctl is-active --quiet send-to-influx; then
+            active_ok=1; break
+        fi
+        sleep 1
+    done
+    [ "$active_ok" = 1 ] || fail "service did not reach 'active' before the restart-on-upgrade scenario (state: $(systemctl is-active send-to-influx 2>&1 || true))"
     pid_before=$(systemctl show -p MainPID --value send-to-influx)
     upgrade_and_assert_silent "upgrade with running service"
     echo "$LAST_UPGRADE_OUTPUT" | grep -q "has been restarted" || fail "expected the restarted upgrade message"
