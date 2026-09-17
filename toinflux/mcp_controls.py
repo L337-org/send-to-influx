@@ -36,7 +36,7 @@ from toinflux.controls import (
 )
 from toinflux.controls import list_controls as stored_control_names
 from toinflux.exceptions import ConfigError
-from toinflux.mcp_common import register_tool
+from toinflux.mcp_common import configured_sources, register_tool
 
 
 def _supervision_by_name(supervisor):
@@ -244,9 +244,15 @@ def _usable_sources(settings):
     Read from the handler classes without constructing one: building a handler loads and
     validates settings and opens a session, and this answers a question about the class.
 
-    A source configured on this install but not known to the code is skipped rather than
-    reported - it cannot be used either way, and `--check-config` is where an operator is
-    told about it.
+    **What this installation collects, not what this build knows how to collect.** An input
+    is read from stored data, so a source nothing collects has nothing to read - offering it
+    would be describing a different installation. ``configured_sources`` is the same list the
+    collectors run and the other MCP tools expose, reused rather than reimplemented: it
+    lowercases, drops a non-string entry, and answers "nothing" for an absent ``sources:``,
+    and a second reading of that setting here would eventually disagree with it.
+
+    A configured source this build does not know is skipped rather than reported - it cannot
+    be used either way, and ``--check-config`` is where an operator is told about it.
 
     Args:
         settings (dict): the parsed settings document
@@ -255,12 +261,10 @@ def _usable_sources(settings):
         dict: the source names readable as inputs, and those able to actuate a device
     """
     from toinflux.exceptions import ConfigError as _ConfigError
-    from toinflux.general import known_sources, source_class
+    from toinflux.general import source_class
 
-    configured = settings.get("sources")
-    names = sorted(configured) if isinstance(configured, list) else sorted(known_sources())
     readable, actuating = [], []
-    for name in names:
+    for name in sorted(configured_sources(settings)):
         try:
             handler = source_class(name)
         except _ConfigError:

@@ -316,6 +316,20 @@ class TestTheControlSchema:
         assert "speedtest" in sources["readable_as_inputs"]
         assert "speedtest" not in sources["can_switch_devices"]
 
+    def test_an_install_collecting_nothing_offers_nothing(self):
+        """An input is read from stored data, so a source nothing collects has nothing to
+        read. Falling back to "every source this build knows" would describe a different
+        installation, and a control written from it would fail at its first read."""
+        schema = _control_schema_result({"controls": {"enabled": True}})
+        assert schema["sources"] == {"readable_as_inputs": [], "can_switch_devices": []}
+        assert _control_schema_result({"sources": "hue", "controls": {}})["sources"]["readable_as_inputs"] == []
+
+    def test_a_source_named_in_any_case_is_reported_lowercased(self):
+        """The same list the collectors run and the other MCP tools expose, so the name a
+        client is given here is the name it will see everywhere else."""
+        schema = _control_schema_result({"sources": ["Hue", "OpenMeteo"], "controls": {"enabled": True}})
+        assert schema["sources"]["readable_as_inputs"] == ["hue", "openmeteo"]
+
     def test_a_source_this_build_does_not_know_is_left_out_rather_than_guessed(self):
         schema = _control_schema_result({"sources": ["hue", "nosuchsource"], "controls": {"enabled": True}})
         assert schema["sources"]["readable_as_inputs"] == ["hue"]
