@@ -18,7 +18,12 @@ from mcp.server.mcpserver import MCPServer
 
 from tests.harness.installation import conservatory
 from toinflux.exceptions import ConfigError
-from toinflux.mcp_controls import _get_control_result, _list_controls_result, register_control_tools
+from toinflux.mcp_controls import (
+    _control_schema_result,
+    _get_control_result,
+    _list_controls_result,
+    register_control_tools,
+)
 from toinflux.supervision import ControlStatus
 
 
@@ -236,11 +241,102 @@ class TestRegistration:
         refusal costs a round trip to learn what the tool list could have said for free."""
         assert self._tools(settings) == set()
 
-    def test_both_tools_are_registered_when_controls_are_on(self):
-        assert self._tools({"controls": {"enabled": True}}) == {"list_controls", "get_control"}
+    def test_every_read_tool_is_registered_when_controls_are_on(self):
+        assert self._tools({"controls": {"enabled": True}}) == {"list_controls", "get_control", "get_control_schema"}
 
     def test_reading_is_not_gated_behind_the_write_flag(self):
         """A control document holds no secrets, and gating "what is this install controlling"
         behind the switch that permits changing a heating loop would mean nobody could look
-        without also granting that. No write flag is set here and both tools appear."""
-        assert self._tools({"controls": {"enabled": True}}) == {"list_controls", "get_control"}
+        without also granting that. No write flag is set here and every read tool appears,
+        `get_control_schema` included - so an installation where nothing may write controls can
+        still be asked for a document to paste in, or to explain one written by hand."""
+        assert self._tools({"controls": {"enabled": True}}) == {"list_controls", "get_control", "get_control_schema"}
+
+
+class TestTheControlSchema:
+    """What a client is handed when it has to *write* a control rather than read one.
+
+    Every part is read from the constant that governs it. A description of a format
+    maintained separately from the format is wrong the first time somebody changes the
+    format and does not think to look - and this one is handed to a client that will then
+    write a document from it.
+    """
+
+    SETTINGS = {"sources": ["hue", "openmeteo", "speedtest"], "controls": {"enabled": True}}
+
+    def test_every_permitted_key_is_described(self):
+        from toinflux.controls import CONTROL_KEYS
+
+        schema = _control_schema_result(self.SETTINGS)
+        assert set(schema["document"]["keys"]) == set(CONTROL_KEYS)
+
+    def test_it_names_which_keys_are_required(self):
+        from toinflux.controls import REQUIRED_CONTROL_KEYS
+
+        schema = _control_schema_result(self.SETTINGS)
+        assert set(schema["document"]["required_keys"]) == set(REQUIRED_CONTROL_KEYS)
+
+    def test_the_rule_language_comes_from_the_parser_s_own_tables(self):
+        """Not a second list written out beside the parser. A rule the parser accepts and
+        the documentation has never heard of is the cheaper half of that failure; the
+        expensive half is a model told about a function that does not exist."""
+        from toinflux.rules import FUNCTION_ARITY, KEYWORDS, MAX_NESTING_DEPTH, MAX_RULE_LENGTH, OPERATORS
+
+        rules = _control_schema_result(self.SETTINGS)["rules"]
+        assert set(rules["functions"]) == set(FUNCTION_ARITY)
+        assert rules["operators"] == list(OPERATORS)
+        assert set(rules["keywords"]) == set(KEYWORDS)
+        assert rules["max_length"] == MAX_RULE_LENGTH
+        assert rules["max_nesting_depth"] == MAX_NESTING_DEPTH
+
+    def test_it_describes_every_rule_slot_the_runtime_parses(self):
+        from toinflux.controls import CONTROL_RULE_SLOTS
+
+        slots = _control_schema_result(self.SETTINGS)["rules"]["slots"]
+        assert [slot["where"] for slot in slots] == [where for _path, where, _optional in CONTROL_RULE_SLOTS]
+        assert [slot["required"] for slot in slots] == [not optional for _p, _w, optional in CONTROL_RULE_SLOTS]
+
+    def test_the_example_it_hands_out_is_valid(self):
+        """The whole reason the example lives in the store rather than in prose. The design
+        note's copy of this example was invalid for as long as it existed - it read
+        `outside` in `enable_when` and declared no such input - and nothing could see it
+        until rules were validated. An example a client is told to start from must be one
+        the validator accepts."""
+        from toinflux.controls import validate_control
+
+        example = _control_schema_result(self.SETTINGS)["example"]
+        assert validate_control(example["name"], example) == []
+
+    def test_it_says_which_sources_can_be_read_and_which_can_switch(self):
+        """Read from the registry rather than from a list written here: a source added to
+        the build appears without anyone remembering to add it, and one that cannot actuate
+        cannot be named as a device however writable it is."""
+        sources = _control_schema_result(self.SETTINGS)["sources"]
+        assert "openmeteo" in sources["readable_as_inputs"]
+        assert "hue" in sources["can_switch_devices"]
+        # Writable - it can trigger a run - and unable to switch a named device.
+        assert "speedtest" in sources["readable_as_inputs"]
+        assert "speedtest" not in sources["can_switch_devices"]
+
+    def test_an_install_collecting_nothing_offers_nothing(self):
+        """An input is read from stored data, so a source nothing collects has nothing to
+        read. Falling back to "every source this build knows" would describe a different
+        installation, and a control written from it would fail at its first read."""
+        schema = _control_schema_result({"controls": {"enabled": True}})
+        assert schema["sources"] == {"readable_as_inputs": [], "can_switch_devices": []}
+        assert _control_schema_result({"sources": "hue", "controls": {}})["sources"]["readable_as_inputs"] == []
+
+    def test_a_source_named_in_any_case_is_reported_lowercased(self):
+        """The same list the collectors run and the other MCP tools expose, so the name a
+        client is given here is the name it will see everywhere else."""
+        schema = _control_schema_result({"sources": ["Hue", "OpenMeteo"], "controls": {"enabled": True}})
+        assert schema["sources"]["readable_as_inputs"] == ["hue", "openmeteo"]
+
+    def test_a_source_this_build_does_not_know_is_left_out_rather_than_guessed(self):
+        schema = _control_schema_result({"sources": ["hue", "nosuchsource"], "controls": {"enabled": True}})
+        assert schema["sources"]["readable_as_inputs"] == ["hue"]
+
+    def test_the_safe_states_are_the_ones_the_code_accepts(self):
+        from toinflux.controls import BUILT_IN_SAFE_STATES
+
+        assert _control_schema_result(self.SETTINGS)["safe_states"] == list(BUILT_IN_SAFE_STATES)

@@ -76,6 +76,24 @@ CONTROL_KEYS = frozenset(
 
 REQUIRED_CONTROL_KEYS = ("inputs", "pid", "output", "devices")
 
+#: One line per permitted key, for a client that has to write a control document rather
+#: than read one. Beside CONTROL_KEYS rather than in prose somewhere, and checked against it
+#: by tests/test_repo_hygiene.py: a key added to the closed set above and not described here
+#: is a key nobody can use, because the only way to learn the format is to be told it.
+CONTROL_KEY_HELP = {
+    "name": "the control's own name, which must match the file it is stored as",
+    "enabled": "true or false; false keeps the document without running the loop",
+    "timezone": "an IANA zone name for the active period; absent means this machine's local time",
+    "parameters": "constants the rules may read, such as a target temperature, adjustable at runtime",
+    "inputs": "name -> {source, field, instance, max_age}: the readings the rules may use",
+    "pid": "the loop itself: input and setpoint rules, and the kp, ki and kd gains",
+    "output": "cycle_seconds, min_transition_seconds, an optional max_level rule, and the stage ladder",
+    "devices": "name -> {source, device, instance, min_transition_seconds}: what the control switches",
+    "enable_when": "a rule gating actuation; the control acts only while it evaluates non-zero",
+    "safe_state": "what the devices do at startup, on failure and at shutdown",
+    "active_period": "{from, to, end_state}: a daily wall-clock window in the control's own timezone",
+}
+
 #: Every slot in a control document holding a rule expression: where it lives, the name to
 #: call it in a message, and whether it may be absent. One table, because the runtime parses
 #: these in two other modules and a validator with its own private list would be a second
@@ -89,6 +107,51 @@ CONTROL_RULE_SLOTS = (
     (("output", "max_level"), "output.max_level", True),
     (("enable_when",), "enable_when", True),
 )
+
+
+#: One control document that is known to be valid, because CI validates it. Handed out by
+#: the schema tool so a client writing its first control has something that works to start
+#: from, and used as the fixture every test builds on, so there is one example rather than
+#: a shipped one and a tested one that drift.
+#:
+#: It is the design note's conservatory example. That example was wrong for as long as it
+#: existed - it read `outside` in `enable_when` and declared no such input - and nothing
+#: could see it until rules were validated. Being the thing tests are built on is what
+#: keeps this one honest.
+CONTROL_EXAMPLE = {
+    "name": "conservatory",
+    "enabled": True,
+    "timezone": "Europe/London",
+    "parameters": {"target": 18.0},
+    "inputs": {
+        "inside": {"source": "hue", "field": "temperature_conservatory", "instance": "bridge1", "max_age": 900},
+        "dew": {"source": "openmeteo", "field": "dew_point_2m", "max_age": 1800},
+        # `outside` and `grid_co2` are declared because `enable_when` and `max_level`
+        # read them. They were missing until the rule check existed, so this fixture -
+        # and the design-note example it mirrors - described a control that passed
+        # every structural check and would have died at startup naming them.
+        "outside": {"source": "openmeteo", "field": "temperature_2m", "max_age": 1800},
+        "grid_co2": {"source": "carbonintensity", "field": "intensity_actual", "max_age": 3600},
+    },
+    "pid": {"input": "inside", "setpoint": "max(target, dew + 5)", "kp": 12.0, "ki": 0.02, "kd": 0.0},
+    "output": {
+        "cycle_seconds": 900,
+        "min_transition_seconds": 300,
+        "max_level": "if(grid_co2 > 300, 750, 2250)",
+        "stages": [
+            {"level": 0, "set": {"heater_far": False, "heater_near": False}},
+            {"level": 750, "set": {"heater_far": True, "heater_near": False}},
+            {"level": 1500, "set": {"heater_far": True, "heater_near": True}},
+        ],
+    },
+    "devices": {
+        "heater_far": {"source": "hue", "device": "Conservatory heater far", "min_transition_seconds": 900},
+        "heater_near": {"source": "hue", "device": "Conservatory heater near"},
+    },
+    "enable_when": "outside < 15",
+    "safe_state": "unenergised",
+    "active_period": {"from": "23:35", "to": "05:25", "end_state": "unenergised"},
+}
 
 
 def rule_names(document):

@@ -111,7 +111,11 @@ COMPARISONS = {
 }
 
 # Longest first, so "<=" is never read as "<" followed by a stray "=".
-_OPERATORS = ("<=", ">=", "==", "!=", "<", ">", "+", "-", "*", "/")
+#
+# Public because the control schema a client is handed describes this language, and a
+# second list of operators written out there would be a copy that drifts: a rule the parser
+# accepts and the documentation has never heard of is the cheaper half of that failure.
+OPERATORS = ("<=", ">=", "==", "!=", "<", ">", "+", "-", "*", "/")
 
 # Bounds on what a rule may be, because a rule is external input: an MCP client writes
 # one. Without them a deeply nested expression exhausts the interpreter's stack and
@@ -195,7 +199,7 @@ def tokenise(text):
             tokens.append(_Token("name", name.group(), position))
             position = name.end()
             continue
-        operator = next((candidate for candidate in _OPERATORS if text.startswith(candidate, position)), None)
+        operator = next((candidate for candidate in OPERATORS if text.startswith(candidate, position)), None)
         if operator:
             tokens.append(_Token("operator", operator, position))
             position += len(operator)

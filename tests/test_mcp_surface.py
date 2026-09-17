@@ -76,6 +76,10 @@ SIBLINGS = {
     # whether the heating is on wants the device rather than the loop.
     "list_controls": {"get_control", "get_current_state"},
     "get_control": {"list_controls", "get_current_state"},
+    # The format, not the contents. Its neighbours are the two tools that return a
+    # real document, because a caller wanting "show me the conservatory control" will
+    # otherwise land here and get a description of the shape instead.
+    "get_control_schema": {"list_controls", "get_control"},
 }
 
 # Backticked identifiers that are payload keys, parameters or settings - not tools. The
@@ -130,11 +134,16 @@ WRITE_EFFECT_PHRASES = {
 # paragraph: without it, "nothing is supervising" reads as "the control is stopped" and a
 # caller goes looking for a crash that never happened. And the `readable`/`valid` pair:
 # a control listed with neither would look like one that simply has no devices.
-MAX_TOOL_BYTES = 15_500
+# Raised again, 15,500 -> 16,500, for `get_control_schema` at 1,034 bytes - the smallest of
+# the three control tools and the one that pays for itself most directly. Without it a client
+# composing a control guesses at the format, and the store refuses an invalid document rather
+# than repairing it, so each guess is a round trip. The description is what tells a model the
+# tool exists at all; the format it returns costs nothing until it is called.
+MAX_TOOL_BYTES = 16_500
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 17_750
+MAX_TOTAL_BYTES = 18_750
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],

@@ -1,5 +1,6 @@
 """Unit tests for toinflux.controls (the control store and its structural validation)."""
 
+import copy
 import os
 import stat as stat_module
 import pytest
@@ -14,6 +15,7 @@ from toinflux.controls import (
     require_valid_control_name,
     save_control,
     rule_names,
+    CONTROL_EXAMPLE,
     validate_control,
     validate_control_rules,
     validate_control_structure,
@@ -25,47 +27,14 @@ from toinflux.exceptions import ConfigError
 def a_valid_control():
     """Return a structurally sound control document.
 
-    Deliberately the conservatory example from the design note rather than a minimal
-    stub: the shape the documentation shows and the shape the code accepts are the same
-    claim, and a cut-down fixture would let them drift apart silently.
+    A deep copy of the example the store ships, so the shape the documentation hands out
+    and the shape the code accepts are one thing rather than two that drift. Copied because
+    almost every test below mutates what it is given.
 
     Returns:
         dict: a document that ``validate_control`` finds no fault with
     """
-    return {
-        "name": "conservatory",
-        "enabled": True,
-        "timezone": "Europe/London",
-        "parameters": {"target": 18.0},
-        "inputs": {
-            "inside": {"source": "hue", "field": "temperature_conservatory", "instance": "bridge1", "max_age": 900},
-            "dew": {"source": "openmeteo", "field": "dew_point_2m", "max_age": 1800},
-            # `outside` and `grid_co2` are declared because `enable_when` and `max_level`
-            # read them. They were missing until the rule check existed, so this fixture -
-            # and the design-note example it mirrors - described a control that passed
-            # every structural check and would have died at startup naming them.
-            "outside": {"source": "openmeteo", "field": "temperature_2m", "max_age": 1800},
-            "grid_co2": {"source": "carbonintensity", "field": "intensity_actual", "max_age": 3600},
-        },
-        "pid": {"input": "inside", "setpoint": "max(target, dew + 5)", "kp": 12.0, "ki": 0.02, "kd": 0.0},
-        "output": {
-            "cycle_seconds": 900,
-            "min_transition_seconds": 300,
-            "max_level": "if(grid_co2 > 300, 750, 2250)",
-            "stages": [
-                {"level": 0, "set": {"heater_far": False, "heater_near": False}},
-                {"level": 750, "set": {"heater_far": True, "heater_near": False}},
-                {"level": 1500, "set": {"heater_far": True, "heater_near": True}},
-            ],
-        },
-        "devices": {
-            "heater_far": {"source": "hue", "device": "Conservatory heater far", "min_transition_seconds": 900},
-            "heater_near": {"source": "hue", "device": "Conservatory heater near"},
-        },
-        "enable_when": "outside < 15",
-        "safe_state": "unenergised",
-        "active_period": {"from": "23:35", "to": "05:25", "end_state": "unenergised"},
-    }
+    return copy.deepcopy(CONTROL_EXAMPLE)
 
 
 @pytest.fixture
