@@ -619,12 +619,18 @@ def _check_scalars(name, document, errors) -> None:
 
 
 def validate_control(name, document):
-    """Check one control document completely: its shape, then its rules.
+    """Check one control document completely: its shape, then its rules, then its sources.
 
     The one call a caller should make. Everything that reads a stored document goes
     through here - ``--check-config``, the supervisor, a control process starting, the
     test harness - so that "is this document usable" has a single answer rather than each
     caller assembling its own and getting a different one.
+
+    Three halves, each answering a question the others cannot:
+    :func:`validate_control_structure` for the shape the store requires,
+    :func:`validate_control_rules` for what the rule parser will accept, and
+    :func:`validate_control_sources` for whether the sources named exist and can do what is
+    asked of them. A caller wanting only one of those can call it directly.
 
     Args:
         name (str): the control's name, which its ``name`` key must agree with
@@ -671,7 +677,10 @@ def validate_control_sources(document):
         if not isinstance(entries, dict):
             continue
         for entry_name, entry in sorted(entries.items(), key=lambda item: str(item[0])):
-            if not isinstance(entry, dict):
+            # An entry name that is not a string is the structural check's to report, and it
+            # does. Reporting a source fault against it as well would name the same broken
+            # key twice, in two different vocabularies.
+            if not isinstance(entry_name, str) or not isinstance(entry, dict):
                 continue
             source = entry.get("source")
             if not isinstance(source, str) or not source.strip():

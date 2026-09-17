@@ -478,6 +478,14 @@ class TestValidatingTheSources:
         assert any(spec["source"] == "openmeteo" for spec in document["inputs"].values())
         assert validate_control_sources(document) == []
 
+    def test_a_non_string_entry_name_is_left_to_the_structural_check(self):
+        """The structural check already reports a key that is not a string, in its own
+        vocabulary. A source fault against the same key would name one broken thing twice."""
+        document = a_valid_control()
+        document["devices"] = {1: {"source": "speedtest", "device": "x"}}
+        assert validate_control_sources(document) == []
+        assert any("entry names must be strings" in error for error in validate_control_structure("c", document))
+
     def test_structure_is_not_reported_twice(self):
         """Each of these is named precisely by the structural check. Said twice, an operator
         looks for two faults."""
