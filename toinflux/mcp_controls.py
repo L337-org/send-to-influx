@@ -24,7 +24,16 @@ __license__ = "MIT"
 
 import logging
 
-from toinflux.controls import controls_enabled, load_control, validate_control
+from toinflux.controls import (
+    CONTROL_EXAMPLE,
+    CONTROL_KEY_HELP,
+    CONTROL_RULE_SLOTS,
+    BUILT_IN_SAFE_STATES,
+    REQUIRED_CONTROL_KEYS,
+    controls_enabled,
+    load_control,
+    validate_control,
+)
 from toinflux.controls import list_controls as stored_control_names
 from toinflux.exceptions import ConfigError
 from toinflux.mcp_common import register_tool
@@ -201,7 +210,128 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
         """
         return await anyio.to_thread.run_sync(_get_control_result, name, settings_file)
 
+    @register_tool(
+        server,
+        title="Get Control Loop Format",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    )
+    async def get_control_schema() -> dict:  # noqa: DOC201
+        """Return the format of a control loop document: every permitted key with what it
+        means, which keys are required, the four rule slots, the rule language a slot may
+        use, the safe states, which of this installation's sources can be read as inputs and
+        which can switch devices, and a complete worked example that is known to be valid.
+
+        Read this before composing a control. The rule language is small and deliberate -
+        arithmetic over numbers, five functions, no strings and no attribute access - and a
+        rule naming an input the document does not declare is refused rather than ignored,
+        so guessing the format costs a round trip per mistake.
+
+        The example is the one the project tests itself against, so it is valid by
+        construction rather than by having been checked once. Use `list_controls` for what
+        this installation already has and `get_control` for one of those documents.
+
+        Reads settings and constants, contacts no device, and changes nothing. It cannot
+        fail on a control, because it describes the format rather than any stored document.
+        """
+        return await anyio.to_thread.run_sync(_control_schema_result, settings)
+
     return server
+
+
+def _usable_sources(settings):
+    """Return which configured sources a control may read from, and which it may switch.
+
+    Read from the handler classes without constructing one: building a handler loads and
+    validates settings and opens a session, and this answers a question about the class.
+
+    A source configured on this install but not known to the code is skipped rather than
+    reported - it cannot be used either way, and `--check-config` is where an operator is
+    told about it.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        dict: the source names readable as inputs, and those able to actuate a device
+    """
+    from toinflux.exceptions import ConfigError as _ConfigError
+    from toinflux.general import known_sources, source_class
+
+    configured = settings.get("sources")
+    names = sorted(configured) if isinstance(configured, list) else sorted(known_sources())
+    readable, actuating = [], []
+    for name in names:
+        try:
+            handler = source_class(name)
+        except _ConfigError:
+            continue
+        readable.append(name)
+        if getattr(handler, "MCP_ACTUATES_DEVICES", False):
+            actuating.append(name)
+    return {"readable_as_inputs": readable, "can_switch_devices": actuating}
+
+
+def _control_schema_result(settings):
+    """Assemble the control document format off the event loop.
+
+    Every part is read from the constant that governs it rather than written out again
+    here. A description of a format that is maintained separately from the format is one
+    that is wrong the first time somebody changes the format and does not think to look -
+    and this one is handed to a client that will then write a document from it.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        dict: the tool's result
+    """
+    from toinflux.rules import FUNCTION_ARITY, KEYWORDS, MAX_NESTING_DEPTH, MAX_RULE_LENGTH, OPERATORS
+
+    return {
+        "document": {
+            "required_keys": list(REQUIRED_CONTROL_KEYS),
+            "keys": dict(sorted(CONTROL_KEY_HELP.items())),
+        },
+        "rules": {
+            "slots": [{"where": where, "required": not optional} for _path, where, optional in CONTROL_RULE_SLOTS],
+            "names": (
+                "a rule may read the keys of `inputs` and `parameters` and nothing else; "
+                "an undeclared name is refused when the document is validated"
+            ),
+            "functions": {name: _arity(low, high) for name, (low, high) in sorted(FUNCTION_ARITY.items())},
+            "operators": list(OPERATORS),
+            "keywords": sorted(KEYWORDS),
+            "max_length": MAX_RULE_LENGTH,
+            "max_nesting_depth": MAX_NESTING_DEPTH,
+            "notes": [
+                "everything is a number: a comparison is 1 or 0, and a gate acts while its rule is non-zero",
+                "`and`, `or` and `if` short-circuit, so a rule can guard its own arithmetic",
+                "comparisons do not chain: write `a < b and b < c` rather than `a < b < c`",
+                "precedence is Python's: or, and, not, comparison, + -, * /, unary minus",
+                "a number may not run straight into a name, so write `1 and 2` rather than `1and 2`",
+            ],
+        },
+        "safe_states": list(BUILT_IN_SAFE_STATES),
+        "sources": _usable_sources(settings),
+        "example": CONTROL_EXAMPLE,
+    }
+
+
+def _arity(low, high):
+    """Describe how many arguments one rule function takes.
+
+    Args:
+        low (int): the fewest it accepts
+        high (int or None): the most, or None where it is unbounded
+
+    Returns:
+        str: a phrase naming the count
+    """
+    if high is None:
+        return f"{low} or more arguments"
+    if high == low:
+        return f"{low} argument" if low == 1 else f"{low} arguments"
+    return f"{low} to {high} arguments"
 
 
 def _list_controls_result(settings_file, supervisor):

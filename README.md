@@ -853,39 +853,18 @@ anyone wanting the first to accept the second.
 
 Each control is its own YAML document under the state directory (`/var/lib/send-to-influx/controls`
 on the packaged install), not part of `settings.yaml`: they are created and edited by the running
-service rather than by hand. Each names its inputs, its PID gains, its devices, and a ladder of
-stages saying what the devices do at each level.
+service rather than by hand.
 
 **One process per control, supervised.** The main process starts one child per stored control,
 watches a heartbeat from each, and restarts one that dies or stops beating with a growing backoff.
 Every death is followed by the parent putting that control's devices into their safe state itself -
 a child that was killed or lost power did not get the chance.
 
-Three settings decide what "safe" means, and they are separate because they answer different
-questions:
-
-| Setting | When it applies |
-|---------|-----------------|
-| `safe_state` | at startup, on failure, and at shutdown |
-| `active_period.end_state` | when the control's daily window closes |
-| `enable_when` | a rule gating actuation while everything else is running |
-
-`safe_state: unenergised` is the default and switches every device the control owns off by name,
-rather than meaning "the lowest stage" - so it does not depend on a zero stage having been declared
-correctly. `leave_unchanged` is the opt-out and means exactly that: the devices keep whatever state
-they were in, including after a crash.
-
-An active period is a wall-clock window in the control's own timezone, and it follows daylight
-saving the way a wall clock does: a window inside the hour the clocks skip does not happen that day,
-and one inside the hour they repeat happens twice.
-
-**Controls are visible over MCP when both `controls.enabled` and the MCP server are on.** Two
-read-only tools: `list_controls` gives each control's name, whether it is enabled, the devices it
-actuates, its cycle length and whether its process is running; `get_control` returns one control's
-stored document. With the subsystem switched off they are not registered at all, so a connected model
-does not see tools it cannot use. Reading a control is deliberately not gated behind anything beyond
-the MCP server itself - a control document holds no secrets, and being able to ask what is being
-controlled and whether it is running should not require granting a model the ability to change it.
+**[CONTROLS.md](CONTROLS.md) is the reference**: the document format key by key, the rule language
+and the things about it that bite, safe states and the active period, the stage ladder, a worked
+example, and what `--check-config` checks. The same reference is available at runtime from the
+`get_control_schema` MCP tool, built from the same constants, so a connected model composing a
+control is not guessing.
 
 Usage
 -----

@@ -1962,3 +1962,45 @@ def test_every_source_that_claims_to_actuate_devices_can():
         f"{', '.join(liars)} declare MCP_ACTUATES_DEVICES without defining "
         f"mcp_set_device_state(), which a control calls on the strength of that flag alone"
     )
+
+
+def test_every_permitted_control_key_is_described_for_a_client():
+    """`CONTROL_KEY_HELP` is what `get_control_schema` hands a client that has to write a
+    control document. A key added to the permitted set without a line there is a key nobody
+    outside this repository can use, because being told is the only way to learn the format -
+    and the store refuses an unknown key, so guessing does not work either.
+
+    The reverse matters as much: a description for a key the store no longer permits tells a
+    client to write something that will be refused.
+    """
+    from toinflux.controls import CONTROL_KEY_HELP, CONTROL_KEYS
+
+    undescribed = sorted(CONTROL_KEYS - set(CONTROL_KEY_HELP))
+    stale = sorted(set(CONTROL_KEY_HELP) - CONTROL_KEYS)
+    assert not undescribed, (
+        f"{', '.join(undescribed)} may appear in a control document and CONTROL_KEY_HELP does "
+        f"not describe them, so get_control_schema tells a client nothing about them"
+    )
+    assert not stale, (
+        f"CONTROL_KEY_HELP describes {', '.join(stale)}, which the store does not permit - a "
+        f"client following it would write a document that is refused for an unknown key"
+    )
+
+
+def test_the_controls_reference_names_every_key_and_function():
+    """`CONTROLS.md` is what somebody writing a control by hand reads, and it was written by
+    generating it from these same constants. Committed, it is static text that drifts.
+
+    Documentation drifting from the format is not hypothetical here: the design note's worked
+    example read an input it never declared, and stayed that way until rules were validated.
+    A key or a rule function that exists and is not in the reference is one nobody hand-editing
+    a document can find out about.
+    """
+    from toinflux.controls import CONTROL_KEYS
+    from toinflux.rules import FUNCTION_ARITY
+
+    reference = (REPO_ROOT / "CONTROLS.md").read_text(encoding="utf-8")
+    missing_keys = sorted(key for key in CONTROL_KEYS if f"`{key}`" not in reference)
+    missing_functions = sorted(name for name in FUNCTION_ARITY if f"`{name}`" not in reference)
+    assert not missing_keys, f"CONTROLS.md does not mention the control key(s): {', '.join(missing_keys)}"
+    assert not missing_functions, f"CONTROLS.md does not mention the rule function(s): {', '.join(missing_functions)}"
