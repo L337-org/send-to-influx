@@ -31,7 +31,7 @@ from toinflux.controller import Controller
 from toinflux.controls import load_control, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import DeviceGuard, Gate, commands_for
-from toinflux.general import load_settings, render_values
+from toinflux.general import load_settings, render_values, source_class
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
 from toinflux.staging import build_ladder
@@ -118,23 +118,28 @@ def command_devices(document, commands, settings_file=None) -> None:
         # they wrote, not the device name the far end knows it by.
         targets.setdefault((spec["source"], spec.get("instance")), []).append((name, spec["device"], state))
     for (source, instance), devices in sorted(targets.items(), key=lambda item: str(item[0])):
+        # Asked of the class, before a handler is built. Building one loads settings and
+        # opens a session, so refusing afterwards costs a socket for a source that is about
+        # to be rejected - and, worse, reports the wrong fault first: a source that cannot
+        # actuate and is also not configured answers "not found in settings", which sends an
+        # operator off to configure it before they find out it could never have worked.
+        if not getattr(source_class(source), "MCP_ACTUATES_DEVICES", False):
+            # Not MCP_WRITABLE, which says only that *some* write path exists and is
+            # satisfied by a source whose write path triggers a speed test. That check
+            # passed and the call below then raised AttributeError - which is not one of
+            # the types the supervisor's safe-state pass handles, so one control's
+            # document could end the thread supervising all of them.
+            #
+            # Named by the control's own device keys rather than by the instance. The
+            # instance is what the grouping is keyed on, but it cannot be the fault
+            # here: actuating is a property of the source, so every instance of it
+            # answers the same way, and naming one would point at the wrong thing.
+            raise ConfigError(
+                f"control device {render_values(sorted(key for key, _device, _state in devices))} "
+                f"names source {source!r}, which cannot switch a device on and off. Name a "
+                f"source that can, or remove the device from this control"
+            )
         with source_handler(source, settings_file=settings_file, instance=instance) as handler:
-            if not getattr(handler, "MCP_ACTUATES_DEVICES", False):
-                # Not MCP_WRITABLE, which says only that *some* write path exists and is
-                # satisfied by a source whose write path triggers a speed test. That check
-                # passed and the call below then raised AttributeError - which is not one of
-                # the types the supervisor's safe-state pass handles, so one control's
-                # document could end the thread supervising all of them.
-                #
-                # Named by the control's own device keys rather than by the instance. The
-                # instance is what the grouping is keyed on, but it cannot be the fault
-                # here: actuating is a property of the source, so every instance of it
-                # answers the same way, and naming one would point at the wrong thing.
-                raise ConfigError(
-                    f"control device {render_values(sorted(key for key, _device, _state in devices))} "
-                    f"names source {source!r}, which cannot switch a device on and off. Name a "
-                    f"source that can, or remove the device from this control"
-                )
             for _key, device, state in devices:
                 handler.mcp_set_device_state(device, on=bool(state))
 

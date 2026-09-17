@@ -246,7 +246,6 @@ class TestCommandingDevices:
         assert Speedtest.MCP_WRITABLE is True
         assert not hasattr(Speedtest, "mcp_set_device_state")
 
-        installation.set_settings("speedtest", db="speedtest_db")
         document = conservatory()
         document["devices"] = {"far": {"source": "speedtest", "device": "far"}}
         with pytest.raises(ConfigError, match="cannot switch a device"):
@@ -256,7 +255,6 @@ class TestCommandingDevices:
         """What an operator edits is the entry they wrote, not the name the far end knows
         the device by - and not the instance, which cannot be the fault here: actuating is
         a property of the source, so every instance of it answers the same way."""
-        installation.set_settings("speedtest", db="speedtest_db")
         document = conservatory()
         document["devices"] = {
             "upstairs": {"source": "speedtest", "device": "line-1"},
@@ -266,6 +264,22 @@ class TestCommandingDevices:
             command_devices(document, {"upstairs": True, "downstairs": False}, installation.settings_file)
         assert "'downstairs'" in str(exc.value) and "'upstairs'" in str(exc.value)
         assert "line-1" not in str(exc.value)
+
+    def test_it_refuses_before_building_a_handler(self, installation):
+        """Speedtest is deliberately *not* configured on this installation. Asked of the
+        class, the refusal names the real fault; asked of a constructed handler, settings
+        are loaded first and the answer is "not found in settings" - which sends an operator
+        off to configure a source that could never have worked anyway.
+
+        Building one also opens a session, and the supervisor calls this on every death.
+        """
+        assert "speedtest" not in installation.settings
+        document = conservatory()
+        document["devices"] = {"far": {"source": "speedtest", "device": "far"}}
+        with pytest.raises(ConfigError) as exc:
+            command_devices(document, {"far": True}, installation.settings_file)
+        assert "cannot switch a device" in str(exc.value)
+        assert "not found in settings" not in str(exc.value)
 
     def test_a_device_declaring_no_source_is_a_config_error_not_a_key_error(self, installation):
         """The supervisor calls this to make a dead control's devices safe and handles the
