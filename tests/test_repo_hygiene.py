@@ -28,6 +28,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -2004,3 +2005,26 @@ def test_the_controls_reference_names_every_key_and_function():
     missing_functions = sorted(name for name in FUNCTION_ARITY if f"`{name}`" not in reference)
     assert not missing_keys, f"CONTROLS.md does not mention the control key(s): {', '.join(missing_keys)}"
     assert not missing_functions, f"CONTROLS.md does not mention the rule function(s): {', '.join(missing_functions)}"
+
+
+def test_the_worked_example_in_the_reference_survives_being_pasted():
+    """`CONTROLS.md` tells a reader to start from its worked example, so the test is not that
+    the file contains the right characters but that pasting them yields a control this project
+    accepts. Parsed with the same loader the store uses and run through the same validator.
+
+    YAML makes that less obvious than it sounds. Under PyYAML's 1.1 resolver an unquoted
+    `23:35` is the integer 1415, while `05:25` is the string it looks like - the sexagesimal
+    pattern needs a leading non-zero digit. `yaml.safe_dump` quotes exactly the values that
+    would otherwise change type, so the generated example is right by construction; this guard
+    is for the day somebody edits the file by hand and reasons about it the way a person does.
+    """
+    from toinflux.controls import validate_control
+
+    reference = (REPO_ROOT / "CONTROLS.md").read_text(encoding="utf-8")
+    blocks = [block for block in re.findall(r"```yaml\n(.*?)```", reference, re.S) if "name:" in block]
+    assert len(blocks) == 1, f"expected exactly one worked control example in CONTROLS.md, found {len(blocks)}"
+
+    document = yaml.safe_load(blocks[0])
+    assert isinstance(document, dict), "the worked example does not parse as a mapping"
+    problems = validate_control(document.get("name"), document)
+    assert not problems, "the worked example in CONTROLS.md does not validate: " + "; ".join(problems)
