@@ -462,11 +462,17 @@ its inputs from InfluxDB and is meant to run with the MCP server absent entirely
 would have pulled `mcp`, `anyio`, `pydantic`, `starlette` and `uvicorn` into every control process just to
 ask what the last temperature reading was.
 
-**Half the injection defence is here, and which half matters.** What moved is query *construction*: a
-measurement and its tags come from the static schema, a field must match a live-discovered key, and every
-identifier is charset-validated and quoted before it reaches a query string. Never add a query path that
-goes around it - a second way to build a query is how the first one stops being the only one.
+**Half the injection defence is here, and which half matters.** What moved is the *primitives* every
+query path is built from - `_validate_identifier`, `_quote_identifier`, `_quote_string_literal`,
+`resolve_db`, `run_query`, the discovery calls and the single-point builders (`build_latest_query`,
+`build_edge_time_query`). A measurement and its tags come from the static schema, a field must match a
+live-discovered key, and every identifier is charset-validated and quoted before it reaches a query
+string. Never add a query path that goes around them - a second way to quote an identifier is how the
+first one stops being the only one.
 
-What stayed in `mcp_read.py` is what a tool *accepts*, because that describes the MCP surface rather than
-how InfluxDB is talked to: `parse_time_bound`, which re-emits a time as RFC3339, the aggregation map, and
-the schema objects that describe a source to a model.
+The larger builders stayed in `mcp_read.py` and import those primitives from here: `build_query`,
+`_select_and_group` and `build_panel_query` are still there, as `architecture/mcp-server.md` says. So
+is what a tool *accepts*, which describes the MCP surface rather than how InfluxDB is talked to:
+`parse_time_bound`, which re-emits a time as RFC3339, the aggregation map, and the schema objects that
+describe a source to a model. The dependency test the move was for still holds - `toinflux.influx`
+imports no HTTP-server stack, so a control process reads InfluxDB without loading one.

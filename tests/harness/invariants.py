@@ -44,17 +44,41 @@ def devices_unenergised(bridge, devices):
     The invariant behind the startup assertion and the exit handler both, and the only one
     whose failure is measured in kilowatt-hours.
 
+    **A name the bridge does not know raises**, rather than contributing no violation.
+    `energised.get(name)` returned None for an unrecognised name, so an invariant handed the
+    wrong names reported clean while every heater stayed on - identical output to a healthy
+    run, on the one check whose failure is measured in kilowatt-hours.
+
+    The names wanted are the ones the *bridge* uses, not the control document's own keys for
+    them. The two need not agree and in this repository they already do not: a control keyed
+    `porch` drives a light named `porch-heater`. `declared_states` below resolves that
+    mapping; this takes resolved names, and refuses anything else rather than quietly
+    checking nothing. Raised rather than skipped because both the bridge and the document are
+    built by the harness, so a name that does not resolve is a fault in the test rather than
+    a condition the system under test produced - the same reason `census._process_table`
+    raises on a failed `ps` instead of returning an empty table.
+
     Args:
         bridge (StubBridge): the bridge to read
-        devices (iterable): the device names the control owns
+        devices (iterable): the device names **as the bridge knows them**
 
     Returns:
         Report: any device left energised
+
+    Raises:
+        AssertionError: a name given is not a device this bridge has
     """
     energised = bridge.energised()
+    wanted = list(devices)
+    unknown = [name for name in wanted if name not in energised]
+    assert not unknown, (
+        f"invariant asked about {unknown!r}, which this bridge does not have - it knows "
+        f"{sorted(energised)!r}. Pass the names the bridge uses, not the control document's "
+        f"keys for them; declared_states() resolves that mapping"
+    )
     return Report(
         name="no device is left energised",
-        violations=[f"{name!r} is still on" for name in devices if energised.get(name)],
+        violations=[f"{name!r} is still on" for name in wanted if energised[name]],
     )
 
 
@@ -116,6 +140,16 @@ def states_were_declared(bridge, control, settle=2.0):
     consecutive ones, so a slow drip of commands cannot extend one transition indefinitely
     and hide a state that was held. A transition is a burst, and a burst is bounded from
     where it started.
+
+    **A second limit, and the one easier to walk into.** A combination is only judged once
+    every device the control owns has been commanded at least once, because the state is
+    assembled from the commands seen. Until then nothing is evaluated however wrong the
+    bridge is: with one of two heaters never commanded, a genuinely undeclared combination
+    reports clean. In practice the startup safe-state assertion commands every device before
+    a cycle runs, so the set completes immediately - but that cover disappears under
+    ``safe_state: leave_unchanged``, which commands nothing, and after any ``bridge.clear()``.
+    Pair this with :func:`devices_unenergised`, which reads the bridge directly and needs no
+    command history.
 
     Args:
         bridge (StubBridge): the bridge to read

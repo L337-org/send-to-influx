@@ -803,3 +803,71 @@ class TestSavingReportsWhatItChanged:
         result = self._save(stored, parameters={"target": 21.0}, output=output)
         assert result["changed"]["sections"] == ["output", "parameters"]
         assert result["changed"]["device_plan"] == ["output"]
+
+
+class TestEachToolReachesItsOwnWorker:
+    """The six registered callables are one-line wrappers around the `_*_result` helpers, and
+    every other test in this module calls those helpers directly.
+
+    So a wrapper pointed at the wrong helper, or passing its arguments in the wrong order,
+    would satisfy the registration tests, the annotation tests, the description guards and
+    every behaviour test here. Driving them through `server.call_tool` is the only thing that
+    reads the wiring itself.
+    """
+
+    @staticmethod
+    def _call(name, arguments, settings_file, supervisor=None):
+        """Invoke one registered control tool the way a client would.
+
+        Args:
+            name (str): the tool name
+            arguments (dict): the call arguments
+            settings_file (str or None): the settings path to register with
+            supervisor (object or None): the supervisor to register with
+
+        Returns:
+            CallToolResult: what the server returned
+        """
+        server = MCPServer(name="wiring-test")
+        settings = {"sources": ["hue"], "controls": {"enabled": True, "mcp_write": True}}
+        register_control_tools(server, settings, settings_file, supervisor=supervisor)
+        return anyio.run(server.call_tool, name, arguments)
+
+    def test_list_controls_returns_this_installation_s_controls(self, stored):
+        result = self._call("list_controls", {}, stored.settings_file)
+        assert "conservatory" in str(result.content)
+
+    def test_get_control_returns_the_named_document(self, stored):
+        result = self._call("get_control", {"name": "conservatory"}, stored.settings_file)
+        assert "Europe/London" in str(result.content)
+
+    def test_get_control_schema_returns_the_format(self, stored):
+        result = self._call("get_control_schema", {}, stored.settings_file)
+        assert "safe_states" in str(result.content)
+
+    def test_save_control_writes_through_the_wrapper(self, state_directory):
+        document = conservatory(name="wired")
+        self._call("save_control", {"name": "wired", "document": document}, state_directory.settings_file)
+        assert _get_control_result("wired", state_directory.settings_file)["document"] == document
+
+    def test_set_control_enabled_writes_through_the_wrapper(self, state_directory):
+        state_directory.write_control(conservatory(enabled=False))
+        self._call("set_control_enabled", {"name": "conservatory", "enabled": True}, state_directory.settings_file)
+        assert _get_control_result("conservatory", state_directory.settings_file)["document"]["enabled"] is True
+
+    def test_delete_control_removes_through_the_wrapper(self, stored):
+        self._call("delete_control", {"name": "conservatory"}, stored.settings_file)
+        with pytest.raises(ConfigError):
+            _get_control_result("conservatory", stored.settings_file)
+
+    def test_a_refusal_reaches_the_client_with_its_message(self, state_directory):
+        """The wrapper must not swallow what the helper raised.
+
+        `translate_failures` is what keeps a ToolParamError's text on the wire rather than
+        flattening it to "Error executing tool", and the registrar applies it - so this also
+        asserts the wrapper went through `register_tool` rather than around it.
+        """
+        with pytest.raises(Exception) as raised:
+            self._call("save_control", {"name": "broken", "document": {}}, state_directory.settings_file)
+        assert "get_control_schema" in str(raised.value)
+        assert "nothing has been written" in str(raised.value)
