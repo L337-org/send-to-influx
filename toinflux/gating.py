@@ -118,12 +118,30 @@ class Gate:
         """
         acting, reason = self._assess(bindings, moment)
         was = self._acting
-        self._acting = acting
         if was is None or was == acting:
+            self._acting = acting
             return Decision(actuating=acting, reason=reason)
         if acting:
+            self._acting = acting
             return Decision(actuating=True, edge="opened")
+        # **A closing edge is not consumed here.** It carries a command, and the caller has
+        # not run it yet. Recording the edge as spent before it has been applied meant a
+        # command that raised was never retried: the next cycle saw no change, so no edge
+        # and no actuation, and the loop slept with the devices still energised until the
+        # window reopened - eighteen hours for the motivating case. The fail-safe does not
+        # cover it either, because it applies `safe_state` rather than the `end_state` that
+        # just failed, and the supervisor's own safe-state pass only runs on death or stop,
+        # never for a control that is alive and beating.
         return Decision(actuating=False, reason=reason, edge="closed", apply=self.closing_state())
+
+    def closed(self) -> None:
+        """Record that a closing edge's command has been applied.
+
+        Called by the loop once the devices are in their end state, so that a failure to
+        put them there re-delivers the edge on the next cycle instead of stranding them.
+        Idempotent: a second call while already closed changes nothing.
+        """
+        self._acting = False
 
     def _assess(self, bindings, moment):
         """Return whether the three conditions all hold, and which one did not.

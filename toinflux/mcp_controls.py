@@ -290,16 +290,23 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
         and put it into effect at once.
 
         Call `get_control_schema` first: the document must be valid in full, and it is
-        checked before anything is written. An invalid document changes nothing - the
-        control that was there keeps running the document it already had - and every
-        problem is returned together rather than one per attempt.
+        checked before anything is written. An invalid one is refused and changes nothing -
+        the control that was there keeps running the document it already had - and every
+        problem comes back together rather than one per attempt.
 
-        Saving an enabled control starts it actuating devices on its next cycle, without a
-        restart. To write one without running it yet, save it with `enabled: false` and turn
-        it on with `set_control_enabled` once you are happy with it.
+        An enabled control actuates devices from its next cycle, without a restart. To
+        write one without running it yet, save it with `enabled: false` and turn it on
+        with `set_control_enabled` once you are happy with it.
 
         Replacing a running control stops it, makes its devices safe, and starts the new
         document - so an edit is a restart rather than a change applied mid-cycle.
+
+        To change one thing about a control that exists, read it with `get_control`, alter
+        that key and send the whole document back. Composing a replacement from memory is
+        what silently rewrites a stage ladder. Replacing one returns a `changed` object:
+        `sections` is everything that differs, `device_plan` the subset deciding which
+        devices are commanded and when. An unexpected entry there means you changed more
+        than you meant to.
         """
         return await anyio.to_thread.run_sync(_save_control_result, name, document, settings_file, supervisor)
 
@@ -315,13 +322,14 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
 
         Enabling starts the control on its next cycle; disabling stops it and makes its
         devices safe rather than leaving them wherever the last cycle put them. Both take
-        effect without restarting the service.
+        effect without restarting the service. An unknown control is an error.
 
-        The separate tool exists because this is the common edit and the safe one: it
-        cannot change what a control does, only whether it does it. Use it to park a loop
+        The separate tool exists because this is the common edit and the safe one: unlike
+        `save_control` it cannot change what a control does, only whether it does it. Use it to park a loop
         you want to keep, or to commission one saved with `enabled: false`.
 
-        Already in the requested state is success, not an error, and says so.
+        Already in the requested state is success, not an error, and says so. Use
+        `list_controls` for the names and which are on.
         """
         return await anyio.to_thread.run_sync(_set_enabled_result, name, enabled, settings_file, supervisor)
 
@@ -336,8 +344,8 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
         """Delete one stored control loop by name, permanently, and stop it if it is running.
 
         The document is removed from disk and cannot be recovered from here. Its process is
-        stopped and its devices are made safe rather than being left wherever the last cycle
-        put them.
+        stopped and it makes its devices safe rather than leaving them wherever the last
+        cycle put them.
 
         `name` is required and there is no default: this deletes exactly the control named
         and never "the current one". Deleting a control that does not exist is an error
@@ -601,13 +609,75 @@ def _save_control_result(name, document, settings_file, supervisor):
     """
     document = _validated_document(name, document)
     replaced = name in set(stored_control_names(settings_file))
+    changes = _changes_against_stored(name, document, settings_file) if replaced else None
     store_control(name, document, settings_file)
     logging.info("Control %r was %s over MCP", name, "replaced" if replaced else "created")
-    return {
+    if changes and changes["device_plan"]:
+        # At WARNING because this is the line an operator wants to find after a heater did
+        # something they did not ask for. Naming the sections rather than diffing them: the
+        # document is on disk either way, and a rendered diff in the journal is unreadable.
+        logging.warning(
+            "Control %r was rewritten over MCP, changing which devices it commands and when: %s",
+            name,
+            ", ".join(changes["device_plan"]),
+        )
+    result = {
         "saved": name,
         "replaced_existing": replaced,
         "enabled": document.get("enabled") is True,
         "reload": _reload_outcome(supervisor, name),
+    }
+    if changes is not None:
+        result["changed"] = changes
+    return result
+
+
+# The sections that decide **which devices are commanded and when** - the ladder, the device
+# list, the gating, the safe state. Deliberately not every section that changes behaviour:
+# `parameters` and `pid` change what the loop *aims at*, which is what an operator adjusts on
+# purpose, and flagging those would warn on every ordinary edit until nobody read the warning.
+# The split is "did you change the machinery" against "did you change the target", because the
+# first is the one somebody does by accident while meaning to do the second.
+DEVICE_PLAN_SECTIONS = ("output", "devices", "safe_state", "active_period", "enable_when", "enabled")
+
+
+def _changes_against_stored(name, document, settings_file):
+    """Say which sections this save alters, against the document already stored.
+
+    **Why a whole-document tool reports this.** ``save_control`` replaces the document, so a
+    client that re-composes one from memory rather than reading it, changing a key and
+    writing it back can produce something that validates and is not what was there - a stage
+    ladder with different rungs is legal, so nothing else would catch it. Naming what moved
+    turns that from silent into visible, in the result the client sees and in the journal the
+    operator reads, without a second narrow tool to keep in step.
+
+    An unreadable stored document is reported as every section changing rather than as no
+    change, because "it was broken and now it is not" is a change and the opposite reading
+    would be reassuring and wrong.
+
+    Args:
+        name (str): the control's name
+        document (dict): the document about to be written
+        settings_file (str or None): the settings path the process was started with
+
+    Returns:
+        dict: ``sections`` (every top-level key that differs) and ``device_plan`` (those of
+        them in :data:`DEVICE_PLAN_SECTIONS`, which decide which devices are commanded and
+        when), both sorted. ``device_plan`` is a subset and not a "behaviour changed" flag:
+        a ``parameters`` or ``pid`` edit changes what the loop aims at, and appears in
+        ``sections`` only. ``sections`` is the complete answer.
+    """
+    try:
+        previous = load_control(name, settings_file)
+    except ConfigError:
+        previous = None
+    if not isinstance(previous, dict):
+        sections = sorted(document)
+    else:
+        sections = sorted(key for key in set(previous) | set(document) if previous.get(key) != document.get(key))
+    return {
+        "sections": sections,
+        "device_plan": [key for key in sections if key in DEVICE_PLAN_SECTIONS],
     }
 
 

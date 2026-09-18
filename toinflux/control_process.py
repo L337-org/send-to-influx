@@ -262,6 +262,10 @@ class ControlProcess:
                 self.controller.hold()
                 if decision.apply:
                     self._apply(commands_for(decision.apply, tuple(self.document.get("devices") or {})))
+                # Only now is the edge spent. If the command above raised, this is not
+                # reached, the gate still believes it is acting, and the next cycle delivers
+                # the same closing edge again - which is the retry.
+                self.gate.closed()
                 logging.info("Control %r stopped acting: %s", self.name, decision.reason)
             elif decision.edge == "opened":
                 self.controller.resume()

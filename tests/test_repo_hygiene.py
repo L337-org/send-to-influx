@@ -2221,3 +2221,45 @@ def test_an_exception_is_not_rendered_twice_into_one_record():
         "these pass exc_info and also render the exception into the message, printing it "
         "twice in one record: " + ", ".join(duplicated)
     )
+
+
+def test_every_product_module_is_findable_from_the_contributor_docs():
+    """A new module under `toinflux/` appears in CONTRIBUTING.md's tree and AGENTS.md's routing.
+
+    Both are steps in CONTRIBUTING.md's own "Checklist when adding a module under
+    `toinflux/`". The checklist did not hold: seven modules carrying the entire control
+    loop - the supervisor, the control process, the PID, the gate, the schedule, the stage
+    ladder and the input reader - were in neither file, added by the same branch that wrote
+    the checklist. Prose asking somebody to remember is what this repository turns into a
+    test, so here it is.
+
+    A wildcard line counts. `toinflux/mcp_*.py` is one row for the whole MCP surface in both
+    files, and expanding it per module would make both documents worse to read.
+    """
+    contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+    def findable(module, text):
+        """Whether this module is named in that document, directly or by a wildcard.
+
+        Args:
+            module (str): the module's file name, e.g. "supervision.py"
+            text (str): the document's contents
+
+        Returns:
+            bool: True where a reader would be routed to it
+        """
+        if module in text:
+            return True
+        stem = module.removesuffix(".py")
+        return any(f"{prefix}_*.py" in text or f"{prefix}*.py" in text for prefix in (stem.split("_")[0],))
+
+    modules = sorted(path.name for path in (REPO_ROOT / "toinflux").glob("*.py") if path.name != "__init__.py")
+    missing = {
+        "CONTRIBUTING.md": [m for m in modules if not findable(m, contributing)],
+        "AGENTS.md": [m for m in modules if not findable(m, agents)],
+    }
+    assert not any(missing.values()), (
+        "these modules are not findable from the contributor documentation, which "
+        f"CONTRIBUTING.md's own checklist requires: {missing}"
+    )

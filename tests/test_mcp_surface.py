@@ -76,6 +76,12 @@ SIBLINGS = {
     # whether the heating is on wants the device rather than the loop.
     "list_controls": {"get_control", "get_current_state"},
     "get_control": {"list_controls", "get_current_state"},
+    # A write tool's confusable neighbours are the other ways to change the same control.
+    # The narrow one is named from the broad one deliberately: rewriting a whole document
+    # to switch a control off is how a misremembered stage ladder reaches the heaters.
+    "save_control": {"get_control_schema", "get_control", "set_control_enabled"},
+    "set_control_enabled": {"save_control", "list_controls"},
+    "delete_control": {"set_control_enabled", "get_control"},
     # The format, not the contents. Its neighbours are the two tools that return a
     # real document, because a caller wanting "show me the conservatory control" will
     # otherwise land here and get a description of the shape instead.
@@ -87,6 +93,8 @@ SIBLINGS = {
 # lands here and a renamed tool lands as a failure.
 NON_TOOL_IDENTIFIERS = {
     "as_of",
+    # Keys in save_control's result, not tools.
+    "device_plan",
     "brightness_pct",
     "group_by",
     "color_temp_k",
@@ -122,6 +130,11 @@ READ_ONLY_PHRASE = "changes nothing"
 WRITE_EFFECT_PHRASES = {
     "hue_set_light": "changes a real device",
     "speedtest_run": "saturates the connection",
+    # These three do not touch a device themselves; they change the rules a control process
+    # then actuates from, which is a larger thing and has to read as one.
+    "save_control": "actuates devices",
+    "set_control_enabled": "makes its devices safe",
+    "delete_control": "makes its devices safe",
 }
 
 # Recorded ceilings, not predictions - see the table in this module's docstring for
@@ -139,21 +152,36 @@ WRITE_EFFECT_PHRASES = {
 # composing a control guesses at the format, and the store refuses an invalid document rather
 # than repairing it, so each guess is a round trip. The description is what tells a model the
 # tool exists at all; the format it returns costs nothing until it is called.
-MAX_TOOL_BYTES = 16_500
+# **Raised from 16,500 when the fixture stopped under-measuring.** `controls.mcp_write` was
+# not set, so `save_control`, `set_control_enabled` and `delete_control` registered nowhere
+# here and their descriptions were never counted, while any install with writes on advertised
+# them. The measured surface was 18,568 the moment they were included - the ceiling had not
+# been holding what it claimed. Kept deliberately tight rather than rounded up, because the
+# point of the number is that the next tool is a decision somebody takes on purpose.
+# The three write descriptions then grew by about 250 bytes to satisfy the prose guards they
+# had never been held to: each now states how it fails, what it changes in the words
+# WRITE_EFFECT_PHRASES records, and names its confusable neighbours. `save_control` gained
+# the round-trip instruction - read with `get_control`, change the key, send it back - which
+# is the mitigation for a whole-document tool and was worth the bytes on its own.
+MAX_TOOL_BYTES = 18_900
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 18_750
+MAX_TOTAL_BYTES = 21_200
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],
     "influx": {"url": "http://influx.example", "user": "u", "password": "p"},
     "hue": {"host": "hue.example", "user": "abc", "db": "hue_db", "mcp_read_write": True},
     "speedtest": {"db": "speedtest_db", "mcp_read_write": True},
-    # On, because this module measures the whole advertised surface and a capability
-    # switched off is absent from it. With controls off the two control tools would not
-    # register and every guard below would pass by not looking at them.
-    "controls": {"enabled": True},
+    # Both on, because this module measures the whole advertised surface and a capability
+    # switched off is absent from it. With controls off the control tools would not register
+    # and every guard below would pass by not looking at them - which is what happened to
+    # the three write tools: `enabled` was set and `mcp_write` was not, so `save_control`,
+    # `set_control_enabled` and `delete_control` were advertised to any install that
+    # switched writes on and measured by nothing here. A guard that stops looking is worse
+    # than no guard, because it reports success either way.
+    "controls": {"enabled": True, "mcp_write": True},
 }
 
 

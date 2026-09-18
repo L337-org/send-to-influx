@@ -232,14 +232,6 @@ class _Number:
         """
         return self.value
 
-    def names(self):
-        """Return the identifiers this node depends on.
-
-        Returns:
-            set: always empty
-        """
-        return set()
-
 
 @dataclass(frozen=True)
 class _Name:
@@ -284,14 +276,6 @@ class _Name:
             )
         return float(value)
 
-    def names(self):
-        """Return the identifiers this node depends on.
-
-        Returns:
-            set: this node's identifier
-        """
-        return {self.identifier}
-
 
 @dataclass(frozen=True)
 class _Unary:
@@ -313,14 +297,6 @@ class _Unary:
             float: the negated value
         """
         return -self.operand.evaluate(bindings)
-
-    def names(self):
-        """Return the identifiers this node depends on.
-
-        Returns:
-            set: the operand's identifiers
-        """
-        return self.operand.names()
 
 
 @dataclass(frozen=True)
@@ -366,14 +342,6 @@ class _Binary:
             raise RuleEvaluationError(f"division by zero at offset {self.offset}")
         return left / right
 
-    def names(self):
-        """Return the identifiers this node depends on.
-
-        Returns:
-            set: the identifiers of both operands
-        """
-        return self.left.names() | self.right.names()
-
 
 @dataclass(frozen=True)
 class _Not:
@@ -395,14 +363,6 @@ class _Not:
             float: 1.0 when the operand is zero, 0.0 otherwise
         """
         return 0.0 if self.operand.evaluate(bindings) else 1.0
-
-    def names(self):
-        """Return the identifiers this node depends on.
-
-        Returns:
-            set: the operand's identifiers
-        """
-        return self.operand.names()
 
 
 @dataclass(frozen=True)
@@ -442,14 +402,6 @@ class _Logical:
         if left:
             return 1.0
         return 1.0 if self.right.evaluate(bindings) else 0.0
-
-    def names(self):
-        """Return the identifiers this node depends on.
-
-        Returns:
-            set: the identifiers of both operands
-        """
-        return self.left.names() | self.right.names()
 
 
 @dataclass(frozen=True)
@@ -499,14 +451,6 @@ class _Call:
         if lower > upper:
             raise RuleEvaluationError(f"clamp lower bound {lower} is above its upper bound {upper}")
         return max(lower, min(value, upper))
-
-    def names(self):
-        """Return the identifiers this node depends on.
-
-        Returns:
-            set: the identifiers of every argument
-        """
-        return set().union(*(argument.names() for argument in self.arguments)) if self.arguments else set()
 
 
 def _render_names(values):
@@ -882,19 +826,17 @@ class Rule:
     Attributes:
         source (str): the rule exactly as the operator wrote it, for messages
         root (object): the parsed expression tree
-        referenced (frozenset): the identifiers this rule actually reads
     """
 
     source: str
     root: object
-    referenced: frozenset
 
     def evaluate(self, bindings):
         """Compute the rule's value for one set of inputs.
 
         Args:
-            bindings (dict): identifier to number, covering at least
-                :attr:`referenced`
+            bindings (dict): identifier to number, covering every name the rule reads -
+                a missing one is a RuleEvaluationError rather than a silent zero
 
         Returns:
             float: the rule's value; a rule used as a gate is true when this is non-zero
@@ -955,4 +897,4 @@ def parse_rule(text, allowed_names=()):
         # bound that turns out to be one interpreter release too generous should still
         # produce a report about a bad rule rather than a crash.
         raise _syntax_error("the rule nests too deeply to parse", 0) from exc
-    return Rule(source=text, root=root, referenced=frozenset(root.names()))
+    return Rule(source=text, root=root)

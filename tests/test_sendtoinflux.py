@@ -2061,11 +2061,11 @@ class TestTheControlSubsystemOptIn:
         assert controls_enabled(settings) is enabled
 
     def test_nothing_starts_when_it_is_switched_off(self):
-        args = argparse.Namespace(settings=None)
+        args = argparse.Namespace(settings=None, print=False, dump=False)
         assert sendtoinflux._start_control_supervisor({}, args) is None
 
     def test_being_switched_on_with_no_controls_says_so_rather_than_starting(self, caplog):
-        args = argparse.Namespace(settings=None)
+        args = argparse.Namespace(settings=None, print=False, dump=False)
         with patch("sendtoinflux.list_controls", return_value=[]):
             with caplog.at_level(logging.WARNING):
                 assert sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args) is None
@@ -2096,7 +2096,7 @@ class TestTheControlSubsystemOptIn:
                 """Record that the exit handler was registered against this."""
                 started["stopped"] = True
 
-        args = argparse.Namespace(settings="/tmp/settings.yaml")
+        args = argparse.Namespace(settings="/tmp/settings.yaml", print=False, dump=False)
         with (
             patch("sendtoinflux.Supervisor", _Supervisor),
             patch("sendtoinflux.list_controls", return_value=["conservatory", "porch"]),
@@ -2155,7 +2155,7 @@ class TestTheSupervisorBanner:
             def stop_all(self):
                 """Do nothing, as a stand-in."""
 
-        args = argparse.Namespace(settings=None)
+        args = argparse.Namespace(settings=None, print=False, dump=False)
         with (
             patch("sendtoinflux.Supervisor", _Supervisor),
             patch("sendtoinflux.list_controls", return_value=["conservatory", "bent"]),
@@ -2181,7 +2181,7 @@ class TestTheSupervisorBanner:
             def stop_all(self):
                 """Do nothing, as a stand-in."""
 
-        args = argparse.Namespace(settings=None)
+        args = argparse.Namespace(settings=None, print=False, dump=False)
         with (
             patch("sendtoinflux.Supervisor", _Supervisor),
             patch("sendtoinflux.list_controls", return_value=["bent"]),
@@ -2191,3 +2191,34 @@ class TestTheSupervisorBanner:
                 assert sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args) is None
         assert "No stored control could be supervised" in caplog.text
         register.assert_not_called()
+
+
+class TestTheDebuggingModesStartNothing:
+    """`--print` and `--dump` print a reading and exit. Starting the supervisor made them
+    spawn a child per control and actuate real devices, and `--dump` was worse: the atexit
+    handler then commanded everything to its safe state on the way out, so asking what a
+    source currently reports switched the operator's heating off.
+
+    The MCP server has had this guard since it was written, with the reasoning in its
+    docstring; the supervisor was added later and did not get it.
+    """
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            pytest.param({"print": True, "dump": False}, id="print"),
+            pytest.param({"print": False, "dump": True}, id="dump"),
+            pytest.param({"print": True, "dump": True}, id="both"),
+        ],
+    )
+    def test_no_supervisor_is_started(self, flags):
+        args = argparse.Namespace(settings=None, **flags)
+        with patch("sendtoinflux.list_controls") as listed:
+            assert sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args) is None
+        assert not listed.called, "the control store was read, so the guard is downstream of the work"
+
+    def test_an_ordinary_run_still_starts_one(self):
+        """The guard must be the debugging modes and nothing else."""
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        with patch("sendtoinflux.list_controls", return_value=[]):
+            sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)

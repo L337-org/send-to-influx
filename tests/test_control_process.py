@@ -472,3 +472,34 @@ class TestAsARealProcess:
             assert "cannot run" in child.stderr.read()
         finally:
             beats.close()
+
+
+class TestAnEndStateThatCouldNotBeCommanded:
+    """One transient bridge failure at the end of the active period used to strand the
+    devices for the whole day.
+
+    The closing edge was recorded as spent before its command had been run, so the failure
+    left nothing to retry: the next cycle saw no change, so no edge and no actuation, and
+    the loop slept with the heaters still on until the window reopened. Nothing else covered
+    it - the fail-safe applies `safe_state` rather than the `end_state` that just failed, and
+    the supervisor only makes devices safe when a control dies or is stopped.
+    """
+
+    def test_the_devices_are_commanded_again_on_the_next_cycle(self, control, bridge):
+        """The retry, and the whole point of the fix."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert bridge.energised()["far"] is True, "the control should have been heating"
+        with faults.unreachable(bridge):
+            control.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        decision = control.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        assert decision.edge == "closed", "the failed edge was not re-delivered, so nothing retries it"
+        assert bridge.energised() == {"far": False, "near": False}
+
+    def test_a_successful_close_is_not_repeated(self, control, bridge):
+        """The converse, because a retry that never stops is its own defect: edge-triggering
+        exists so a control does not re-command devices already in place every cycle."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert control.cycle(dt=60, moment=DAY, sleep=_never_sleep).edge == "closed"
+        bridge.clear()
+        assert control.cycle(dt=60, moment=DAY, sleep=_never_sleep).edge is None
+        assert bridge.commanded() == []

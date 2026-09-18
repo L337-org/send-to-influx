@@ -283,6 +283,40 @@ class TestTheStageLadder:
         document["output"]["stages"][1]["level"] = True
         assert any("level" in error for error in validate_control("conservatory", document))
 
+    @pytest.mark.parametrize(
+        "state",
+        [
+            pytest.param("false", id="a-quoted-false"),
+            pytest.param("no", id="a-quoted-no"),
+            pytest.param("off", id="a-quoted-off"),
+            pytest.param(0, id="an-integer-zero"),
+            pytest.param(1, id="an-integer-one"),
+            pytest.param([], id="a-list"),
+            pytest.param(None, id="a-null"),
+        ],
+    )
+    def test_a_stage_state_that_is_not_a_boolean_is_refused(self, state):
+        """The loop commands `on=bool(state)`, and every non-empty string is truthy - so a
+        quoted `"false"`, which is what somebody writes when they are being careful with
+        YAML, switched the device **on**. On the level 0 rung that turned the everything-off
+        rung into an everything-on rung, and it passed --check-config clean.
+
+        Unquoted `off`/`no`/`false` are YAML booleans and were always right, which is what
+        made this invisible: the wrong version looks more careful than the right one.
+        Integers are refused too rather than tolerated through `bool(0)`, because working by
+        accident is what this whole check is about.
+        """
+        document = a_valid_control()
+        document["output"]["stages"][0]["set"]["heater_far"] = state
+        errors = validate_control("conservatory", document)
+        assert any("must be true or false" in error and "heater_far" in error for error in errors), errors
+
+    def test_real_booleans_are_accepted(self):
+        """The check must not refuse the documents everybody actually has."""
+        document = a_valid_control()
+        document["output"]["stages"][0]["set"] = dict.fromkeys(document["devices"], False)
+        assert validate_control("conservatory", document) == []
+
     def test_an_empty_ladder_is_refused(self):
         document = a_valid_control()
         document["output"]["stages"] = []
