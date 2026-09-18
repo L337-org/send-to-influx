@@ -303,9 +303,9 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
 
         To change one thing about a control that exists, read it with `get_control`, alter
         that key and send the whole document back. Composing a replacement from memory is
-        what silently rewrites a stage ladder. Replacing an existing control returns which
-        sections changed and which of those change what the devices do, so read that back:
-        it is how you catch having done it anyway.
+        what silently rewrites a stage ladder. Replacing one returns `sections` - everything
+        that differs - and `device_plan`, the subset deciding which devices are commanded
+        and when. Read them back: an unexpected entry means you changed more than you meant.
         """
         return await anyio.to_thread.run_sync(_save_control_result, name, document, settings_file, supervisor)
 
@@ -611,14 +611,14 @@ def _save_control_result(name, document, settings_file, supervisor):
     changes = _changes_against_stored(name, document, settings_file) if replaced else None
     store_control(name, document, settings_file)
     logging.info("Control %r was %s over MCP", name, "replaced" if replaced else "created")
-    if changes and changes["actuation"]:
+    if changes and changes["device_plan"]:
         # At WARNING because this is the line an operator wants to find after a heater did
         # something they did not ask for. Naming the sections rather than diffing them: the
         # document is on disk either way, and a rendered diff in the journal is unreadable.
         logging.warning(
-            "Control %r was rewritten over MCP and this changed what its devices do: %s",
+            "Control %r was rewritten over MCP, changing which devices it commands and when: %s",
             name,
-            ", ".join(changes["actuation"]),
+            ", ".join(changes["device_plan"]),
         )
     result = {
         "saved": name,
@@ -631,10 +631,13 @@ def _save_control_result(name, document, settings_file, supervisor):
     return result
 
 
-# The sections that decide what a device physically does. A change to one of these is the
-# difference between editing a control and rebuilding it, which is the thing worth saying
-# out loud when a whole document has been replaced to alter one number.
-ACTUATING_SECTIONS = ("output", "devices", "safe_state", "active_period", "enable_when", "enabled")
+# The sections that decide **which devices are commanded and when** - the ladder, the device
+# list, the gating, the safe state. Deliberately not every section that changes behaviour:
+# `parameters` and `pid` change what the loop *aims at*, which is what an operator adjusts on
+# purpose, and flagging those would warn on every ordinary edit until nobody read the warning.
+# The split is "did you change the machinery" against "did you change the target", because the
+# first is the one somebody does by accident while meaning to do the second.
+DEVICE_PLAN_SECTIONS = ("output", "devices", "safe_state", "active_period", "enable_when", "enabled")
 
 
 def _changes_against_stored(name, document, settings_file):
@@ -657,8 +660,11 @@ def _changes_against_stored(name, document, settings_file):
         settings_file (str or None): the settings path the process was started with
 
     Returns:
-        dict: ``sections`` (every top-level key that differs) and ``actuation`` (those of
-        them that change what the devices do), both sorted
+        dict: ``sections`` (every top-level key that differs) and ``device_plan`` (those of
+        them in :data:`DEVICE_PLAN_SECTIONS`, which decide which devices are commanded and
+        when), both sorted. ``device_plan`` is a subset and not a "behaviour changed" flag:
+        a ``parameters`` or ``pid`` edit changes what the loop aims at, and appears in
+        ``sections`` only. ``sections`` is the complete answer.
     """
     try:
         previous = load_control(name, settings_file)
@@ -670,7 +676,7 @@ def _changes_against_stored(name, document, settings_file):
         sections = sorted(key for key in set(previous) | set(document) if previous.get(key) != document.get(key))
     return {
         "sections": sections,
-        "actuation": [key for key in sections if key in ACTUATING_SECTIONS],
+        "device_plan": [key for key in sections if key in DEVICE_PLAN_SECTIONS],
     }
 
 

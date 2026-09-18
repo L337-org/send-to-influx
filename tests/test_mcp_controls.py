@@ -741,21 +741,21 @@ class TestSavingReportsWhatItChanged:
     def test_an_identical_save_reports_nothing_changed(self, stored):
         """The round-trip a well-behaved client performs when it decides not to edit."""
         result = self._save(stored)
-        assert result["changed"] == {"sections": [], "actuation": []}
+        assert result["changed"] == {"sections": [], "device_plan": []}
 
     def test_changing_one_parameter_names_only_that_section(self, stored):
         """The case the report exists to make boring: an adjustment that touched nothing else."""
         result = self._save(stored, parameters={"target": 21.0})
         assert result["changed"]["sections"] == ["parameters"]
-        assert result["changed"]["actuation"] == []
+        assert result["changed"]["device_plan"] == []
 
-    def test_a_rewritten_stage_ladder_is_called_out_as_actuation(self, stored):
+    def test_a_rewritten_stage_ladder_is_called_out_as_a_device_plan_change(self, stored):
         """The case it exists to catch. This document validates; it simply is not the one
         that was there, and the rungs decide what the heaters do."""
         output = conservatory()["output"]
         output["stages"] = [stage for stage in output["stages"] if stage["level"] != 750]
         result = self._save(stored, output=output)
-        assert "output" in result["changed"]["actuation"]
+        assert "output" in result["changed"]["device_plan"]
 
     def test_it_says_so_in_the_journal_too(self, stored, caplog):
         """The result reaches the client; the operator reads the journal."""
@@ -763,14 +763,14 @@ class TestSavingReportsWhatItChanged:
         output["stages"] = [stage for stage in output["stages"] if stage["level"] != 750]
         with caplog.at_level(logging.WARNING):
             self._save(stored, output=output)
-        assert "changed what its devices do" in caplog.text
+        assert "changing which devices it commands and when" in caplog.text
         assert "conservatory" in caplog.text
 
     def test_a_parameter_change_does_not_warn(self, stored, caplog):
         """A warning on every ordinary edit is a warning nobody reads."""
         with caplog.at_level(logging.WARNING):
             self._save(stored, parameters={"target": 21.0})
-        assert "changed what its devices do" not in caplog.text
+        assert "changing which devices it commands and when" not in caplog.text
 
     def test_an_unreadable_stored_document_reports_everything_as_changed(self, stored):
         """Not "nothing changed", which would be reassuring and wrong: going from a document
@@ -778,5 +778,28 @@ class TestSavingReportsWhatItChanged:
         with open(os.path.join(stored.state_dir, "controls", "conservatory.yaml"), "w", encoding="utf-8") as handle:
             handle.write("{{{ not yaml")
         result = self._save(stored)
-        assert "output" in result["changed"]["actuation"]
+        assert "output" in result["changed"]["device_plan"]
         assert "parameters" in result["changed"]["sections"]
+
+    def test_a_tuning_change_is_reported_but_not_as_a_device_plan_change(self, stored):
+        """`device_plan` is a subset, not a "behaviour changed" flag, and the distinction is
+        the whole reason it is useful.
+
+        Rewriting `pid` gains changes behaviour dramatically - `kp` of 1200 makes the loop
+        unstable - and it belongs in `sections`, not here. `device_plan` answers a narrower
+        question: did which-devices-and-when change? That is the one somebody alters by
+        accident while meaning to alter a target, and a flag that fired on every ordinary
+        tuning edit would be a flag nobody read.
+        """
+        pid = dict(conservatory()["pid"], kp=1200.0)
+        result = self._save(stored, pid=pid)
+        assert result["changed"]["sections"] == ["pid"]
+        assert result["changed"]["device_plan"] == []
+
+    def test_sections_is_the_complete_answer(self, stored):
+        """Whatever `device_plan` says, nothing that differs is left out of `sections`."""
+        output = conservatory()["output"]
+        output["cycle_seconds"] = 600
+        result = self._save(stored, parameters={"target": 21.0}, output=output)
+        assert result["changed"]["sections"] == ["output", "parameters"]
+        assert result["changed"]["device_plan"] == ["output"]

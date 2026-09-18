@@ -93,6 +93,8 @@ SIBLINGS = {
 # lands here and a renamed tool lands as a failure.
 NON_TOOL_IDENTIFIERS = {
     "as_of",
+    # Keys in save_control's result, not tools.
+    "device_plan",
     "brightness_pct",
     "group_by",
     "color_temp_k",
