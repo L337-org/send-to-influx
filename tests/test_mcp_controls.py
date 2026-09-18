@@ -633,3 +633,78 @@ class TestDeletingAControl:
     def test_a_name_that_could_choose_another_file_is_refused(self, state_directory):
         with pytest.raises(ConfigError):
             _delete_control_result("../../etc/cron.d/x", state_directory.settings_file, _Reloading())
+
+
+class TestWhatTheToolAnnotationsClaim:
+    """`idempotent_hint` means "calling it repeatedly with the same arguments will have no
+    additional effect on its environment" (the SDK's own words). A client may retry on that
+    basis, so a wrong hint here is a wrong retry against real heaters."""
+
+    @staticmethod
+    def _annotations(name):
+        """Return one registered tool's annotations.
+
+        Args:
+            name (str): the tool name
+
+        Returns:
+            ToolAnnotations: what it advertises
+        """
+        server = MCPServer(name="annotations-test")
+        register_control_tools(server, {"controls": {"enabled": True, "mcp_write": True}}, None)
+        tools = {tool.name: tool for tool in anyio.run(server.list_tools)}
+        return tools[name].annotations
+
+    def test_saving_is_not_idempotent(self):
+        """The file would end up identical, but a second save requests another reload, and a
+        reload stops a running control, makes its devices safe and starts it again. Repeating
+        the call moves heaters, which is an additional effect by any reading."""
+        assert self._annotations("save_control").idempotent_hint is False
+
+    def test_setting_enabled_is_idempotent(self):
+        """The opposite case, and the reason this is not a blanket rule: it returns early
+        when nothing would change, so a repeat writes nothing and asks for no reload."""
+        assert self._annotations("set_control_enabled").idempotent_hint is True
+
+    def test_deleting_is_not_idempotent(self):
+        """A second delete raises rather than succeeding quietly."""
+        assert self._annotations("delete_control").idempotent_hint is False
+
+    @pytest.mark.parametrize("tool", ["save_control", "set_control_enabled", "delete_control"])
+    def test_every_write_tool_says_it_writes(self, tool):
+        assert self._annotations(tool).read_only_hint is False
+
+
+class TestWhetherANewControlWillActuallyStart:
+    """There is no supervisor when nothing was supervisable at startup, and the commonest
+    way to be in that state is to have no controls stored at all - which is exactly the
+    person being told how to write their first one by hand."""
+
+    @staticmethod
+    def _writing(mcp_write, supervisor):
+        """Return the schema's writing section.
+
+        Args:
+            mcp_write (bool): what `controls.mcp_write` is set to
+            supervisor (object or None): the supervisor to report against
+
+        Returns:
+            dict: the `writing` section
+        """
+        settings = {"sources": ["hue"], "controls": {"enabled": True, "mcp_write": mcp_write}}
+        return _control_schema_result(settings, "/etc/send-to-influx/settings.yaml", supervisor)["writing"]
+
+    def test_hand_saving_advice_admits_a_restart_is_needed_when_nothing_is_supervising(self):
+        """The wrong advice would land on precisely the person most likely to read it."""
+        assert "restarted" in self._writing(False, None)["meanwhile"]
+
+    def test_hand_saving_advice_says_no_restart_is_needed_when_something_is_supervising(self):
+        assert "without a restart" in self._writing(False, _Reloading())["meanwhile"]
+
+    def test_the_write_tools_carry_the_same_caveat(self):
+        """A model told its save takes effect would otherwise wait for a heater that nothing
+        is going to start - the same distinction the save result itself reports."""
+        assert "restarted" in self._writing(True, None)["takes_effect"]
+
+    def test_and_do_not_carry_it_when_it_does_not_apply(self):
+        assert "restarted" not in self._writing(True, _Reloading())["takes_effect"]

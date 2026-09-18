@@ -185,7 +185,10 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
     if not controls_enabled(settings):
         # Absent rather than refusing: see the module docstring.
         return server
-    logging.info("MCP control tools enabled (read-only)")
+    # Deliberately not "(read-only)": the write tools may be registered a few lines below,
+    # and an operator reading the journal should not be told read-only and then told
+    # otherwise. What is read-only is this half, and the next line says what the other is.
+    logging.info("MCP control read tools enabled")
 
     @register_tool(
         server,
@@ -260,7 +263,7 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
         Reads settings and constants, contacts no device, and changes nothing. It cannot
         fail on a control, because it describes the format rather than any stored document.
         """
-        return await anyio.to_thread.run_sync(_control_schema_result, settings, settings_file)
+        return await anyio.to_thread.run_sync(_control_schema_result, settings, settings_file, supervisor)
 
     if not control_writes_enabled(settings):
         # Absent rather than refusing, as above - and get_control_schema says so, because
@@ -274,8 +277,12 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
     @register_tool(
         server,
         title="Save Control Loop",
+        # Not idempotent, though the file would end up identical: a second save requests
+        # another reload, and a reload stops a running control, makes its devices safe and
+        # starts it again. Repeating the call moves heaters. `set_control_enabled` below is
+        # idempotent for the opposite reason - it returns early when nothing would change.
         annotations=ToolAnnotations(
-            read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=False
         ),
     )
     async def save_control(name: str, document: dict) -> dict:  # noqa: DOC101,DOC103,DOC108,DOC201
@@ -382,7 +389,7 @@ def _usable_sources(settings):
     return {"readable_as_inputs": readable, "can_switch_devices": actuating}
 
 
-def _control_schema_result(settings, settings_file=None):
+def _control_schema_result(settings, settings_file=None, supervisor=None):
     """Assemble the control document format off the event loop.
 
     Every part is read from the constant that governs it rather than written out again
@@ -393,6 +400,7 @@ def _control_schema_result(settings, settings_file=None):
     Args:
         settings (dict): the parsed settings document
         settings_file (str or None): the settings path the process was started with
+        supervisor (Supervisor or None): the running supervisor, where there is one
 
     Returns:
         dict: the tool's result
@@ -426,11 +434,11 @@ def _control_schema_result(settings, settings_file=None):
         "safe_states": list(BUILT_IN_SAFE_STATES),
         "sources": _usable_sources(settings),
         "example": CONTROL_EXAMPLE,
-        "writing": _writing_availability(settings, settings_file),
+        "writing": _writing_availability(settings, settings_file, supervisor),
     }
 
 
-def _writing_availability(settings, settings_file):
+def _writing_availability(settings, settings_file, supervisor=None):
     """Describe whether this installation lets a model change controls, and what to do if not.
 
     **This is the whole nudge, and it is here because it cannot be anywhere better.** A
@@ -448,21 +456,40 @@ def _writing_availability(settings, settings_file):
     Naming the directory matters as much as naming the setting. "Ask your operator to enable
     writes" is a dead end if neither party knows where the file would go.
 
+    **Whether a new document is picked up depends on the supervisor existing**, which is why
+    one is taken. It does not exist when nothing was supervisable at startup, and the
+    commonest way to be in that state is to have no controls stored at all - which is
+    precisely the person being told here how to write their first one by hand. Promising
+    them a pickup that cannot happen is the worst place to be wrong, so the advice is
+    conditional on what is actually running. :func:`_reload_outcome` makes the same
+    distinction for a write that goes through the tools.
+
     Args:
         settings (dict): the parsed settings document
         settings_file (str or None): the settings path the process was started with
+        supervisor (Supervisor or None): the running supervisor, where there is one
 
     Returns:
         dict: what the client may do about controls, and how to change it
     """
+    # One sentence, two states, used by both branches below: a control only starts by itself
+    # where something is watching for it.
+    if supervisor is None:
+        pickup = (
+            "this service is not currently supervising any control, so a newly stored one "
+            "will not start until the service is restarted - which is the normal state when "
+            "no control is stored yet"
+        )
+    else:
+        pickup = "the service picks up a stored control without a restart"
     if control_writes_enabled(settings):
         return {
             "available": True,
             "tools": ["save_control", "set_control_enabled", "delete_control"],
             "takes_effect": (
-                "immediately - a saved or deleted control is reconciled with the running "
-                "supervisor without restarting the service, so an enabled control starts "
-                "actuating on its next cycle"
+                "a saved or deleted control is reconciled with the supervisor rather than "
+                "waiting for a restart, so an enabled control starts actuating on its next "
+                f"cycle - but note that {pickup}"
             ),
         }
     return {
@@ -481,7 +508,7 @@ def _writing_availability(settings, settings_file):
         "meanwhile": (
             "compose the document and give it to the operator to save as "
             f"{control_dir(settings_file)}/<name>.yaml - it is the same format described "
-            "here, and the service picks up a new file without a restart"
+            f"here. Note that {pickup}"
         ),
     }
 
