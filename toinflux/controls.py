@@ -837,3 +837,39 @@ def controls_enabled(settings):
     """
     block = settings.get("controls")
     return isinstance(block, dict) and block.get("enabled") is True
+
+
+def control_writes_enabled(settings):
+    """Whether an MCP client may create, change or remove controls here.
+
+    A second opt-in on top of :func:`controls_enabled`, because the two grant different
+    things. ``controls.enabled`` runs the loops the operator wrote; this hands a model
+    authorship of them, and an authored control actuates devices repeatedly and unattended
+    for as long as it exists. Granting the first is not granting the second.
+
+    **Both, checked here rather than left to the caller.** ``mcp_write`` alone describes an
+    installation that has not asked for controls at all, and writing documents nothing will
+    ever run is not a capability worth granting. The one caller does check
+    ``controls_enabled`` first, so this conjunction changes nothing today - it is here so
+    that the answer cannot become wrong by being asked somewhere new, which is the failure
+    a predicate that half-answers its own question invites.
+
+    It is also not the collector's ``mcp_read_write``: that permits an action now (turn
+    this light on), where this permits a standing rule that keeps acting.
+
+    Exactly ``true`` and nothing else, for the same reason as ``controls.enabled`` - a
+    quoted ``"true"`` is a truthy string, and a loose check would hand out write access to
+    somebody who quoted a YAML boolean.
+
+    Off does not mean the model is stuck: the read tools still describe the format, so it
+    can compose a document for the operator to save by hand. :func:`toinflux.mcp_controls`
+    reports that state in ``get_control_schema`` so it can say so rather than guess.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        bool: True where ``controls.enabled`` and ``controls.mcp_write`` are both exactly true
+    """
+    block = settings.get("controls")
+    return controls_enabled(settings) and isinstance(block, dict) and block.get("mcp_write") is True

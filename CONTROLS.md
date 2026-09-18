@@ -20,21 +20,40 @@ Two separate opt-ins, and neither is a collector's `mcp_read_write` flag:
 
 ```yaml
 controls:
-  enabled: true
+  enabled: true      # run the stored controls
+  mcp_write: true    # let an MCP client write them for you
 ```
 
-Controls are off unless you switch them on, because a control actuates devices with nobody
-watching. Wanting a heating loop is not the same as granting a connected model device-write
-access, and one setting governing both would force anyone wanting the first to accept the
-second.
+`enabled` runs the controls you have. Controls are off unless you switch them on, because a
+control actuates devices with nobody watching. Wanting a heating loop is not the same as
+granting a connected model device-write access, and one setting governing both would force
+anyone wanting the first to accept the second.
+
+`mcp_write` lets a connected model create, change and delete controls, effective
+immediately. It is a bigger grant than it looks, and bigger than `mcp_read_write`: that
+permits an action now, where this permits a *standing rule* that keeps acting, unattended,
+for as long as it exists.
+
+Neither implies the other, and both are exactly `true` - a quoted `"true"` is a string, and
+`--check-config` will say so rather than leaving you with a switch that reads as off.
+
+**With `mcp_write` off, an assistant can still help.** The read tools stay available, so it
+can describe your controls, explain one, and compose a document for you to save by hand - it
+is told where to tell you to put it. What it cannot do is save it for you. If you find an
+assistant repeatedly handing you YAML instead of installing it, this switch is why.
 
 Where they live
 ---------------
 
 One YAML document per control, under the state directory - `/var/lib/send-to-influx/controls`
 on a packaged install, beside `settings.yaml` in a source checkout. They are written by the
-running service and by an MCP client on its behalf rather than by hand, though hand-editing
-works and `--check-config` will tell you if you got it wrong.
+running service, and by an MCP client on its behalf where `mcp_write` permits it, though
+hand-editing works and `--check-config` will tell you if you got it wrong.
+
+A change is picked up without restarting the service, however it was made: the supervisor
+reconciles a control with its document, so a saved edit restarts that loop, a deleted
+document stops it and makes its devices safe, and a document that will not parse leaves the
+running control alone rather than killing it over a half-finished edit.
 
 The document
 ------------

@@ -1233,11 +1233,43 @@ def validate_settings(settings, source=None, settings_path="settings.yaml", warn
     hue_warnings.extend(myenergi_warnings)
     errors.extend(_validate_mqtt_block(settings, sources))
     errors.extend(mcp_block_errors(settings))
+    errors.extend(_validate_controls_block(settings))
     _log_config_warnings(hue_warnings, settings_path, warn)
     if errors:
         for error in errors:
             logging.critical("%s: %s", settings_path, error)
         raise ConfigError("; ".join(errors))
+
+
+def _validate_controls_block(settings):
+    """Return errors for the ``controls`` block's own switches.
+
+    Both switches are read with a strict ``is True`` - see
+    :func:`toinflux.controls.controls_enabled` for why - which means a mistyped
+    ``enabled: "true"`` is silently off rather than wrong. That is the worst shape for an
+    operator: the subsystem simply does not run, and nothing says why. Checking the type
+    here turns it into a ``--check-config`` error at the moment it is written.
+
+    Only the two switches. The controls themselves are separate documents under the state
+    directory with their own validation (:func:`toinflux.controls.validate_stored_controls`),
+    which needs the store rather than this dict.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        list: error strings for the controls block, empty when it is usable
+    """
+    block = settings.get("controls")
+    if block is None:
+        return []
+    if not isinstance(block, dict):
+        return [f"controls must be a mapping of settings (got {type(block).__name__})"]
+    return [
+        f"controls.{key} must be true or false (got {block[key]!r})"
+        for key in ("enabled", "mcp_write")
+        if key in block and not isinstance(block[key], bool)
+    ]
 
 
 def _contains_real_secret(settings):

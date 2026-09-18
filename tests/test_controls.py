@@ -7,15 +7,16 @@ import pytest
 import yaml
 from toinflux.controls import (
     BUILT_IN_SAFE_STATES,
+    CONTROL_EXAMPLE,
     control_dir,
     control_path,
+    control_writes_enabled,
     delete_control,
     list_controls,
     load_control,
     require_valid_control_name,
-    save_control,
     rule_names,
-    CONTROL_EXAMPLE,
+    save_control,
     validate_control,
     validate_control_rules,
     validate_control_sources,
@@ -611,3 +612,41 @@ class TestDocumentsWrittenToBreakTheValidator:
         assert offending, "the malformed input was not reported at all"
         assert "\n" not in offending[0]
         assert "\\n" in offending[0]
+
+
+class TestWhetherWritingControlsIsPermitted:
+    """`control_writes_enabled` answers for both switches, not just its own.
+
+    The registration path checks `controls_enabled` before it ever asks this, so these are
+    about the predicate's own contract rather than about today's behaviour: a helper that
+    half-answers its own question is one a later call site gets wrong, and it is the kind of
+    wrong that grants a capability rather than withholding one.
+    """
+
+    @pytest.mark.parametrize(
+        "controls",
+        [
+            pytest.param({"enabled": True, "mcp_write": True}, id="both-on"),
+        ],
+    )
+    def test_both_switches_on_permits_writing(self, controls):
+        assert control_writes_enabled({"controls": controls}) is True
+
+    @pytest.mark.parametrize(
+        "controls",
+        [
+            pytest.param({"mcp_write": True}, id="write-without-the-subsystem"),
+            pytest.param({"enabled": False, "mcp_write": True}, id="subsystem-explicitly-off"),
+            pytest.param({"enabled": True}, id="no-write-key"),
+            pytest.param({"enabled": True, "mcp_write": False}, id="write-off"),
+            pytest.param({"enabled": True, "mcp_write": "true"}, id="a-quoted-yaml-boolean-is-a-string"),
+            pytest.param({"enabled": "true", "mcp_write": True}, id="the-subsystem-switch-is-a-string-too"),
+            pytest.param({}, id="empty-block"),
+        ],
+    )
+    def test_anything_short_of_both_does_not(self, controls):
+        assert control_writes_enabled({"controls": controls}) is False
+
+    @pytest.mark.parametrize("settings", [{}, {"controls": None}, {"controls": "yes"}, {"controls": []}])
+    def test_a_block_that_is_not_a_mapping_does_not_permit_writing(self, settings):
+        assert control_writes_enabled(settings) is False

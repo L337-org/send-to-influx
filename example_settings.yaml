@@ -123,6 +123,14 @@ mcp:
 controls:
   # Uncomment the line below to run the stored controls (default: off)
   # enabled: true
+  # Opt in to letting an MCP client create, edit and delete control loops for you.
+  # Off by default, and separate from "enabled" above: running the loops you wrote is
+  # not the same as letting an AI assistant write them. With this off, an assistant can
+  # still read your controls and draft one for you to save by hand; with it on, it saves
+  # the file itself and the service picks it up without a restart. A control it writes
+  # actuates devices unattended for as long as it exists. Has no effect unless the MCP
+  # server is enabled (see the mcp block above) and "enabled" above is true.
+  mcp_write: false
 
 # Hue bridge settings
 hue:

@@ -18,10 +18,14 @@ from mcp.server.mcpserver import MCPServer
 
 from tests.harness.installation import conservatory
 from toinflux.exceptions import ConfigError
+from toinflux.exceptions import ToolParamError
 from toinflux.mcp_controls import (
     _control_schema_result,
+    _delete_control_result,
     _get_control_result,
     _list_controls_result,
+    _save_control_result,
+    _set_enabled_result,
     register_control_tools,
 )
 from toinflux.supervision import ControlStatus
@@ -340,3 +344,367 @@ class TestTheControlSchema:
         from toinflux.controls import BUILT_IN_SAFE_STATES
 
         assert _control_schema_result(self.SETTINGS)["safe_states"] == list(BUILT_IN_SAFE_STATES)
+
+
+class _Reloading:
+    """A supervisor stand-in that records what it was asked to reconcile.
+
+    Records rather than acts: what matters at this layer is that the write told the
+    supervisor, and in which order relative to the file changing. What the supervisor then
+    does with the name is `tests/test_supervision.py`'s question.
+    """
+
+    def __init__(self, on_request=None):
+        """Hold the requests, and optionally observe each one as it arrives.
+
+        Args:
+            on_request (collections.abc.Callable or None): called with the name at the
+                moment of the request, for asserting on the state of the disk *then*
+        """
+        self.requests = []
+        self._on_request = on_request
+
+    def request_reload(self, name) -> None:
+        """Record a reload request.
+
+        Args:
+            name (str): the control whose document changed
+        """
+        self.requests.append(name)
+        if self._on_request is not None:
+            self._on_request(name)
+
+
+class TestWriteToolsAreOnTheirOwnSwitch:
+    """`controls.enabled` runs the loops an operator wrote; `controls.mcp_write` hands a
+    model authorship of them. Neither implies the other, so the tool list has to prove it."""
+
+    @staticmethod
+    def _tools(settings):
+        """Register against those settings and return the advertised tool names.
+
+        Args:
+            settings (dict): the settings to register from
+
+        Returns:
+            set: the registered tool names
+        """
+        server = MCPServer(name="controls-write-test")
+        register_control_tools(server, settings, None)
+        return {tool.name for tool in anyio.run(server.list_tools)}
+
+    WRITE_TOOLS = {"save_control", "set_control_enabled", "delete_control"}
+
+    @pytest.mark.parametrize(
+        "controls",
+        [
+            pytest.param({"enabled": True}, id="no-write-key"),
+            pytest.param({"enabled": True, "mcp_write": False}, id="off"),
+            pytest.param({"enabled": True, "mcp_write": "true"}, id="a-quoted-yaml-boolean-is-a-string"),
+            pytest.param({"enabled": True, "mcp_write": 1}, id="truthy-but-not-true"),
+        ],
+    )
+    def test_no_write_tool_is_registered_without_the_switch(self, controls):
+        """Strict `is True`, the same as the switch above it: a quoted boolean is a truthy
+        string, and a loose check would hand out authorship to somebody who quoted YAML."""
+        assert self._tools({"controls": controls}) & self.WRITE_TOOLS == set()
+
+    def test_the_write_switch_alone_grants_nothing(self):
+        """`mcp_write` without `enabled` is an install that has not asked for controls at
+        all. Writing documents nothing will ever run is not a capability worth advertising."""
+        assert self._tools({"controls": {"mcp_write": True}}) == set()
+
+    def test_every_write_tool_appears_when_both_are_on(self):
+        registered = self._tools({"controls": {"enabled": True, "mcp_write": True}})
+        assert self.WRITE_TOOLS <= registered
+
+    def test_the_read_tools_are_still_there(self):
+        """Granting writes must not quietly replace the read surface it builds on."""
+        registered = self._tools({"controls": {"enabled": True, "mcp_write": True}})
+        assert {"list_controls", "get_control", "get_control_schema"} <= registered
+
+
+class TestTheSchemaSaysWhetherWritingIsAvailable:
+    """The whole nudge. With the write tools unregistered a model cannot tell "this install
+    has not enabled writing" from "this build cannot write controls", and the two call for
+    different answers to the user. So the tool it must call before composing says which."""
+
+    @staticmethod
+    def _writing(mcp_write, settings_file=None):
+        """Return the schema's writing section for that switch setting.
+
+        Args:
+            mcp_write (bool): what `controls.mcp_write` is set to
+            settings_file (str or None): the settings path to report
+
+        Returns:
+            dict: the `writing` section
+        """
+        settings = {"sources": ["hue"], "controls": {"enabled": True, "mcp_write": mcp_write}}
+        return _control_schema_result(settings, settings_file)["writing"]
+
+    def test_it_says_so_when_writing_is_not_available(self):
+        assert self._writing(False)["available"] is False
+
+    def test_it_names_the_setting_that_would_enable_it(self):
+        """Without the exact key, "ask your operator to turn on writes" is a dead end for
+        both of them."""
+        writing = self._writing(False)
+        assert writing["setting"] == "controls.mcp_write"
+        assert writing["set_it_to"] is True
+
+    def test_it_names_the_settings_file_it_is_running_from(self):
+        """The file in effect, not a guess at where one usually lives: an operator editing
+        the wrong settings.yaml sees no change and has nothing to blame."""
+        assert self._writing(False, "/etc/send-to-influx/settings.yaml")["in_file"] == (
+            "/etc/send-to-influx/settings.yaml"
+        )
+
+    def test_it_says_where_a_document_would_go_if_saved_by_hand(self):
+        """Off is a working state: compose it and hand it over. That is only actionable
+        with somewhere to put it."""
+        assert "controls" in self._writing(False)["meanwhile"]
+
+    def test_it_says_the_two_switches_are_separate(self):
+        """The trap this whole section exists for: `controls.enabled` is on, so the model can
+        see and read controls, and writing still refuses. Nothing about that is guessable."""
+        assert "neither implies the other" in self._writing(False)["note"]
+
+    def test_it_says_so_when_writing_is_available(self):
+        writing = self._writing(True)
+        assert writing["available"] is True
+        assert set(writing["tools"]) == {"save_control", "set_control_enabled", "delete_control"}
+
+    def test_it_does_not_name_a_setting_that_is_already_set(self):
+        """Advice to enable what is enabled would send a model to the operator for nothing."""
+        assert "setting" not in self._writing(True)
+
+
+class TestSavingAControl:
+    """Validation happens here, because this is the door an unchecked document arrives at:
+    `controls.save_control` writes whatever it is given, deliberately."""
+
+    def test_a_valid_document_is_stored_and_applied(self, state_directory):
+        supervisor = _Reloading()
+        document = conservatory()
+        result = _save_control_result("conservatory", document, state_directory.settings_file, supervisor)
+        assert result["saved"] == "conservatory"
+        assert supervisor.requests == ["conservatory"]
+        assert _get_control_result("conservatory", state_directory.settings_file)["document"] == document
+
+    def test_it_says_whether_it_replaced_something(self, stored):
+        """A model that thinks it created a control when it overwrote a running one will
+        report the wrong thing to the operator."""
+        created = _save_control_result(
+            "spare_room", conservatory(name="spare_room"), stored.settings_file, _Reloading()
+        )
+        replaced = _save_control_result("conservatory", conservatory(), stored.settings_file, _Reloading())
+        assert created["replaced_existing"] is False
+        assert replaced["replaced_existing"] is True
+
+    def test_an_invalid_document_writes_nothing(self, stored):
+        """The control that was there keeps running the document it already had, which
+        matters because it may be holding a room at temperature."""
+        before = _get_control_result("conservatory", stored.settings_file)
+        broken = conservatory()
+        broken["stages"] = "not a ladder"
+        with pytest.raises(ToolParamError):
+            _save_control_result("conservatory", broken, stored.settings_file, _Reloading())
+        assert _get_control_result("conservatory", stored.settings_file) == before
+
+    def test_an_invalid_document_is_not_applied_either(self, stored):
+        """Nothing written means nothing to reconcile. A reload request here would stop a
+        working control and start it again from the document it already had."""
+        supervisor = _Reloading()
+        with pytest.raises(ToolParamError):
+            _save_control_result("conservatory", {"name": "conservatory"}, stored.settings_file, supervisor)
+        assert supervisor.requests == []
+
+    def test_every_problem_is_reported_at_once(self, state_directory):
+        """One fault per round trip is one exchange per fault, and they are independent."""
+        broken = conservatory()
+        broken["stages"] = "not a ladder"
+        del broken["inputs"]
+        with pytest.raises(ToolParamError) as raised:
+            _save_control_result("conservatory", broken, state_directory.settings_file, _Reloading())
+        assert "stages" in str(raised.value) and "inputs" in str(raised.value)
+
+    def test_the_refusal_points_at_the_format(self, state_directory):
+        """A model told only "invalid" guesses again; told where the format is, it reads it."""
+        with pytest.raises(ToolParamError, match="get_control_schema"):
+            _save_control_result("conservatory", {"name": "conservatory"}, state_directory.settings_file, _Reloading())
+
+    @pytest.mark.parametrize("document", [[], "name: conservatory", None, 7])
+    def test_something_that_is_not_a_document_is_refused_by_type(self, state_directory, document):
+        """A YAML string is the likely mistake: a model that has just been handed an example
+        as text may send it back as text."""
+        with pytest.raises(ToolParamError, match="mapping"):
+            _save_control_result("conservatory", document, state_directory.settings_file, _Reloading())
+
+    def test_a_name_that_could_choose_another_file_is_refused(self, state_directory):
+        """The name is concatenated into a path and arrives from an MCP client.
+
+        The document names itself the same thing deliberately. A mismatch between the two is
+        caught by validation, which would mask the question being asked here: `validate_control`
+        does *not* check that a name is usable as a filename, so with both agreeing, the only
+        thing standing between a traversal and a write is the store's own guard. Asserting on
+        the weaker case would have passed whether that guard existed or not."""
+        evil = "../../etc/cron.d/x"
+        with pytest.raises(ConfigError, match="invalid control name"):
+            _save_control_result(evil, conservatory(name=evil), state_directory.settings_file, _Reloading())
+        assert not os.path.exists("/etc/cron.d/x")
+
+    def test_a_name_disagreeing_with_the_document_is_refused(self, state_directory):
+        """The other half: saving under one name a document that calls itself another would
+        store a control whose `name` does not match the file the supervisor finds it in."""
+        with pytest.raises(ToolParamError, match="but the file is named"):
+            _save_control_result("somewhere_else", conservatory(), state_directory.settings_file, _Reloading())
+
+    def test_it_reports_whether_the_control_will_actually_start(self, state_directory):
+        """Stored is not running. With nothing supervising - the subsystem on but no control
+        startable - a client told its save took effect waits for a heater nobody will start."""
+        result = _save_control_result("conservatory", conservatory(), state_directory.settings_file, None)
+        assert result["reload"]["in_effect"] is False
+        assert "restart" in result["reload"]["detail"]
+
+
+class TestEnablingAndDisabling:
+    def test_it_turns_a_control_on(self, state_directory):
+        state_directory.write_control(conservatory(enabled=False))
+        supervisor = _Reloading()
+        result = _set_enabled_result("conservatory", True, state_directory.settings_file, supervisor)
+        assert result["changed"] is True
+        assert _get_control_result("conservatory", state_directory.settings_file)["document"]["enabled"] is True
+        assert supervisor.requests == ["conservatory"]
+
+    def test_it_leaves_the_rest_of_the_document_alone(self, state_directory):
+        """The reason this is a separate tool from save: it cannot change what a control
+        does, only whether it does it."""
+        state_directory.write_control(conservatory(enabled=False))
+        before = _get_control_result("conservatory", state_directory.settings_file)["document"]
+        _set_enabled_result("conservatory", True, state_directory.settings_file, _Reloading())
+        after = _get_control_result("conservatory", state_directory.settings_file)["document"]
+        assert {key: value for key, value in after.items() if key != "enabled"} == (
+            {key: value for key, value in before.items() if key != "enabled"}
+        )
+
+    def test_already_in_that_state_is_success_and_writes_nothing(self, stored):
+        """Not an error: a model reconciling to a desired state should not have to check
+        first. Writing anyway would restart a running control for no change."""
+        supervisor = _Reloading()
+        result = _set_enabled_result("conservatory", True, stored.settings_file, supervisor)
+        assert result["changed"] is False
+        assert supervisor.requests == []
+
+    @pytest.mark.parametrize("enabled", ["true", 1, None])
+    def test_a_non_boolean_is_refused(self, stored, enabled):
+        """The same trap as the settings switch, at the other end of the same idea."""
+        with pytest.raises(ToolParamError, match="true or false"):
+            _set_enabled_result("conservatory", enabled, stored.settings_file, _Reloading())
+
+    def test_an_unknown_control_is_an_error_naming_it(self, state_directory):
+        with pytest.raises(ConfigError, match="nowhere"):
+            _set_enabled_result("nowhere", True, state_directory.settings_file, _Reloading())
+
+
+class TestDeletingAControl:
+    def test_it_removes_the_document(self, stored):
+        _delete_control_result("conservatory", stored.settings_file, _Reloading())
+        with pytest.raises(ConfigError):
+            _get_control_result("conservatory", stored.settings_file)
+
+    def test_the_supervisor_is_told_after_the_file_is_gone(self, stored):
+        """The supervisor decides what a reload means by looking at the document. Asked
+        while the file still existed, a deletion reads as a restart - so it would stop the
+        control and start it again from the document that is about to vanish."""
+        seen = {}
+
+        def _look(name):
+            seen[name] = os.path.exists(os.path.join(stored.state_dir, "controls", f"{name}.yaml"))
+
+        _delete_control_result("conservatory", stored.settings_file, _Reloading(on_request=_look))
+        assert seen == {"conservatory": False}
+
+    def test_deleting_something_that_is_not_there_is_an_error(self, state_directory):
+        """A mistyped name reported rather than appearing to have worked."""
+        with pytest.raises(ConfigError, match="nowhere"):
+            _delete_control_result("nowhere", state_directory.settings_file, _Reloading())
+
+    def test_a_name_that_could_choose_another_file_is_refused(self, state_directory):
+        with pytest.raises(ConfigError):
+            _delete_control_result("../../etc/cron.d/x", state_directory.settings_file, _Reloading())
+
+
+class TestWhatTheToolAnnotationsClaim:
+    """`idempotent_hint` means "calling it repeatedly with the same arguments will have no
+    additional effect on its environment" (the SDK's own words). A client may retry on that
+    basis, so a wrong hint here is a wrong retry against real heaters."""
+
+    @staticmethod
+    def _annotations(name):
+        """Return one registered tool's annotations.
+
+        Args:
+            name (str): the tool name
+
+        Returns:
+            ToolAnnotations: what it advertises
+        """
+        server = MCPServer(name="annotations-test")
+        register_control_tools(server, {"controls": {"enabled": True, "mcp_write": True}}, None)
+        tools = {tool.name: tool for tool in anyio.run(server.list_tools)}
+        return tools[name].annotations
+
+    def test_saving_is_not_idempotent(self):
+        """The file would end up identical, but a second save requests another reload, and a
+        reload stops a running control, makes its devices safe and starts it again. Repeating
+        the call moves heaters, which is an additional effect by any reading."""
+        assert self._annotations("save_control").idempotent_hint is False
+
+    def test_setting_enabled_is_idempotent(self):
+        """The opposite case, and the reason this is not a blanket rule: it returns early
+        when nothing would change, so a repeat writes nothing and asks for no reload."""
+        assert self._annotations("set_control_enabled").idempotent_hint is True
+
+    def test_deleting_is_not_idempotent(self):
+        """A second delete raises rather than succeeding quietly."""
+        assert self._annotations("delete_control").idempotent_hint is False
+
+    @pytest.mark.parametrize("tool", ["save_control", "set_control_enabled", "delete_control"])
+    def test_every_write_tool_says_it_writes(self, tool):
+        assert self._annotations(tool).read_only_hint is False
+
+
+class TestWhetherANewControlWillActuallyStart:
+    """There is no supervisor when nothing was supervisable at startup, and the commonest
+    way to be in that state is to have no controls stored at all - which is exactly the
+    person being told how to write their first one by hand."""
+
+    @staticmethod
+    def _writing(mcp_write, supervisor):
+        """Return the schema's writing section.
+
+        Args:
+            mcp_write (bool): what `controls.mcp_write` is set to
+            supervisor (object or None): the supervisor to report against
+
+        Returns:
+            dict: the `writing` section
+        """
+        settings = {"sources": ["hue"], "controls": {"enabled": True, "mcp_write": mcp_write}}
+        return _control_schema_result(settings, "/etc/send-to-influx/settings.yaml", supervisor)["writing"]
+
+    def test_hand_saving_advice_admits_a_restart_is_needed_when_nothing_is_supervising(self):
+        """The wrong advice would land on precisely the person most likely to read it."""
+        assert "restarted" in self._writing(False, None)["meanwhile"]
+
+    def test_hand_saving_advice_says_no_restart_is_needed_when_something_is_supervising(self):
+        assert "without a restart" in self._writing(False, _Reloading())["meanwhile"]
+
+    def test_the_write_tools_carry_the_same_caveat(self):
+        """A model told its save takes effect would otherwise wait for a heater that nothing
+        is going to start - the same distinction the save result itself reports."""
+        assert "restarted" in self._writing(True, None)["takes_effect"]
+
+    def test_and_do_not_carry_it_when_it_does_not_apply(self):
+        assert "restarted" not in self._writing(True, _Reloading())["takes_effect"]
