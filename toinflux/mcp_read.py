@@ -922,7 +922,7 @@ def _retention_for(session, influx_settings, db):
             return _v2_retention(session, influx_settings, db)
         return _v1_retention(session, influx_settings, db)
     except SourceConnectionError as exc:
-        logging.warning("Could not read retention configuration for %r: %s", db, exc)
+        logging.warning("Could not read retention configuration for %r: %r", db, exc)
         return {"known": False, "reason": str(exc)}
 
 
@@ -1513,7 +1513,7 @@ def current_state_result(source, settings, settings_file):
                 fields, as_of = _instance_state(handler)
                 instances[instance] = {"fields": fields, "as_of": as_of}
             except SourceConnectionError as exc:
-                logging.warning("Could not read current state for %s: %s", handler.worker_label, exc)
+                logging.warning("Could not read current state for %s: %r", handler.worker_label, exc)
                 instances[instance] = {"error": str(exc)}
                 failures += 1
         if failures == len(handlers):

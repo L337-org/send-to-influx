@@ -339,7 +339,7 @@ class MqttDataHandler(DataHandler):
         try:
             on_message(topic, payload)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            logging.warning("Error handling MQTT message on topic '%s': %s", topic, exc, exc_info=True)
+            logging.warning("Error handling MQTT message on topic '%s': %r", topic, exc, exc_info=True)
 
     @staticmethod
     def _drop_oldest_and_enqueue(message_queue, item, topic) -> None:

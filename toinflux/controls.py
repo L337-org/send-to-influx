@@ -264,7 +264,7 @@ def list_controls(settings_file=None):
         try:
             require_valid_control_name(name)
         except ConfigError as exc:
-            logging.warning("Ignoring %r in the control directory: %s", entry, exc)
+            logging.warning("Ignoring %r in the control directory: %r", entry, exc)
             continue
         names.append(name)
     return names

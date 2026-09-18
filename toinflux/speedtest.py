@@ -234,7 +234,7 @@ class Speedtest(DataHandler):
             self.send_data()
         except InfluxWriteError as exc:
             recorded = False
-            logging.warning("Triggered Speedtest ran but recording it to InfluxDB failed: %s", exc)
+            logging.warning("Triggered Speedtest ran but recording it to InfluxDB failed: %r", exc)
         result = {}
         for name, value in sorted((data or {}).items()):
             entry = {"value": value}
