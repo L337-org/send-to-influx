@@ -11,6 +11,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import copy
 import os
 import socket
 import ssl
@@ -24,8 +25,9 @@ import pytest
 import requests
 
 from tests.harness import census, faults, invariants
-from tests.harness.bridge import StubBridge, plug
+from tests.harness.bridge import StubBridge, bulb, plug
 from tests.harness.certificates import write_self_signed
+from tests.harness.endpoints import Request
 from tests.harness.installation import conservatory
 from toinflux.controls import control_dir, load_control, validate_control
 from toinflux.exceptions import SourceConnectionError
@@ -689,3 +691,76 @@ class TestTheEnergisedInvariantRefusesWhatItCannotCheck:
         """The refusal must not have swallowed the check it exists to protect."""
         bridge.lights["1"]["state"]["on"] = True
         assert invariants.devices_unenergised(bridge, ["far"]).violations == ["'far' is still on"]
+
+
+class TestTheBridgeGetIsASnapshot:
+    """A reply the bridge has decided must not change under it.
+
+    `dict(light)` shared the nested `state` with the live light, and `_set_state` mutates
+    that in place. The server is threaded and the chaos driver drives many controls against
+    one bridge, so a command landing between the GET releasing the lock and the handler
+    serialising the payload would alter a reply already returned - a flaky harness, which is
+    worse than a failing one because it discredits every assertion built on it.
+
+    Driven through `respond()` rather than over HTTPS: the property under test is that the
+    returned object is independent of the live one, and the window being closed is between
+    that return and the serialisation the server does afterwards.
+    """
+
+    @staticmethod
+    def _get(bridge):
+        """Ask the bridge for every light, the way its server does.
+
+        Args:
+            bridge (StubBridge): the bridge to ask
+
+        Returns:
+            dict: the lights payload
+        """
+        request = Request(at=0.0, method="GET", path=f"/api/{bridge.user}", query={}, body=None)
+        status, payload = bridge.respond(request)
+        assert status == 200, payload
+        return payload["lights"]
+
+    @staticmethod
+    def _put(bridge, light_id, state):
+        """Command one light, the way its server does.
+
+        Args:
+            bridge (StubBridge): the bridge to command
+            light_id (str): which light
+            state (dict): the state fragment
+        """
+        request = Request(
+            at=0.0,
+            method="PUT",
+            path=f"/api/{bridge.user}/lights/{light_id}/state",
+            query={},
+            body=state,
+        )
+        bridge.respond(request)
+
+    def test_a_later_command_does_not_alter_a_reply_already_returned(self, bridge):
+        """The race itself, made deterministic: the reply is held while a command lands."""
+        reply = self._get(bridge)
+        before = copy.deepcopy(reply)
+        self._put(bridge, "1", {"on": True})
+        assert reply == before, "the earlier reply changed when a later command arrived"
+
+    def test_the_reply_still_reports_the_state_at_the_time(self, bridge):
+        """The snapshot must be of the real thing rather than of a stale copy."""
+        self._put(bridge, "1", {"on": True})
+        assert self._get(bridge)["1"]["state"]["on"] is True
+
+    def test_mutating_the_reply_does_not_reach_the_bridge(self, bridge):
+        """The other direction: a caller editing what it was handed must not move a device."""
+        reply = self._get(bridge)
+        reply["1"]["state"]["on"] = True
+        assert bridge.energised()["far"] is False
+
+    def test_a_nested_capability_is_copied_too(self, bridge):
+        """`bulb()` nests `capabilities` a second level, which a per-key copy would miss."""
+        bridge.lights["7"] = bulb("lamp")
+        reply = self._get(bridge)
+        reply["7"]["capabilities"]["control"]["maxlumen"] = 1
+        assert bridge.lights["7"]["capabilities"]["control"]["maxlumen"] == 806

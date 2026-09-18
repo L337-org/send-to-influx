@@ -15,6 +15,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import copy
 import time
 from dataclasses import dataclass
 
@@ -120,7 +121,14 @@ class StubBridge(StubEndpoint):
             return 200, [{"error": {"type": 1, "address": "/", "description": "unauthorized user"}}]
         if request.method == "GET" and len(parts) == 2:
             with self.lock:
-                return 200, {"lights": {lid: dict(light) for lid, light in self.lights.items()}}
+                # Deep, not `dict(light)`. A shallow copy shares the nested `state` with
+                # `self.lights`, and `_set_state` mutates that dict in place - so a PUT
+                # arriving on another thread after this lock is released, but before the
+                # handler serialises the payload, would change a reply already decided. The
+                # server is threaded and the chaos driver runs many controls against one
+                # bridge, so the two do overlap. `capabilities` on a bulb is nested a second
+                # level, which is why this copies wholesale rather than picking out `state`.
+                return 200, {"lights": copy.deepcopy(self.lights)}
         if request.method == "PUT" and len(parts) == 5 and parts[2] == "lights" and parts[4] == "state":
             return self._set_state(parts[3], request.body)
         return 404, [{"error": {"type": 3, "address": request.path, "description": "resource not available"}}]
