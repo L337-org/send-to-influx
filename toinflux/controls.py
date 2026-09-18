@@ -619,12 +619,18 @@ def _check_scalars(name, document, errors) -> None:
 
 
 def validate_control(name, document):
-    """Check one control document completely: its shape, then its rules.
+    """Check one control document completely: its shape, then its rules, then its sources.
 
     The one call a caller should make. Everything that reads a stored document goes
     through here - ``--check-config``, the supervisor, a control process starting, the
     test harness - so that "is this document usable" has a single answer rather than each
     caller assembling its own and getting a different one.
+
+    Three halves, each answering a question the others cannot:
+    :func:`validate_control_structure` for the shape the store requires,
+    :func:`validate_control_rules` for what the rule parser will accept, and
+    :func:`validate_control_sources` for whether the sources named exist and can do what is
+    asked of them. A caller wanting only one of those can call it directly.
 
     Args:
         name (str): the control's name, which its ``name`` key must agree with
@@ -633,7 +639,63 @@ def validate_control(name, document):
     Returns:
         list: human-readable problems, empty when the document is sound
     """
-    return validate_control_structure(name, document) + validate_control_rules(document)
+    return (
+        validate_control_structure(name, document)
+        + validate_control_rules(document)
+        + validate_control_sources(document)
+    )
+
+
+def validate_control_sources(document):
+    """Check that every source a control names exists and can do what is asked of it.
+
+    The third half, and the one that asks a question the document cannot answer about
+    itself: whether ``hue`` is a source this build knows, and whether it can switch a
+    device, are facts about the code rather than about the file.
+
+    **A devices entry needs more than a readable source.** ``MCP_ACTUATES_DEVICES`` is the
+    narrow claim - this source can switch a named device on and off - and it is not implied
+    by a source being writable at all. Without this check, a control naming a source that
+    cannot actuate passed ``--check-config``, started, and failed on its first command, a
+    cycle window after being told the configuration was fine.
+
+    Structure is not re-reported here. A section that is not a mapping, an entry that is
+    not a mapping, a missing or non-string ``source``: each is named precisely by the
+    structural check, and saying it twice has an operator looking for two faults.
+
+    Args:
+        document (dict): the parsed document
+
+    Returns:
+        list: human-readable problems, empty where every source named can do its job
+    """
+    from toinflux.general import source_class
+
+    errors = []
+    for key, must_actuate in (("inputs", False), ("devices", True)):
+        entries = document.get(key)
+        if not isinstance(entries, dict):
+            continue
+        for entry_name, entry in sorted(entries.items(), key=lambda item: str(item[0])):
+            # An entry name that is not a string is the structural check's to report, and it
+            # does. Reporting a source fault against it as well would name the same broken
+            # key twice, in two different vocabularies.
+            if not isinstance(entry_name, str) or not isinstance(entry, dict):
+                continue
+            source = entry.get("source")
+            if not isinstance(source, str) or not source.strip():
+                continue
+            where = f"{key}[{entry_name!r}]"
+            try:
+                handler = source_class(source)
+            except ConfigError:
+                errors.append(f"{where}: source {source!r} is not one this build collects from")
+                continue
+            if must_actuate and not getattr(handler, "MCP_ACTUATES_DEVICES", False):
+                errors.append(
+                    f"{where}: source {source!r} cannot switch a device on and off, so a control " f"cannot actuate it"
+                )
+    return errors
 
 
 def validate_control_rules(document):

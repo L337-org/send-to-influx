@@ -41,6 +41,57 @@ MINIMUM_INTERVAL_KEY = "minimum_interval"
 MAX_AGE_KEY = "max_age"
 
 
+#: What every continuation line of a multi-line log record is prefixed with. Two spaces is
+#: enough because the only property that matters is that it is not a digit: a real entry
+#: begins with the year, so an indented line cannot be read as the start of one.
+LOG_CONTINUATION_INDENT = "  "
+
+
+class IndentedFormatter(logging.Formatter):
+    """A formatter whose records cannot forge a second log entry.
+
+    Every entry this project writes begins with a timestamp, and the packaged install sends
+    them to ``/var/log/send-to-influx.log`` through rsyslog - a plain, line-oriented file. So
+    a newline anywhere in a record lets whatever follows it start a line of its own, and a
+    line of its own can be written to look exactly like a genuine entry::
+
+        2026-09-18 08:23:58 ERROR    Could not make control 'conservatory' safe: ...
+        AttributeError: no such attribute
+        2026-09-18 01:00:00 INFO     Conservatory heating is off      <- forged
+
+    That text arrives from outside: a vendor library's exception message, a YAML parser
+    quoting a document, a device name somebody chose. Rendering external values with ``%r``
+    is the first defence and covers the values this project interpolates deliberately; it
+    cannot cover a traceback, whose final line is the exception's message verbatim at column
+    zero.
+
+    Indenting every line after the first closes it for all of them at once, and costs
+    nothing a reader wants: a stack trace stays a stack trace, two spaces further in.
+    Stripping the newlines instead would defend the same ground and turn a traceback into
+    one long smear, which is the diagnostic this exists to preserve.
+    """
+
+    def format(self, record):
+        """Format one record, indenting everything after its first line.
+
+        Args:
+            record (logging.LogRecord): the record to render
+
+        Returns:
+            str: the formatted record, with no line after the first able to begin like an entry
+        """
+        rendered = super().format(record)
+        # splitlines() rather than split("\n"), and it earns the difference: a lone carriage
+        # return breaks a line for a terminal and for several log readers, and so do the form
+        # feed, the next-line character and the unicode separators. Splitting on "\n" alone
+        # leaves every one of those able to start a line this has not indented, which is the
+        # whole thing being prevented. Rejoining with "\n" normalises them on the way out.
+        lines = rendered.splitlines()
+        if len(lines) <= 1:
+            return rendered
+        return lines[0] + "\n" + "\n".join(LOG_CONTINUATION_INDENT + line for line in lines[1:])
+
+
 def configure_logging(
     logfile=None, loglevel="INFO", log_max_bytes=DEFAULT_LOG_MAX_BYTES, log_backup_count=DEFAULT_LOG_BACKUP_COUNT
 ):
@@ -59,7 +110,7 @@ def configure_logging(
     Raises:
         ConfigError: the logfile path cannot be opened for writing
     """
-    fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    fmt = IndentedFormatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     root = logging.getLogger()
 
     resolved_level = getattr(logging, str(loglevel).upper(), None)

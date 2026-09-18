@@ -1,6 +1,7 @@
 """Unit tests for toinflux.general (load_settings, get_class)."""
 
 import logging
+import io
 import os
 import tempfile
 from pathlib import Path
@@ -8,6 +9,8 @@ from unittest.mock import patch
 import pytest
 import yaml
 from toinflux.general import (
+    IndentedFormatter,
+    configure_logging,
     MCP_DEFAULT_BIND_ADDRESS,
     expand_sources,
     flatten_dict,
@@ -1063,3 +1066,123 @@ class TestRenderValues:
 
     def test_the_separator_can_be_chosen(self):
         assert render_values(["a", "b"], separator="; ") == "'a'; 'b'"
+
+
+class TestLogRecordsCannotForgeAnEntry:
+    """Every entry begins with a timestamp, and the packaged install sends them to
+    `/var/log/send-to-influx.log` through rsyslog - a plain, line-oriented file. A newline
+    anywhere in a record therefore lets whatever follows start a line of its own, and that
+    line can be written to look exactly like a genuine entry.
+
+    `%r` on an external value is the first defence and covers what the project interpolates
+    deliberately. It cannot cover a traceback, whose last line is the exception's message
+    verbatim at column zero - which is how this was found.
+    """
+
+    FORMAT = "%(asctime)s %(levelname)-8s %(message)s"
+
+    def _render(self, call):
+        """Log through the project's formatter and return the lines it produced.
+
+        Args:
+            call (callable): given a logger, emits the record under test
+
+        Returns:
+            list: the rendered lines
+        """
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(IndentedFormatter(self.FORMAT, datefmt="%Y-%m-%d %H:%M:%S"))
+        logger = logging.getLogger(f"forge-{id(call)}")
+        logger.handlers = [handler]
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        call(logger)
+        return stream.getvalue().splitlines()
+
+    @staticmethod
+    def _starts_like_an_entry(line):
+        """Whether a line could be read as the beginning of a log entry.
+
+        Args:
+            line (str): one rendered line
+
+        Returns:
+            bool: True where it opens with a four-digit year, as every real entry does
+        """
+        return len(line) >= 4 and line[:4].isdigit()
+
+    def test_a_newline_in_an_exception_message_cannot_start_a_line(self):
+        """The case review found. The forged text is still in the log - suppressing it would
+        lose the diagnostic - but it cannot pass itself off as an entry of its own."""
+        forged = "2026-09-18 01:00:00 INFO     Conservatory heating is off"
+
+        def emit(logger):
+            try:
+                raise AttributeError(f"no such attribute\n{forged}")
+            except AttributeError as exc:
+                logger.exception("Could not make control %r safe: %r", "conservatory", exc)
+
+        lines = self._render(emit)
+        assert any(forged in line for line in lines), "the message was lost, not just made safe"
+        assert [line for line in lines if self._starts_like_an_entry(line)] == [lines[0]]
+
+    def test_a_newline_in_an_interpolated_value_cannot_start_a_line(self):
+        """Not only tracebacks. Any message carrying external text has the same exposure,
+        which is why this lives in the formatter rather than at one call site."""
+        lines = self._render(
+            lambda logger: logger.error("Device %s reported", "kitchen\n2026-09-18 01:00:00 INFO     all off")
+        )
+        assert [line for line in lines if self._starts_like_an_entry(line)] == [lines[0]]
+
+    @pytest.mark.parametrize(
+        "separator",
+        [
+            pytest.param("\n", id="newline"),
+            pytest.param("\r", id="carriage-return"),
+            pytest.param("\r\n", id="crlf"),
+            pytest.param("\x85", id="next-line"),
+            pytest.param("\u2028", id="line-separator"),
+            pytest.param("\f", id="form-feed"),
+        ],
+    )
+    def test_every_character_that_breaks_a_line_is_caught(self, separator):
+        """Splitting on "\\n" alone was the first attempt and leaves all of the others able to
+        start a line this has not indented, which is the whole thing being prevented. A lone
+        carriage return breaks a line for a terminal and for several log readers, and so do
+        the form feed, the next-line character and the unicode separators."""
+        lines = self._render(
+            lambda logger: logger.error("Device %s reported", f"kitchen{separator}2026-01-01 00:00:00 INFO forged")
+        )
+        assert [line for line in lines if self._starts_like_an_entry(line)] == [lines[0]]
+
+    def test_configure_logging_actually_installs_it(self, tmp_path):
+        """The tests above build the formatter directly, so every one of them passes against
+        a project that defines it and never uses it - which is what happened when this was
+        first written. Asserted on the handlers configure_logging leaves behind, which is the
+        only thing that decides what reaches the log."""
+        configure_logging(logfile=str(tmp_path / "out.log"))
+        installed = [h for h in logging.getLogger().handlers if getattr(h, "_send_to_influx_handler", False)]
+        assert installed, "configure_logging attached no handler of its own"
+        assert all(isinstance(h.formatter, IndentedFormatter) for h in installed), [
+            type(h.formatter).__name__ for h in installed
+        ]
+
+    def test_a_single_line_record_is_left_exactly_as_it_was(self):
+        """The common case pays nothing: no trailing newline, no indent, no change."""
+        (line,) = self._render(lambda logger: logger.info("Control %r started", "conservatory"))
+        assert line.endswith("Control 'conservatory' started")
+
+    def test_the_traceback_is_still_readable(self):
+        """Indenting rather than stripping, because the stack is the diagnostic this exists
+        to preserve - stripping newlines would defend the same ground and leave a smear."""
+
+        def emit(logger):
+            try:
+                raise ValueError("boom")
+            except ValueError:
+                logger.exception("failed")
+
+        lines = self._render(emit)
+        assert lines[1] == "  Traceback (most recent call last):"
+        assert lines[-1] == "  ValueError: boom"
