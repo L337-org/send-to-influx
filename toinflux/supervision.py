@@ -814,20 +814,17 @@ class Supervisor:
                 # Not a substitute for the specific fixes: the case that prompted it is
                 # refused at validation now. It is the floor under them.
                 #
-                # `exception` rather than `error`, so the traceback comes with it. That is a
-                # deliberate trade and the only place in this subsystem that makes it: a
-                # traceback ends with the exception's raw message, so a vendor library whose
-                # message contains newlines can put lines of its choosing into the journal,
-                # which everywhere else here is prevented by rendering with %r.
+                # `exception` rather than `error`, so the traceback comes with it. This branch
+                # exists for a failure nobody predicted, from a library this project does not
+                # control, on a thread that must not die - without the stack the log says
+                # something unexpected happened inside make_safe and nothing about where.
                 #
-                # Kept because this branch exists precisely for a failure nobody predicted,
-                # arriving from a library this project does not control, on a thread that
-                # must not die. Without the stack, the log says something unexpected happened
-                # inside make_safe and nothing about where - and the rule is that a failure
-                # is diagnosable the first time it happens, on a machine nobody can reach.
-                # The summary line itself is still safe: %r carries the type and quotes the
-                # message, so the forged text can only appear inside the indented traceback
-                # below a line that already names what went wrong.
+                # Safe to carry a traceback because IndentedFormatter indents every line after
+                # the first, so nothing inside one can begin like a log entry. Review raised
+                # this as log forging and was right: a traceback's last line is the exception's
+                # message at column zero, which %r elsewhere cannot reach. Fixed in the
+                # formatter rather than here, because the exposure was never specific to this
+                # call site.
                 logging.exception("Could not make control %r safe, and the reason was unexpected: %r", name, exc)
 
     def _documents_for(self, name):

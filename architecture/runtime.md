@@ -157,6 +157,34 @@ Once the child has exited, draining continues for `_DRAIN_GRACE_SECONDS` and the
 whatever still holds that pipe is not going to close it. Output the command produced before
 that point is still returned.
 
+## Logging (`toinflux/general.py`)
+
+`IndentedFormatter` prefixes every line of a record after the first with two spaces, and the
+reason is not cosmetic. Every entry begins with a timestamp and the packaged install sends
+them through rsyslog to `/var/log/send-to-influx.log`, a plain line-oriented file - so a
+newline anywhere in a record lets what follows start a line of its own, and that line can be
+written to look exactly like a genuine entry:
+
+```
+2026-09-18 08:23:58 ERROR    Could not make control 'conservatory' safe: ...
+AttributeError: no such attribute
+2026-09-18 01:00:00 INFO     Conservatory heating is off      <- forged, column zero
+```
+
+Rendering external values with `!r` is the first defence and covers what this project
+interpolates deliberately. It cannot cover a **traceback**, whose last line is the
+exception's message verbatim at column zero - which is how this was found, in review of the
+supervisor's broad catch. Indenting closes it for every message at once, and the only
+property that matters is that an indent is not a digit.
+
+It splits with `splitlines()` rather than on `"\n"`. A lone carriage return breaks a line for
+a terminal and for several log readers, and so do the form feed, the next-line character and
+the unicode separators; splitting on `"\n"` alone leaves each of them able to start a line
+nothing has indented. Rejoining with `"\n"` normalises them on the way out.
+
+Indenting rather than stripping the newlines, because a stack trace is the diagnostic the
+broad catch exists to preserve and stripping would leave one long smear.
+
 ## Control configuration (`toinflux/controls.py`)
 
 A control is a closed loop holding something at a target by actuating a device. Each is a
