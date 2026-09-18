@@ -271,5 +271,12 @@ behind any write flag: a control document holds no secrets, and being able to as
 being controlled and whether it is running should not require granting the ability to change
 it.
 
+Add `controls.mcp_write` and three more appear: `save_control` (create or replace a document,
+validated before anything is written), `set_control_enabled` (turn one on or off without
+rewriting it) and `delete_control`. Each takes effect without restarting the service. With the
+flag off, those three are not registered at all rather than present and refusing, and
+`get_control_schema` says so and names the setting - so an assistant can tell "this install
+has not enabled writing" from "this build cannot", and tell you which.
+
 With the subsystem switched off they are not registered at all, so a connected model does not
 see tools it cannot use.

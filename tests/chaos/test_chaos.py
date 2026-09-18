@@ -144,7 +144,10 @@ def _chaos_run(installation, seed, ticks):
         supervisor.stop_all()
         reports = [
             invariants.devices_unenergised(
-                installation.bridge, [d for doc in documents.values() for d in doc["devices"]]
+                installation.bridge,
+                # The bridge's names, not the documents' keys for them. The two need not
+                # agree, and passing keys used to check nothing at all rather than failing.
+                [spec["device"] for doc in documents.values() for spec in doc["devices"].values()],
             ),
             invariants.nothing_leaked(before, census.quiet_after(before, os.getpid())),
         ]

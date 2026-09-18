@@ -374,16 +374,27 @@ class TestTheSurfaceIsVersionIndependent:
                 )
 
     def test_nothing_registers_a_tool_around_the_registrar(self):
-        # The effect test above cannot catch a bypass on 3.13+, where the compiler hides
-        # it, so the source is checked directly - the one guard that fails on every
-        # version, including the machine the mistake is made on.
+        """No module reaches past `register_tool()` to `@server.tool` directly.
+
+        The effect test above cannot catch a bypass on 3.13+, where the compiler hides it, so
+        the source is checked - the one guard that fails on every version, including the
+        machine the mistake is made on.
+
+        **Every `mcp_*` module, discovered rather than listed.** It named `mcp_read` and
+        `mcp_write` while four modules registered tools, so `mcp_dashboards` and
+        `mcp_controls` could have bypassed the registrar and this would have passed. A
+        hand-maintained list of the modules to check is a list somebody forgets to extend,
+        which is the same failure as the bypass it is guarding against.
+        """
         import pathlib
 
         root = pathlib.Path(__file__).resolve().parent.parent
-        for module in ("toinflux/mcp_read.py", "toinflux/mcp_write.py"):
-            text = (root / module).read_text(encoding="utf-8")
+        modules = sorted((root / "toinflux").glob("mcp*.py"))
+        assert modules, "no MCP modules were found to check, so this guard is not guarding"
+        for module in modules:
+            text = module.read_text(encoding="utf-8")
             assert "@server.tool(" not in text, (
-                f"{module} registers a tool directly with @server.tool - use "
+                f"{module.name} registers a tool directly with @server.tool - use "
                 f"@register_tool(server, ...) so the docstring is dedented first"
             )
 

@@ -299,18 +299,47 @@ network-facing server.
 
 ## Control tools (`toinflux/mcp_controls.py`, `register_control_tools()`)
 
-Read-only: `list_controls` for what is stored and what is running, `get_control` for one document as
-held on disk, and `get_control_schema` for the document format itself.
+Six tools in two tiers behind two switches.
 
-**Register them only where `controls.enabled` is true.** A capability that is switched off should be
+**`controls.enabled` registers the read tier**: `list_controls` for what is stored and what is
+running, `get_control` for one document as held on disk, and `get_control_schema` for the document
+format itself. **`controls.mcp_write` then adds the write tier**: `save_control`,
+`set_control_enabled` and `delete_control`.
+
+**Neither switch implies the other, and `control_writes_enabled()` requires both.** Running the loops
+an operator wrote is not the same act as handing a model authorship of them, and an authored control
+actuates devices unattended for as long as it exists - a larger grant than a collector's
+`mcp_read_write`, which permits an action now where this permits a standing rule that keeps acting.
+Both are read with a strict `is True`. The predicate checks both rather than only its own key: one
+that half-answers its own question is one a later call site gets wrong, in the direction of granting
+a capability.
+
+**Register each tier only where its switch is true.** A capability that is switched off should be
 absent from the advertised surface rather than present and refusing, because a tool a model can see
 is a tool it will try.
 
-They are deliberately not behind the flag that permits *writing* controls. A control document holds
-no secrets, and gating "what is this install controlling, and is it running" behind the switch that
-permits changing a heating loop would mean nobody could look without also granting that. The same
-applies to `get_control_schema` despite its reason for existing being to serve writing: an
-installation where nothing may write controls can still be asked for a document to paste in by hand.
+Reading is deliberately not behind the write flag. A control document holds no secrets, and gating
+"what is this install controlling, and is it running" behind the switch that permits changing a
+heating loop would mean nobody could look without also granting that. The same applies to
+`get_control_schema` despite its reason for existing being to serve writing: an installation where
+nothing may write controls can still be asked for a document to paste in by hand.
+
+**Absence cannot explain itself, so `get_control_schema` reports the write state.** With the write
+tools unregistered a model cannot tell "this installation has not enabled writing" from "this build
+cannot write controls" - the tool list is identical and the likely guess is wrong. So the schema
+result names `controls.mcp_write`, the settings file in effect and the directory a document would go
+in by hand, and that advice is conditional on a supervisor existing, because there is none when
+nothing was supervisable at startup - which is exactly the state an install with no controls yet is
+in, and exactly the person being told how to write their first one.
+
+**`save_control` is not idempotent, deliberately.** A second save with the same document requests
+another reload, and a reload stops a running control, makes its devices safe and starts it again -
+so repeating the call moves heaters. `set_control_enabled` is idempotent for the opposite reason: it
+returns early when nothing would change. Validation lives in the tool layer rather than in the store,
+which writes what it is given on purpose, and a rejected save writes nothing - so the control that
+was there keeps running the document it already had. Replacing a control reports which sections
+changed and which of those decide which devices are commanded and when, because a whole-document tool
+cannot otherwise tell a caller it rewrote a stage ladder it meant to leave alone.
 
 **Pass the supervisor in to `build_mcp_server()` rather than looking it up.** It runs in a thread of
 this same process, so reading it is an ordinary method call - but it is read from the MCP server's
@@ -349,8 +378,9 @@ in step. `ReadSchema`/`build_schema()` combine those with a live field set.
 
 They are different attributes and confusing them gives wrong answers.
 
-`MCP_TAG_FILTERS` pins a tag to one value (`device=zappi`) to disambiguate a source within a shared
-measurement. `MCP_INSTANCE_TAG` names the tag separating *producers* within one source's
+`MCP_TAG_FILTERS` pins a tag to one value to disambiguate a source within a shared measurement. It
+is a class constant and so cannot vary per instance, which is why MyEnergi no longer uses it: see
+`mcp_tag_filters()` below. `MCP_INSTANCE_TAG` names the tag separating *producers* within one source's
 measurement - something to enumerate, scope by, and report per value.
 
 Having only the first is what made a two-host Speedtest install give wrong answers: both hosts'
@@ -360,10 +390,13 @@ Grafana honoured the dimension all along; the MCP layer flattened it. It is set 
 means different things - a collecting host, a bridge, a lock, a device - and most sources genuinely
 have one producer.
 
-- **`discover_tag_values()` is the exact analogue of `discover_measurement_keys()`.** `SHOW TAG VALUES` gives the live allowlist
-  an `instance` argument is validated against, so a value never written is refused rather than
-  answered confidently with nothing. Discovered rather than
-  configured, so a host that started reporting yesterday is queryable today with no config change.
+- **`discover_tag_values()` is the exact analogue of `discover_measurement_keys()`.** `SHOW TAG VALUES`
+  gives the live half of the allowlist an `instance` argument is validated against, so a value that
+  is neither written nor configured is refused rather than answered confidently with nothing.
+  **Discovered *and* configured, and for a shared measurement configured only** - see the union rule
+  above: a host that started reporting yesterday is queryable today with no config change, while a
+  configured target that has not reported yet is queryable too, and for the MyEnergi trio discovery
+  is skipped entirely because a discovered `device` label cannot be attributed to one of the three.
   Verified identical on real InfluxDB 1.8 and 2.7's v1-compatibility endpoint - worth checking,
   since that same endpoint reports bucket retention as `0s`.
 - **Payload shape depends on the source, never on how many producers it happens to have.** Scoped,
@@ -446,9 +479,12 @@ comparable without knowing which version produced them.
 ### Query construction
 
 - **A measurement is not always the source name.** `openmeteo` writes to `weather`, and the three
-  MyEnergi devices share the `myenergi` measurement distinguished by a `device` tag, so their
-  classes set `MCP_MEASUREMENT`/`MCP_TAG_FILTERS` or a query for one device would return all three.
-  Every other source owns its measurement, leaving `MCP_MEASUREMENT` as `None`.
+  MyEnergi devices share the `myenergi` measurement distinguished by a `device` tag, so their classes
+  set `MCP_MEASUREMENT` or a query for one device would return all three. The discrimination itself
+  comes from `mcp_tag_filters()` per instance rather than from `MCP_TAG_FILTERS`, which is empty on
+  the shared parent and set by none of the three: once `device` carries the operator's own label, a
+  class constant cannot name it. Every other source owns its measurement, leaving `MCP_MEASUREMENT`
+  as `None`.
 - **Injection defence is layered**, because InfluxQL has no identifier parameter binding. The
   measurement and tags come from the source class's static schema, never model input. A requested
   field must exactly match a key discovered live via `SHOW FIELD KEYS` - the field set *is* the
@@ -635,9 +671,10 @@ unit, value mappings decoding a coded field, and a series alias.
 - **An undeclared numeric field gets no `kind` and is suggested `last`**, the one aggregation that
   cannot be wrong for any kind. Suggesting `mean` would say averaging is safe about a field that may
   be a counter.
-- **A tag already pinned by `MCP_TAG_FILTERS` is not grouped by** (`series_tags()`): a Zappi pins
-  `device` to its own label, so grouping by it would add a series dimension with one member. Hue's
-  `host` and Nuki's `device` are real axes and are grouped.
+- **A tag the schema already pins is not grouped by** (`series_tags()` subtracts
+  `schema.tag_filters` from `schema.tag_keys`): a Zappi pins `device` to its own label - through
+  `mcp_tag_filters()`, not the class constant - so grouping by it would add a series dimension with
+  one member. Hue's `host` and Nuki's `device` are real axes and are grouped.
 - **Alias every panel, including single-series ones.** Without an alias Grafana names the series
   after the query - a Zappi energy panel came back as `myenergi.last` on a real Grafana - so a grouped
   panel gets `$tag_<key>` and an ungrouped one the bare field name, a literal alias verified to pass
@@ -740,7 +777,9 @@ Every tool, prompt and resource description, plus their titles, is held to the A
 rather than to ordinary documentation standards: a model reads it to choose what to call, and every
 byte is paid for on each session that loads it.
 
-`tests/test_mcp_surface.py` guards the prose half across all four registration modules. It enforces:
+`tests/test_mcp_surface.py` guards the prose half across every registration module - it builds the
+surface from all six registrars, so a tool that registers nowhere in that fixture is measured by
+nothing. It enforces:
 
 - a description and a distinct title on everything registered;
 - a `SIBLINGS` table naming every registered tool, so a new tool fails until someone has decided
@@ -753,10 +792,15 @@ byte is paid for on each session that loads it.
 Line wrapping is normalised away before matching: a docstring keeps its newlines, so
 `changes nothing` split across a break would fail a guard the description satisfies.
 
-Measured with that module's fixture - two sources, both write-enabled, so every tool, prompt and
-per-source resource registers - the surface went from **10,162 bytes to 13,296** in the prose pass:
-tools 9,937 to 11,252, prompts 225 to 523, resources 0 to 1,521. The growth is where the surface was
-*silent* rather than merely terse:
+The fixture registers everything an install can advertise: two sources, both write-enabled, and both
+control switches on, so all six registrars contribute. **Read the ceilings in
+`tests/test_mcp_surface.py` for the current figures rather than trusting a number written here** -
+they are asserted on every run, and a number in prose is only right on the day it is typed.
+
+What the prose pass itself cost, as a historical record: the surface went from 10,162 bytes to 13,296
+- tools 9,937 to 11,252, prompts 225 to 523, resources 0 to 1,521. It has grown well beyond that
+since, mostly through the control tools. The growth in that pass was where the surface was *silent*
+rather than merely terse:
 
 - The three resources carried no description at all from 5.0 to 5.3, so a client enumerating
   `resources/list` saw a URI and a name and nothing about what it held, what reading it cost, or
@@ -782,19 +826,25 @@ its first CI run.
 CPython 3.13 strips a docstring's leading indentation at compile time; 3.10-3.12 do not, and the SDK
 advertises `fn.__doc__` verbatim (`func_doc = description or fn.__doc__ or ""`). So on the older half
 of the supported range - which the `.deb` explicitly allows with `Depends: python3 (>= 3.10)` -
-every continuation line of every tool description reached the model carrying eight leading spaces:
-**14,569 bytes advertised on 3.12 against 13,297 on 3.14**, the 1,272-byte difference being pure
-whitespace, paid for on every session and invisible to anyone developing on 3.13+.
+every continuation line of every tool description reached the model carrying eight leading spaces.
+Measured on the surface as it stood when this was found: **14,569 bytes advertised on 3.12 against
+13,297 on 3.14**, the 1,272-byte difference being pure whitespace, paid for on every session and
+invisible to anyone developing on 3.13+. The surface has grown since, so those two totals date the
+defect rather than describe the artefact - what carries forward is the per-session cost of the bug,
+not the figures.
 
 `register_tool()` passes `description=inspect.cleandoc(fn.__doc__)`, so every supported version
 advertises the same bytes. Two guards, because one cannot do it: the *effect* is asserted - no
 advertised description carries an indented line - which is real on 3.10-3.12 and trivially true on
-3.13+; and the *source* is asserted - `@server.tool(` appears in neither registration module - which
-is the only check that fails on the machine where the mistake is made.
+3.13+; and the *source* is asserted - `@server.tool(` appears in no `toinflux/mcp*.py` module, discovered
+by glob rather than named, because a hand-kept list is one somebody forgets to extend - which is the
+only check that fails on the machine where the mistake is made.
 
-Verified by simulation as well as by CI: re-indenting each 3.14 description the way 3.10-3.12
-present it and pushing it back through `cleandoc` reproduces `query_history` at exactly the 2,209
-bytes CI reported, and returns every tool description to byte-identical.
+Verified by simulation as well as by CI at the time: re-indenting each 3.14 description the way
+3.10-3.12 present it and pushing it back through `cleandoc` reproduced `query_history` at exactly the
+2,209 bytes CI reported, and returned every tool description to byte-identical. That description is
+shorter now, so the figure will not reproduce - the method is the point, and it is what the guards
+above run on every version.
 
 ### Translate anticipated failures, and never with a bare `except Exception`
 

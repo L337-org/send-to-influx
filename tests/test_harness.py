@@ -603,17 +603,47 @@ class TestCheckingThemTogether:
 class TestTheProcessFaults:
     def test_a_stopped_process_is_alive_and_silent(self):
         """The case a heartbeat exists for, and the case "is the process still there"
-        answers wrongly."""
+        answers wrongly.
+
+        **The silence is what this asserts, and it did not.** `poll() is None` is true whether
+        or not the signal was delivered, so with `faults.stopped` replaced by a no-op context
+        manager the test still passed - it proved the child was alive and nothing else, while
+        the child went on writing a tick every 50ms into an unread pipe. A fault that had
+        stopped working looked exactly like one that worked.
+        """
+        import selectors
+
         child = subprocess.Popen(
             [sys.executable, "-c", "import sys,time\nwhile True:\n print('tick', flush=True); time.sleep(0.05)"],
             stdout=subprocess.PIPE,
             text=True,
         )
+
+        def produced_within(seconds):
+            """Whether the child writes anything in that window.
+
+            Args:
+                seconds (float): how long to wait
+
+            Returns:
+                bool: True where something became readable
+            """
+            with selectors.DefaultSelector() as selector:
+                selector.register(child.stdout, selectors.EVENT_READ)
+                return bool(selector.select(timeout=seconds))
+
         try:
             assert child.stdout.readline().strip() == "tick"
             with faults.stopped(child):
-                time.sleep(0.3)
+                # Drain what was already in flight when the signal landed, so what follows is
+                # about the stopped process rather than about the pipe's buffer.
+                time.sleep(0.1)
+                while produced_within(0):
+                    child.stdout.readline()
                 assert child.poll() is None, "a stopped process is still alive"
+                # Six tick intervals. A running child fills this window; a stopped one cannot.
+                assert not produced_within(0.3), "the process kept writing, so it was never stopped"
+            assert produced_within(1.0), "the process never resumed, so the fault did not unwind"
         finally:
             child.kill()
             child.wait()
@@ -622,3 +652,40 @@ class TestTheProcessFaults:
     def test_killing_reports_the_signal_that_ended_it(self):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         assert faults.kill(child) == -9
+
+
+class TestTheEnergisedInvariantRefusesWhatItCannotCheck:
+    """The one invariant whose failure is measured in kilowatt-hours, and it used to report
+    clean when handed names the bridge did not recognise.
+
+    `energised.get(name)` returned None for an unknown name, so an unrecognised entry
+    contributed no violation and no skip - byte-identical output to a healthy run while every
+    heater stayed on. It held together only because the fixtures happened to name each
+    control's device key the same as the bridge's light. The document format does not require
+    that, and this repository already breaks it: a control keyed `porch` drives `porch-heater`.
+    """
+
+    def test_an_unknown_name_is_refused_rather_than_skipped(self, bridge):
+        with pytest.raises(AssertionError, match="does not have"):
+            invariants.devices_unenergised(bridge, ["far", "no-such-light"])
+
+    def test_the_refusal_names_what_the_bridge_does_have(self, bridge):
+        """So the fix is obvious from the failure rather than needing the source."""
+        with pytest.raises(AssertionError, match="far"):
+            invariants.devices_unenergised(bridge, ["no-such-light"])
+
+    def test_a_document_key_that_is_not_the_bridge_name_is_refused(self, bridge):
+        """The exact shape the chaos driver used to pass: `devices` dict keys."""
+        control = {
+            "devices": {"heater_far": {"source": "hue", "device": "far"}},
+            "output": {"stages": [{"level": 0, "set": {"heater_far": False}}]},
+        }
+        with pytest.raises(AssertionError):
+            invariants.devices_unenergised(bridge, list(control["devices"]))
+        names, _allowed = invariants.declared_states(control)
+        assert invariants.devices_unenergised(bridge, list(names.values())).violations == []
+
+    def test_a_real_name_still_reports_normally(self, bridge):
+        """The refusal must not have swallowed the check it exists to protect."""
+        bridge.lights["1"]["state"]["on"] = True
+        assert invariants.devices_unenergised(bridge, ["far"]).violations == ["'far' is still on"]

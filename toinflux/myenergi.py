@@ -353,7 +353,8 @@ class MyEnergi(DataHandler):
             quantity here where a stale value is worse than none.
         MCP_INSTANCE_TAG (str): "device" - the trio share one measurement, so each point names
             which device produced it.
-        MCP_TAG_FILTERS (dict): empty on this shared parent; each concrete device sets its own.
+        MCP_TAG_FILTERS (dict): empty, and stays empty - the filter varies per instance, so it comes
+            from ``mcp_tag_filters()`` rather than from a class constant that cannot vary.
     """
 
     # myenergi's cloud API rather than the hardware: a third party, and one whose director

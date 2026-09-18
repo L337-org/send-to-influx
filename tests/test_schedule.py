@@ -44,7 +44,7 @@ def _transitions(year, zone):
     return days
 
 
-def _minutes_inside(period, day, zone, hours=6):
+def _minutes_inside(period, day, hours=6):
     """Count the real minutes spent inside a window during a span of one UTC day.
 
     Walked in UTC, so the count is of actual elapsed time rather than of local clock
@@ -124,7 +124,7 @@ class TestDaylightSaving:
         during an hour that did not occur.
         """
         spring = _transitions(2026, LONDON)[0][0]
-        assert _minutes_inside(_period("01:15", "01:45"), spring, LONDON) == 0
+        assert _minutes_inside(_period("01:15", "01:45"), spring) == 0
 
     def test_a_window_inside_the_repeated_hour_runs_twice(self):
         """The clocks go back over 01:15-01:45, so that window happens twice - sixty real
@@ -134,7 +134,7 @@ class TestDaylightSaving:
         time means what the wall clock says.
         """
         autumn = _transitions(2026, LONDON)[1][0]
-        assert _minutes_inside(_period("01:15", "01:45"), autumn, LONDON) == 60
+        assert _minutes_inside(_period("01:15", "01:45"), autumn) == 60
 
     def test_an_overnight_window_is_an_hour_shorter_and_longer_across_them(self):
         """The consequence for the real conservatory window, as real minutes of heating.

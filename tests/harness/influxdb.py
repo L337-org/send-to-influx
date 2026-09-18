@@ -64,6 +64,12 @@ class StubInflux(StubEndpoint):
     def age_reading(self, field, seconds) -> None:
         """Move one field's timestamp back, so it reads as that much older.
 
+        **Only visible while the clock is frozen.** ``_series`` stamps a reply with
+        ``time.time()`` unless ``frozen`` is set, so ageing a reading on a running clock
+        changes the stored timestamp and nothing a reader sees - and a max-age test written
+        that way passes for the wrong reason. Every call site pairs the two; this says so
+        rather than leaving the next one to find out.
+
         Args:
             field (str): the field key
             seconds (float): how much older to make it
