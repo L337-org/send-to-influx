@@ -273,7 +273,13 @@ class StubEndpoint:
                 certificate = write_self_signed()
                 self._own_certificate_dir = os.path.dirname(certificate[0])
             certificate_path, key_path = certificate
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            # The platform's own server defaults rather than a bare `SSLContext`, which
+            # accepts TLS 1.0 and 1.1 - flagged by CodeQL, and the project's rule is to take
+            # the stack's defaults rather than hand-pick versions. Nothing here needs an old
+            # protocol: the only client is this project's own `requests` session, so a stub
+            # that refuses TLS 1.0 tests the same thing while carrying no weak-protocol
+            # example for somebody to copy into product code.
+            context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
             context.load_cert_chain(certificate_path, key_path)
             self._server.socket = context.wrap_socket(self._server.socket, server_side=True)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
