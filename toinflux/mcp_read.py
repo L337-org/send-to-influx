@@ -16,7 +16,7 @@ binding:
 * A requested field must exactly match a key the server itself discovered via
   ``SHOW FIELD KEYS`` against that measurement - the live field set is the
   allowlist, which also handles collectors whose field names are dynamic (Hue
-  sensor names, per-lock Nuki prefixes).
+  sensor and light names).
 * Every identifier that reaches a query is additionally validated against a
   strict charset and double-quoted with escaping.
 * Time bounds are parsed in Python and re-emitted as RFC3339; the model's raw
@@ -147,8 +147,8 @@ class ReadSchema:
     ``measurement`` and ``tag_filters`` are the source class's static domain
     knowledge (never model input); ``allowed_fields`` is the live field set
     discovered from InfluxDB (the injection allowlist); ``field_metadata`` maps a
-    field key - or a ``_``-delimited suffix, for collectors with dynamic prefixes
-    like Nuki's per-lock fields - to a dict of annotations, **every key optional**:
+    field key - or a ``_``-delimited suffix, which matches the device-prefixed keys
+    Nuki wrote before 5.3 (see :func:`metadata_for`) - to a dict of annotations, **every key optional**:
     ``unit`` (str), ``codes`` (``{int: str}``), ``kind`` (one of
     :data:`FIELD_KINDS`) and ``description`` (str). A key is absent rather than
     empty where a source has nothing to say, so read it with ``.get()`` - a flag
@@ -1790,8 +1790,8 @@ def build_documentation(settings, settings_file):
         "where it has one and how it may be aggregated: a gauge is an instantaneous reading (never "
         "sum them), an interval total is a quantity accumulated over its reporting period (sum them "
         "for a total), a counter a running total that resets (take its last value or a difference, "
-        "never its mean), a state a discrete code or label. Field keys may carry a per-device prefix "
-        "(e.g. a Nuki lock's name); the meanings below are keyed by the base name.",
+        "never its mean), a state a discrete code or label. Field keys written before 5.3 may carry a "
+        "per-device prefix (e.g. a Nuki lock's name); the meanings below are keyed by the base name.",
         "",
     ]
     for source in configured_sources(settings):

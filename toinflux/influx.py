@@ -234,8 +234,8 @@ class DataHandler:
     # measurement outright.
     MCP_TAG_FILTERS: dict = {}
     # Field annotation for the read tools: maps a field key - or a _-delimited
-    # suffix, for collectors with dynamic prefixes (Nuki's per-lock fields) - to
-    # any of:
+    # suffix, which matches the device-prefixed keys Nuki wrote before 5.3 and no
+    # collector writes today - to any of:
     #   "unit"        display unit, e.g. "W", "kWh", "°C". Omitted where a field
     #                 genuinely has none (a flag, a text label, a status code).
     #   "codes"       {int: str} meanings for a numeric-coded field, so a state
@@ -953,7 +953,7 @@ def build_edge_time_query(measurement, tag_filters, order, group_by_tag=None):
     the caller reads only the ``time`` column. Enumerating them here would put every field
     key in the query string, and that string travels in a GET parameter: measured against a
     real InfluxDB with a 120-field measurement, the enumerated form was a 3.4 KB query, and a
-    measurement grows with device count (a Nuki install prefixes fields per lock). A wide
+    measurement grows with device count (Hue writes a field per sensor and per light). A wide
     enough estate would exceed a reverse proxy's request-line limit, failing a read that has
     no need of the width. Tag columns coming back in the row are harmless when no value is
     read from it.

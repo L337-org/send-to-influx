@@ -419,8 +419,8 @@ them.
 **It selects `*` rather than enumerating fields**, unlike `build_latest_query`, because only the
 `time` column is read. The query travels in a GET parameter, and measured against a real InfluxDB a
 120-field measurement produced a **3.4 KB** query string when enumerated, against 46 characters now.
-A measurement grows with device count - Nuki prefixes fields per lock - so a wide enough estate would
-exceed a reverse proxy's request-line limit on a read with no need of the width. Tag columns in the
+A measurement grows with device count - Hue writes a field per sensor and per light - so a wide
+enough estate would exceed a reverse proxy's request-line limit on a read with no need of the width. Tag columns in the
 returned row are harmless when no value is read from it; `build_latest_query` still enumerates,
 because it does read values and must exclude them.
 
