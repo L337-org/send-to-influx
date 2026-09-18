@@ -293,8 +293,11 @@ looked like Python but bound differently would be worse than one that looked not
   `(a < b) < c`; both are defensible and they disagree, so it is refused with a message naming
   the `and` form to write instead.
 - **Names resolve when the rule is parsed**, against what the control declared, so an undeclared
-  name is a `--check-config` failure rather than a surprise at three in the morning. A rule
-  reports the names it reads, which is how the loop knows what to fetch.
+  name is a `--check-config` failure rather than a surprise at three in the morning. A parsed rule
+  also reports the names it reads, as `Rule.referenced`, but nothing in the product reads it:
+  `gather()` fetches every input the document declares, whether a rule mentions it or not. One
+  consequence worth knowing before changing either half - an input no rule reads is still fetched,
+  and if it is stale it fails the whole cycle.
 
 Keep `RuleSyntaxError` and `RuleEvaluationError` distinct. `RuleSyntaxError` is a `ConfigError`:
 the rule is wrong and waiting will not fix it. `RuleEvaluationError` is not: the rule is fine and

@@ -155,7 +155,12 @@ class TestEdges:
             assert (decision.edge, decision.apply) == ("closed", "unenergised")
 
     def test_a_night_runs_as_one_open_and_one_close(self):
-        """The shape an operator would recognise, rather than a property in isolation."""
+        """The shape an operator would recognise, rather than a property in isolation.
+
+        Confirms each closing edge the way the loop does, because a closing edge is not
+        spent until its command has been applied. Without that the close repeats every
+        cycle, which is exactly the retry the repetition exists to provide.
+        """
         gate = Gate(_document())
         edges = []
         for hour, outside in ((23, 10.0), (0, 9.0), (3, 9.0), (4, 20.0), (5, 20.0), (12, 20.0)):
@@ -163,6 +168,8 @@ class TestEdges:
             decision = gate.decide({"outside": outside}, moment)
             if decision.edge:
                 edges.append((f"{hour:02d}:40", decision.edge))
+            if decision.edge == "closed":
+                gate.closed()
         assert edges == [("04:40", "closed")], edges
 
 
@@ -420,3 +427,66 @@ class TestInARealProcess:
         assert _commanded_in(record) == []
         _run_child(_guard_script(str(record), assert_only=True))
         assert _commanded_in(record)[0] == {"far": False, "near": False}
+
+
+class TestAClosingEdgeIsNotSpentUntilItIsApplied:
+    """The edge carries a command, and the loop has not run it when `decide` returns.
+
+    Recording it as spent immediately meant a command that raised was never retried: the
+    next cycle saw no change, so no edge and no actuation, and the loop slept with the
+    devices still energised until the window reopened - eighteen hours for the motivating
+    case, from one transient bridge failure at 05:25.
+
+    Nothing else covered it. The fail-safe applies `safe_state`, not the `end_state` that
+    just failed, and with `safe_state: leave_unchanged` it commands nothing at all. The
+    supervisor's own safe-state pass runs only from `_drop`, `_stop`, `_reap` and
+    `stop_all` - every one a death or a stop - so a control that is alive and beating is
+    never made safe by the parent.
+    """
+
+    @staticmethod
+    def _closed_gate():
+        """Return a gate that has just acted, and its first closing decision.
+
+        Returns:
+            tuple: (the gate, the closing decision)
+        """
+        gate = Gate(_document())
+        assert gate.decide({"outside": 5.0}, NIGHT).actuating is True
+        decision = gate.decide({"outside": 5.0}, DAY)
+        assert decision.edge == "closed"
+        return gate, decision
+
+    def test_the_edge_repeats_while_the_command_has_not_been_confirmed(self):
+        """This is the retry. Nothing else re-commands the devices."""
+        gate, first = self._closed_gate()
+        again = gate.decide({"outside": 5.0}, DAY)
+        assert again.edge == "closed", "the edge was consumed before its command was applied"
+        assert again.apply == first.apply
+
+    def test_confirming_it_stops_the_repeat(self):
+        """Otherwise every subsequent cycle would re-command devices already in place,
+        which is the thing edge-triggering exists to avoid."""
+        gate, _ = self._closed_gate()
+        gate.closed()
+        assert gate.decide({"outside": 5.0}, DAY).edge is None
+
+    def test_confirming_twice_is_not_an_error(self):
+        gate, _ = self._closed_gate()
+        gate.closed()
+        gate.closed()
+        assert gate.decide({"outside": 5.0}, DAY).edge is None
+
+    def test_reopening_after_a_confirmed_close_still_reports_an_opening_edge(self):
+        """The control has to resume, and `resume` is what back-computes the integral."""
+        gate, _ = self._closed_gate()
+        gate.closed()
+        assert gate.decide({"outside": 5.0}, NIGHT).edge == "opened"
+
+    def test_an_opening_edge_is_spent_immediately(self):
+        """It carries no command, so there is nothing that could fail and nothing to wait
+        for. Repeating it would call `resume` every cycle."""
+        gate = Gate(_document())
+        assert gate.decide({"outside": 5.0}, DAY).actuating is False
+        assert gate.decide({"outside": 5.0}, NIGHT).edge == "opened"
+        assert gate.decide({"outside": 5.0}, NIGHT).edge is None

@@ -229,7 +229,10 @@ class TestNames:
         assert "nothing" in str(exc.value)
 
     def test_a_rule_reports_which_names_it_reads(self):
-        # The control loop uses this to know which inputs it must fetch before evaluating.
+        # Not used by the control loop, whatever this comment said before: `gather()` fetches
+        # every declared input regardless. This asserts the parser's own reporting, which is
+        # all it has ever tested - a claim about a caller is not something a parser test can
+        # make, and stating one here meant nobody noticed the caller did not exist.
         rule = parse_rule("max(target, dew + 5)", NAMES)
         assert rule.referenced == frozenset({"target", "dew"})
 

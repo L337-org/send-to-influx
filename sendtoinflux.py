@@ -712,6 +712,13 @@ def _start_control_supervisor(settings, args):
     Returns None where the subsystem is switched off or no controls are stored, so the
     ordinary collector install starts nothing and says nothing.
 
+    **Nothing is started under --print or --dump**, for the same reason those modes start
+    no MCP server, and with more at stake: they are interactive debugging commands that
+    print a reading and exit, and starting the supervisor made them spawn a child per
+    control and actuate real devices. --dump was the worse half - the atexit handler then
+    commanded every device to its safe state on the way out, so asking what a source
+    currently reports switched the operator's heating off.
+
     Args:
         settings (dict): the parsed settings document
         args (argparse.Namespace): the parsed command line
@@ -719,6 +726,8 @@ def _start_control_supervisor(settings, args):
     Returns:
         Supervisor or None: the running supervisor, already started
     """
+    if args.print or args.dump:
+        return None
     if not controls_enabled(settings):
         return None
     names = list_controls(args.settings)

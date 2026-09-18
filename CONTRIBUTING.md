@@ -29,6 +29,13 @@ isn't covered here, look in `architecture/`.
 │   ├── process.py          # run_command() - the only place this project starts a process
 │   ├── controls.py         # control documents: where they live, reading/writing, structural validation
 │   ├── rules.py            # the control rule language: tokenise(), parse_rule(), Rule.evaluate()
+│   ├── supervision.py      # the parent side: starts one child per control, watchdog, backoff, safe state
+│   ├── control_process.py  # the child side: one control's cycle - gather, decide, command, fail safe
+│   ├── controller.py       # the PID itself, on simple-pid, and the checks that keep it out of nan
+│   ├── gating.py           # whether a control may act this cycle (enabled/period/enable_when), DeviceGuard
+│   ├── schedule.py         # the active period in the control's own zone, across daylight saving
+│   ├── staging.py          # the stage ladder and time-proportioning between adjacent rungs
+│   ├── inputs.py           # reading a control's inputs: InfluxDB first, live fetch past max_age
 │   ├── credentials.py      # systemd-creds substitution into loaded settings
 │   ├── credential_cli.py   # send-to-influx-set-credential
 │   ├── influx.py           # DataHandler base class - owns send_data() (line protocol + InfluxDB HTTP POST)

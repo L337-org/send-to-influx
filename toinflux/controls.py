@@ -539,6 +539,19 @@ def _check_one_stage(where, stage, device_names, errors) -> None:
             f"{where}.set: does not say what to do with {_render_names(missing)} - "
             f"every stage must assign every device"
         )
+    # **The state must be a real boolean, and this is the dangerous direction.** The loop
+    # commands `on=bool(state)`, and every non-empty string is truthy - so a quoted
+    # `"false"` or `"no"`, which is what somebody writes when they are being careful with
+    # YAML, energised the device. On the level 0 rung that turned the everything-off rung
+    # into an everything-on rung, and it passed --check-config clean. Unquoted `off`/`no`/
+    # `false` are YAML booleans and were always right; quoting them silently inverted the
+    # meaning. `level` above has been guarded against the same class since it was written.
+    wrong = {name for name, state in assignments.items() if name in device_names and not isinstance(state, bool)}
+    if wrong:
+        errors.append(
+            f"{where}.set: must be true or false for {_render_names(wrong)} - "
+            f"a quoted 'false' is a string, and every non-empty string switches the device on"
+        )
 
 
 def _check_active_period(document, errors) -> None:
