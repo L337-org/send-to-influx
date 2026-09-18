@@ -232,14 +232,15 @@ ever running a test.
 
 ## Keep the OAuth state in the systemd `StateDirectory`, not `/etc`
 
-This was broken from 5.0 until 5.3. The service runs as `send-to-influx` while `postinst` leaves
-`/etc/send-to-influx` root-owned 755, so `save()` could create neither the state file nor the `.tmp`
-its atomic write needs beside it. `PermissionError` was logged and persistence degraded to nothing,
-exactly as the error said - and because access tokens are in-memory anyway, the only symptom was a
-connected MCP client re-authorising after **every** restart, which an operator meets at upgrades.
+The service runs as `send-to-influx` while `postinst` leaves `/etc/send-to-influx` root-owned 755,
+so `save()` can create neither the state file nor the `.tmp` its atomic write needs beside it.
+Persistence then degrades to nothing with only a logged `PermissionError`, and because access tokens
+are in-memory anyway the sole symptom is a connected MCP client re-authorising after **every**
+restart.
 
-Neither suite caught it: the unit tests asserted the resolved *path*, the packaging suite that the
-server *bound*, and `save()` is deliberately non-fatal so nothing raised.
+That failure is invisible to both suites: a unit test asserting the resolved *path* and a packaging
+test asserting the server *bound* both pass, and `save()` is deliberately non-fatal so nothing
+raises.
 
 `resolve_state_path()` prefers `$STATE_DIRECTORY`, the same shape as
 `apply_credential_substitution()`'s `$CREDENTIALS_DIRECTORY`: set by systemd only for a unit that
@@ -528,10 +529,9 @@ a kind.
 - **`build_documentation` deliberately does not use the hook.** The generated reference promises no
   InfluxDB round trip - `get_documentation`'s own description says so - so it keeps reading the class
   attribute, and a source with only per-install metadata is absent from it. That is the honest
-  trade; `list_fields` is where those fields are described. It was wired to the hook by mistake once,
-  which broke the promise with nothing failing, so
-  `test_the_reference_uses_the_class_attribute_and_never_the_hook` asserts the hook is not called at
-  all.
+  trade; `list_fields` is where those fields are described. `test_the_reference_uses_the_class_attribute_and_never_the_hook`
+  asserts the hook is not called at all, because wiring it up breaks the promise with nothing
+  failing.
 - **A field key is not unique across bridges**, so the lookup groups by `host` as well as `device`:
   two bridges with a device of the same name write the *same* field key under different host tags.
   Where they are the same class it is described once; where they disagree it is described not at all,
@@ -579,13 +579,9 @@ serve different readers - a model choosing a field, versus a maintainer reading 
 disagreements with vendor documentation - so neither is derived from the other, and comparing them
 would force them to converge on whichever reader was served worse.
 
-It caught two real defects on its first run, neither visible to any existing test: UNITS.md gave
-Speedtest's unit as "bits per second" against the metadata's `bits/s`, and its own code-table parser
-read past `stateValue`'s table into `doorsensorStateValue`'s.
-
 ### The four MyEnergi day/hour fields are hourly, not daily
 
-Found while writing their descriptions. `get_data()` calls `dayhour_results(..., now.hour)`, and the
+`get_data()` calls `dayhour_results(..., now.hour)`, and the
 matching-hour branch *assigns* that hour's value and breaks rather than accumulating, so
 `Charge`/`Import`/`Export`/`Genera` hold the current hour's energy and reset on the hour.
 
@@ -655,11 +651,11 @@ quantity accumulated over a reporting period. Octopus's `consumption_kwh` and `g
 the energy used during one interval and Open-Meteo's `precipitation` is what fell during one, so
 summing them is not merely allowed - it is how a daily total is obtained.
 
-Those three were declared gauges, so the tool steered callers away from the correct aggregation, and
-**only a suppressed review comment surfaced it**. Dropping `sum` from gauge's list fixed those three
-and made the warning useless for every real gauge; keeping it kept the wrong advice. Neither
-statement is true of one class, so the class was split: `gauge` now warns against `sum` soundly, and
-`interval` recommends it.
+Declaring those three as gauges steers callers away from the correct aggregation, and the
+contradiction is invisible to every behaviour test - it took a suppressed review comment to surface.
+Dropping `sum` from gauge's list would make the warning useless for every real gauge; keeping it
+keeps the wrong advice. Neither statement is true of one class, hence the split: `gauge` warns
+against `sum` soundly, and `interval` recommends it.
 
 **The interval's duration is deliberately not in the schema.** A sum is correct whatever it is, so
 the aggregation guidance does not need it; it is observable anyway, since Octopus stamps each point
@@ -670,8 +666,7 @@ this project discards. A field populated for one of three cases would be worse t
 
 Two tests hold the split in place. `test_an_interval_quantity_is_a_kind_of_its_own` fails if one of
 the three moves back to `gauge`; `test_no_declared_gauge_is_really_an_interval_quantity` fails if any
-*other* field describes itself as per-interval while calling itself a gauge, which is how the
-contradiction arose the first time. It exempts a description saying "average", since an average over
+*other* field describes itself as per-interval while calling itself a gauge. It exempts a description saying "average", since an average over
 an interval is still a reading and summing averages means nothing.
 
 **That second test is a keyword heuristic, not a proof.** It matches "during one", "accumulated" and
@@ -691,9 +686,9 @@ Emitting the four unmapped units as `suffix:` forms would therefore work - `suff
 bare string, because a bare one would silently adopt Grafana's formatter, possibly one that rescales,
 if a real id of that name were ever added.
 
-The belief this replaces - that an unknown id renders as *no* unit - was never checked against
-Grafana's source, only against an inconclusive grep of its minified bundle, and inconclusive was
-recorded as settled. `GRAFANA_UNITS` still covers only ids read out of a running Grafana's bundle,
+Treat the previous entry here as unsound rather than as a decision: it claimed an unknown id renders
+as *no* unit, on an inconclusive grep of Grafana's minified bundle that was recorded as settled.
+`GRAFANA_UNITS` still covers only ids read out of a running Grafana's bundle,
 and W/m², gCO2/kWh, pence/kWh and "kWh or m³" still get no `unit` key - now because nobody has
 decided to add them rather than because it would not work.
 
@@ -814,13 +809,13 @@ plain `Exception`, so without the translation every deliberate message this serv
 withheld and every ordinary caller mistake is logged as a crash. Both registrars share one
 `translate_failures()`, so which failures count as anticipated is decided once.
 
-**Catch the one base class, `ToInfluxError`.** The base is what makes a new project exception
-covered by inheriting. It was a listed pair of subclasses and the list went stale - `ConfigError`
-was never added, so every unconfigured-device failure reached the model with its message withheld.
+**Catch the one base class, `ToInfluxError`**, never a list of subclasses: the base is what makes a
+new project exception covered by inheriting, and a list goes stale silently - every failure of the
+omitted type reaches the model with its message withheld.
 
-Dressing a bug up as a deliberate failure loses exactly what the SDK's rule protects: the bare
-`AttributeError` `build_query` used to raise on a schema with no axis would reach the model as
-though it were an instruction to the caller, with no traceback logged.
+Equally, never widen it to `except Exception`. Dressing a bug up as a deliberate failure loses what
+the SDK's rule protects: a bare `AttributeError` would reach the model as though it were an
+instruction to the caller, with no traceback logged.
 
 The wrapper matches the tool's own sync/async-ness, because the SDK decides whether to await by
 asking `is_async_callable(fn)`. An async wrapper around a sync tool would run its body on the event
@@ -850,8 +845,7 @@ indistinguishable from one that passed.
 Both are context that buys nothing.
 
 A *registration* precondition - "requires `hue.mcp_read_write: true`" - is guaranteed true whenever
-the model can see the tool at all, since a disabled capability is not registered. It was drafted
-into all three write tools and then removed.
+the model can see the tool at all, since a disabled capability is not registered.
 
 A `title` on a *prompt* stays a short display name, with the model-facing instructions in the
 returned message rather than in the advertised list.

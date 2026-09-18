@@ -260,11 +260,10 @@ Getting this wrong treated `ok`/`consecutive_failures` as lock names whose scala
 skipped, so **Nuki wrote no heartbeat at all**, silently, with only warnings - the exact gap the
 heartbeat exists to prevent.
 
-The tests did not catch it because every heartbeat test used a `MagicMock` handler, whose
-`send_data` never runs the source's own override: those tests assert what `send_heartbeat` *asked
-for*, never what the handler *did*. `test_every_source_actually_writes_a_heartbeat_point` drives a
-real handler per source down to the HTTP boundary, written across every source because the break
-was one subclass violating a shared contract.
+**A `MagicMock` handler cannot catch this**, because its `send_data` never runs the source's own
+override - such a test asserts what `send_heartbeat` *asked for*, never what the handler *did*.
+`test_every_source_actually_writes_a_heartbeat_point` drives a real handler per source down to the
+HTTP boundary, across every source, because the break is one subclass violating a shared contract.
 
 ### Name external values with `!r` in every message
 
@@ -349,9 +348,6 @@ Integration tests are deselected from the default `pytest` run because they need
 local run says nothing about them - and `pytest -m integration` *without* a broker skips cleanly, so it
 proves nothing either.
 
-The Nuki device-tag change left `test_mqtt_streaming.py` asserting the old prefixed field key and
-`startswith("nuki,host=")`, the exact tag the change removed, and only CI caught it.
-
 When a change alters a measurement, tag set or field key: grep `tests/integration/` for the old names;
 run that suite against a real broker (`MQTT_TEST_BROKER_HOST`/`MQTT_TEST_BROKER_PORT` point it
 anywhere, so a throwaway `eclipse-mosquitto:2` container is enough); then mutate the product back and
@@ -387,8 +383,8 @@ config - streaming is a property of the transport, not an option.
 
 `Nuki.decode_stream_message()` (with `STREAM_TOPIC_FILTER = "nuki/+/+"`) is the per-message vendor
 decode, the event-driven counterpart to `parse_nuki_data`, reusing `_decode_field` and remembering each
-device's retained `name` as its field-key prefix, warning on a duplicate-name collision as the snapshot
-path does. The snapshot path is untouched, so existing Grafana panels keep working, just denser.
+device's retained `name` as its **device label** - the `device` tag value, not a field-key prefix, since
+5.3 made field keys bare - and warning on a duplicate-name collision as the snapshot path does. The snapshot path is untouched, so existing Grafana panels keep working, just denser.
 
 ## MyEnergi multiple devices
 
