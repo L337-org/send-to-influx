@@ -228,14 +228,6 @@ class TestNames:
             parse_rule("target", set())
         assert "nothing" in str(exc.value)
 
-    def test_a_rule_reports_which_names_it_reads(self):
-        # Not used by the control loop, whatever this comment said before: `gather()` fetches
-        # every declared input regardless. This asserts the parser's own reporting, which is
-        # all it has ever tested - a claim about a caller is not something a parser test can
-        # make, and stating one here meant nobody noticed the caller did not exist.
-        rule = parse_rule("max(target, dew + 5)", NAMES)
-        assert rule.referenced == frozenset({"target", "dew"})
-
     def test_a_name_the_binding_lacks_at_runtime_fails_safe_rather_than_silently(self):
         rule = parse_rule("target + 1", NAMES)
         with pytest.raises(RuleEvaluationError) as exc:
@@ -321,7 +313,7 @@ class TestTheLanguageHasNoWayOut:
         # Normalised on the way in, so a one-shot iterable is not consumed by the first
         # membership test and then absent from the error message.
         rule = parse_rule("target", (name for name in ["target", "dew"]))
-        assert rule.referenced == frozenset({"target"})
+        assert rule.evaluate({"target": 18.0, "dew": 9.0}) == 18.0
 
     def test_a_one_shot_iterable_still_lists_the_declared_names_on_failure(self):
         with pytest.raises(RuleSyntaxError) as exc:

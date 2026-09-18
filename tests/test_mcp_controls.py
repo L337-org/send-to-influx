@@ -9,6 +9,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import logging
 import os
 
 import anyio
@@ -708,3 +709,74 @@ class TestWhetherANewControlWillActuallyStart:
 
     def test_and_do_not_carry_it_when_it_does_not_apply(self):
         assert "restarted" not in self._writing(True, _Reloading())["takes_effect"]
+
+
+class TestSavingReportsWhatItChanged:
+    """`save_control` replaces the whole document, so a client that re-composes one from
+    memory instead of reading it, changing a key and writing it back can produce something
+    that validates and is not what was there. A stage ladder with different rungs is legal,
+    so nothing else catches it. Naming what moved makes that visible instead of silent.
+    """
+
+    @staticmethod
+    def _save(stored, **changes):
+        """Save the conservatory with those top-level changes and return the result.
+
+        Args:
+            stored (Installation): the installation holding the original
+            **changes: top-level keys to replace
+
+        Returns:
+            dict: the tool's result
+        """
+        return _save_control_result("conservatory", conservatory(**changes), stored.settings_file, _Reloading())
+
+    def test_creating_reports_no_changes_at_all(self, state_directory):
+        """There is nothing to compare against, and an empty change list would read as
+        "nothing moved" for a control that did not exist a moment ago."""
+        result = _save_control_result("fresh", conservatory(name="fresh"), state_directory.settings_file, _Reloading())
+        assert "changed" not in result
+        assert result["replaced_existing"] is False
+
+    def test_an_identical_save_reports_nothing_changed(self, stored):
+        """The round-trip a well-behaved client performs when it decides not to edit."""
+        result = self._save(stored)
+        assert result["changed"] == {"sections": [], "actuation": []}
+
+    def test_changing_one_parameter_names_only_that_section(self, stored):
+        """The case the report exists to make boring: an adjustment that touched nothing else."""
+        result = self._save(stored, parameters={"target": 21.0})
+        assert result["changed"]["sections"] == ["parameters"]
+        assert result["changed"]["actuation"] == []
+
+    def test_a_rewritten_stage_ladder_is_called_out_as_actuation(self, stored):
+        """The case it exists to catch. This document validates; it simply is not the one
+        that was there, and the rungs decide what the heaters do."""
+        output = conservatory()["output"]
+        output["stages"] = [stage for stage in output["stages"] if stage["level"] != 750]
+        result = self._save(stored, output=output)
+        assert "output" in result["changed"]["actuation"]
+
+    def test_it_says_so_in_the_journal_too(self, stored, caplog):
+        """The result reaches the client; the operator reads the journal."""
+        output = conservatory()["output"]
+        output["stages"] = [stage for stage in output["stages"] if stage["level"] != 750]
+        with caplog.at_level(logging.WARNING):
+            self._save(stored, output=output)
+        assert "changed what its devices do" in caplog.text
+        assert "conservatory" in caplog.text
+
+    def test_a_parameter_change_does_not_warn(self, stored, caplog):
+        """A warning on every ordinary edit is a warning nobody reads."""
+        with caplog.at_level(logging.WARNING):
+            self._save(stored, parameters={"target": 21.0})
+        assert "changed what its devices do" not in caplog.text
+
+    def test_an_unreadable_stored_document_reports_everything_as_changed(self, stored):
+        """Not "nothing changed", which would be reassuring and wrong: going from a document
+        that will not parse to one that does is the largest change there is."""
+        with open(os.path.join(stored.state_dir, "controls", "conservatory.yaml"), "w", encoding="utf-8") as handle:
+            handle.write("{{{ not yaml")
+        result = self._save(stored)
+        assert "output" in result["changed"]["actuation"]
+        assert "parameters" in result["changed"]["sections"]
