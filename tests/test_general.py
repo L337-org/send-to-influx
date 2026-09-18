@@ -1186,3 +1186,39 @@ class TestLogRecordsCannotForgeAnEntry:
         lines = self._render(emit)
         assert lines[1] == "  Traceback (most recent call last):"
         assert lines[-1] == "  ValueError: boom"
+
+
+class TestControlsBlockValidation:
+    """Both control switches are read with a strict `is True`, so a mistyped one is silently
+    off rather than wrong. That is the worst shape for an operator: the subsystem does not
+    run, or the assistant will not write, and nothing anywhere says why."""
+
+    @pytest.mark.parametrize("key", ["enabled", "mcp_write"])
+    @pytest.mark.parametrize("value", ["true", "yes", 1, 0, None])
+    def test_a_non_boolean_switch_fails_loud(self, sample_settings, key, value):
+        """A quoted YAML boolean is the likely mistake and the silent one."""
+        sample_settings["controls"] = {key: value}
+        with pytest.raises(ConfigError, match=f"controls.{key} must be true or false"):
+            validate_settings(sample_settings)
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_real_booleans_are_accepted(self, sample_settings, value):
+        sample_settings["controls"] = {"enabled": value, "mcp_write": value}
+        validate_settings(sample_settings)
+
+    def test_no_controls_block_is_fine(self, sample_settings):
+        """Controls are opt-in; most installations never write the block at all."""
+        sample_settings.pop("controls", None)
+        validate_settings(sample_settings)
+
+    def test_a_controls_block_that_is_not_a_mapping_is_named(self, sample_settings):
+        sample_settings["controls"] = "yes please"
+        with pytest.raises(ConfigError, match="controls must be a mapping"):
+            validate_settings(sample_settings)
+
+    def test_an_unknown_key_is_not_rejected(self, sample_settings):
+        """Deliberately permissive: the controls block is where later work adds settings, and
+        a strict allow-list here would fail an install whose settings file is newer than its
+        package. The two switches are checked because they are silently ignorable."""
+        sample_settings["controls"] = {"enabled": True, "something_later": 3}
+        validate_settings(sample_settings)

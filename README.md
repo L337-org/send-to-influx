@@ -603,7 +603,8 @@ Key points:
   so package upgrades and reboots don't make the client re-authenticate.
 - **Read-only by default.** Device-control tools are opt-in per collector and aren't registered at
   all unless enabled in that collector's own settings block - when none is enabled, the write tools
-  don't exist on the server.
+  don't exist on the server. The same is true of the control-loop write tools, which need
+  `controls.mcp_write` on top of `controls.enabled`.
 
 **Example nginx config.** Give the server its own subdomain and serve it at the root - its OAuth
 flow uses several root-level routes (`/authorize`, `/token`, `/.well-known/oauth-*`, `/login`), so a
@@ -844,12 +845,19 @@ watching:
 
 ```yaml
 controls:
-  enabled: true
+  enabled: true      # run the stored controls
+  mcp_write: true    # let a connected model write them for you
 ```
 
 That is deliberately not the per-source `mcp_read_write` flag. Wanting a heating loop is not the
 same as granting a connected model device-write access, and one setting governing both would force
 anyone wanting the first to accept the second.
+
+`mcp_write` is the second, separate opt-in, and neither implies the other. It lets a connected
+model create, change and delete controls, effective without a restart - a bigger grant than
+`mcp_read_write`, which permits an action now where this permits a standing rule that keeps
+acting. With it off, a model can still read your controls and compose one for you to save by
+hand; it just cannot save it itself.
 
 Each control is its own YAML document under the state directory (`/var/lib/send-to-influx/controls`
 on the packaged install), not part of `settings.yaml`: they are created and edited by the running
