@@ -2130,9 +2130,13 @@ def _exception_renderings(source, tree, handler):
             continue
         span = source[starts[fmt.lineno - 1] + fmt.col_offset : starts[fmt.end_lineno - 1] + fmt.end_col_offset]
         specifiers = _format_specifier_positions(span)
+        carries_traceback = any(
+            keyword.arg == "exc_info" and getattr(keyword.value, "value", True) for keyword in call.keywords
+        )
         for position, argument in enumerate(call.args[first + 1 :]):
             if isinstance(argument, ast.Name) and argument.id == handler.name and position < len(specifiers):
-                yield enclosing.get(id(call), "<module>"), call.lineno, span[specifiers[position]]
+                conversion = "duplicated" if carries_traceback else span[specifiers[position]]
+                yield enclosing.get(id(call), "<module>"), call.lineno, conversion
 
 
 def _swallowed_exception_log_calls():
@@ -2190,3 +2194,30 @@ def test_the_exemption_list_names_something_real():
     }
     stale = SWALLOWED_EXCEPTION_RENDERED_FOR_A_PERSON - exempted
     assert not stale, f"these exemptions no longer match a %s log call and should be removed: {stale}"
+
+
+def test_an_exception_is_not_rendered_twice_into_one_record():
+    """Where ``exc_info`` attaches the traceback, the message does not also name the exception.
+
+    The rule above exists because a swallowed exception's log line is the only record of it,
+    so the type has to be in that line. ``exc_info=True`` puts the type in the record by
+    another route - the traceback's last line is the type and the message - so repeating it
+    in the summary prints it twice in the same entry:
+
+        WARNING  Error handling MQTT message on topic 'sensors/x': RuntimeError('boom')
+          Traceback (most recent call last):
+            ...
+          RuntimeError: boom
+
+    The message carries what the traceback cannot: which topic, which control, which file.
+    ``mcp_common.py`` already logs this way, and this is the rule it was following.
+    """
+    duplicated = [
+        f"{module}:{line} in {function}()"
+        for module, function, line, conversion in _swallowed_exception_log_calls()
+        if conversion == "duplicated"
+    ]
+    assert not duplicated, (
+        "these pass exc_info and also render the exception into the message, printing it "
+        "twice in one record: " + ", ".join(duplicated)
+    )
