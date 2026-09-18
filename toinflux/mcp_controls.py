@@ -303,9 +303,10 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
 
         To change one thing about a control that exists, read it with `get_control`, alter
         that key and send the whole document back. Composing a replacement from memory is
-        what silently rewrites a stage ladder. Replacing one returns `sections` - everything
-        that differs - and `device_plan`, the subset deciding which devices are commanded
-        and when. Read them back: an unexpected entry means you changed more than you meant.
+        what silently rewrites a stage ladder. Replacing one returns a `changed` object:
+        `sections` is everything that differs, `device_plan` the subset deciding which
+        devices are commanded and when. An unexpected entry there means you changed more
+        than you meant to.
         """
         return await anyio.to_thread.run_sync(_save_control_result, name, document, settings_file, supervisor)
 
