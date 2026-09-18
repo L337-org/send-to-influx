@@ -712,7 +712,7 @@ class SendToInfluxOAuthProvider:
             return OAuthClientInformationFull.model_validate(raw)
         except ValidationError as exc:
             logging.warning(
-                "Dropping malformed MCP OAuth client entry '%s' from %s: %r",
+                "Dropping malformed MCP OAuth client entry %r from %r: %r",
                 client_id,
                 self.state.state_path,
                 exc,

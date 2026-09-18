@@ -2037,6 +2037,11 @@ SWALLOWED_EXCEPTION_RENDERED_FOR_A_PERSON = {("sendtoinflux.py", "_configure_log
 
 
 LOG_LEVEL_METHODS = frozenset({"debug", "info", "warning", "error", "critical", "exception"})
+# `logging.log(level, msg, *args)` takes the level first, so its format string and its
+# arguments both sit one place further along than every other call above. Named here
+# rather than handled at the call site because forgetting it is invisible: the guard goes
+# on passing and simply stops looking, which is the failure mode a guard must not have.
+LOG_METHOD_WITH_LEVEL_FIRST = "log"
 
 
 def _format_specifier_positions(text):
@@ -2116,14 +2121,16 @@ def _exception_renderings(source, tree, handler):
         starts.append(starts[-1] + len(line))
     enclosing = _enclosing_function_names(tree)
     for call in (node for node in ast.walk(handler) if isinstance(node, ast.Call)):
-        if getattr(call.func, "attr", None) not in LOG_LEVEL_METHODS:
+        method = getattr(call.func, "attr", None)
+        if method not in LOG_LEVEL_METHODS and method != LOG_METHOD_WITH_LEVEL_FIRST:
             continue
-        fmt = call.args[0] if call.args else None
+        first = 1 if method == LOG_METHOD_WITH_LEVEL_FIRST else 0
+        fmt = call.args[first] if len(call.args) > first else None
         if not isinstance(fmt, ast.Constant) or not isinstance(fmt.value, str):
             continue
         span = source[starts[fmt.lineno - 1] + fmt.col_offset : starts[fmt.end_lineno - 1] + fmt.end_col_offset]
         specifiers = _format_specifier_positions(span)
-        for position, argument in enumerate(call.args[1:]):
+        for position, argument in enumerate(call.args[first + 1 :]):
             if isinstance(argument, ast.Name) and argument.id == handler.name and position < len(specifiers):
                 yield enclosing.get(id(call), "<module>"), call.lineno, span[specifiers[position]]
 

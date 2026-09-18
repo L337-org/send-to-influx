@@ -244,7 +244,7 @@ def apply_credential_substitution(settings):
     try:
         present = sorted(os.listdir(creds_dir))
     except OSError as exc:
-        logging.warning("Could not list credentials directory %s: %r", creds_dir, exc)
+        logging.warning("Could not list credentials directory %r: %r", creds_dir, exc)
         return settings
     for name in present:
         path = credential_field(name)
@@ -282,7 +282,7 @@ def _read_credential(cred_path, name):
             # one - but strip defensively in case anything else in the pipeline did.
             return handle.read().rstrip("\r\n")
     except (OSError, UnicodeDecodeError) as exc:
-        logging.warning("Could not read credential '%s' from %s: %r", name, cred_path, exc)
+        logging.warning("Could not read credential %r from %r: %r", name, cred_path, exc)
         return None
 
 
