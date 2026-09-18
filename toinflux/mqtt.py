@@ -338,8 +338,12 @@ class MqttDataHandler(DataHandler):
         """
         try:
             on_message(topic, payload)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            logging.warning("Error handling MQTT message on topic '%s': %s", topic, exc, exc_info=True)
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Not bound, because the exception is not rendered into the message: exc_info
+            # attaches the traceback, whose last line is already the type and the message,
+            # so naming it here too printed it twice in one record. The topic is the part
+            # exc_info cannot supply, and it comes from the broker, so it is quoted.
+            logging.warning("Error handling MQTT message on topic %r", topic, exc_info=True)
 
     @staticmethod
     def _drop_oldest_and_enqueue(message_queue, item, topic) -> None:

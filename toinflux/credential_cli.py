@@ -269,7 +269,7 @@ def _reload_systemd():
         # it up at the next reload or boot whether or not this one worked. Logged rather
         # than swallowed, because the symptom otherwise is a credential that only starts
         # working after an unrelated restart, with nothing saying why.
-        logging.warning("Could not reload systemd, so the new drop-in takes effect later: %s", exc)
+        logging.warning("Could not reload systemd, so the new drop-in takes effect later: %r", exc)
         return
     if not result.ok:
         logging.warning(
@@ -1013,7 +1013,7 @@ def _ensure_influx_storage(name, settings_path=None, credstore_dir=None) -> None
                 logging.info("Ensured InfluxDB v1 database '%s' exists", name)
     except Exception as exc:  # pylint: disable=broad-except
         logging.warning(
-            "Could not create InfluxDB storage '%s' automatically (%s) - create it yourself if needed.",
+            "Could not create InfluxDB storage '%s' automatically (%r) - create it yourself if needed.",
             name,
             exc,
         )

@@ -2028,3 +2028,196 @@ def test_the_worked_example_in_the_reference_survives_being_pasted():
     assert isinstance(document, dict), "the worked example does not parse as a mapping"
     problems = validate_control(document.get("name"), document)
     assert not problems, "the worked example in CONTROLS.md does not validate: " + "; ".join(problems)
+
+
+# The one place a swallowed exception is rendered with %s rather than %r, and why.
+# Keyed by module and the name of the function the call sits in, not by line number,
+# so editing the file above it does not silently move the exemption somewhere else.
+SWALLOWED_EXCEPTION_RENDERED_FOR_A_PERSON = {("sendtoinflux.py", "_configure_logging_or_exit")}
+
+
+LOG_LEVEL_METHODS = frozenset({"debug", "info", "warning", "error", "critical", "exception"})
+# `logging.log(level, msg, *args)` takes the level first, so its format string and its
+# arguments both sit one place further along than every other call above. Named here
+# rather than handled at the call site because forgetting it is invisible: the guard goes
+# on passing and simply stops looking, which is the failure mode a guard must not have.
+LOG_METHOD_WITH_LEVEL_FIRST = "log"
+
+
+def _format_specifier_positions(text):
+    """Return the index of each %-conversion's specifier character, skipping ``%%``.
+
+    Args:
+        text (str): the format string's source, which may span several concatenated literals
+
+    Returns:
+        list: one index per conversion, in order, so the Nth matches the Nth argument
+    """
+    found = []
+    index = 0
+    while index < len(text) - 1:
+        if text[index] != "%":
+            index += 1
+            continue
+        if text[index + 1] == "%":
+            index += 2
+            continue
+        cursor = index + 1
+        while cursor < len(text) and text[cursor] in "-+ #0123456789.*":
+            cursor += 1
+        if cursor < len(text):
+            found.append(cursor)
+        index = cursor + 1
+    return found
+
+
+def _enclosing_function_names(tree):
+    """Map each node to the name of the function containing it.
+
+    Args:
+        tree (ast.Module): the parsed module
+
+    Returns:
+        dict: id(node) -> the innermost enclosing function's name
+    """
+    names = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for inner in ast.walk(node):
+                names.setdefault(id(inner), node.name)
+    return names
+
+
+def _swallowing_handlers(tree):
+    """Yield every ``except X as e:`` handler that does not re-raise.
+
+    Args:
+        tree (ast.Module): the parsed module
+
+    Yields:
+        ast.ExceptHandler: a handler that binds its exception and swallows it
+    """
+    for handler in (node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)):
+        if handler.name is None:
+            continue
+        if any(isinstance(node, ast.Raise) for node in ast.walk(handler)):
+            continue
+        yield handler
+
+
+def _exception_renderings(source, tree, handler):
+    """Yield how each log call in one handler renders the exception it caught.
+
+    Args:
+        source (str): the module's source, for reading a format string's own span
+        tree (ast.Module): the parsed module
+        handler (ast.ExceptHandler): the handler to look inside
+
+    Yields:
+        tuple: (the enclosing function's name, line number, the conversion character used)
+    """
+    starts = [0]
+    for line in source.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    enclosing = _enclosing_function_names(tree)
+    for call in (node for node in ast.walk(handler) if isinstance(node, ast.Call)):
+        method = getattr(call.func, "attr", None)
+        if method not in LOG_LEVEL_METHODS and method != LOG_METHOD_WITH_LEVEL_FIRST:
+            continue
+        first = 1 if method == LOG_METHOD_WITH_LEVEL_FIRST else 0
+        fmt = call.args[first] if len(call.args) > first else None
+        if not isinstance(fmt, ast.Constant) or not isinstance(fmt.value, str):
+            continue
+        span = source[starts[fmt.lineno - 1] + fmt.col_offset : starts[fmt.end_lineno - 1] + fmt.end_col_offset]
+        specifiers = _format_specifier_positions(span)
+        carries_traceback = any(
+            keyword.arg == "exc_info" and getattr(keyword.value, "value", True) for keyword in call.keywords
+        )
+        for position, argument in enumerate(call.args[first + 1 :]):
+            if isinstance(argument, ast.Name) and argument.id == handler.name and position < len(specifiers):
+                conversion = "duplicated" if carries_traceback else span[specifiers[position]]
+                yield enclosing.get(id(call), "<module>"), call.lineno, conversion
+
+
+def _swallowed_exception_log_calls():
+    """Yield every log call that renders a caught-and-not-re-raised exception.
+
+    Yields:
+        tuple: (module path, enclosing function name, line number, the conversion used)
+    """
+    for path in _modules_that_carry_a_header():
+        if path.relative_to(REPO_ROOT).parts[0] not in PRODUCT_CODE_ROOTS:
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, str(path))
+        module = str(path.relative_to(REPO_ROOT))
+        for handler in _swallowing_handlers(tree):
+            for function, line, conversion in _exception_renderings(source, tree, handler):
+                yield module, function, line, conversion
+
+
+def test_a_swallowed_exception_keeps_its_type_in_the_log():
+    """An exception that is caught, logged and not re-raised is rendered with ``%r``.
+
+    The log line is the only record that it happened, so the type has to be in it. Nothing
+    else carries it: there is no traceback, and no ``raise ... from exc`` chain for a reader
+    to follow. ``ConfigError('hue.host is not set')`` and
+    ``SourceConnectionError('hue.host is not set')`` render identically under ``%s``, and
+    those two mean opposite things - one is stop, the other is retry.
+
+    Deliberately not applied to an exception that is re-raised, where ``from exc`` preserves
+    the chain and the traceback prints the type at the top, so ``%r`` there is noise. The
+    rule follows what the reader can otherwise recover, not a preference about quoting.
+
+    One exemption, named in ``SWALLOWED_EXCEPTION_RENDERED_FOR_A_PERSON`` above: a message
+    whose entire text is the exception, shown to somebody starting the service before it
+    exits. ``%r`` would wrap a sentence written for them in a class name and quotes.
+    """
+    wrong = [
+        f"{module}:{line} in {function}()"
+        for module, function, line, conversion in _swallowed_exception_log_calls()
+        if conversion != "r" and (module, function) not in SWALLOWED_EXCEPTION_RENDERED_FOR_A_PERSON
+    ]
+    assert not wrong, "a swallowed exception must be logged with %r so its type survives: " + ", ".join(wrong)
+
+
+def test_the_exemption_list_names_something_real():
+    """An exemption that stops matching is an exemption nobody notices has gone stale.
+
+    Without this, deleting or renaming the exempted call leaves an entry that silently
+    permits a future ``%s`` in whatever function later takes that name.
+    """
+    exempted = {
+        (module, function)
+        for module, function, _line, conversion in _swallowed_exception_log_calls()
+        if conversion != "r"
+    }
+    stale = SWALLOWED_EXCEPTION_RENDERED_FOR_A_PERSON - exempted
+    assert not stale, f"these exemptions no longer match a %s log call and should be removed: {stale}"
+
+
+def test_an_exception_is_not_rendered_twice_into_one_record():
+    """Where ``exc_info`` attaches the traceback, the message does not also name the exception.
+
+    The rule above exists because a swallowed exception's log line is the only record of it,
+    so the type has to be in that line. ``exc_info=True`` puts the type in the record by
+    another route - the traceback's last line is the type and the message - so repeating it
+    in the summary prints it twice in the same entry:
+
+        WARNING  Error handling MQTT message on topic 'sensors/x': RuntimeError('boom')
+          Traceback (most recent call last):
+            ...
+          RuntimeError: boom
+
+    The message carries what the traceback cannot: which topic, which control, which file.
+    ``mcp_common.py`` already logs this way, and this is the rule it was following.
+    """
+    duplicated = [
+        f"{module}:{line} in {function}()"
+        for module, function, line, conversion in _swallowed_exception_log_calls()
+        if conversion == "duplicated"
+    ]
+    assert not duplicated, (
+        "these pass exc_info and also render the exception into the message, printing it "
+        "twice in one record: " + ", ".join(duplicated)
+    )

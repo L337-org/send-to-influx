@@ -255,7 +255,7 @@ class _StreamSink:
             data = self.data_handler.get_data()
         except SourceConnectionError as exc:
             probe_ok = False
-            logging.warning("Health probe for streaming source '%s' failed: %s", self.source, exc)
+            logging.warning("Health probe for streaming source '%s' failed: %r", self.source, exc)
         else:
             try:
                 self._write(data)
@@ -333,7 +333,7 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures) -> None:
             use_buffer=False,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        logging.warning("Failed to write heartbeat for '%s': %s", data_handler.worker_label, exc)
+        logging.warning("Failed to write heartbeat for '%s': %r", data_handler.worker_label, exc)
     finally:
         data_handler.influx_header = original_header
 
@@ -447,7 +447,7 @@ def create_source_worker(unit, source_start_delay, args, stopped_sources, last_a
                 maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
                 _stamp_activity(last_activity, unit)
             except ConfigError as exc:
-                logging.critical("'%s' has a configuration problem and will not be retried: %s", label, exc)
+                logging.critical("'%s' has a configuration problem and will not be retried: %r", label, exc)
                 maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
                 stopped_sources.add(unit)
                 return
@@ -455,7 +455,7 @@ def create_source_worker(unit, source_start_delay, args, stopped_sources, last_a
                 failure_count += 1
                 restart_delay = get_backoff_delay(failure_count)
                 logging.warning(
-                    "'%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                    "'%s' failed: %r. Restarting in %s seconds (attempt %s).",
                     label,
                     exc,
                     restart_delay,
@@ -573,7 +573,7 @@ def register_thread_dump_handler() -> None:
     try:
         faulthandler.register(signal.SIGUSR1, all_threads=True)
     except (ValueError, OSError) as exc:
-        logging.warning("Could not register SIGUSR1 thread-dump handler: %s", exc)
+        logging.warning("Could not register SIGUSR1 thread-dump handler: %r", exc)
 
 
 def _exit_if_nothing_to_collect(units, requested, settings, args) -> None:
@@ -941,10 +941,10 @@ def _dump_source_and_exit(units, args):
             data_handler = toinflux.get_class(source, args.settings, instance=instance)
             collected[instance] = data_handler.get_data()
         except ConfigError as exc:
-            logging.critical("'%s' has a configuration problem: %s", worker_label(source, instance), exc)
+            logging.critical("'%s' has a configuration problem: %r", worker_label(source, instance), exc)
             sys.exit(1)
         except SourceConnectionError as exc:
-            logging.error("'%s' failed: %s", worker_label(source, instance), exc)
+            logging.error("'%s' failed: %r", worker_label(source, instance), exc)
             failed.append(instance)
 
     if instanced:
@@ -990,14 +990,14 @@ def run_one_worker(unit, args) -> None:
             failure_count = 0
             maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
         except ConfigError as exc:
-            logging.critical("'%s' has a configuration problem and will not be retried: %s", label, exc)
+            logging.critical("'%s' has a configuration problem and will not be retried: %r", label, exc)
             maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
             sys.exit(1)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             failure_count += 1
             restart_delay = get_backoff_delay(failure_count)
             logging.warning(
-                "'%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                "'%s' failed: %r. Restarting in %s seconds (attempt %s).",
                 label,
                 exc,
                 restart_delay,

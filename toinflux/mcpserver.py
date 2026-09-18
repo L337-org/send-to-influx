@@ -178,7 +178,7 @@ class OAuthStateStore:
                 os.chmod(self.state_path, 0o600)
             except OSError as exc:
                 logging.warning(
-                    "MCP OAuth state file %s is group/other accessible and could not be " "tightened to 0600: %s",
+                    "MCP OAuth state file %r is group/other accessible and could not be " "tightened to 0600: %r",
                     self.state_path,
                     exc,
                 )
@@ -198,7 +198,7 @@ class OAuthStateStore:
             return
         except (OSError, ValueError) as exc:
             logging.warning(
-                "MCP OAuth state file %s could not be read (%s) - starting with empty state; "
+                "MCP OAuth state file %r could not be read (%r) - starting with empty state; "
                 "connected clients will need to re-authenticate",
                 self.state_path,
                 exc,
@@ -231,7 +231,7 @@ class OAuthStateStore:
                 # A failed save degrades to pre-persistence behaviour (state lost on
                 # restart) - report it once per call, don't take the server down.
                 logging.error(
-                    "Could not persist MCP OAuth state to %s: %s - client registrations and "
+                    "Could not persist MCP OAuth state to %r: %r - client registrations and "
                     "refresh tokens will not survive a restart",
                     self.state_path,
                     exc,
@@ -712,7 +712,7 @@ class SendToInfluxOAuthProvider:
             return OAuthClientInformationFull.model_validate(raw)
         except ValidationError as exc:
             logging.warning(
-                "Dropping malformed MCP OAuth client entry '%s' from %s: %s",
+                "Dropping malformed MCP OAuth client entry %r from %r: %r",
                 client_id,
                 self.state.state_path,
                 exc,
@@ -973,10 +973,10 @@ def start_mcp_server_thread(settings, settings_file=None, supervisor=None):
                 server.run(transport="streamable-http", **run_options(settings))
                 logging.error("MCP server exited unexpectedly; restarting in %ss", SERVER_RESTART_SECONDS)
             except ConfigError as exc:
-                logging.critical("MCP server cannot start and will not be retried: %s", exc)
+                logging.critical("MCP server cannot start and will not be retried: %r", exc)
                 return
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                logging.error("MCP server failed: %s. Restarting in %ss.", exc, SERVER_RESTART_SECONDS)
+                logging.error("MCP server failed: %r. Restarting in %ss.", exc, SERVER_RESTART_SECONDS)
             time.sleep(SERVER_RESTART_SECONDS)
 
     thread = threading.Thread(target=server_worker, name="mcp-server", daemon=True)
