@@ -178,7 +178,7 @@ class OAuthStateStore:
                 os.chmod(self.state_path, 0o600)
             except OSError as exc:
                 logging.warning(
-                    "MCP OAuth state file %s is group/other accessible and could not be " "tightened to 0600: %r",
+                    "MCP OAuth state file %r is group/other accessible and could not be " "tightened to 0600: %r",
                     self.state_path,
                     exc,
                 )
@@ -198,7 +198,7 @@ class OAuthStateStore:
             return
         except (OSError, ValueError) as exc:
             logging.warning(
-                "MCP OAuth state file %s could not be read (%r) - starting with empty state; "
+                "MCP OAuth state file %r could not be read (%r) - starting with empty state; "
                 "connected clients will need to re-authenticate",
                 self.state_path,
                 exc,
@@ -231,7 +231,7 @@ class OAuthStateStore:
                 # A failed save degrades to pre-persistence behaviour (state lost on
                 # restart) - report it once per call, don't take the server down.
                 logging.error(
-                    "Could not persist MCP OAuth state to %s: %r - client registrations and "
+                    "Could not persist MCP OAuth state to %r: %r - client registrations and "
                     "refresh tokens will not survive a restart",
                     self.state_path,
                     exc,
