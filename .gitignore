@@ -8,6 +8,13 @@
 !.claude/
 .claude/settings.local.json
 
+# Runtime state written beside settings.yaml when not running under systemd, where
+# StateDirectory would otherwise put it. A source checkout is first class here, so these
+# land in the repository root and are easy to commit by accident - fetch-hue.lock already
+# was, in this file's absence.
+/locks/
+/controls/
+
 # Python
 __pycache__/
 *.py[cod]

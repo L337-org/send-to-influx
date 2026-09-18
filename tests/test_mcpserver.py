@@ -13,10 +13,13 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import anyio
+from pydantic import AnyUrl
+from starlette.requests import Request
 import pytest
 from starlette.testclient import TestClient
 
 from toinflux.exceptions import ConfigError
+from toinflux import mcpserver
 from toinflux.mcpserver import (
     ACCESS_TOKEN_TTL_SECONDS,
     LOGIN_FAILURE_LIMIT,
@@ -33,6 +36,9 @@ from toinflux.mcpserver import (
 )
 
 MCP_PUBLIC_URL = "https://mcp.example.org"
+# The protected resource these tokens are for. One constant, because a test that spelt it
+# differently from the server would be testing a pairing that cannot happen in production.
+RESOURCE_SERVER_URL = f"{MCP_PUBLIC_URL}{MCP_HTTP_PATH}"
 REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback"
 MCP_USER = "gavin"
 MCP_PASSWORD = "correct-horse"
@@ -565,6 +571,7 @@ class TestProviderInternals:
             expected_user=MCP_USER,
             expected_password=MCP_PASSWORD,
             state_store=OAuthStateStore(str(tmp_path / "state.json")),
+            resource_server_url=RESOURCE_SERVER_URL,
         )
 
     def test_expired_access_token_rejected(self, provider):
@@ -819,9 +826,142 @@ class TestPreviousReleaseStateFile:
             expected_user=MCP_USER,
             expected_password=MCP_PASSWORD,
             state_store=OAuthStateStore(str(state_file)),
+            resource_server_url=RESOURCE_SERVER_URL,
         )
         client = anyio.run(provider.get_client, "abc-123")
         assert client is not None, "a client registered under mcp 1.28.1 no longer loads"
         assert client.client_id == "abc-123"
         assert client.token_endpoint_auth_method == "client_secret_post"
         assert [str(u) for u in client.redirect_uris] == ["https://claude.ai/api/mcp/auth_callback"]
+
+
+class TestTokensAreBoundToThisResource:
+    """RFC 8707 resource indicators. A token minted for one protected resource must not work
+    against another, which is what stops a token obtained from this server being replayed
+    somewhere else - and stops one obtained elsewhere being presented here.
+
+    The check was off by omission until the mcp 2.2.0 bump warned about it, and 2.2.0 also
+    says 3.0 turns it on by default wherever `resource_server_url` is set. Turning it on
+    without stamping the resource on issued tokens would have refused every token this
+    server had minted, so the pair is one change and these tests cover both halves.
+    """
+
+    @staticmethod
+    def _backend(provider):
+        """Return the SDK's bearer backend wired the way the server wires it.
+
+        Args:
+            provider (SendToInfluxOAuthProvider): the provider under test
+
+        Returns:
+            BearerAuthBackend: the backend, validating against this server's resource
+        """
+        from mcp.server.auth.middleware.bearer_auth import BearerAuthBackend
+        from mcp.server.auth.provider import ProviderTokenVerifier
+
+        # The same wrapper the SDK puts round an auth_server_provider, so this drives the
+        # real path rather than a convenient one.
+        return BearerAuthBackend(
+            token_verifier=ProviderTokenVerifier(provider), resource_server_url=RESOURCE_SERVER_URL
+        )
+
+    @staticmethod
+    def _issue(provider):
+        """Mint a token pair the way the token endpoint does.
+
+        Args:
+            provider (SendToInfluxOAuthProvider): the provider under test
+
+        Returns:
+            OAuthToken: the issued pair
+        """
+        from mcp.shared.auth import OAuthClientInformationFull
+
+        client = OAuthClientInformationFull(
+            client_id="c", client_secret="s", redirect_uris=[AnyUrl("https://example.org/cb")]
+        )
+        return provider._issue_tokens(client, ["read"], subject="gavin")
+
+    @pytest.fixture
+    def provider(self, tmp_path):
+        """Yield a provider bound to this server's own resource.
+
+        Yields:
+            SendToInfluxOAuthProvider: the provider
+        """
+        yield SendToInfluxOAuthProvider(
+            public_url=MCP_PUBLIC_URL,
+            expected_user=MCP_USER,
+            expected_password=MCP_PASSWORD,
+            state_store=OAuthStateStore(str(tmp_path / "state.json")),
+            resource_server_url=RESOURCE_SERVER_URL,
+        )
+
+    def test_an_issued_token_carries_this_server_s_resource(self, provider):
+        issued = self._issue(provider)
+        record = anyio.run(provider.load_access_token, issued.access_token)
+        assert record.resource == RESOURCE_SERVER_URL
+
+    def test_a_token_this_server_issued_is_accepted(self, provider):
+        """The half that would break everything if the resource were not stamped: with the
+        check on and no resource on the token, the server refuses its own tokens."""
+        issued = self._issue(provider)
+        request = Request({"type": "http", "headers": [(b"authorization", f"Bearer {issued.access_token}".encode())]})
+        assert anyio.run(self._backend(provider).authenticate, request) is not None
+
+    def test_a_token_carrying_no_resource_is_refused(self, provider):
+        """The shape every token had before this change."""
+        from mcp.server.auth.provider import AccessToken
+
+        provider._access_tokens["bare"] = AccessToken(
+            token="bare", client_id="c", scopes=["read"], expires_at=int(time.time() + 300), subject="gavin"
+        )
+        request = Request({"type": "http", "headers": [(b"authorization", b"Bearer bare")]})
+        assert anyio.run(self._backend(provider).authenticate, request) is None
+
+    def test_a_token_issued_for_another_resource_is_refused(self, provider):
+        """The attack the indicator exists for: a token minted for somebody else's resource,
+        presented here."""
+        from mcp.server.auth.provider import AccessToken
+
+        provider._access_tokens["elsewhere"] = AccessToken(
+            token="elsewhere",
+            client_id="c",
+            scopes=["read"],
+            expires_at=int(time.time() + 300),
+            subject="gavin",
+            resource="https://someone-else.example.org/mcp",
+        )
+        request = Request({"type": "http", "headers": [(b"authorization", b"Bearer elsewhere")]})
+        assert anyio.run(self._backend(provider).authenticate, request) is None
+
+    def test_the_server_turns_the_check_on(self, mcp_settings):
+        server = build_mcp_server(mcp_settings)
+        assert server.settings.auth.validate_token_resource is True
+
+    def test_the_token_and_the_check_use_one_url(self, mcp_settings, tmp_path, monkeypatch):
+        """The failure that would be invisible until nobody could connect: the resource
+        stamped on a token and the resource the middleware compares it against are built from
+        one string, so they cannot end up two spellings of the same URL.
+
+        Caught by holding the provider the server actually built, rather than by building a
+        second one here and hoping it matches.
+        """
+        built = {}
+        real = mcpserver.SendToInfluxOAuthProvider
+
+        def capture(**kwargs):
+            """Build the provider and keep it.
+
+            Args:
+                **kwargs: passed straight through
+
+            Returns:
+                SendToInfluxOAuthProvider: the provider the server will use
+            """
+            built["provider"] = real(**kwargs)
+            return built["provider"]
+
+        monkeypatch.setattr(mcpserver, "SendToInfluxOAuthProvider", capture)
+        server = build_mcp_server(mcp_settings)
+        assert str(server.settings.auth.resource_server_url) == str(built["provider"].resource_server_url)

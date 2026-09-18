@@ -1,5 +1,6 @@
 """Unit tests for sendtoinflux (signal_handler, main, helper functions)."""
 
+import argparse
 import itertools
 import json
 import logging
@@ -11,6 +12,7 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 import pytest
 import sendtoinflux
+from toinflux.controls import controls_enabled
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.speedtest import Speedtest
 from toinflux.influx import DataHandler, InfluxWriteError
@@ -287,6 +289,56 @@ class TestMain:
             mock_validate_settings.assert_called_once_with(
                 {"sources": ["hue"]}, source=None, settings_path="settings.yaml", warn=True
             )
+            mock_print.assert_called_once_with("Configuration OK")
+
+    def test_main_check_config_rejects_a_broken_stored_control(self, tmp_path, monkeypatch, capsys):
+        """--check-config fails when a stored control is structurally wrong.
+
+        Controls are configuration even though they do not live in settings.yaml. An
+        operator running this is asking whether the installation would start cleanly, and
+        a stage that forgets a device would otherwise surface at the moment a control
+        process was meant to start actuating a heater.
+        """
+        from toinflux.controls import save_control
+
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        save_control("conservatory", {"inputs": {}, "pid": {}, "output": {}, "devices": {}, "enabled": "yes"})
+
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
+            patch("sendtoinflux.toinflux.validate_settings"),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
+        ):
+            mock_load_settings.return_value = {"sources": ["hue"]}
+            with pytest.raises(SystemExit) as exc_info:
+                sendtoinflux.main()
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "conservatory" in captured.err
+        # The verdict goes to stderr and stdout stays clean, the same split every other
+        # diagnostic here follows.
+        assert "conservatory" not in captured.out
+
+    def test_main_check_config_passes_with_a_sound_stored_control(self, tmp_path, monkeypatch):
+        """A well-formed control does not stop --check-config reporting OK."""
+        from tests.test_controls import a_valid_control
+        from toinflux.controls import save_control
+
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        save_control("conservatory", a_valid_control())
+
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
+            patch("sendtoinflux.toinflux.validate_settings"),
+            patch("sendtoinflux.print") as mock_print,
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
+            patch("sendtoinflux.sys.exit", side_effect=SystemExit(0)),
+        ):
+            mock_load_settings.return_value = {"sources": ["hue"]}
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
             mock_print.assert_called_once_with("Configuration OK")
 
     def test_main_check_config_validates_explicit_source_argument(self, tmp_path):
@@ -1354,7 +1406,7 @@ class TestMaybeStartMcpServer:
         args = SimpleNamespace(print=False, dump=False, settings="/etc/send-to-influx/settings.yaml")
         with patch("toinflux.mcpserver.start_mcp_server_thread") as start:
             result = sendtoinflux.maybe_start_mcp_server(self.ENABLED_SETTINGS, args)
-        start.assert_called_once_with(self.ENABLED_SETTINGS, "/etc/send-to-influx/settings.yaml")
+        start.assert_called_once_with(self.ENABLED_SETTINGS, "/etc/send-to-influx/settings.yaml", supervisor=None)
         assert result is start.return_value
 
     def test_main_does_not_start_mcp_server_when_nothing_configured(self):
@@ -1985,3 +2037,188 @@ class TestOutputStreams:
         assert json.loads(captured.out) == {"a.example.com": {"lamp": 1}}
         # ...and the failure was still reported, just elsewhere.
         assert "bridge down" in captured.err
+
+
+class TestTheControlSubsystemOptIn:
+    """Controls actuate devices unattended, so an installation that has not said it wants
+    that does not get it. Deliberately not the collector's mcp_read_write flag: wanting a
+    heating loop is not the same as granting a model device-write access."""
+
+    @pytest.mark.parametrize(
+        "settings,enabled",
+        [
+            pytest.param({"controls": {"enabled": True}}, True, id="switched-on"),
+            pytest.param({}, False, id="nothing-said"),
+            pytest.param({"controls": {}}, False, id="a-block-that-says-nothing"),
+            pytest.param({"controls": {"enabled": False}}, False, id="switched-off"),
+            pytest.param({"controls": {"enabled": "true"}}, False, id="a-string-is-not-true"),
+            pytest.param({"controls": True}, False, id="not-a-block-at-all"),
+        ],
+    )
+    def test_only_an_explicit_true_switches_it_on(self, settings, enabled):
+        """`enabled: "true"` is a string and truthy, so a loose check would start unattended
+        actuation for somebody who quoted a YAML boolean."""
+        assert controls_enabled(settings) is enabled
+
+    def test_nothing_starts_when_it_is_switched_off(self):
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        assert sendtoinflux._start_control_supervisor({}, args) is None
+
+    def test_being_switched_on_with_no_controls_says_so_rather_than_starting(self, caplog):
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        with patch("sendtoinflux.list_controls", return_value=[]):
+            with caplog.at_level(logging.WARNING):
+                assert sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args) is None
+        assert "no controls are stored" in caplog.text
+
+    def test_it_supervises_every_stored_control(self):
+        """A stand-in rather than a mock: a MagicMock invents a truthy value for any
+        attribute, which is how a test ends up asserting against something it made up."""
+        started = {}
+
+        class _Supervisor:
+            def __init__(self, names, settings_file=None):
+                started["names"] = list(names)
+                started["settings_file"] = settings_file
+                # What the supervisor actually took on, which is what the banner counts.
+                self.children = {name: object() for name in names}
+
+            def run(self, stop, poll_seconds=0.5):
+                """Record that the thread ran, and return.
+
+                Args:
+                    stop (threading.Event): unused here
+                    poll_seconds (float): unused here
+                """
+                started["ran"] = True
+
+            def stop_all(self):
+                """Record that the exit handler was registered against this."""
+                started["stopped"] = True
+
+        args = argparse.Namespace(settings="/tmp/settings.yaml", print=False, dump=False)
+        with (
+            patch("sendtoinflux.Supervisor", _Supervisor),
+            patch("sendtoinflux.list_controls", return_value=["conservatory", "porch"]),
+            patch("sendtoinflux.atexit.register") as register,
+        ):
+            supervisor = sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)
+        assert started["names"] == ["conservatory", "porch"]
+        assert started["settings_file"] == "/tmp/settings.yaml"
+        # Registered, because a signal exits through sys.exit and the daemon thread simply
+        # stops - so the last word on leaving devices safe has to run either way.
+        register.assert_called_once_with(supervisor.stop_all)
+
+
+class TestAnEmptyControlName:
+    def test_it_is_a_control_run_rather_than_a_collector_run(self):
+        """`--control ""` is a name somebody meant to pass. Treating it as absent would
+        start collecting instead of saying the name is unusable."""
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.register_thread_dump_handler"),
+            patch("sendtoinflux.toinflux.load_settings", return_value={"sources": []}),
+            patch("sendtoinflux._configure_logging_or_exit"),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux.py", "--control", ""]),
+            patch("sendtoinflux.run_control", side_effect=ConfigError("invalid control name ''")) as run,
+        ):
+            with pytest.raises(SystemExit) as exited:
+                sendtoinflux.main()
+        assert exited.value.code == 1
+        run.assert_called_once()
+
+
+class TestTheSupervisorBanner:
+    """A control skipped for being unreadable says so on its own line. A banner counting it
+    as well would have an operator looking for a process that was never started."""
+
+    def test_it_counts_what_is_supervised_rather_than_what_was_found(self, caplog):
+        class _Supervisor:
+            children = {"conservatory": object()}
+
+            def __init__(self, names, settings_file=None):
+                """Accept the names and supervise only some of them.
+
+                Args:
+                    names (iterable): what was found on disk
+                    settings_file (str or None): unused here
+                """
+
+            def run(self, stop, poll_seconds=0.5):
+                """Do nothing, as a stand-in.
+
+                Args:
+                    stop (threading.Event): unused
+                    poll_seconds (float): unused
+                """
+
+            def stop_all(self):
+                """Do nothing, as a stand-in."""
+
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        with (
+            patch("sendtoinflux.Supervisor", _Supervisor),
+            patch("sendtoinflux.list_controls", return_value=["conservatory", "bent"]),
+            patch("sendtoinflux.atexit.register"),
+        ):
+            with caplog.at_level(logging.INFO):
+                sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)
+        assert "Supervising 1 control(s)" in caplog.text
+        assert "bent" not in caplog.text
+
+    def test_nothing_starts_when_no_control_survives(self, caplog):
+        class _Supervisor:
+            children = {}
+
+            def __init__(self, names, settings_file=None):
+                """Supervise nothing at all.
+
+                Args:
+                    names (iterable): what was found on disk
+                    settings_file (str or None): unused here
+                """
+
+            def stop_all(self):
+                """Do nothing, as a stand-in."""
+
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        with (
+            patch("sendtoinflux.Supervisor", _Supervisor),
+            patch("sendtoinflux.list_controls", return_value=["bent"]),
+            patch("sendtoinflux.atexit.register") as register,
+        ):
+            with caplog.at_level(logging.ERROR):
+                assert sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args) is None
+        assert "No stored control could be supervised" in caplog.text
+        register.assert_not_called()
+
+
+class TestTheDebuggingModesStartNothing:
+    """`--print` and `--dump` print a reading and exit. Starting the supervisor made them
+    spawn a child per control and actuate real devices, and `--dump` was worse: the atexit
+    handler then commanded everything to its safe state on the way out, so asking what a
+    source currently reports switched the operator's heating off.
+
+    The MCP server has had this guard since it was written, with the reasoning in its
+    docstring; the supervisor was added later and did not get it.
+    """
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            pytest.param({"print": True, "dump": False}, id="print"),
+            pytest.param({"print": False, "dump": True}, id="dump"),
+            pytest.param({"print": True, "dump": True}, id="both"),
+        ],
+    )
+    def test_no_supervisor_is_started(self, flags):
+        args = argparse.Namespace(settings=None, **flags)
+        with patch("sendtoinflux.list_controls") as listed:
+            assert sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args) is None
+        assert not listed.called, "the control store was read, so the guard is downstream of the work"
+
+    def test_an_ordinary_run_still_starts_one(self):
+        """The guard must be the debugging modes and nothing else."""
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        with patch("sendtoinflux.list_controls", return_value=[]):
+            sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)

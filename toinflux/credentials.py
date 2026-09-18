@@ -82,7 +82,9 @@ def _slot_suffix(text, prefix):
     if not isinstance(text, str) or not text.startswith(prefix):
         return None
     suffix = text[len(prefix) :]
-    return suffix if CANONICAL_SLOT_SUFFIX_RE.match(suffix) else None
+    # fullmatch: `$` matches before a trailing newline, so match() would accept "2\n" as a
+    # canonical slot suffix and the name it came from would be treated as slot 2.
+    return suffix if CANONICAL_SLOT_SUFFIX_RE.fullmatch(suffix) else None
 
 
 def credential_field(name):
@@ -242,7 +244,7 @@ def apply_credential_substitution(settings):
     try:
         present = sorted(os.listdir(creds_dir))
     except OSError as exc:
-        logging.warning("Could not list credentials directory %s: %s", creds_dir, exc)
+        logging.warning("Could not list credentials directory %r: %r", creds_dir, exc)
         return settings
     for name in present:
         path = credential_field(name)
@@ -280,7 +282,7 @@ def _read_credential(cred_path, name):
             # one - but strip defensively in case anything else in the pipeline did.
             return handle.read().rstrip("\r\n")
     except (OSError, UnicodeDecodeError) as exc:
-        logging.warning("Could not read credential '%s' from %s: %s", name, cred_path, exc)
+        logging.warning("Could not read credential %r from %r: %r", name, cred_path, exc)
         return None
 
 

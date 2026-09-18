@@ -44,6 +44,25 @@ class TestHue:
                 with pytest.raises(SourceConnectionError):
                     hue.get_data_from_hue_bridge()
 
+    def test_get_data_from_hue_bridge_raises_on_an_error_status_carrying_json(self, sample_settings):
+        """The CLIP API reports its own errors as a 200 carrying a list, so a non-200 comes
+        from the transport or from something in front of the bridge.
+
+        Unchecked, a proxy's JSON error body was read as a datastore: against a stub bridge
+        answering 503, device discovery reported no writable devices at all and a collection
+        raised KeyError('sensors') out of the parse instead of this module's own error. The
+        write path has always called raise_for_status; this is the read path catching up.
+        """
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            hue = Hue(source="hue")
+            mock_response = MagicMock()
+            mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("503 Server Error")
+            mock_response.json.return_value = {"error": "service unavailable"}
+            with patch.object(hue.session, "get", return_value=mock_response):
+                with pytest.raises(SourceConnectionError):
+                    hue.get_data_from_hue_bridge()
+
     def test_get_data_from_hue_bridge_skips_tls_verification_by_default(self, sample_settings):
         """get_data_from_hue_bridge defaults to verify=False (backward-compatible with self-signed bridge certs)."""
         with patch("toinflux.influx.load_settings") as mock_load_settings:
@@ -463,6 +482,28 @@ class TestHueTokenRedaction:
         cleaned = hue._redact("url /api/TOKEN_A failed, and /api/TOKEN_B also failed")
         assert "TOKEN_A" not in cleaned and "TOKEN_B" not in cleaned
         assert cleaned.count("<redacted>") == 2
+
+
+class TestASlotFieldIsWholeString:
+    """`$` matches before a trailing newline, so an anchored pattern checked with match() is
+    not a whole-string test - and this one decides which bridge a settings key addresses.
+
+    Tested against _slot_field directly rather than through enumerate_bridges: the first
+    version of this test went through the public path, and passed with the fix reverted
+    because an incomplete slot never becomes a bridge anyway. It proved nothing.
+    """
+
+    @pytest.mark.parametrize("field", ["host2\n", "user2\n", "host\n", "host2 "])
+    def test_a_field_with_trailing_text_names_no_slot(self, field):
+        from toinflux.philipshue import _parse_slot_field
+
+        assert _parse_slot_field(field) == (None, None)
+
+    @pytest.mark.parametrize("field,slot", [("host", 1), ("host2", 2), ("user17", 17)])
+    def test_a_plain_field_still_names_its_slot(self, field, slot):
+        from toinflux.philipshue import _parse_slot_field
+
+        assert _parse_slot_field(field)[0] == slot
 
 
 class TestEnumerateBridges:
@@ -981,7 +1022,7 @@ class TestHueFieldMetadata:
     """Reading the description back, which is what gives a per-install field a unit."""
 
     def _series(self, pairs):
-        from toinflux.mcp_read import QuerySeries
+        from toinflux.influx import QuerySeries
 
         # One series per (device, host), which is how the grouped query answers.
         return [
@@ -1062,7 +1103,7 @@ class TestHueFieldMetadata:
         # The same reasoning as discover_tag_values' own guard: a malformed series must
         # not become a field description, because a wrong unit on a real field is worse
         # than none. Reachable only if the grouped query ever answers without its tag.
-        from toinflux.mcp_read import QuerySeries
+        from toinflux.influx import QuerySeries
 
         hue = _hue(sample_settings)
         series = [

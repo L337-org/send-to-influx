@@ -1,6 +1,7 @@
 """Unit tests for toinflux.general (load_settings, get_class)."""
 
 import logging
+import io
 import os
 import tempfile
 from pathlib import Path
@@ -8,6 +9,8 @@ from unittest.mock import patch
 import pytest
 import yaml
 from toinflux.general import (
+    IndentedFormatter,
+    configure_logging,
     MCP_DEFAULT_BIND_ADDRESS,
     expand_sources,
     flatten_dict,
@@ -217,6 +220,93 @@ class TestValidateSettings:
     def test_bool_mcp_read_write_is_accepted(self, sample_settings):
         """A real boolean mcp_read_write passes validation."""
         sample_settings["hue"]["mcp_read_write"] = True
+        validate_settings(sample_settings)
+
+    @pytest.mark.parametrize(
+        "bad,expected",
+        [
+            (float("nan"), "interval must be a finite number"),
+            (float("inf"), "interval must be a finite number"),
+            ("300", "interval must be a number of seconds"),
+            (True, "interval must be a number of seconds"),
+            (0, "interval must be greater than zero"),
+            (-5, "interval must be greater than zero"),
+        ],
+    )
+    def test_an_unusable_interval_raises_config_error(self, sample_settings, bad, expected):
+        """Presence was the only check, so `interval: .nan` passed --check-config and then
+        reached a worker's time.sleep, which raises. The same is true of a string, a bool
+        and anything at or below zero, none of which sleep accepts and all of which a YAML
+        file can hold.
+
+        The accepted shape is the one _stall_threshold_seconds already requires before it
+        will use the value.
+        """
+        sample_settings["hue"]["interval"] = bad
+        with pytest.raises(ConfigError, match=expected):
+            validate_settings(sample_settings)
+
+    def test_a_usable_interval_is_accepted(self, sample_settings):
+        for value in (1, 300, 12.5):
+            sample_settings["hue"]["interval"] = value
+            validate_settings(sample_settings)
+
+    def test_non_numeric_minimum_interval_raises_config_error(self, sample_settings):
+        """The live-fetch floor is reported at --check-config, not at a control's startup.
+
+        A control process resolves it hours later and in the journal, which is the wrong
+        place to find out that a number was typed as a string.
+        """
+        sample_settings["hue"]["minimum_interval"] = "60"
+        with pytest.raises(ConfigError, match="minimum_interval must be a number of seconds"):
+            validate_settings(sample_settings)
+
+    def test_bool_minimum_interval_raises_config_error(self, sample_settings):
+        """`bool` subclasses `int`, so `minimum_interval: true` would validate and then act as a
+        one-second floor - the same trap a control's stage level refuses a bool for."""
+        sample_settings["hue"]["minimum_interval"] = True
+        with pytest.raises(ConfigError, match="minimum_interval must be a number of seconds"):
+            validate_settings(sample_settings)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_non_finite_minimum_interval_raises_config_error(self, sample_settings, bad):
+        """.nan and .inf are floats to YAML and to isinstance, and neither fails loudly at
+        runtime: a nan floor never holds so every cycle goes live, an inf one always holds
+        so nothing ever does."""
+        sample_settings["hue"]["minimum_interval"] = bad
+        with pytest.raises(ConfigError, match="minimum_interval must be a finite number"):
+            validate_settings(sample_settings)
+
+    def test_negative_minimum_interval_raises_config_error(self, sample_settings):
+        sample_settings["hue"]["minimum_interval"] = -1
+        with pytest.raises(ConfigError, match="minimum_interval must not be negative"):
+            validate_settings(sample_settings)
+
+    @pytest.mark.parametrize(
+        "bad,expected", [("900", "must be a number"), (float("nan"), "must be a finite"), (-1, "must not be negative")]
+    )
+    def test_an_unusable_max_age_raises_config_error(self, sample_settings, bad, expected):
+        """The same three checks as minimum_interval, through the shared validator: the two
+        keys differ in meaning and not at all in what a usable value looks like."""
+        sample_settings["hue"]["max_age"] = bad
+        with pytest.raises(ConfigError, match=f"max_age {expected}"):
+            validate_settings(sample_settings)
+
+    def test_a_usable_max_age_is_accepted(self, sample_settings):
+        for value in (0, 120, 900.5):
+            sample_settings["hue"]["max_age"] = value
+            validate_settings(sample_settings)
+
+    def test_numeric_minimum_interval_is_accepted(self, sample_settings):
+        """Zero is a legitimate floor: it means this source may be asked whenever a control
+        wants it, which is the right setting for something cheap to read."""
+        for value in (0, 60, 12.5):
+            sample_settings["hue"]["minimum_interval"] = value
+            validate_settings(sample_settings)
+
+    def test_absent_minimum_interval_is_accepted(self, sample_settings):
+        """The key is optional; the source's own interval is the default floor."""
+        sample_settings["hue"].pop("minimum_interval", None)
         validate_settings(sample_settings)
 
     def test_empty_token_falls_back_to_v1_validation(self, sample_settings):
@@ -976,3 +1066,159 @@ class TestRenderValues:
 
     def test_the_separator_can_be_chosen(self):
         assert render_values(["a", "b"], separator="; ") == "'a'; 'b'"
+
+
+class TestLogRecordsCannotForgeAnEntry:
+    """Every entry begins with a timestamp, and the packaged install sends them to
+    `/var/log/send-to-influx.log` through rsyslog - a plain, line-oriented file. A newline
+    anywhere in a record therefore lets whatever follows start a line of its own, and that
+    line can be written to look exactly like a genuine entry.
+
+    `%r` on an external value is the first defence and covers what the project interpolates
+    deliberately. It cannot cover a traceback, whose last line is the exception's message
+    verbatim at column zero - which is how this was found.
+    """
+
+    FORMAT = "%(asctime)s %(levelname)-8s %(message)s"
+
+    def _render(self, call):
+        """Log through the project's formatter and return the lines it produced.
+
+        Args:
+            call (callable): given a logger, emits the record under test
+
+        Returns:
+            list: the rendered lines
+        """
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(IndentedFormatter(self.FORMAT, datefmt="%Y-%m-%d %H:%M:%S"))
+        logger = logging.getLogger(f"forge-{id(call)}")
+        logger.handlers = [handler]
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        call(logger)
+        return stream.getvalue().splitlines()
+
+    @staticmethod
+    def _starts_like_an_entry(line):
+        """Whether a line could be read as the beginning of a log entry.
+
+        Args:
+            line (str): one rendered line
+
+        Returns:
+            bool: True where it opens with a four-digit year, as every real entry does
+        """
+        return len(line) >= 4 and line[:4].isdigit()
+
+    def test_a_newline_in_an_exception_message_cannot_start_a_line(self):
+        """The case review found. The forged text is still in the log - suppressing it would
+        lose the diagnostic - but it cannot pass itself off as an entry of its own."""
+        forged = "2026-09-18 01:00:00 INFO     Conservatory heating is off"
+
+        def emit(logger):
+            try:
+                raise AttributeError(f"no such attribute\n{forged}")
+            except AttributeError as exc:
+                logger.exception("Could not make control %r safe: %r", "conservatory", exc)
+
+        lines = self._render(emit)
+        assert any(forged in line for line in lines), "the message was lost, not just made safe"
+        assert [line for line in lines if self._starts_like_an_entry(line)] == [lines[0]]
+
+    def test_a_newline_in_an_interpolated_value_cannot_start_a_line(self):
+        """Not only tracebacks. Any message carrying external text has the same exposure,
+        which is why this lives in the formatter rather than at one call site."""
+        lines = self._render(
+            lambda logger: logger.error("Device %s reported", "kitchen\n2026-09-18 01:00:00 INFO     all off")
+        )
+        assert [line for line in lines if self._starts_like_an_entry(line)] == [lines[0]]
+
+    @pytest.mark.parametrize(
+        "separator",
+        [
+            pytest.param("\n", id="newline"),
+            pytest.param("\r", id="carriage-return"),
+            pytest.param("\r\n", id="crlf"),
+            pytest.param("\x85", id="next-line"),
+            pytest.param("\u2028", id="line-separator"),
+            pytest.param("\f", id="form-feed"),
+        ],
+    )
+    def test_every_character_that_breaks_a_line_is_caught(self, separator):
+        """Splitting on "\\n" alone was the first attempt and leaves all of the others able to
+        start a line this has not indented, which is the whole thing being prevented. A lone
+        carriage return breaks a line for a terminal and for several log readers, and so do
+        the form feed, the next-line character and the unicode separators."""
+        lines = self._render(
+            lambda logger: logger.error("Device %s reported", f"kitchen{separator}2026-01-01 00:00:00 INFO forged")
+        )
+        assert [line for line in lines if self._starts_like_an_entry(line)] == [lines[0]]
+
+    def test_configure_logging_actually_installs_it(self, tmp_path):
+        """The tests above build the formatter directly, so every one of them passes against
+        a project that defines it and never uses it - which is what happened when this was
+        first written. Asserted on the handlers configure_logging leaves behind, which is the
+        only thing that decides what reaches the log."""
+        configure_logging(logfile=str(tmp_path / "out.log"))
+        installed = [h for h in logging.getLogger().handlers if getattr(h, "_send_to_influx_handler", False)]
+        assert installed, "configure_logging attached no handler of its own"
+        assert all(isinstance(h.formatter, IndentedFormatter) for h in installed), [
+            type(h.formatter).__name__ for h in installed
+        ]
+
+    def test_a_single_line_record_is_left_exactly_as_it_was(self):
+        """The common case pays nothing: no trailing newline, no indent, no change."""
+        (line,) = self._render(lambda logger: logger.info("Control %r started", "conservatory"))
+        assert line.endswith("Control 'conservatory' started")
+
+    def test_the_traceback_is_still_readable(self):
+        """Indenting rather than stripping, because the stack is the diagnostic this exists
+        to preserve - stripping newlines would defend the same ground and leave a smear."""
+
+        def emit(logger):
+            try:
+                raise ValueError("boom")
+            except ValueError:
+                logger.exception("failed")
+
+        lines = self._render(emit)
+        assert lines[1] == "  Traceback (most recent call last):"
+        assert lines[-1] == "  ValueError: boom"
+
+
+class TestControlsBlockValidation:
+    """Both control switches are read with a strict `is True`, so a mistyped one is silently
+    off rather than wrong. That is the worst shape for an operator: the subsystem does not
+    run, or the assistant will not write, and nothing anywhere says why."""
+
+    @pytest.mark.parametrize("key", ["enabled", "mcp_write"])
+    @pytest.mark.parametrize("value", ["true", "yes", 1, 0, None])
+    def test_a_non_boolean_switch_fails_loud(self, sample_settings, key, value):
+        """A quoted YAML boolean is the likely mistake and the silent one."""
+        sample_settings["controls"] = {key: value}
+        with pytest.raises(ConfigError, match=f"controls.{key} must be true or false"):
+            validate_settings(sample_settings)
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_real_booleans_are_accepted(self, sample_settings, value):
+        sample_settings["controls"] = {"enabled": value, "mcp_write": value}
+        validate_settings(sample_settings)
+
+    def test_no_controls_block_is_fine(self, sample_settings):
+        """Controls are opt-in; most installations never write the block at all."""
+        sample_settings.pop("controls", None)
+        validate_settings(sample_settings)
+
+    def test_a_controls_block_that_is_not_a_mapping_is_named(self, sample_settings):
+        sample_settings["controls"] = "yes please"
+        with pytest.raises(ConfigError, match="controls must be a mapping"):
+            validate_settings(sample_settings)
+
+    def test_an_unknown_key_is_not_rejected(self, sample_settings):
+        """Deliberately permissive: the controls block is where later work adds settings, and
+        a strict allow-list here would fail an install whose settings file is newer than its
+        package. The two switches are checked because they are silently ignorable."""
+        sample_settings["controls"] = {"enabled": True, "something_later": 3}
+        validate_settings(sample_settings)

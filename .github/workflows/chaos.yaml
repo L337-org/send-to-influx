@@ -1,0 +1,58 @@
+name: 'Chaos run'
+permissions:
+  contents: read
+
+# Scheduled rather than per pull request: a run long enough to find anything is minutes, and
+# what it looks for - an interaction between several controls, a bridge and a database under
+# randomly chosen faults - is not a property of one change. Any seed that has *failed* runs
+# with the ordinary suite instead, so a finding is never waiting on this job to run again.
+on:
+  schedule:
+    # 03:17 UTC daily. Not on the hour, because every scheduled job in the world is.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: 'Seed to reproduce a previous run; random when empty'
+        required: false
+        type: string
+      ticks:
+        description: 'How many ticks to drive'
+        required: false
+        default: '300'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+
+  chaos:
+    runs-on: [ubuntu-latest]
+    name: Seeded chaos run
+    # A 300-tick run is about 2 minutes of real processes; the ceiling is for a run that
+    # wedges rather than for one that is merely long.
+    timeout-minutes: 30
+    steps:
+      - name: Check out source repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python environment
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run the chaos scenarios
+        env:
+          CHAOS_SEED: ${{ inputs.seed }}
+          CHAOS_TICKS: ${{ inputs.ticks || '300' }}
+        # -s so the seed is in the log of a run that passed as well as one that failed: the
+        # seed of a run nobody can repeat is worth nothing, and a green run whose seed is
+        # only in captured output is a run nobody can repeat.
+        run: pytest -m chaos -s

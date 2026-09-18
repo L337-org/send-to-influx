@@ -8,6 +8,7 @@ __license__ = "MIT"
 import sys
 import time
 import json
+import atexit
 import math
 import signal
 import logging
@@ -16,8 +17,12 @@ import threading
 import faulthandler
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
+from toinflux.general import render_values
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.controls import controls_enabled, list_controls, validate_stored_controls
+from toinflux.control_process import heartbeat_writer, run_control
+from toinflux.supervision import Supervisor
 
 try:
     __version__ = version("send-to-influx")
@@ -250,7 +255,7 @@ class _StreamSink:
             data = self.data_handler.get_data()
         except SourceConnectionError as exc:
             probe_ok = False
-            logging.warning("Health probe for streaming source '%s' failed: %s", self.source, exc)
+            logging.warning("Health probe for streaming source '%s' failed: %r", self.source, exc)
         else:
             try:
                 self._write(data)
@@ -328,7 +333,7 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures) -> None:
             use_buffer=False,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        logging.warning("Failed to write heartbeat for '%s': %s", data_handler.worker_label, exc)
+        logging.warning("Failed to write heartbeat for '%s': %r", data_handler.worker_label, exc)
     finally:
         data_handler.influx_header = original_header
 
@@ -442,7 +447,7 @@ def create_source_worker(unit, source_start_delay, args, stopped_sources, last_a
                 maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
                 _stamp_activity(last_activity, unit)
             except ConfigError as exc:
-                logging.critical("'%s' has a configuration problem and will not be retried: %s", label, exc)
+                logging.critical("'%s' has a configuration problem and will not be retried: %r", label, exc)
                 maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
                 stopped_sources.add(unit)
                 return
@@ -450,7 +455,7 @@ def create_source_worker(unit, source_start_delay, args, stopped_sources, last_a
                 failure_count += 1
                 restart_delay = get_backoff_delay(failure_count)
                 logging.warning(
-                    "'%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                    "'%s' failed: %r. Restarting in %s seconds (attempt %s).",
                     label,
                     exc,
                     restart_delay,
@@ -497,7 +502,7 @@ def signal_handler(sig, _frame):
     sys.exit(0)
 
 
-def maybe_start_mcp_server(settings, args):
+def maybe_start_mcp_server(settings, args, supervisor=None):
     """Start the embedded MCP server thread when enabled and in a collection mode.
 
     ``--print`` and ``--dump`` are interactive debugging modes that never touch
@@ -509,6 +514,8 @@ def maybe_start_mcp_server(settings, args):
     Args:
         settings (dict): loaded settings dict
         args (argparse.Namespace): parsed CLI arguments
+        supervisor (Supervisor or None): the running control supervisor, where there is
+            one, so the control tools can report whether a control's process is up
 
     Returns:
         threading.Thread or None: the server thread, or None when not started
@@ -519,7 +526,7 @@ def maybe_start_mcp_server(settings, args):
         return None
     from toinflux.mcpserver import start_mcp_server_thread
 
-    return start_mcp_server_thread(settings, args.settings)
+    return start_mcp_server_thread(settings, args.settings, supervisor=supervisor)
 
 
 def _configure_logging_or_exit(settings, args):
@@ -566,7 +573,7 @@ def register_thread_dump_handler() -> None:
     try:
         faulthandler.register(signal.SIGUSR1, all_threads=True)
     except (ValueError, OSError) as exc:
-        logging.warning("Could not register SIGUSR1 thread-dump handler: %s", exc)
+        logging.warning("Could not register SIGUSR1 thread-dump handler: %r", exc)
 
 
 def _exit_if_nothing_to_collect(units, requested, settings, args) -> None:
@@ -675,6 +682,16 @@ def _check_config_and_exit(settings, args):
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         sys.exit(1)
+    # Stored controls are checked here too, because they are configuration even though
+    # they do not live in settings.yaml. An operator running --check-config is asking
+    # whether this installation would start cleanly, and a control with a stage that
+    # forgets a device would otherwise be discovered by the control process at the
+    # moment it was meant to start actuating a heater.
+    try:
+        validate_stored_controls(args.settings)
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        sys.exit(1)
     # A config that validates cleanly but configures nothing to collect isn't "OK" -
     # it's the same "nothing to collect" state _exit_if_nothing_to_collect() stops a
     # real run for, so --check-config must not report success on it either.
@@ -686,6 +703,72 @@ def _check_config_and_exit(settings, args):
         )
         sys.exit(1)
     print("Configuration OK")
+    sys.exit(0)
+
+
+def _start_control_supervisor(settings, args):
+    """Start the control supervisor in its own thread, or return None.
+
+    Returns None where the subsystem is switched off or no controls are stored, so the
+    ordinary collector install starts nothing and says nothing.
+
+    **Nothing is started under --print or --dump**, for the same reason those modes start
+    no MCP server, and with more at stake: they are interactive debugging commands that
+    print a reading and exit, and starting the supervisor made them spawn a child per
+    control and actuate real devices. --dump was the worse half - the atexit handler then
+    commanded every device to its safe state on the way out, so asking what a source
+    currently reports switched the operator's heating off.
+
+    Args:
+        settings (dict): the parsed settings document
+        args (argparse.Namespace): the parsed command line
+
+    Returns:
+        Supervisor or None: the running supervisor, already started
+    """
+    if args.print or args.dump:
+        return None
+    if not controls_enabled(settings):
+        return None
+    names = list_controls(args.settings)
+    if not names:
+        logging.warning("controls.enabled is true but no controls are stored, so none will run")
+        return None
+    supervisor = Supervisor(names, settings_file=args.settings)
+    supervised = list(supervisor.children)
+    if not supervised:
+        # Every stored control was unusable, and each said so as it was skipped. A
+        # supervisor with nothing to supervise is a thread and a banner about nothing.
+        logging.error("No stored control could be supervised, so none are running")
+        return None
+    thread = threading.Thread(target=supervisor.run, args=(SHUTDOWN,), name="control-supervisor", daemon=True)
+    thread.start()
+    # The supervisor's own loop stops its controls when SHUTDOWN is set, but a signal exits
+    # this process through sys.exit and the daemon thread simply stops - so the last word on
+    # leaving devices safe belongs here, where it runs either way. stop_all is idempotent.
+    atexit.register(supervisor.stop_all)
+    # From what is actually being supervised rather than from what was found on disk: a
+    # control skipped for being unreadable said so on its own line, and a banner counting it
+    # too would have an operator looking for a process that was never started.
+    logging.info("Supervising %s control(s): %s", len(supervised), render_values(supervised))
+    return supervisor
+
+
+def _run_control_and_exit(args):
+    """Run one control as this process, and exit with what it did.
+
+    Args:
+        args (argparse.Namespace): the parsed command line
+    """
+    beat = heartbeat_writer(args.heartbeat_fd) if args.heartbeat_fd is not None else None
+    try:
+        run_control(args.control, settings_file=args.settings, heartbeat=beat)
+    except ConfigError as exc:
+        # A configuration fault, so no retry helps and the supervisor should not respawn
+        # this one until somebody has changed something. Reported as the operator's problem
+        # rather than as a traceback.
+        logging.critical("Control %r cannot run: %r", args.control, exc)
+        sys.exit(1)
     sys.exit(0)
 
 
@@ -755,6 +838,26 @@ def main() -> None:
             "If no sources are configured, the process logs that plainly and exits."
         ),
     )
+    arg_parse.add_argument(
+        "--control",
+        required=False,
+        dest="control",
+        type=str,
+        help=(
+            "run one stored control as this process, rather than collecting. "
+            "One process per control; the supervisor starts these, and an operator rarely does"
+        ),
+    )
+    arg_parse.add_argument(
+        "--heartbeat-fd",
+        required=False,
+        dest="heartbeat_fd",
+        type=int,
+        help=(
+            "an inherited pipe to beat down once per cycle, so a supervisor can tell a slow "
+            "control from a dead one. Set by the supervisor when it starts a control"
+        ),
+    )
     args = arg_parse.parse_args()
 
     # load settings once for defaults and configured source list
@@ -769,6 +872,21 @@ def main() -> None:
         _check_config_and_exit(settings, args)
 
     _configure_logging_or_exit(settings, args)
+
+    if args.control is not None:
+        # `is not None` rather than truthiness: `--control ""` is a name somebody meant to
+        # pass, and treating it as absent would start the collector instead of saying the
+        # name is unusable. An empty name fails in the store, which is where it should.
+        #
+        # Before the collector's own setup, and it never returns to it: a control process
+        # collects nothing, serves no MCP, and starting a worker here would put two things
+        # in one process that the supervisor expects to kill independently.
+        _run_control_and_exit(args)
+
+    # Kept, because the MCP control tools report on it. Started here rather than after the
+    # server so that a client connecting immediately is told what is running rather than
+    # that nothing is.
+    supervisor = _start_control_supervisor(settings, args)
 
     requested = _requested_sources(settings, args)
     units = toinflux.expand_sources(requested, settings)
@@ -788,7 +906,7 @@ def main() -> None:
     # server here would only be a brief bind/log-noise/state-file-write cycle on a
     # path meant to be a clean early exit.
     _exit_if_nothing_to_collect(units, requested, settings, args)
-    maybe_start_mcp_server(settings, args)
+    maybe_start_mcp_server(settings, args, supervisor=supervisor)
     if args.dump:
         if len(requested) > 1:
             logging.error("The --dump option requires --source when running in multi-source mode.")
@@ -832,10 +950,10 @@ def _dump_source_and_exit(units, args):
             data_handler = toinflux.get_class(source, args.settings, instance=instance)
             collected[instance] = data_handler.get_data()
         except ConfigError as exc:
-            logging.critical("'%s' has a configuration problem: %s", worker_label(source, instance), exc)
+            logging.critical("'%s' has a configuration problem: %r", worker_label(source, instance), exc)
             sys.exit(1)
         except SourceConnectionError as exc:
-            logging.error("'%s' failed: %s", worker_label(source, instance), exc)
+            logging.error("'%s' failed: %r", worker_label(source, instance), exc)
             failed.append(instance)
 
     if instanced:
@@ -881,14 +999,14 @@ def run_one_worker(unit, args) -> None:
             failure_count = 0
             maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
         except ConfigError as exc:
-            logging.critical("'%s' has a configuration problem and will not be retried: %s", label, exc)
+            logging.critical("'%s' has a configuration problem and will not be retried: %r", label, exc)
             maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
             sys.exit(1)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             failure_count += 1
             restart_delay = get_backoff_delay(failure_count)
             logging.warning(
-                "'%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                "'%s' failed: %r. Restarting in %s seconds (attempt %s).",
                 label,
                 exc,
                 restart_delay,
