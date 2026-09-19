@@ -144,8 +144,13 @@ The safe states are `unenergised` and `leave_unchanged`.
 
 `unenergised` is the default and switches every device the control owns off **by name**,
 rather than meaning "the lowest stage" - so it does not depend on a zero stage having been
-declared correctly. `leave_unchanged` is the opt-out and means exactly that: the devices keep
-whatever state they were in, including after a crash.
+declared correctly.
+
+`leave_unchanged` is the opt-out and means exactly that: the devices keep whatever state they
+were in. **It also removes the startup assertion**, which is what would otherwise clear the
+mess a crash left, so after a SIGKILL or a power cut the device stays where it was and
+nothing will correct it. The right trade for a light you do not want going out because a
+server rebooted, and the wrong one for a heater.
 
 An active period is a wall-clock window in the control's own timezone, and it follows
 daylight saving the way a wall clock does: a window inside the hour the clocks skip does not

@@ -307,7 +307,14 @@ class DeviceGuard:
                 is the one that can tell them apart.
         """
         if self._commands is None:
-            logging.warning(
+            # INFO, not WARNING. `leave_unchanged` is what the operator asked for, and for
+            # the case it exists to serve - a light that should not go out because a server
+            # rebooted - there is no safety question at all. The consequence is real and
+            # belongs where somebody reads it while choosing, which is CONTROLS.md at the
+            # point the option is configured; shouting it at every service start for the
+            # lifetime of a correct configuration is the noise that teaches people to skim
+            # warnings, and buys a one-time mistake only if they happen to be watching.
+            logging.info(
                 "Control %r starts with safe_state %r, so its devices keep whatever state they "
                 "were left in, including after a crash or a power cut",
                 self.name,

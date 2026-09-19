@@ -297,12 +297,22 @@ class TestTheStartupAssertion:
         assert commanded == []
 
     def test_leave_unchanged_says_so_at_startup(self, caplog):
-        """It hollows out the assertion, so the operator is told once, at the point where
-        the protection is not happening rather than in the documentation."""
+        """Said once at startup, at INFO.
+
+        It does hollow out the assertion, and that consequence is real - but it is what the
+        operator asked for, and for the case the option exists to serve, a light that should
+        not go out because a server rebooted, there is no safety question at all. The
+        consequence belongs where somebody reads it while choosing, which is CONTROLS.md at
+        the point the option is configured. A warning on every start for the lifetime of a
+        correct configuration is the noise that teaches people to skim warnings.
+        """
         command, _ = _recorder()
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             DeviceGuard("conservatory", "leave_unchanged", ["far"], command).assert_safe_state()
         assert "leave_unchanged" in caplog.text and "conservatory" in caplog.text
+        assert not [
+            record for record in caplog.records if record.levelno >= logging.WARNING
+        ], "the configuration the operator chose is not a warning"
 
     def test_a_failure_reaches_the_caller_with_its_own_type(self):
         """A device that is missing and a bridge that is briefly unreachable want opposite
