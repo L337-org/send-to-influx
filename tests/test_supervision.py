@@ -378,17 +378,27 @@ class TestADocumentThatChanged:
 
     def test_a_document_that_will_not_read_leaves_the_control_running(self, supervisor, state_directory, caplog):
         """A half-finished hand edit is not a reason to stop a control that is holding a
-        room at temperature. The next reload gets another go."""
+        room at temperature. The next reload gets another go.
+
+        Said at WARNING, not ERROR: nothing failed - refusing to kill a working control over
+        a half-written file is the design working - but the operator's edit did not take
+        effect, which is what wants their attention. The same situation at start-up says so
+        at the same level, and the two disagreeing made one look worse than the other for no
+        reason.
+        """
         supervisor.start_all()
         _wait_for(supervisor, "beat", "conservatory")
         running = supervisor.children["conservatory"].process.pid
         _bend(state_directory, "conservatory")
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.WARNING):
             supervisor.request_reload("conservatory")
             event = _wait_for(supervisor, "reload-failed", "conservatory")
         assert supervisor.children["conservatory"].process.pid == running
         assert "not valid YAML" in event.detail
         assert "still running the document it started with" in caplog.text
+        assert not [
+            r for r in caplog.records if r.levelno >= logging.ERROR
+        ], "a control that kept working is not an error"
         _wait_for(supervisor, "beat", "conservatory")
 
     def test_an_ordinary_restart_picks_up_an_edit_nobody_announced(self, supervisor, state_directory):
