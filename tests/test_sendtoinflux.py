@@ -2065,11 +2065,22 @@ class TestTheControlSubsystemOptIn:
         assert sendtoinflux._start_control_supervisor({}, args) is None
 
     def test_being_switched_on_with_no_controls_says_so_rather_than_starting(self, caplog):
+        """Said at INFO, because switching the subsystem on before writing any control is the
+        ordinary first state - and where `controls.mcp_write` is on, writing them over MCP is
+        the intended route, so there is nothing the operator should have done differently.
+
+        The line names the directory, which is what makes it useful to somebody part-way
+        through setting up rather than a reprimand for being there.
+        """
         args = argparse.Namespace(settings=None, print=False, dump=False)
         with patch("sendtoinflux.list_controls", return_value=[]):
-            with caplog.at_level(logging.WARNING):
+            with caplog.at_level(logging.INFO):
                 assert sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args) is None
-        assert "no controls are stored" in caplog.text
+        assert "none are stored yet" in caplog.text
+        assert "controls" in caplog.text, "the line should say where they go"
+        assert not [
+            r for r in caplog.records if r.levelno >= logging.WARNING
+        ], "an empty control store is not a fault, so it must not be logged as one"
 
     def test_it_supervises_every_stored_control(self):
         """A stand-in rather than a mock: a MagicMock invents a truthy value for any

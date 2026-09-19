@@ -20,7 +20,7 @@ import toinflux
 from toinflux.general import render_values
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
-from toinflux.controls import controls_enabled, list_controls, validate_stored_controls
+from toinflux.controls import control_dir, controls_enabled, list_controls, validate_stored_controls
 from toinflux.control_process import heartbeat_writer, run_control
 from toinflux.supervision import Supervisor
 
@@ -732,7 +732,17 @@ def _start_control_supervisor(settings, args):
         return None
     names = list_controls(args.settings)
     if not names:
-        logging.warning("controls.enabled is true but no controls are stored, so none will run")
+        # INFO and a signpost, not a warning. Switching the subsystem on before writing any
+        # control is the ordinary first state - and where `controls.mcp_write` is on, writing
+        # them over MCP is the intended route, so there is nothing to have done differently.
+        # Naming the directory makes the line useful to somebody in that position instead of
+        # telling them off for being part-way through. The genuinely wrong case - documents
+        # present and none of them usable - is the ERROR below, and keeps its urgency.
+        logging.info(
+            "Controls are enabled and none are stored yet, so none will run. They live in %s, "
+            "one YAML document each",
+            control_dir(args.settings),
+        )
         return None
     supervisor = Supervisor(names, settings_file=args.settings)
     supervised = list(supervisor.children)
