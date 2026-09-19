@@ -269,9 +269,14 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
         # Absent rather than refusing, as above - and get_control_schema says so, because
         # absence alone cannot tell a model which of the two reasons it is looking at.
         return server
-    logging.warning(
-        "MCP control writing enabled: a connected client may create, change and delete "
-        "control loops, which actuate devices unattended (controls.mcp_write)"
+    # INFO, not WARNING. This is the configuration the operator asked for, and a warning
+    # about a deliberate setting is noise that teaches people to skim warnings. The
+    # neighbouring grant says the same thing the same way: `mcp_write.py` logs "MCP
+    # device-write tools enabled for: ..." at INFO, and that one lets a model switch a real
+    # heater on this second. WARNING is kept for a configuration that will not do what was
+    # asked - `mcp_write.py` uses it for a source that is write-enabled with no tools wired.
+    logging.info(
+        "MCP control-write tools enabled: a client may create, change and delete control " "loops (controls.mcp_write)"
     )
 
     @register_tool(
