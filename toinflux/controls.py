@@ -816,6 +816,15 @@ def actuator_identity(spec):
     ``(source, instance, device)``, because that triple is what reaches the bridge: two
     entries differing only in an absent versus explicit instance are one actuator to it.
 
+    **The source is lower-cased and the other two are not**, which follows what each one
+    means rather than being a general tidy-up. ``source_class`` resolves a source name
+    case-insensitively, so ``Hue`` and ``hue`` are one handler commanding one device - left
+    verbatim they produced two identities and slipped past both the duplicate-device check
+    and the one-enabled-owner rule. A device name is the bridge's own, and the bridge tells
+    two lights apart by case; an instance names a configured target the same way. Folding
+    either would invent a clash between two real devices, which is the opposite failure and
+    the worse one, since it refuses a configuration that works.
+
     Args:
         spec (object): a ``devices`` entry
 
@@ -827,7 +836,7 @@ def actuator_identity(spec):
     source, device = spec.get("source"), spec.get("device")
     if source is None or device is None:
         return None
-    return (source, spec.get("instance"), device)
+    return (source.lower() if isinstance(source, str) else source, spec.get("instance"), device)
 
 
 def control_is_enabled(document):
@@ -908,12 +917,14 @@ def _check_one_key_per_actuator(document, devices, errors) -> None:
     """
     if not devices:
         return
+    # Through `actuator_identity` rather than rebuilding the triple here. It was built in
+    # both places, so canonicalising the source fixed the cross-document rule and left this
+    # one still treating `Hue` and `hue` as two actuators - one concept with two
+    # implementations diverges the first time either is corrected.
     seen: dict = {}
     for key, spec in sorted(devices.items(), key=lambda item: repr(item[0])):
-        if not isinstance(spec, dict):
-            continue
-        identity = (spec.get("source"), spec.get("instance"), spec.get("device"))
-        if None in (identity[0], identity[2]):
+        identity = actuator_identity(spec)
+        if identity is None:
             # A missing source or device is already reported by the shape check above, and
             # guessing an identity from half of one would invent a second complaint.
             continue

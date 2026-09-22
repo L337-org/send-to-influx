@@ -736,6 +736,30 @@ class TestTwoKeysForOneActuator:
         document["output"]["stages"] = [{"level": 0, "set": {"a": False, "b": False}}]
         assert not [e for e in validate_control("conservatory", document) if "same actuator" in e]
 
+    def test_a_source_spelled_differently_is_the_same_actuator(self):
+        """`source_class` resolves a source name case-insensitively, so `Hue` and `hue` are
+        one handler commanding one device. Left verbatim they were two identities and slipped
+        past this check entirely."""
+        document = a_valid_control()
+        document["devices"] = {
+            "a": {"source": "hue", "device": "heater_far"},
+            "b": {"source": "HUE", "device": "heater_far"},
+        }
+        document["output"]["stages"] = [{"level": 0, "set": {"a": False, "b": False}}]
+        assert any("same actuator" in error for error in validate_control("conservatory", document))
+
+    def test_a_device_spelled_differently_is_not(self):
+        """The opposite direction, and the worse failure: a device name is the bridge's own
+        and the bridge tells two lights apart by case, so folding it would refuse a
+        configuration that works."""
+        document = a_valid_control()
+        document["devices"] = {
+            "a": {"source": "hue", "device": "heater_far"},
+            "b": {"source": "hue", "device": "Heater_Far"},
+        }
+        document["output"]["stages"] = [{"level": 0, "set": {"a": False, "b": False}}]
+        assert not [e for e in validate_control("conservatory", document) if "same actuator" in e]
+
     def test_an_ordinary_document_is_unaffected(self):
         assert validate_control("conservatory", a_valid_control()) == []
 
@@ -772,6 +796,15 @@ class TestOnlyOneEnabledControlPerActuator:
         """Preparing a replacement before switching over is a workflow, not a fault - and it
         is exactly what `save_control` does when it stores a clashing control disabled."""
         assert shared_actuator_problems(self._pair(enabled=False)) == []
+
+    def test_a_source_spelled_differently_still_clashes_across_documents(self):
+        """The same canonicalisation, checked at the other scope - the identity is built in
+        one place now precisely so these two cannot drift apart again."""
+        documents = self._pair()
+        documents["spare"]["devices"] = {
+            key: dict(spec, source=spec["source"].upper()) for key, spec in documents["spare"]["devices"].items()
+        }
+        assert shared_actuator_problems(documents), "a differently-spelled source bypassed the rule"
 
     def test_one_control_alone_is_fine(self):
         assert shared_actuator_problems({"conservatory": a_valid_control()}) == []
