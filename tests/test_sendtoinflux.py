@@ -339,7 +339,13 @@ class TestMain:
             mock_load_settings.return_value = {"sources": ["hue"]}
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
-            mock_print.assert_called_once_with("Configuration OK")
+            printed = [call.args[0] for call in mock_print.call_args_list]
+            assert "Configuration OK" in printed
+            # The settings here carry no `controls:` block while a control is stored, so the
+            # note about it fires too. That is the point of the note: "Configuration OK" on
+            # its own is exactly the answer that sends somebody looking elsewhere when their
+            # control is not running.
+            assert any("controls.enabled is not true" in line for line in printed)
 
     def test_main_check_config_validates_explicit_source_argument(self, tmp_path):
         """--check-config also validates the source named by --source, even if it isn't in sources:.
@@ -2482,3 +2488,44 @@ class TestShutdownStopsTheThreadBeforeTheDevices:
             sendtoinflux.SHUTDOWN.clear()
         assert stopped == [True]
         assert "did not stop within" in caplog.text
+
+
+class TestControlsStoredButSwitchedOff:
+    """The subsystem is off unless switched on, and returning quietly is right for the
+    installations that never use it. But somebody who has written a control document and is
+    watching for it got nothing at all - no error, no mention of controls, and a service
+    collecting normally. Three silent paths, and `--check-config` printing "Configuration OK"
+    was the one that sent them looking elsewhere."""
+
+    def test_startup_says_the_documents_will_not_run(self, caplog):
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        with patch("sendtoinflux.list_controls", return_value=["conservatory_heating"]):
+            with caplog.at_level(logging.WARNING):
+                assert sendtoinflux._start_control_supervisor({}, args) is None
+        assert "controls.enabled is not true" in caplog.text
+        assert "conservatory_heating" in caplog.text, "the operator needs to know which"
+
+    def test_it_says_where_they_are(self, caplog):
+        """So the answer is not "somewhere on disk"."""
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        with patch("sendtoinflux.list_controls", return_value=["conservatory_heating"]):
+            with caplog.at_level(logging.WARNING):
+                sendtoinflux._start_control_supervisor({}, args)
+        assert "controls" in caplog.text
+
+    def test_an_installation_with_no_controls_stays_quiet(self):
+        """The ordinary case, which must not gain a warning it can do nothing about."""
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        with patch("sendtoinflux.list_controls", return_value=[]):
+            with patch("sendtoinflux.logging.warning") as warned:
+                assert sendtoinflux._start_control_supervisor({}, args) is None
+        assert not warned.called
+
+    def test_the_debugging_modes_stay_quiet_too(self):
+        """They promise to start nothing and say nothing about it."""
+        args = argparse.Namespace(settings=None, print=True, dump=False)
+        with patch("sendtoinflux.list_controls", return_value=["conservatory_heating"]) as listed:
+            with patch("sendtoinflux.logging.warning") as warned:
+                assert sendtoinflux._start_control_supervisor({}, args) is None
+        assert not warned.called
+        assert not listed.called, "the store was read on a path that does nothing"

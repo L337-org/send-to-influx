@@ -707,6 +707,14 @@ def _check_config_and_exit(settings, args):
             file=sys.stderr,
         )
         sys.exit(1)
+    if not controls_enabled(settings) and list_controls(args.settings):
+        # Said here too, because this is where somebody checks when a control is not running
+        # and "Configuration OK" is exactly the answer that sends them looking elsewhere.
+        print(
+            f"Note: control documents are stored in {control_dir(args.settings)} but "
+            f"controls.enabled is not true, so none will run.",
+            file=sys.stderr,
+        )
     print("Configuration OK")
     sys.exit(0)
 
@@ -734,6 +742,20 @@ def _start_control_supervisor(settings, args):
     if args.print or args.dump:
         return None
     if not controls_enabled(settings):
+        # **Silence here is what made "my control is not running" undiagnosable.** The
+        # subsystem is off unless switched on, and returning quietly is right for the
+        # installations that never use it - but somebody who has written a control document
+        # and is watching the journal for it got nothing at all: no error, no mention of
+        # controls, and a service collecting normally. The documents are only read to say so,
+        # which costs one directory listing on a path that then does nothing else.
+        stored = list_controls(args.settings)
+        if stored:
+            logging.warning(
+                "%s control document(s) are stored in %s but controls.enabled is not true, so " "none will run: %s",
+                len(stored),
+                control_dir(args.settings),
+                render_values(stored),
+            )
         return None
     names = list_controls(args.settings)
     supervisor = Supervisor(names, settings_file=args.settings)
