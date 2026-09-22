@@ -143,7 +143,7 @@ CONTROL_EXAMPLE = {
     "pid": {"input": "inside", "setpoint": "max(target, dew + 5)", "kp": 12.0, "ki": 0.02, "kd": 0.0},
     "output": {
         "cycle_seconds": 900,
-        "min_transition_seconds": 300,
+        "min_transition_seconds": 60,
         "max_level": "if(grid_co2 > 300, 750, 2250)",
         "stages": [
             {"level": 0, "set": {"heater_far": False, "heater_near": False}},
@@ -152,7 +152,7 @@ CONTROL_EXAMPLE = {
         ],
     },
     "devices": {
-        "heater_far": {"source": "hue", "device": "Conservatory heater far", "min_transition_seconds": 900},
+        "heater_far": {"source": "hue", "device": "Conservatory heater far", "min_transition_seconds": 180},
         "heater_near": {"source": "hue", "device": "Conservatory heater near"},
     },
     "enable_when": "outside < 15",

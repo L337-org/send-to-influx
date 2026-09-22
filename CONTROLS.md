@@ -180,10 +180,12 @@ window at 1500 and 35% at 750.
   device is not a stage turning it off, and this is refused - an operator reading the ladder
   would assume it was off, which is how a heater stays on.
 * `level` must be a number. `true` would validate and then sort as 1, inserting a rung.
-* `min_transition_seconds` is enforced per device, and only for devices that actually change
-  between the two rungs. **It may not exceed `cycle_seconds`** and is refused if it does: the
-  limit binds within a window, not across the boundary between them, so a longer one would be
-  broken at every boundary anyway.
+* `min_transition_seconds` protects hardware that objects to frequent switching - a relay, a
+  compressor - rather than smoothing the loop, which is the PID's job. Tens of seconds is the
+  usual range. It is enforced per device, and only for devices that actually change between the
+  two rungs. **It may not exceed `cycle_seconds`** and is refused if it does: the limit binds
+  within a window, not across the boundary between them, so a longer one would be broken at
+  every boundary anyway.
 * `max_level` caps the **ladder**, not the demand. Capping the demand still proportions
   between rungs above the cap; capping the ladder does not.
 
@@ -226,7 +228,7 @@ pid:
   kd: 0.0
 output:
   cycle_seconds: 900
-  min_transition_seconds: 300
+  min_transition_seconds: 60
   max_level: if(grid_co2 > 300, 750, 2250)
   stages:
   - level: 0
@@ -245,7 +247,7 @@ devices:
   heater_far:
     source: hue
     device: Conservatory heater far
-    min_transition_seconds: 900
+    min_transition_seconds: 180
   heater_near:
     source: hue
     device: Conservatory heater near
