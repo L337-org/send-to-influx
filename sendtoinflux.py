@@ -722,8 +722,9 @@ def _check_config_and_exit(settings, args):
 def _start_control_supervisor(settings, args):
     """Start the control supervisor in its own thread, or return None.
 
-    Returns None where the subsystem is switched off or no controls are stored, so the
-    ordinary collector install starts nothing and says nothing.
+    Returns None only where the subsystem is switched off, so the ordinary collector
+    install starts nothing. An enabled installation with an empty store still gets a
+    supervisor, because that is what lets the first control created over MCP run.
 
     **Nothing is started under --print or --dump**, for the same reason those modes start
     no MCP server, and with more at stake: they are interactive debugging commands that
