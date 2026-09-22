@@ -271,6 +271,15 @@ class ControlProcess:
                 self.controller.resume()
                 logging.info("Control %r resumed", self.name)
             if decision.actuating:
+                # **Let go of any hold before stepping.** `_fail_safe` holds the controller so
+                # a failed cycle does not integrate an error the loop never acted on, and
+                # nothing else ever released it: the gate had not closed, so no `opened` edge
+                # followed, so `resume` above never ran. One transient failure therefore left
+                # the PID in manual mode returning its last demand for ever - measured at 642
+                # whether the room was 5 degrees or 25, which is a heater stuck on.
+                # `set_auto_mode(True)` is a no-op while already automatic, so this costs
+                # nothing on the ordinary path.
+                self.controller.resume()
                 self._spend_window(dt, sleep)
             else:
                 sleep(self.cycle_seconds)

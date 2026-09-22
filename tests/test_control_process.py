@@ -503,3 +503,57 @@ class TestAnEndStateThatCouldNotBeCommanded:
         bridge.clear()
         assert control.cycle(dt=60, moment=DAY, sleep=_never_sleep).edge is None
         assert bridge.commanded() == []
+
+
+class TestRecoveringFromAFailedCycle:
+    """A transient failure must not cost the control its ability to respond.
+
+    `_fail_safe` holds the controller, so the loop does not integrate an error it never acted
+    on. Nothing released that hold: the gate had not closed, so no `opened` edge followed, so
+    the `resume` on that branch never ran. The PID stayed in manual mode and simple-pid
+    returns the last demand unchanged while it is there - measured at 642 whether the room
+    was 5 degrees or 25, which is a heater stuck on and a control that has stopped being one.
+
+    The existing coverage asserted the next cycle returned a decision rather than None, which
+    is true of a wholly unresponsive loop.
+    """
+
+    def test_the_controller_is_automatic_again_on_the_next_cycle(self, control, bridge):
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        control._fail_safe(SourceConnectionError("a transient failure"))
+        assert control.controller.pid.auto_mode is False, "the fail-safe should have held it"
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert control.controller.pid.auto_mode is True, "nothing ever let go of the hold"
+
+    def test_the_demand_responds_to_the_room_again(self, control, influx, bridge):
+        """The property the mode is only a proxy for: a held loop answers the same whatever
+        it is told, so asserting on the mode alone would miss a different way of freezing."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        control._fail_safe(SourceConnectionError("a transient failure"))
+
+        def demand_at(temperature):
+            """Run one cycle with the room at that temperature and return what was commanded.
+
+            Args:
+                temperature (float): the conservatory temperature to report
+
+            Returns:
+                list: the device states commanded during the cycle
+            """
+            influx.write_reading("temperature_conservatory", temperature)
+            bridge.clear()
+            control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            return bridge.commanded()
+
+        cold = demand_at(5.0)
+        warm = demand_at(25.0)
+        assert cold != warm, f"the loop answered the same for 5 and 25 degrees: {cold} then {warm}"
+
+    def test_an_ordinary_cycle_is_unaffected(self, control, bridge):
+        """`set_auto_mode(True)` only resets when the mode actually changes, which is what
+        lets the cycle call it unconditionally. A loop already running must not be reset
+        every cycle - that would discard the integral continuously and never converge."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        integral = control.controller.pid._integral
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert control.controller.pid._integral != integral, "the integral stopped moving, so it is being reset"

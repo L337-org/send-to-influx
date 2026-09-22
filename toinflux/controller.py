@@ -147,14 +147,22 @@ class Controller:
         self.pid.set_auto_mode(False, last_output=last_output)
 
     def resume(self, last_output=None) -> None:
-        """Start controlling again without a step change.
+        """Start controlling again.
 
         simple-pid's ``set_auto_mode(True, last_output=...)`` back-computes the integral so
-        the first demand after resuming matches ``last_output`` rather than jumping from
-        zero, which is what stops a heater slamming on at the start of every active period.
+        the first demand after resuming matches ``last_output``. **No caller passes one**, so
+        in practice the integral restarts at zero and the loop rebuilds it over a few cycles,
+        which is the same cost a restart already carries. The parameter is kept because the
+        continuity it buys is a real option, not because anything takes it today - see the
+        note on the design record before wiring it up, since it changes what a heater does at
+        the start of every active period.
+
+        Idempotent while already automatic: ``set_auto_mode`` only resets when the mode
+        actually changes, which is what lets the cycle call this unconditionally.
 
         Args:
-            last_output (float or None): the demand to resume from
+            last_output (float or None): the demand to resume from, or None to restart the
+                integral at zero
         """
         self.pid.set_auto_mode(True, last_output=last_output)
 
