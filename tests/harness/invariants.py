@@ -210,6 +210,36 @@ def backoff_grew(starts, minimum):
     return Report(name="restart backoff holds", violations=violations)
 
 
+def no_control_processes_left(pid):
+    """Nothing the supervisor started is still running.
+
+    **Separate from :func:`nothing_leaked`, which cannot see this.** That one reports
+    *growth* against a baseline, and the chaos baseline is taken once every control is up -
+    correctly, because a census before startup counts none of the connection threads a
+    working install has at rest and every run would "leak" the cost of starting. But it means
+    a run that started four children and leaked one ends with a count of 1 against a baseline
+    of 4, which is not growth, so the check passes. The one thing the census exists to catch
+    was the one thing it could not report.
+
+    After a stop there is no baseline to argue about: the right number of descendants is
+    none, so that is asserted outright.
+
+    Args:
+        pid (int): the process whose descendants must be gone
+
+    Returns:
+        Report: the survivors, where there are any
+    """
+    from tests.harness import census
+
+    table = census._process_table()
+    left = census.descendants(pid, table)
+    return Report(
+        name="no control process is left running",
+        violations=[f"{len(left)} control process(es) still running: {sorted(left)}"] if left else [],
+    )
+
+
 def nothing_leaked(before, after, allowance=0):
     """No process, thread or descriptor growth across the run.
 

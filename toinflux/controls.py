@@ -861,6 +861,7 @@ def validate_control_structure(name, document):
     _check_scalars(name, document, errors)
     _check_mapping_of(document, "inputs", errors, ("source", "field"), ("max_age",))
     devices = _check_mapping_of(document, "devices", errors, ("source", "device"), ("min_transition_seconds",))
+    _check_instances_are_names(devices, errors)
     _check_one_key_per_actuator(document, devices, errors)
     _check_pid(document, errors)
     _check_stages(document, devices, errors)
@@ -985,6 +986,31 @@ def enabled_owner_of(actuators, documents, excluding=None):
                 if actuators_may_be_one(ours, theirs):
                     return name, ours
     return None
+
+
+def _check_instances_are_names(devices, errors) -> None:
+    """Refuse a device ``instance`` that is not a usable name.
+
+    It is optional and was never shape-checked, so a list or a mapping validated cleanly and
+    then reached ``command_devices``, which groups devices by ``(source, instance)`` - and a
+    tuple containing a list cannot be hashed, so the control died with a TypeError rather
+    than the "cannot run" a configuration fault is supposed to produce. An empty string is
+    refused too: it is not ``None``, so it does not mean "the first configured target", and
+    it names nothing.
+
+    Args:
+        devices (dict or None): the devices section, where it was usable
+        errors (list): appended to with any problems found
+    """
+    for key, spec in sorted((devices or {}).items(), key=lambda item: repr(item[0])):
+        if not isinstance(spec, dict) or "instance" not in spec:
+            continue
+        instance = spec["instance"]
+        if not isinstance(instance, str) or not instance.strip():
+            errors.append(
+                f"devices.{key}.instance: must be a non-empty name where it is given, got {instance!r} - "
+                f"omit it entirely to mean the first configured target"
+            )
 
 
 def _check_one_key_per_actuator(document, devices, errors) -> None:

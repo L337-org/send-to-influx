@@ -959,3 +959,41 @@ class TestATransitionMinimumLongerThanTheWindow:
         document["output"]["min_transition_seconds"] = 600
         error = next(e for e in validate_control("conservatory", document) if "longer than" in e)
         assert "shorten it" in error and "cycle_seconds" in error
+
+
+class TestADeviceInstanceThatIsNotAName:
+    """`instance` is optional and was never shape-checked, so a list or a mapping validated
+    cleanly and then reached `command_devices`, which groups by `(source, instance)` - and a
+    tuple containing a list cannot be hashed, so the control died with a TypeError rather
+    than the "cannot run" a configuration fault should produce."""
+
+    @pytest.mark.parametrize(
+        "instance",
+        [
+            pytest.param([], id="a-list"),
+            pytest.param({}, id="a-mapping"),
+            pytest.param(3, id="a-number"),
+            pytest.param("", id="empty"),
+            pytest.param("   ", id="whitespace"),
+        ],
+    )
+    def test_it_is_refused(self, instance):
+        document = a_valid_control()
+        key = sorted(document["devices"])[0]
+        document["devices"][key]["instance"] = instance
+        assert any("instance" in error for error in validate_control("conservatory", document))
+
+    def test_an_unhashable_one_would_have_broken_the_grouping(self):
+        """The failure this prevents, stated as the thing it actually is."""
+        with pytest.raises(TypeError):
+            dict.fromkeys([("hue", [])])
+
+    def test_a_real_name_is_accepted(self):
+        document = a_valid_control()
+        key = sorted(document["devices"])[0]
+        document["devices"][key]["instance"] = "bridge1"
+        assert validate_control("conservatory", document) == []
+
+    def test_omitting_it_is_still_fine(self):
+        """It means the first configured target, which is a legitimate thing to mean."""
+        assert validate_control("conservatory", a_valid_control()) == []

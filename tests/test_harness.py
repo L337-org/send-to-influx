@@ -764,3 +764,33 @@ class TestTheBridgeGetIsASnapshot:
         reply = self._get(bridge)
         reply["7"]["capabilities"]["control"]["maxlumen"] = 1
         assert bridge.lights["7"]["capabilities"]["control"]["maxlumen"] == 806
+
+
+class TestTheLeakCheckCanActuallySeeALeak:
+    """`nothing_leaked` reports *growth* against a baseline, and the chaos baseline is taken
+    once every control is up - correctly, or a census before startup would report the cost of
+    starting as a leak. But a run that started four children and leaked one ends at 1 against
+    a baseline of 4, which is not growth, so it passed. The one thing the census exists to
+    catch was the one thing it could not report."""
+
+    def test_a_survivor_is_a_violation_regardless_of_any_baseline(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            report = invariants.no_control_processes_left(os.getpid())
+            assert report.violations, "a running child was not reported"
+            assert str(child.pid) in report.violations[0]
+        finally:
+            child.kill()
+            child.wait()
+
+    def test_nothing_left_is_clean(self):
+        assert invariants.no_control_processes_left(os.getpid()).violations == []
+
+    def test_the_growth_check_alone_would_have_missed_it(self):
+        """The reason this exists as a separate invariant rather than a tightening of the
+        other: with a baseline taken while four children ran, one survivor is a fall."""
+        from tests.harness.census import Census
+
+        before = Census(processes=4, threads=10, descriptors=20, skipped=[])
+        after = Census(processes=1, threads=10, descriptors=20, skipped=[])
+        assert invariants.nothing_leaked(before, after).violations == []

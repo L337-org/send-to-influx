@@ -150,6 +150,10 @@ def _chaos_run(installation, seed, ticks):
                 [spec["device"] for doc in documents.values() for spec in doc["devices"].values()],
             ),
             invariants.nothing_leaked(before, census.quiet_after(before, os.getpid())),
+            # Asserted outright rather than against the baseline. The baseline is taken with
+            # every control up, so a run that leaked one child ends *below* it and the growth
+            # check passes - blind to the one thing the census is here for.
+            invariants.no_control_processes_left(os.getpid()),
         ]
         broken = [f"{report.name}: {v}" for report in reports for v in report.violations]
         assert not broken, (

@@ -3,6 +3,10 @@
 import argparse
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+
+import logging
+
 import pytest
 import requests
 import yaml
@@ -1673,3 +1677,49 @@ class TestWhichFieldsMayBeCreated:
 
     def test_no_other_section_has_creatable_fields(self):
         assert credential_cli._is_creatable_field("influx", "host2") is False
+
+
+class TestReloadingSystemdReportsFailureSafely:
+    """`_reload_systemd` tolerates a failure deliberately - the drop-in is already written and
+    systemd picks it up at the next reload or boot - but it has to say so, and what it says
+    includes systemctl's own stderr.
+
+    This CLI configures no logging of its own, so the collector's indenting formatter is not
+    on this path: an un-indented continuation line would read as its own log entry.
+    """
+
+    @staticmethod
+    def _reload_with(stderr_text, caplog):
+        """Run the reload against a failing systemctl and return what was logged.
+
+        Args:
+            stderr_text (str): what systemctl wrote to stderr
+            caplog (pytest.LogCaptureFixture): the log capture
+
+        Returns:
+            list: the emitted records
+        """
+        result = SimpleNamespace(ok=False, returncode=1, stderr_text=stderr_text, stdout_text="")
+        with patch("toinflux.credential_cli.os.path.isdir", return_value=True):
+            with patch("toinflux.credential_cli.run_command", return_value=result):
+                with caplog.at_level(logging.WARNING):
+                    credential_cli._reload_systemd()
+        return caplog.records
+
+    def test_a_failure_is_reported(self, caplog):
+        records = self._reload_with("Failed to connect to bus", caplog)
+        assert records, "a failed daemon-reload said nothing at all"
+        assert "takes effect later" in records[0].getMessage()
+
+    def test_a_newline_in_the_output_cannot_forge_a_second_entry(self, caplog):
+        """The whole reason it is rendered with %r rather than %s."""
+        forged = "Failed\n2026-01-01 00:00:00 ERROR    this line was not written by the service"
+        records = self._reload_with(forged, caplog)
+        message = records[0].getMessage()
+        assert "\n" not in message, f"the output reached the log as {message.count(chr(10)) + 1} lines"
+        assert "\\n" in message, "the newline should survive as an escape rather than vanish"
+
+    def test_the_output_is_still_readable(self, caplog):
+        """Escaping must not cost the diagnostic - the point is to keep what systemctl said."""
+        records = self._reload_with("Failed to connect to bus: No such file", caplog)
+        assert "No such file" in records[0].getMessage()

@@ -273,7 +273,10 @@ def _reload_systemd():
         return
     if not result.ok:
         logging.warning(
-            "'systemctl daemon-reload' exited %s, so the new drop-in takes effect later: %s",
+            # %r: this is systemctl's own stderr, so it can carry newlines, and this CLI
+            # configures no logging of its own - the collector's indenting formatter is not
+            # on this path, so an un-indented continuation line would read as its own entry.
+            "'systemctl daemon-reload' exited %s, so the new drop-in takes effect later: %r",
             result.returncode,
             result.stderr_text,
         )
