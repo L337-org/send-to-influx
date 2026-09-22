@@ -301,16 +301,26 @@ class TestTheControlSchema:
         assert [slot["where"] for slot in slots] == [where for _path, where, _optional in CONTROL_RULE_SLOTS]
         assert [slot["required"] for slot in slots] == [not optional for _p, _w, optional in CONTROL_RULE_SLOTS]
 
-    def test_the_example_it_hands_out_is_valid(self):
-        """The whole reason the example lives in the store rather than in prose. The design
+    def test_every_example_it_hands_out_is_valid_and_says_when_to_use_it(self):
+        """The whole reason the examples live in the store rather than in prose. The design
         note's copy of this example was invalid for as long as it existed - it read
         `outside` in `enable_when` and declared no such input - and nothing could see it
         until rules were validated. An example a client is told to start from must be one
-        the validator accepts."""
+        the validator accepts.
+
+        Asserted through the tool's own result rather than the constant, because the thing
+        that matters is what a client is handed. `use_when` is part of that: three documents
+        with no way to choose between them is how a model averages across them instead of
+        picking one.
+        """
         from toinflux.controls import validate_control
 
-        example = _control_schema_result(self.SETTINGS)["example"]
-        assert validate_control(example["name"], example) == []
+        examples = _control_schema_result(self.SETTINGS)["examples"]
+        assert len(examples) >= 3, f"expected a scenario set, got {sorted(examples)}"
+        for scenario, entry in examples.items():
+            document = entry["document"]
+            assert validate_control(document["name"], document) == [], scenario
+            assert entry["use_when"].strip(), f"{scenario} does not say when it applies"
 
     def test_it_says_which_sources_can_be_read_and_which_can_switch(self):
         """Read from the registry rather than from a list written here: a source added to

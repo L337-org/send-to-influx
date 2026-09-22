@@ -47,7 +47,7 @@ import threading
 
 
 from toinflux.controls import (
-    CONTROL_EXAMPLE,
+    CONTROL_EXAMPLES,
     actuators_owned,
     enabled_owner_of,
     CONTROL_KEY_HELP,
@@ -466,7 +466,7 @@ def _control_schema_result(settings, settings_file=None, supervisor=None):
         },
         "safe_states": list(BUILT_IN_SAFE_STATES),
         "sources": _usable_sources(settings),
-        "example": CONTROL_EXAMPLE,
+        "examples": CONTROL_EXAMPLES,
         "writing": _writing_availability(settings, settings_file, supervisor),
     }
 

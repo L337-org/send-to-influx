@@ -195,12 +195,22 @@ window at 1500 and 35% at 750.
 * `max_level` caps the **ladder**, not the demand. Capping the demand still proportions
   between rungs above the cap; capping the ladder does not.
 
-A worked example
-----------------
+Worked examples
+---------------
 
-This is the example the project tests itself against, and CI refuses it if it stops being
-valid - so it is known to work rather than known to have been checked once. It is what
-`get_control_schema` hands out.
+Three complete documents, one per situation, and `get_control_schema` hands out all
+three. CI validates every one of them, so they are known to work rather than known to
+have been checked once.
+
+**Copy one whole rather than taking values from several.** These are templates, not
+illustrations: every number in them is one you would actually run. Mixing them is how a
+control ends up with a transition minimum that belonged to neither - which is a real
+incident, not a hypothetical one.
+
+### Normal
+
+The usual case: devices that can be switched as often as the loop likes, and one
+transition minimum covering all of them. Start here.
 
 ```yaml
 name: conservatory
@@ -253,7 +263,6 @@ devices:
   heater_far:
     source: hue
     device: Conservatory heater far
-    min_transition_seconds: 180
   heater_near:
     source: hue
     device: Conservatory heater near
@@ -263,6 +272,104 @@ active_period:
   from: '23:35'
   to: 05:25
   end_state: unenergised
+```
+
+### Slow response
+
+One device's effect takes longer to show up at the sensor than another's - a heater
+across the room from it, or a larger load - so it should be held while the nearer one
+trims. `heater_far` gets its own longer minimum, and that binds **only at the rungs
+where `heater_far` itself changes**: at a demand between 0 and 750 the window collapses
+onto one rung rather than switching it twice, while a demand between 750 and 1500 still
+splits at `heater_near`'s own 60 seconds. That is the whole reason a per-device minimum
+is worth having, and the only example here that carries one.
+
+```yaml
+name: conservatory_staged
+enabled: true
+timezone: Europe/London
+parameters:
+  target: 18.0
+inputs:
+  inside:
+    source: hue
+    field: temperature_conservatory
+    max_age: 900
+  outside:
+    source: openmeteo
+    field: temperature_2m
+    max_age: 1800
+pid:
+  input: inside
+  setpoint: target
+  kp: 12.0
+  ki: 0.02
+  kd: 0.0
+output:
+  cycle_seconds: 300
+  min_transition_seconds: 60
+  stages:
+  - level: 0
+    set:
+      heater_far: false
+      heater_near: false
+  - level: 750
+    set:
+      heater_far: true
+      heater_near: false
+  - level: 1500
+    set:
+      heater_far: true
+      heater_near: true
+devices:
+  heater_far:
+    source: hue
+    device: Conservatory heater far
+    min_transition_seconds: 120
+  heater_near:
+    source: hue
+    device: Conservatory heater near
+enable_when: outside < 15
+safe_state: unenergised
+```
+
+### Fast adjustment
+
+A small thermal mass and a device with nothing to protect. The loop recomputes every
+minute and the window splits as finely as ten seconds.
+
+```yaml
+name: propagator
+enabled: true
+timezone: Europe/London
+parameters:
+  target: 21.0
+inputs:
+  tray:
+    source: hue
+    field: temperature_propagator
+    max_age: 300
+pid:
+  input: tray
+  setpoint: target
+  kp: 40.0
+  ki: 0.1
+  kd: 0.0
+output:
+  cycle_seconds: 60
+  min_transition_seconds: 10
+  stages:
+  - level: 0
+    set:
+      mat: false
+  - level: 1000
+    set:
+      mat: true
+devices:
+  mat:
+    source: hue
+    device: Propagator mat
+safe_state: unenergised
 ```
 
 What is checked, and when

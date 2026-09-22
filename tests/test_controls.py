@@ -10,6 +10,7 @@ from toinflux.controls import (
     shared_actuator_problems,
     BUILT_IN_SAFE_STATES,
     CONTROL_EXAMPLE,
+    CONTROL_EXAMPLES,
     control_dir,
     control_path,
     control_writes_enabled,
@@ -1035,11 +1036,13 @@ class TestAMisspeltKeyInANestedSection:
         document["parameters"] = {"target": 19.0, "whatever_they_called_it": 2.0}
         assert not [error for error in validate_control("conservatory", document) if "unknown key" in error]
 
-    def test_the_example_the_store_ships_uses_no_key_it_would_refuse(self):
-        """The documented example is what an MCP client copies. If the key sets and the
+    def test_the_examples_the_store_ships_use_no_key_they_would_refuse(self):
+        """The documented examples are what an MCP client copies. If the key sets and an
         example ever disagree, the thing following our own documentation is the one that
         gets the error."""
-        assert validate_control("conservatory", a_valid_control()) == []
+        for key, entry in CONTROL_EXAMPLES.items():
+            document = entry["document"]
+            assert validate_control(document["name"], document) == [], key
 
 
 class TestASourceThisInstallationHasNotConfigured:
@@ -1101,3 +1104,46 @@ class TestASourceThisInstallationHasNotConfigured:
         document["devices"]["heater_far"]["source"] = "nosuchsource"
         errors = [e for e in validate_control("conservatory", document, state_directory.settings) if "nosuch" in e]
         assert len(errors) == 1, f"one fault, {len(errors)} messages: {errors}"
+
+
+class TestEveryShippedExample:
+    """Each scenario document is handed to a client that will copy it, so each one is held
+    to the same bar as the canonical example rather than only the one tests are built on.
+
+    An example nothing exercises is a document that stops working the first time the format
+    moves, and nobody finds out until somebody follows the documentation.
+    """
+
+    @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
+    def test_it_is_valid_against_a_real_installation(self, scenario, state_directory):
+        document = CONTROL_EXAMPLES[scenario]["document"]
+        assert validate_control(document["name"], document, state_directory.settings) == []
+
+    @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
+    def test_it_says_when_to_use_it(self, scenario):
+        """The reason there are three. Without it a model picks the first, or averages
+        across them, which is how a 600-second minimum arrived between a 300 and a 900."""
+        assert CONTROL_EXAMPLES[scenario]["use_when"].strip()
+
+    @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
+    def test_it_can_actually_be_stored_and_read_back(self, scenario, state_directory):
+        """Validation is not storage: a name the store refuses would make an example that
+        validates and cannot be written under the name it carries."""
+        document = CONTROL_EXAMPLES[scenario]["document"]
+        save_control(document["name"], document, state_directory.settings_file)
+        assert load_control(document["name"], state_directory.settings_file) == document
+
+    def test_no_setting_carries_two_values_a_reader_could_average(self):
+        """The defect that produced all this. Where an example sets `min_transition_seconds`
+        at the output level and again on a device, the two must differ for a stated reason -
+        which only the slow_response example has. Anywhere else, one value.
+        """
+        for scenario, entry in CONTROL_EXAMPLES.items():
+            document = entry["document"]
+            overrides = {
+                name: spec["min_transition_seconds"]
+                for name, spec in document["devices"].items()
+                if "min_transition_seconds" in spec
+            }
+            if scenario != "slow_response":
+                assert not overrides, f"{scenario} shows an override with nothing to justify it: {overrides}"

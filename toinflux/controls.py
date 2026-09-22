@@ -167,12 +167,100 @@ CONTROL_EXAMPLE = {
         ],
     },
     "devices": {
-        "heater_far": {"source": "hue", "device": "Conservatory heater far", "min_transition_seconds": 180},
+        "heater_far": {"source": "hue", "device": "Conservatory heater far"},
         "heater_near": {"source": "hue", "device": "Conservatory heater near"},
     },
     "enable_when": "outside < 15",
     "safe_state": "unenergised",
     "active_period": {"from": "23:35", "to": "05:25", "end_state": "unenergised"},
+}
+
+
+#: Three complete documents, one per situation, handed out together by the schema tool.
+#:
+#: **Separate documents rather than one annotated with alternatives.** An example is copied,
+#: not read: an agent writing a control took this example's `min_transition_seconds: 300` at
+#: the output level and `900` on a device override and wrote 600, which is the average of two
+#: numbers and belonged to neither. Anything present to demonstrate a mechanism rather than
+#: to be run is a hazard, and two values for one setting within reach at once is the specific
+#: shape of it. So each of these is internally coherent and says when it applies, and a
+#: per-device override appears only where the situation justifies keeping it.
+#:
+#: Every one is validated by CI, because an example nothing exercises is a document that
+#: stops working the first time the format moves.
+CONTROL_EXAMPLES = {
+    "normal": {
+        "use_when": (
+            "the usual case: devices that can be switched as often as the loop likes, and one "
+            "transition minimum covering all of them"
+        ),
+        "document": CONTROL_EXAMPLE,
+    },
+    "slow_response": {
+        "use_when": (
+            "one device's effect takes longer to show up at the sensor than another's - a heater "
+            "across the room from it, or a larger load - so it should be left alone while the "
+            "nearer one trims. Give that device its own longer minimum: it binds only at the rungs "
+            "where that device actually changes, so the nearer one still moves at its own rate"
+        ),
+        "document": {
+            "name": "conservatory_staged",
+            "enabled": True,
+            "timezone": "Europe/London",
+            "parameters": {"target": 18.0},
+            "inputs": {
+                "inside": {"source": "hue", "field": "temperature_conservatory", "max_age": 900},
+                "outside": {"source": "openmeteo", "field": "temperature_2m", "max_age": 1800},
+            },
+            "pid": {"input": "inside", "setpoint": "target", "kp": 12.0, "ki": 0.02, "kd": 0.0},
+            "output": {
+                "cycle_seconds": 300,
+                "min_transition_seconds": 60,
+                "stages": [
+                    {"level": 0, "set": {"heater_far": False, "heater_near": False}},
+                    {"level": 750, "set": {"heater_far": True, "heater_near": False}},
+                    {"level": 1500, "set": {"heater_far": True, "heater_near": True}},
+                ],
+            },
+            "devices": {
+                # The far heater carries the steady load and is slow to read, so it is held
+                # for longer. This governs only the 0 <-> 750 rungs, which are the ones it
+                # changes at; heater_near still trims at the 60 above.
+                "heater_far": {
+                    "source": "hue",
+                    "device": "Conservatory heater far",
+                    "min_transition_seconds": 120,
+                },
+                "heater_near": {"source": "hue", "device": "Conservatory heater near"},
+            },
+            "enable_when": "outside < 15",
+            "safe_state": "unenergised",
+        },
+    },
+    "fast_adjustment": {
+        "use_when": (
+            "a small thermal mass and a device with nothing to protect, where the loop should "
+            "recompute often and the window should split finely"
+        ),
+        "document": {
+            "name": "propagator",
+            "enabled": True,
+            "timezone": "Europe/London",
+            "parameters": {"target": 21.0},
+            "inputs": {"tray": {"source": "hue", "field": "temperature_propagator", "max_age": 300}},
+            "pid": {"input": "tray", "setpoint": "target", "kp": 40.0, "ki": 0.1, "kd": 0.0},
+            "output": {
+                "cycle_seconds": 60,
+                "min_transition_seconds": 10,
+                "stages": [
+                    {"level": 0, "set": {"mat": False}},
+                    {"level": 1000, "set": {"mat": True}},
+                ],
+            },
+            "devices": {"mat": {"source": "hue", "device": "Propagator mat"}},
+            "safe_state": "unenergised",
+        },
+    },
 }
 
 

@@ -2007,10 +2007,16 @@ def test_the_controls_reference_names_every_key_and_function():
     assert not missing_functions, f"CONTROLS.md does not mention the rule function(s): {', '.join(missing_functions)}"
 
 
-def test_the_worked_example_in_the_reference_survives_being_pasted():
-    """`CONTROLS.md` tells a reader to start from its worked example, so the test is not that
-    the file contains the right characters but that pasting them yields a control this project
-    accepts. Parsed with the same loader the store uses and run through the same validator.
+def test_the_worked_examples_in_the_reference_survive_being_pasted():
+    """`CONTROLS.md` tells a reader to start from one of its worked examples, so the test is
+    not that the file contains the right characters but that pasting them yields a control
+    this project accepts. Parsed with the same loader the store uses and run through the same
+    validator.
+
+    Every one of them, and they must be the documents actually shipped rather than prose that
+    has drifted from them: the reference and `get_control_schema` are two copies of the same
+    thing, and a reader following the one that went stale gets an error from the one that did
+    not.
 
     YAML makes that less obvious than it sounds. Under PyYAML's 1.1 resolver an unquoted
     `23:35` is the integer 1415, while `05:25` is the string it looks like - the sexagesimal
@@ -2018,16 +2024,23 @@ def test_the_worked_example_in_the_reference_survives_being_pasted():
     would otherwise change type, so the generated example is right by construction; this guard
     is for the day somebody edits the file by hand and reasons about it the way a person does.
     """
-    from toinflux.controls import validate_control
+    from toinflux.controls import CONTROL_EXAMPLES, validate_control
 
     reference = (REPO_ROOT / "CONTROLS.md").read_text(encoding="utf-8")
     blocks = [block for block in re.findall(r"```yaml\n(.*?)```", reference, re.S) if "name:" in block]
-    assert len(blocks) == 1, f"expected exactly one worked control example in CONTROLS.md, found {len(blocks)}"
+    expected = {entry["document"]["name"]: entry["document"] for entry in CONTROL_EXAMPLES.values()}
+    assert len(blocks) == len(
+        expected
+    ), f"expected {len(expected)} worked control examples in CONTROLS.md, found {len(blocks)}"
 
-    document = yaml.safe_load(blocks[0])
-    assert isinstance(document, dict), "the worked example does not parse as a mapping"
-    problems = validate_control(document.get("name"), document)
-    assert not problems, "the worked example in CONTROLS.md does not validate: " + "; ".join(problems)
+    for block in blocks:
+        document = yaml.safe_load(block)
+        assert isinstance(document, dict), "a worked example does not parse as a mapping"
+        name = document.get("name")
+        problems = validate_control(name, document)
+        assert not problems, f"the {name!r} example in CONTROLS.md does not validate: " + "; ".join(problems)
+        assert name in expected, f"CONTROLS.md carries an example {name!r} that the store does not ship"
+        assert document == expected[name], f"the {name!r} example in CONTROLS.md has drifted from the shipped one"
 
 
 # The one place a swallowed exception is rendered with %s rather than %r, and why.
