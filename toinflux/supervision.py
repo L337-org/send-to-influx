@@ -44,7 +44,14 @@ import time
 from dataclasses import dataclass
 
 from toinflux.control_process import command_devices
-from toinflux.controls import actuators_owned, control_is_enabled, control_path, load_control, validate_control
+from toinflux.controls import (
+    actuators_may_be_one,
+    actuators_owned,
+    control_is_enabled,
+    control_path,
+    load_control,
+    validate_control,
+)
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import commands_for
 from toinflux.process import TimeoutExpired, spawn
@@ -316,7 +323,7 @@ class Supervisor:
         # on every machine and every start. Which of the pair wins is arbitrary; that it is
         # the *same* one each time is not, because an operator watching a heater needs the
         # answer to hold still while they fix it.
-        claimed = {}
+        claimed: list = []
         for name in sorted(names):
             # Read now rather than at each start: a control that cannot be read is a
             # configuration fault, and finding that out per restart would turn it into a
@@ -335,18 +342,25 @@ class Supervisor:
             # the only place left before two loops start fighting over a heater, each with
             # its own PID and its own safe state, neither able to detect the other.
             if control_is_enabled(document):
-                shared = actuators_owned(document) & set(claimed)
-                if shared:
-                    actuator = sorted(shared, key=repr)[0]
+                # Pairwise rather than a set intersection: an absent instance means "the
+                # first configured target", so it is ambiguous against an explicit one rather
+                # than distinct from it, and a set would have let the two spellings past.
+                mine = sorted(actuators_owned(document), key=repr)
+                clash = next(
+                    ((who, held, ours) for ours in mine for who, held in claimed if actuators_may_be_one(ours, held)),
+                    None,
+                )
+                if clash is not None:
+                    owner, _held, actuator = clash
                     logging.error(
                         "Control %r is not being started: %r is already enabled and commands %r - "
                         "two enabled controls must not share an actuator, so disable one",
                         name,
-                        claimed[actuator],
+                        owner,
                         actuator[2],
                     )
                     continue
-                claimed.update({identity: name for identity in actuators_owned(document)})
+                claimed.extend((name, identity) for identity in mine)
             self.children[name] = Child(name=name, document=document, stall_seconds=stall_seconds(document))
 
     def _default_argv(self, name):

@@ -1018,3 +1018,15 @@ class TestOneEnabledControlPerActuator:
         result = _save_control_result("conservatory", conservatory(), stored.settings_file, _Reloading())
         assert result["enabled"] is True
         assert "stored_disabled" not in result
+
+
+class TestAnOmittedInstanceIsNotADifferentActuator:
+    """Saving a control that names the first bridge explicitly, while an enabled one omits
+    `instance`, must not slip past the ownership rule - `None` means that same bridge."""
+
+    def test_it_is_stored_disabled_like_any_other_clash(self, stored):
+        explicit = conservatory(name="spare")
+        explicit["devices"] = {key: dict(spec, instance="bridge1") for key, spec in explicit["devices"].items()}
+        result = _save_control_result("spare", explicit, stored.settings_file, _Reloading())
+        assert result["enabled"] is False
+        assert "conservatory" in result["stored_disabled"]["because"]

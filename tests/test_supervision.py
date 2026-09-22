@@ -1135,3 +1135,19 @@ class TestOneControlThatWillNotStart:
         that would survive it."""
         monkeypatch.setattr(supervisor, "start", _refuse_to_spawn)
         supervisor.start_all()
+
+
+class TestAnOmittedInstanceStillCounts:
+    """`None` means "the first configured target", so a control omitting `instance` and one
+    naming that bridge explicitly are the same actuator. A set intersection treated them as
+    two, which let both start - the bypass this rule exists to prevent, spelled differently."""
+
+    def test_only_one_of_the_two_spellings_starts(self, state_directory, caplog):
+        state_directory.write_control(_quick("aaa", {"far": {"source": "hue", "device": "far"}}))
+        state_directory.write_control(
+            _quick("bbb", {"far": {"source": "hue", "device": "far", "instance": state_directory.bridge.host}})
+        )
+        with caplog.at_level(logging.ERROR):
+            supervisor = Supervisor(["aaa", "bbb"], settings_file=state_directory.settings_file)
+        assert sorted(supervisor.children) == ["aaa"]
+        assert "is not being started" in caplog.text

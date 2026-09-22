@@ -6,6 +6,7 @@ import stat as stat_module
 import pytest
 import yaml
 from toinflux.controls import (
+    actuators_may_be_one,
     shared_actuator_problems,
     BUILT_IN_SAFE_STATES,
     CONTROL_EXAMPLE,
@@ -856,3 +857,40 @@ class TestOnlyOneEnabledControlPerActuator:
             ]
             state_directory.write_control(document, name=name)
         validate_stored_controls(state_directory.settings_file)
+
+
+class TestAnOmittedInstanceIsAmbiguousNotDistinct:
+    """`None` means "the first configured target" (see `Hue.bridge`), so an entry omitting
+    `instance` and one naming that bridge explicitly are the same actuator while comparing
+    unequal. Resolving the default would need the settings document, which validation does
+    not have - so the comparison treats an absent instance as possibly matching any."""
+
+    def test_an_omitted_instance_clashes_with_an_explicit_one_in_one_document(self):
+        document = a_valid_control()
+        document["devices"] = {
+            "a": {"source": "hue", "device": "heater_far"},
+            "b": {"source": "hue", "device": "heater_far", "instance": "bridge1"},
+        }
+        document["output"]["stages"] = [{"level": 0, "set": {"a": False, "b": False}}]
+        assert any("same actuator" in error for error in validate_control("conservatory", document))
+
+    def test_it_clashes_across_documents_too(self):
+        first = a_valid_control()
+        second = dict(a_valid_control(), name="spare")
+        second["devices"] = {key: dict(spec, instance="bridge1") for key, spec in second["devices"].items()}
+        assert shared_actuator_problems({"conservatory": first, "spare": second})
+
+    def test_two_different_explicit_instances_do_not_clash(self):
+        """The refusal errs toward safety, but not so far that two real bridges collide."""
+        document = a_valid_control()
+        document["devices"] = {
+            "a": {"source": "hue", "device": "heater_far", "instance": "bridge1"},
+            "b": {"source": "hue", "device": "heater_far", "instance": "bridge2"},
+        }
+        document["output"]["stages"] = [{"level": 0, "set": {"a": False, "b": False}}]
+        assert not [e for e in validate_control("conservatory", document) if "same actuator" in e]
+
+    def test_the_comparison_is_symmetric(self):
+        """Which of the pair is read first must not decide the answer."""
+        omitted, explicit = ("hue", None, "far"), ("hue", "bridge1", "far")
+        assert actuators_may_be_one(omitted, explicit) is actuators_may_be_one(explicit, omitted) is True

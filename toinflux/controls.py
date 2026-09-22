@@ -821,9 +821,14 @@ def actuator_identity(spec):
     case-insensitively, so ``Hue`` and ``hue`` are one handler commanding one device - left
     verbatim they produced two identities and slipped past both the duplicate-device check
     and the one-enabled-owner rule. A device name is the bridge's own, and the bridge tells
-    two lights apart by case; an instance names a configured target the same way. Folding
-    either would invent a clash between two real devices, which is the opposite failure and
-    the worse one, since it refuses a configuration that works.
+    two lights apart by case. Folding it would invent a clash between two real devices, which
+    is the opposite failure and the worse one, since it refuses a configuration that works.
+
+    **An absent instance is not normalised here and is not comparable by equality.** ``None``
+    means "the first configured target" (see ``Hue.bridge``), so an entry omitting it and one
+    naming that bridge explicitly are the same actuator while comparing unequal. Resolving it
+    would need the settings document, which validation does not have, so the comparison is
+    done by :func:`actuators_may_be_one` rather than by matching tuples.
 
     Args:
         spec (object): a ``devices`` entry
@@ -837,6 +842,32 @@ def actuator_identity(spec):
     if source is None or device is None:
         return None
     return (source.lower() if isinstance(source, str) else source, spec.get("instance"), device)
+
+
+def actuators_may_be_one(first, second):
+    """Whether two actuator identities may name the same physical device.
+
+    Not equality, because an absent instance is ambiguous rather than distinct: ``None``
+    means "the first configured target", so an entry that omits it and one that names that
+    target explicitly are the same actuator and compare unequal. Resolving the default would
+    need the settings document, which the validators do not have.
+
+    So an absent instance is treated as possibly matching any instance of the same source and
+    device. That errs toward refusing - two controls on different bridges, one of which omits
+    its instance, are reported as a clash they may not have - and that is the right direction
+    here: the alternative is two loops commanding one heater, and the refusal names the fix,
+    which is to say which target each one means.
+
+    Args:
+        first (tuple): ``(source, instance, device)``
+        second (tuple): the identity to compare it with
+
+    Returns:
+        bool: True where they may be one actuator
+    """
+    if first[0] != second[0] or first[2] != second[2]:
+        return False
+    return first[1] is None or second[1] is None or first[1] == second[1]
 
 
 def control_is_enabled(document):
@@ -891,9 +922,10 @@ def enabled_owner_of(actuators, documents, excluding=None):
     for name in sorted(documents):
         if name == excluding or not control_is_enabled(documents[name]):
             continue
-        shared = actuators & actuators_owned(documents[name])
-        if shared:
-            return name, sorted(shared, key=repr)[0]
+        for theirs in sorted(actuators_owned(documents[name]), key=repr):
+            for ours in sorted(actuators, key=repr):
+                if actuators_may_be_one(ours, theirs):
+                    return name, ours
     return None
 
 
@@ -921,21 +953,26 @@ def _check_one_key_per_actuator(document, devices, errors) -> None:
     # both places, so canonicalising the source fixed the cross-document rule and left this
     # one still treating `Hue` and `hue` as two actuators - one concept with two
     # implementations diverges the first time either is corrected.
-    seen: dict = {}
+    # Pairwise rather than keyed on the identity, because an absent instance is ambiguous
+    # rather than distinct - see `actuators_may_be_one`. A dict keyed on the tuple put
+    # `(hue, None, far)` and `(hue, bridge1, far)` in different buckets, which is the same
+    # actuator in two entries and exactly what this refuses.
+    entries = []
     for key, spec in sorted(devices.items(), key=lambda item: repr(item[0])):
         identity = actuator_identity(spec)
         if identity is None:
             # A missing source or device is already reported by the shape check above, and
             # guessing an identity from half of one would invent a second complaint.
             continue
-        seen.setdefault(identity, []).append(key)
-    for identity, keys in seen.items():
-        if len(keys) > 1:
-            errors.append(
-                f"devices: {_render_names(keys)} all name the same actuator "
-                f"({identity[2]!r} on {identity[0]!r}) - a stage could set them to opposite "
-                f"states and which one wins would depend on ordering"
-            )
+        entries.append((key, identity))
+    for index, (key, identity) in enumerate(entries):
+        for other_key, other in entries[index + 1 :]:
+            if actuators_may_be_one(identity, other):
+                errors.append(
+                    f"devices: {_render_names([key, other_key])} name the same actuator "
+                    f"({identity[2]!r} on {identity[0]!r}) - a stage could set them to opposite "
+                    f"states and which one wins would depend on ordering"
+                )
 
 
 def validate_stored_controls(settings_file=None) -> None:
@@ -986,20 +1023,21 @@ def shared_actuator_problems(documents):
         list: a problem per clash, naming both controls and the actuator
     """
     problems = []
-    claimed = {}
+    claimed = []
     for name in sorted(documents):
         if not control_is_enabled(documents[name]):
             continue
         for identity in sorted(actuators_owned(documents[name]), key=repr):
-            if identity in claimed:
+            owner = next((who for who, held in claimed if actuators_may_be_one(identity, held)), None)
+            if owner is not None:
                 source, instance, device = identity
                 where = f"{device!r} on {source!r}" + (f" ({instance!r})" if instance else "")
                 problems.append(
-                    f"controls {claimed[identity]!r} and {name!r} are both enabled and both "
+                    f"controls {owner!r} and {name!r} are both enabled and both "
                     f"command {where} - two loops commanding one device fight, so disable one"
                 )
             else:
-                claimed[identity] = name
+                claimed.append((name, identity))
     return problems
 
 
