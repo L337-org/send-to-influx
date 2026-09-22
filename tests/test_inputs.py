@@ -10,6 +10,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
+import logging
 import os
 import random
 import signal
@@ -30,6 +31,7 @@ import pytest
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.influx import InfluxWriteError
 from toinflux.inputs import (
+    _usable_age,
     MAX_LOCK_BACKOFF,
     MIN_LOCK_BACKOFF,
     InputReading,
@@ -995,3 +997,41 @@ class TestReadInput:
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         with pytest.raises(SourceConnectionError, match="no such field"):
             read_input(None, SETTINGS, SPEC)
+
+
+class TestATimestampThatCannotBeBelieved:
+    """Every freshness check in this subsystem is an upper bound, so a reading whose age is
+    not a positive number slips past all of them and is acted on for ever."""
+
+    @pytest.mark.parametrize(
+        "offset,label",
+        [
+            pytest.param(-120.0, "ordinary", id="two-minutes-old"),
+            pytest.param(2.0, "skew", id="a-couple-of-seconds-ahead"),
+        ],
+    )
+    def test_a_believable_timestamp_is_kept(self, offset, label):
+        now = 1_000_000.0
+        assert _usable_age(now + offset, now, "hue", "temperature") is not None
+
+    def test_a_far_future_point_is_refused(self):
+        """A negative age is less than every bound, so a live refresh is suppressed until the
+        clock catches up - indefinitely, for a point a year out."""
+        now = 1_000_000.0
+        assert _usable_age(now + 86400, now, "hue", "temperature") is None
+
+    @pytest.mark.parametrize("stamp", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_timestamp_is_refused(self, stamp):
+        """The worse of the two: `nan > limit` is False, so it reads as fresh permanently and
+        the fail-safe never fires on data it cannot date."""
+        assert _usable_age(stamp, 1_000_000.0, "hue", "temperature") is None
+
+    def test_a_small_skew_is_clamped_rather_than_refused(self):
+        """Refusing it would make an estate with a second of drift fail safe every cycle."""
+        now = 1_000_000.0
+        assert _usable_age(now + 2, now, "hue", "temperature") == 0.0
+
+    def test_the_refusal_says_which_field_and_why(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            _usable_age(float("nan"), 1_000_000.0, "hue", "temperature")
+        assert "temperature" in caplog.text and "hue" in caplog.text

@@ -405,12 +405,71 @@ def handler_reading(session, settings, handler, field, now=None):
         # exist look like a fresh one.
         return None
     moment = time.time() if now is None else now
+    age = _usable_age(float(stamp), moment, handler.source, field)
+    if age is None:
+        return None
     return InputReading(
         value=_as_reading_value(value, handler.source, field),
         timestamp=float(stamp),
-        age=moment - float(stamp),
+        age=age,
         live=False,
     )
+
+
+# How far ahead of now a stored point may be stamped and still be believed. Clock skew
+# between the collector and InfluxDB is ordinarily sub-second on an NTP-synced estate; a
+# minute is generous for that and far below the smallest per-source staleness bound, which is
+# 300 seconds, so this cannot mask a genuinely stale reading.
+FUTURE_TOLERANCE_SECONDS = 60.0
+
+
+def _usable_age(stamp, moment, source, field):
+    """Return how old a stored point is, or None where its timestamp cannot be believed.
+
+    **Every freshness check in this subsystem is an upper bound**, so a reading whose age is
+    not a positive number slips past all of them and is acted on for ever. Two shapes do it:
+
+    * A point stamped in the future gives a negative age, which is less than any bound, so a
+      live refresh is suppressed until the clock catches up - indefinitely, for a point a year
+      out.
+    * A non-finite timestamp gives a nan age, and ``nan > limit`` is ``False``, so it is
+      treated as fresh permanently. This is the worse of the two, because the fail-safe exists
+      precisely to stop a control acting on data it cannot date, and nan defeats it silently.
+
+    Neither is returned as a reading. The caller's response to no reading is a live fetch, and
+    failing that the safe state, which is the right answer for a point that cannot be dated.
+
+    A small future offset is clock skew rather than corruption and is clamped to zero, because
+    refusing it would make an estate with a second of drift fail safe every cycle.
+
+    Args:
+        stamp (float): the point's timestamp, unix seconds
+        moment (float): now, unix seconds
+        source (str): the source, for the log line
+        field (str): the field, for the log line
+
+    Returns:
+        float or None: the age in seconds, or None where the timestamp is unusable
+    """
+    age = moment - stamp
+    if not math.isfinite(stamp) or not math.isfinite(age):
+        logging.warning(
+            "Ignoring the stored point for %r on %r: its timestamp is %r, which is not a time",
+            field,
+            source,
+            stamp,
+        )
+        return None
+    if age < -FUTURE_TOLERANCE_SECONDS:
+        logging.warning(
+            "Ignoring the stored point for %r on %r: it is stamped %.0fs in the future, so its "
+            "age cannot be judged and every freshness check would accept it",
+            field,
+            source,
+            -age,
+        )
+        return None
+    return max(age, 0.0)
 
 
 def _read_filters(handler):
@@ -806,6 +865,15 @@ def _live_reading(handler, source, field, instance, stored, now):
     # evaluated later and separately, so the stored point and the reading returned here
     # would carry different timestamps and a freshness check could straddle them.
     written_at = int(moment) if handler.timestamp is None else handler.timestamp
+    # **A handler's own timestamp is checked before it is written, not after.** Nuki and
+    # Octopus report readings older than the request, which is why `handler.timestamp` wins
+    # here at all - but nothing made it a *believable* time. A non-finite or far-future one
+    # was written to InfluxDB and handed back with an age every upper-bound freshness check
+    # accepts, so the bad value outlived this cycle: it is what the next control reads too.
+    # Refused here rather than clamped, because the reading is the handler's to date and a
+    # substituted time would be this module inventing one.
+    if _usable_age(float(written_at), moment, source, field) is None:
+        return _require(stored, source, field, "the live read carried a timestamp that is not a usable time")
     # Write back every field the fetch returned, not just the one asked for: the round trip
     # has already been paid for, and another control reading a different field of this
     # source is the case the minimum interval exists to serve.
@@ -826,7 +894,10 @@ def _live_reading(handler, source, field, instance, stored, now):
         return _require(stored, source, field, "the live read returned no such field")
     stamp = float(written_at)
     return InputReading(
-        value=_as_reading_value(fields[field], source, field), timestamp=stamp, age=moment - stamp, live=True
+        value=_as_reading_value(fields[field], source, field),
+        timestamp=stamp,
+        age=_usable_age(stamp, moment, source, field),
+        live=True,
     )
 
 

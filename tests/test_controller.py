@@ -14,6 +14,7 @@ import math
 
 import pytest
 
+from toinflux.controls import DEFAULT_CYCLE_SECONDS
 from toinflux.controller import Controller, first_order_plant, simulate
 from toinflux.exceptions import ConfigError
 from toinflux.rules import RuleEvaluationError
@@ -361,3 +362,33 @@ class TestThePlant:
         plant = first_order_plant(start=10.0, gain=0.004, loss=0.06, ambient=8.0)
         with pytest.raises(ValueError):
             plant(float("nan"))
+
+
+class TestAnOmittedCycleWindow:
+    """`cycle_seconds` is optional and three readers need it - the loop, the process and the
+    supervisor's stall threshold. Two defaulted to 900 and this one left it None, so a
+    document that passed `--check-config` raised ConfigError on its first cycle - and a
+    ConfigError is how a control says no retry will help, so it died permanently on a
+    document it had just been told was fine."""
+
+    def test_a_document_without_one_still_runs_a_cycle(self):
+        document = _document()
+        del document["output"]["cycle_seconds"]
+        plan = Controller(document).step({"inside": 17.0, "target": 18.0}, dt=CYCLE)
+        assert plan, "the first cycle produced no plan"
+
+    def test_it_takes_the_same_default_as_everything_else(self):
+        document = _document()
+        del document["output"]["cycle_seconds"]
+        assert Controller(document).cycle_seconds == DEFAULT_CYCLE_SECONDS
+
+    def test_the_three_readers_agree(self):
+        """Read from the one definition rather than compared to a literal, so this cannot
+        pass while two of them drift apart."""
+        from toinflux.control_process import DEFAULT_CYCLE_SECONDS as from_process
+        from toinflux.supervision import stall_seconds
+
+        document = _document()
+        del document["output"]["cycle_seconds"]
+        assert Controller(document).cycle_seconds == from_process
+        assert stall_seconds(document) == from_process * 3

@@ -45,6 +45,7 @@ from dataclasses import dataclass
 
 from toinflux.control_process import command_devices
 from toinflux.controls import (
+    DEFAULT_CYCLE_SECONDS,
     actuators_may_be_one,
     actuators_owned,
     control_is_enabled,
@@ -163,7 +164,7 @@ def stall_seconds(document):
         # A validated document cannot reach here with this shape, but this is public and
         # somebody will call it with a document that came from somewhere else.
         raise ConfigError(f"output must be a mapping, got {type(output).__name__}")
-    cycle = (output or {}).get("cycle_seconds", 900)
+    cycle = (output or {}).get("cycle_seconds", DEFAULT_CYCLE_SECONDS)
     # Checked rather than converted. A bare float() on a stored document raises ValueError
     # or TypeError, and this runs while the supervisor is being built in the collector's own
     # main process - so one corrupt control would take the collector down with it rather

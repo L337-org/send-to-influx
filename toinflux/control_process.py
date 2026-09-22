@@ -28,7 +28,7 @@ import time
 import requests
 
 from toinflux.controller import Controller
-from toinflux.controls import load_control, validate_control
+from toinflux.controls import DEFAULT_CYCLE_SECONDS, load_control, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import DeviceGuard, Gate, commands_for
 from toinflux.general import load_settings, render_values, source_class
@@ -37,7 +37,6 @@ from toinflux.rules import RuleEvaluationError
 from toinflux.staging import build_ladder
 
 #: How long a cycle waits when the document names nothing.
-DEFAULT_CYCLE_SECONDS = 900.0
 
 
 def gather(document, settings, session, settings_file=None, now=None):

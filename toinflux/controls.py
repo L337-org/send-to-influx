@@ -31,6 +31,13 @@ from toinflux.general import resolve_state_dir
 # Where control documents live inside the state directory.
 CONTROL_DIR_NAME = "controls"
 
+# The cycle window a control uses when its document does not say. Homed here, with the
+# document format, because three readers need it - the loop, the process and the
+# supervisor's stall threshold - and they disagreed: two defaulted to 900 and the
+# controller left it None, so a document that passed --check-config raised ConfigError on
+# its first cycle. A default with three spellings is a default with none.
+DEFAULT_CYCLE_SECONDS = 900.0
+
 CONTROL_SUFFIX = ".yaml"
 
 # A control's name is also its filename, and an MCP client can choose it. Anything

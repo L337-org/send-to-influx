@@ -18,7 +18,7 @@ import math
 from simple_pid import PID
 
 from toinflux.exceptions import ConfigError
-from toinflux.controls import rule_names
+from toinflux.controls import DEFAULT_CYCLE_SECONDS, rule_names
 from toinflux.rules import RuleEvaluationError, parse_rule
 from toinflux.staging import build_ladder, cap_ladder, plan_window
 
@@ -45,7 +45,12 @@ class Controller:
         output = document.get("output") or {}
         self.ladder = build_ladder(output.get("stages") or [])
         self.devices = document.get("devices") or {}
-        self.cycle_seconds = output.get("cycle_seconds")
+        # The same default as `ControlProcess.cycle_seconds` and `stall_seconds`, because
+        # `cycle_seconds` is optional and three readers must not disagree about what an
+        # omitted one means. Left as None here, a document that passed --check-config raised
+        # ConfigError on its first cycle - and a ConfigError is how a control says "no retry
+        # will help", so it died permanently on a document it had just been told was fine.
+        self.cycle_seconds = output.get("cycle_seconds", DEFAULT_CYCLE_SECONDS)
         self._default_transition = output.get("min_transition_seconds", 0)
         names = rule_names(document)
         self._setpoint_rule = _rule(document.get("pid", {}).get("setpoint"), names, "pid.setpoint")
