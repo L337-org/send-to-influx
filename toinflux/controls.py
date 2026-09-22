@@ -65,6 +65,21 @@ BUILT_IN_SAFE_STATES = (SAFE_STATE_UNENERGISED, SAFE_STATE_LEAVE_UNCHANGED)
 # Keys a control document may carry at the top level. Checked as a closed set: a
 # mistyped key that was merely ignored would leave the operator looking at a setting
 # they believe is in force and is not.
+# What each nested section may contain. Unknown keys are refused rather than ignored, for
+# the same reason the top-level set below refuses them: a misspelt key is a setting the
+# operator meant to make, so falling back to the default silently gives them a control that
+# does something other than what the document in front of them says. `output.cycle_secconds`
+# validated cleanly and then ran a 900-second window nobody asked for.
+#
+# `parameters` is deliberately not here - its keys are the operator's own names - and
+# neither is a stage's `set`, whose keys are checked against the device list instead.
+INPUT_KEYS = frozenset({"source", "field", "instance", "max_age"})
+DEVICE_KEYS = frozenset({"source", "device", "instance", "min_transition_seconds"})
+PID_KEYS = frozenset({"input", "setpoint", "kp", "ki", "kd"})
+OUTPUT_KEYS = frozenset({"cycle_seconds", "min_transition_seconds", "max_level", "stages"})
+STAGE_KEYS = frozenset({"level", "set"})
+ACTIVE_PERIOD_KEYS = frozenset({"from", "to", "end_state"})
+
 CONTROL_KEYS = frozenset(
     {
         "name",
@@ -425,7 +440,21 @@ def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _check_mapping_of(document, key, errors, required_fields, optional_numbers=()):
+def _check_no_unknown_keys(where, mapping, allowed, errors) -> None:
+    """Refuse keys a section does not define.
+
+    Args:
+        where (str): the section's position, for the message
+        mapping (dict): the section as parsed
+        allowed (frozenset): every key the section defines
+        errors (list): appended to with any problems found
+    """
+    unknown = set(mapping) - allowed
+    if unknown:
+        errors.append(f"{where}: unknown key(s): {_render_names(unknown)}")
+
+
+def _check_mapping_of(document, key, errors, required_fields, optional_numbers=(), allowed=frozenset()):
     """Check one mapping-of-mappings section: inputs, devices.
 
     Args:
@@ -434,6 +463,7 @@ def _check_mapping_of(document, key, errors, required_fields, optional_numbers=(
         errors (list): appended to with any problems found
         required_fields (tuple): field names each entry must carry as a non-empty string
         optional_numbers (tuple): field names that must be positive numbers if present
+        allowed (frozenset): every key an entry may carry; anything else is refused
 
     Returns:
         dict: the section, or an empty mapping when it was missing or the wrong shape
@@ -461,6 +491,7 @@ def _check_mapping_of(document, key, errors, required_fields, optional_numbers=(
         for field in optional_numbers:
             if field in entry and not (_is_number(entry[field]) and entry[field] > 0):
                 errors.append(f"{where}: {field} must be a positive number, got {entry[field]!r}")
+        _check_no_unknown_keys(where, entry, allowed, errors)
     return section
 
 
@@ -482,6 +513,7 @@ def _check_pid(document, errors) -> None:
     for field in ("kp", "ki", "kd"):
         if field in pid and not _is_number(pid[field]):
             errors.append(f"pid.{field}: must be a number, got {pid[field]!r}")
+    _check_no_unknown_keys("pid", pid, PID_KEYS, errors)
 
 
 def _check_stages(document, devices, errors) -> None:
@@ -503,6 +535,7 @@ def _check_stages(document, devices, errors) -> None:
             errors.append(f"output: must be a mapping, got {type(output).__name__}")
         return
 
+    _check_no_unknown_keys("output", output, OUTPUT_KEYS, errors)
     for field in ("cycle_seconds", "min_transition_seconds"):
         if field in output and not (_is_number(output[field]) and output[field] > 0):
             errors.append(f"output.{field}: must be a positive number, got {output[field]!r}")
@@ -582,6 +615,7 @@ def _check_one_stage(where, stage, device_names, errors) -> None:
     if not isinstance(stage, dict):
         errors.append(f"{where}: must be a mapping, got {type(stage).__name__}")
         return
+    _check_no_unknown_keys(where, stage, STAGE_KEYS, errors)
     if not _is_number(stage.get("level")):
         errors.append(f"{where}.level: is required and must be a number")
     assignments = stage.get("set")
@@ -625,6 +659,7 @@ def _check_active_period(document, errors) -> None:
     if not isinstance(period, dict):
         errors.append(f"active_period: must be a mapping, got {type(period).__name__}")
         return
+    _check_no_unknown_keys("active_period", period, ACTIVE_PERIOD_KEYS, errors)
     for field in ("from", "to"):
         value = period.get(field)
         # fullmatch: `$` matches before a trailing newline, so "23:35\n" passed this and
@@ -689,7 +724,7 @@ def _check_scalars(name, document, errors) -> None:
         errors.append(f"safe_state: must be one of {', '.join(BUILT_IN_SAFE_STATES)}, got {safe_state!r}")
 
 
-def validate_control(name, document):
+def validate_control(name, document, settings=None):
     """Check one control document completely: its shape, then its rules, then its sources.
 
     The one call a caller should make. Everything that reads a stored document goes
@@ -706,6 +741,9 @@ def validate_control(name, document):
     Args:
         name (str): the control's name, which its ``name`` key must agree with
         document (dict): the parsed document
+        settings (dict or None): the parsed settings, so a source can be checked against
+            this installation and not only against the build. Omitted means structural and
+            rule validity only; every caller that could actually run the control passes it.
 
     Returns:
         list: human-readable problems, empty when the document is sound
@@ -713,11 +751,11 @@ def validate_control(name, document):
     return (
         validate_control_structure(name, document)
         + validate_control_rules(document)
-        + validate_control_sources(document)
+        + validate_control_sources(document, settings)
     )
 
 
-def validate_control_sources(document):
+def validate_control_sources(document, settings=None):
     """Check that every source a control names exists and can do what is asked of it.
 
     The third half, and the one that asks a question the document cannot answer about
@@ -736,11 +774,13 @@ def validate_control_sources(document):
 
     Args:
         document (dict): the parsed document
+        settings (dict or None): the parsed settings, for the configured-here check;
+            omitted means the build-level checks only
 
     Returns:
         list: human-readable problems, empty where every source named can do its job
     """
-    from toinflux.general import source_class
+    from toinflux.general import source_block_problem, source_class
 
     errors = []
     for key, must_actuate in (("inputs", False), ("devices", True)):
@@ -766,6 +806,16 @@ def validate_control_sources(document):
                 errors.append(
                     f"{where}: source {source!r} cannot switch a device on and off, so a control " f"cannot actuate it"
                 )
+                continue
+            # Knowing the class is not knowing the installation. Without this, a control
+            # naming `hue` on a machine whose settings have no `hue` block passed
+            # --check-config, started, and died on its first safe-state command - then
+            # again on every restart the backoff allowed, each time reporting a fault that
+            # was really a missing settings section. The same question settings validation
+            # already asks, asked with the same function so the two cannot drift.
+            unusable = source_block_problem(source.lower(), settings) if settings is not None else None
+            if unusable:
+                errors.append(f"{where}: {unusable}")
     return errors
 
 
@@ -859,8 +909,10 @@ def validate_control_structure(name, document):
             errors.append(f"{key}: is required and has nothing under it")
 
     _check_scalars(name, document, errors)
-    _check_mapping_of(document, "inputs", errors, ("source", "field"), ("max_age",))
-    devices = _check_mapping_of(document, "devices", errors, ("source", "device"), ("min_transition_seconds",))
+    _check_mapping_of(document, "inputs", errors, ("source", "field"), ("max_age",), INPUT_KEYS)
+    devices = _check_mapping_of(
+        document, "devices", errors, ("source", "device"), ("min_transition_seconds",), DEVICE_KEYS
+    )
     _check_instances_are_names(devices, errors)
     _check_one_key_per_actuator(document, devices, errors)
     _check_pid(document, errors)
@@ -1059,11 +1111,13 @@ def _check_one_key_per_actuator(document, devices, errors) -> None:
                 )
 
 
-def validate_stored_controls(settings_file=None) -> None:
+def validate_stored_controls(settings_file=None, settings=None) -> None:
     """Check every stored control, reporting all of their problems at once.
 
     Args:
         settings_file (str or None): the settings path the process was started with
+        settings (dict or None): the parsed settings, so each control's sources can be
+            checked against this installation as well as against the build
 
     Raises:
         ConfigError: one or more stored controls is unreadable or structurally wrong
@@ -1076,7 +1130,7 @@ def validate_stored_controls(settings_file=None) -> None:
         except ConfigError as exc:
             problems.append(str(exc))
             continue
-        errors = validate_control(name, document)
+        errors = validate_control(name, document, settings)
         problems.extend(f"control {name!r}: {error}" for error in errors)
         if not errors:
             # Only documents that are usable on their own. A broken one has already said so,

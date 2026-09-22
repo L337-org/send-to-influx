@@ -55,6 +55,7 @@ from toinflux.controls import (
 )
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import commands_for
+from toinflux.general import load_settings
 from toinflux.process import TimeoutExpired, spawn
 
 #: How many cycles a control may miss before it is killed and restarted. Three, because one
@@ -141,7 +142,7 @@ def _usable_control(name, settings_file):
         ConfigError: where it cannot be read or is not structurally valid
     """
     document = load_control(name, settings_file)
-    errors = validate_control(name, document)
+    errors = validate_control(name, document, load_settings(settings_file))
     if errors:
         raise ConfigError(f"control {name!r} is not valid:\n  " + "\n  ".join(errors))
     return document

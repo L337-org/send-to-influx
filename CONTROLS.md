@@ -75,8 +75,14 @@ The document
 | `safe_state` | no | what the devices do at startup, on failure and at shutdown |
 | `timezone` | no | an IANA zone name for the active period; absent means this machine's local time |
 
-A key the store does not permit is refused rather than ignored: a mistyped key that was
-quietly dropped would leave you looking at a setting you believe is in force and is not.
+A key the store does not permit is refused rather than ignored, in the nested sections as
+well as at the top level: a mistyped key that was quietly dropped would leave you looking at
+a setting you believe is in force and is not. The exceptions are the two places whose keys
+are yours to choose - `parameters`, and the device names inside a stage's `set`.
+
+Every source a control names needs a settings section on the machine running it, for its
+devices and its inputs alike: an input is read through a source handler too, which resolves
+the database to query from that source's own section.
 
 A required key that is present with nothing under it - `inputs:` with the block unindented
 beneath it - is refused too, and says so specifically, because that is what the mistake
@@ -265,11 +271,11 @@ What is checked, and when
 `--check-config` validates every stored control and reports **all** of their problems at
 once, not the first, because fixing one typo per run is not a review. It checks three things:
 
-* **the shape** - unknown keys, missing or empty required sections, a stage that omits a
-  device, a device referenced by no stage;
+* **the shape** - unknown keys at any level, missing or empty required sections, a stage
+  that omits a device, a device referenced by no stage;
 * **the rules** - every slot parses, and every name it reads is declared;
-* **the sources** - every source named is one this build collects from, and every source in
-  `devices` can actually switch a device on and off.
+* **the sources** - every source named is one this build collects from, has a settings
+  section on this machine, and, in `devices`, can actually switch a device on and off.
 
 Left to a control's startup: whether the device exists on the bridge, and whether it has a
 capability a stage asks for. Those need the far end, and they fail that control only.

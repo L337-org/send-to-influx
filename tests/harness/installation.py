@@ -99,6 +99,11 @@ class Installation:
         self.settings_file = os.path.join(self.root, "settings.yaml")
         self._settings = {
             "sources": list(sources) if sources is not None else ["hue", "openmeteo"],
+            # The shipped control example reads grid carbon intensity, and a control's
+            # inputs are read through a source handler - which resolves the database from
+            # that source's own settings block. An installation running that example has
+            # this section, so the harness does too.
+            "carbonintensity": {"db": "grid", "interval": 1800},
             "openmeteo": {
                 "db": "weather",
                 "interval": 900,

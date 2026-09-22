@@ -693,7 +693,7 @@ def _check_config_and_exit(settings, args):
     # forgets a device would otherwise be discovered by the control process at the
     # moment it was meant to start actuating a heater.
     try:
-        validate_stored_controls(args.settings)
+        validate_stored_controls(args.settings, settings)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         sys.exit(1)

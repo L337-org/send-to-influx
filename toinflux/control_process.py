@@ -185,10 +185,10 @@ class ControlProcess:
         self.name = name
         self.settings_file = settings_file
         self.document = load_control(name, settings_file)
-        errors = validate_control(name, self.document)
+        self.settings = load_settings(settings_file)
+        errors = validate_control(name, self.document, self.settings)
         if errors:
             raise ConfigError(f"control {name!r} is not valid:\n  " + "\n  ".join(errors))
-        self.settings = load_settings(settings_file)
         self.gate = Gate(self.document)
         self.controller = Controller(self.document)
         self.ladder = build_ladder(self.document["output"]["stages"])

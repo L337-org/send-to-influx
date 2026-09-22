@@ -947,13 +947,17 @@ def _validate_influx_block(influx):
     return errors
 
 
-def _unusable_source_block(source, settings):
+def source_block_problem(source, settings):
     """Return the one error that stops a source section being validated at all, or None.
 
     Split from the field checks below both to keep them within the complexity limit and
     because these four faults are terminal: none of the field checks can run, and reporting
     them anyway would bury the real cause under "interval is required" for a section that
     has no fields.
+
+    Public because a control document names sources too, and needs the same question
+    answered before it is accepted: see :func:`toinflux.controls.validate_control_sources`.
+    One definition of "this source is not configured" rather than two that can drift.
 
     Args:
         source (str): source name, already lowercased
@@ -1006,7 +1010,7 @@ def _validate_source_block(source, settings, is_v2):
     """
     if not source:
         return []
-    unusable = _unusable_source_block(source, settings)
+    unusable = source_block_problem(source, settings)
     if unusable:
         return [unusable]
     errors = []

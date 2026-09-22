@@ -997,3 +997,107 @@ class TestADeviceInstanceThatIsNotAName:
     def test_omitting_it_is_still_fine(self):
         """It means the first configured target, which is a legitimate thing to mean."""
         assert validate_control("conservatory", a_valid_control()) == []
+
+
+class TestAMisspeltKeyInANestedSection:
+    """A key outside a section's schema is refused rather than ignored.
+
+    The top-level validator already refused unknown keys; the nested sections did not, so
+    `output.cycle_secconds` validated cleanly and then ran the default window, and
+    `pid.kp_typo` validated cleanly and then ran a proportional gain of zero. In both cases
+    the operator has a document in front of them saying one thing and a control doing
+    another, with nothing anywhere reporting a fault.
+    """
+
+    @pytest.mark.parametrize(
+        "place, mutate",
+        [
+            pytest.param("inputs", lambda d: d["inputs"]["inside"].update({"max_gae": 900}), id="inputs-entry"),
+            pytest.param("devices", lambda d: d["devices"]["heater_far"].update({"min_transition": 60}), id="devices"),
+            pytest.param("pid", lambda d: d["pid"].update({"kp_typo": 3.0}), id="pid"),
+            pytest.param("output", lambda d: d["output"].update({"cycle_secconds": 60}), id="output"),
+            pytest.param("stages[0]", lambda d: d["output"]["stages"][0].update({"levle": 0}), id="stage"),
+            pytest.param("active_period", lambda d: d["active_period"].update({"form": "01:00"}), id="active-period"),
+        ],
+    )
+    def test_it_is_refused_and_named(self, place, mutate):
+        document = a_valid_control()
+        mutate(document)
+        errors = validate_control("conservatory", document)
+        assert any("unknown key" in error for error in errors), f"{place} accepted a key it does not define"
+        assert any(place.split("[")[0] in error for error in errors), "the message must say which section"
+
+    def test_the_operators_own_names_are_still_theirs(self):
+        """`parameters` keys and a stage's `set` keys are named by the operator, not by the
+        schema, so the rule must not reach them. `set` has its own check against the device
+        list, which is the one that should speak for a name that is wrong there."""
+        document = a_valid_control()
+        document["parameters"] = {"target": 19.0, "whatever_they_called_it": 2.0}
+        assert not [error for error in validate_control("conservatory", document) if "unknown key" in error]
+
+    def test_the_example_the_store_ships_uses_no_key_it_would_refuse(self):
+        """The documented example is what an MCP client copies. If the key sets and the
+        example ever disagree, the thing following our own documentation is the one that
+        gets the error."""
+        assert validate_control("conservatory", a_valid_control()) == []
+
+
+class TestASourceThisInstallationHasNotConfigured:
+    """Knowing the class is not knowing the installation.
+
+    `source_class` proves the build can collect from `hue`; it says nothing about whether
+    this machine has a `hue` block. Without the settings check a control naming one passed
+    --check-config, started, and died on its first safe-state command - then again on every
+    restart the backoff allowed, reporting a device fault that was really a missing section.
+
+    Inputs as well as devices, because an input is read through a source handler too: the
+    database it is queried from is resolved out of that source's own settings block.
+    """
+
+    @staticmethod
+    def _without(installation, section):
+        """Return the settings with one source section removed.
+
+        Args:
+            installation (Installation): the installation to read
+            section (str): the source section to drop
+
+        Returns:
+            dict: settings with that section absent
+        """
+        return {key: value for key, value in installation.settings.items() if key != section}
+
+    def test_a_device_source_with_no_settings_section_is_refused(self, state_directory):
+        errors = validate_control("conservatory", a_valid_control(), self._without(state_directory, "hue"))
+        assert any("no configuration section found for source 'hue'" in error for error in errors)
+        assert any("devices" in error for error in errors), "the message must say which entry"
+
+    def test_an_input_source_with_no_settings_section_is_refused(self, state_directory):
+        errors = validate_control("conservatory", a_valid_control(), self._without(state_directory, "openmeteo"))
+        assert any("no configuration section found for source 'openmeteo'" in error for error in errors)
+
+    def test_a_fully_configured_installation_is_accepted(self, state_directory):
+        assert validate_control("conservatory", a_valid_control(), state_directory.settings) == []
+
+    def test_without_settings_it_is_structure_only(self):
+        """Callers that have no settings still get the other two thirds, rather than an
+        error about a check they did not ask for."""
+        assert validate_control("conservatory", a_valid_control()) == []
+
+    def test_check_config_actually_applies_it(self, state_directory):
+        """Through `validate_stored_controls` with settings, which is how --check-config
+        calls it - the one that fails if the check is computed and then never reached."""
+        state_directory.write_control(a_valid_control(), name="conservatory")
+        settings = self._without(state_directory, "hue")
+        with pytest.raises(ConfigError, match="no configuration section found for source 'hue'"):
+            validate_stored_controls(state_directory.settings_file, settings)
+        validate_stored_controls(state_directory.settings_file, state_directory.settings)
+
+    def test_an_unknown_source_is_not_reported_twice(self, state_directory):
+        """`source_block_problem` has its own "not a known source" branch. Reaching it here
+        would print two messages for one fault in two different vocabularies, so it is only
+        asked about sources the build already recognised."""
+        document = a_valid_control()
+        document["devices"]["heater_far"]["source"] = "nosuchsource"
+        errors = [e for e in validate_control("conservatory", document, state_directory.settings) if "nosuch" in e]
+        assert len(errors) == 1, f"one fault, {len(errors)} messages: {errors}"

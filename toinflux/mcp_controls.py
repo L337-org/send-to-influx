@@ -67,6 +67,7 @@ from toinflux.controls import delete_control as remove_stored_control
 from toinflux.controls import list_controls as stored_control_names
 from toinflux.controls import save_control as store_control
 from toinflux.exceptions import ConfigError, ToolParamError
+from toinflux.general import load_settings
 from toinflux.mcp_common import configured_sources, register_tool
 
 # One writer at a time across the control-write tools. Each of them is a read-modify-write -
@@ -99,7 +100,7 @@ def _supervision_by_name(supervisor):
     return {status.name: status for status in supervisor.status()}
 
 
-def _describe(name, settings_file, supervision):
+def _describe(name, settings_file, supervision, settings=None):
     """Return one control's entry for the list, including why it cannot be used.
 
     A control that cannot be read, or that reads and is the wrong shape, is reported rather
@@ -123,6 +124,8 @@ def _describe(name, settings_file, supervision):
         name (str): the control's name
         settings_file (str or None): the settings path the process was started with
         supervision (dict or None): name to status, or None where nothing is supervising
+        settings (dict or None): the parsed settings, read once by the caller for the whole
+            listing rather than once per control
 
     Returns:
         dict: the control's entry
@@ -136,7 +139,7 @@ def _describe(name, settings_file, supervision):
         entry["error"] = repr(exc)
         return entry
     entry["readable"] = True
-    errors = validate_control(name, document)
+    errors = validate_control(name, document, settings)
     entry["valid"] = not errors
     if errors:
         entry["errors"] = errors
@@ -582,7 +585,7 @@ def _reload_outcome(supervisor, name):
     }
 
 
-def _validated_document(name, document):
+def _validated_document(name, document, settings_file=None):
     """Return a document fit to store, or raise with everything wrong with it.
 
     **Validation is here and not in** :func:`toinflux.controls.save_control`, which writes
@@ -597,6 +600,8 @@ def _validated_document(name, document):
     Args:
         name (str): the control's name, which some checks depend on
         document (dict): the document as the client sent it
+        settings_file (str or None): the settings path the process was started with, so a
+            source can be checked against this installation and not only against the build
 
     Returns:
         dict: the same document, once it is known to be valid
@@ -609,7 +614,7 @@ def _validated_document(name, document):
             f"document must be a control document (a mapping of keys), got {type(document).__name__} - "
             "call get_control_schema for the format"
         )
-    errors = validate_control(name, document)
+    errors = validate_control(name, document, load_settings(settings_file))
     if errors:
         raise ToolParamError(
             f"control {name!r} is not valid and nothing has been written; "
@@ -681,7 +686,7 @@ def _save_control_result(name, document, settings_file, supervisor):
     Raises:
         ToolParamError: the document is not valid
     """
-    document = _validated_document(name, document)
+    document = _validated_document(name, document, settings_file)
     with _WRITE_LOCK:
         return _save_validated(name, document, settings_file, supervisor)
 
@@ -874,7 +879,7 @@ def _set_enabled_locked(name, enabled, settings_file, supervisor):
                 f"Disable {owner!r} first, then enable {name!r}"
             )
     document["enabled"] = enabled
-    _validated_document(name, document)
+    _validated_document(name, document, settings_file)
     store_control(name, document, settings_file)
     logging.info("Control %r was %s over MCP", name, "enabled" if enabled else "disabled")
     return {
@@ -938,8 +943,10 @@ def _list_controls_result(settings_file, supervisor):
     """
     supervision = _supervision_by_name(supervisor)
     names = stored_control_names(settings_file)
+    # Read once for the whole listing rather than once per control.
+    settings = load_settings(settings_file)
     result = {
-        "controls": [_describe(name, settings_file, supervision) for name in names],
+        "controls": [_describe(name, settings_file, supervision, settings) for name in names],
         "supervisor_running": supervision is not None,
     }
     if supervision is None:

@@ -320,6 +320,31 @@ class TestMain:
         # diagnostic here follows.
         assert "conservatory" not in captured.out
 
+    def test_main_check_config_refuses_a_control_naming_an_unconfigured_source(self, tmp_path, monkeypatch):
+        """The wiring, not the check: `validate_stored_controls` is what knows the rule, and
+        it only applies it when --check-config hands it the settings. Dropping that argument
+        leaves every other test here green while the check silently stops running."""
+        from tests.test_controls import a_valid_control
+        from toinflux.controls import save_control
+
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        save_control("conservatory", a_valid_control())
+
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings") as mock_load_settings,
+            patch("sendtoinflux.toinflux.validate_settings"),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
+        ):
+            mock_load_settings.return_value = {
+                "sources": ["hue"],
+                "openmeteo": {"db": "weather", "interval": 900},
+                "carbonintensity": {"db": "grid", "interval": 1800},
+            }
+            with pytest.raises(SystemExit) as exc_info:
+                sendtoinflux.main()
+        assert exc_info.value.code == 1
+
     def test_main_check_config_passes_with_a_sound_stored_control(self, tmp_path, monkeypatch):
         """A well-formed control does not stop --check-config reporting OK."""
         from tests.test_controls import a_valid_control
@@ -336,7 +361,16 @@ class TestMain:
             patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
             patch("sendtoinflux.sys.exit", side_effect=SystemExit(0)),
         ):
-            mock_load_settings.return_value = {"sources": ["hue"]}
+            # Every source the example control names needs a section here, because that is
+            # now part of what makes a stored control valid - a control naming `hue` on a
+            # machine with no `hue` block used to pass this check and then die on its first
+            # command.
+            mock_load_settings.return_value = {
+                "sources": ["hue"],
+                "hue": {"db": "hue_db", "interval": 300},
+                "openmeteo": {"db": "weather", "interval": 900},
+                "carbonintensity": {"db": "grid", "interval": 1800},
+            }
             with pytest.raises(SystemExit):
                 sendtoinflux.main()
             printed = [call.args[0] for call in mock_print.call_args_list]
