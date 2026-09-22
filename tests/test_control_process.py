@@ -227,7 +227,7 @@ class TestCommandingDevices:
         document = conservatory()
         document["devices"] = {"far": {"source": "openmeteo", "device": "far"}}
         with pytest.raises(ConfigError, match="cannot switch a device"):
-            command_devices(document, {"far": True}, installation.settings_file)
+            command_devices("conservatory", document, {"far": True}, installation.settings_file)
 
     def test_a_writable_source_that_cannot_switch_a_device_is_refused_too(self, installation):
         """The case the old check let through. `MCP_WRITABLE` says only that *some* write
@@ -249,7 +249,7 @@ class TestCommandingDevices:
         document = conservatory()
         document["devices"] = {"far": {"source": "speedtest", "device": "far"}}
         with pytest.raises(ConfigError, match="cannot switch a device"):
-            command_devices(document, {"far": True}, installation.settings_file)
+            command_devices("conservatory", document, {"far": True}, installation.settings_file)
 
     def test_the_refusal_names_the_control_s_own_device_keys(self, installation):
         """What an operator edits is the entry they wrote, not the name the far end knows
@@ -261,7 +261,9 @@ class TestCommandingDevices:
             "downstairs": {"source": "speedtest", "device": "line-2"},
         }
         with pytest.raises(ConfigError) as exc:
-            command_devices(document, {"upstairs": True, "downstairs": False}, installation.settings_file)
+            command_devices(
+                "conservatory", document, {"upstairs": True, "downstairs": False}, installation.settings_file
+            )
         assert "'downstairs'" in str(exc.value) and "'upstairs'" in str(exc.value)
         assert "line-1" not in str(exc.value)
 
@@ -277,7 +279,7 @@ class TestCommandingDevices:
         document = conservatory()
         document["devices"] = {"far": {"source": "speedtest", "device": "far"}}
         with pytest.raises(ConfigError) as exc:
-            command_devices(document, {"far": True}, installation.settings_file)
+            command_devices("conservatory", document, {"far": True}, installation.settings_file)
         assert "cannot switch a device" in str(exc.value)
         assert "not found in settings" not in str(exc.value)
 
@@ -288,16 +290,16 @@ class TestCommandingDevices:
         document = conservatory()
         document["devices"] = {"far": {"device": "far"}}
         with pytest.raises(ConfigError, match="declares no"):
-            command_devices(document, {"far": True}, installation.settings_file)
+            command_devices("conservatory", document, {"far": True}, installation.settings_file)
 
     def test_a_device_the_document_does_not_declare_is_refused(self, installation):
         with pytest.raises(ConfigError, match="not declared"):
-            command_devices(conservatory(), {"nosuchdevice": True}, installation.settings_file)
+            command_devices("conservatory", conservatory(), {"nosuchdevice": True}, installation.settings_file)
 
     def test_the_far_end_s_refusal_reaches_the_caller(self, installation, bridge):
         with faults.erroring(bridge, 503):
             with pytest.raises(SourceConnectionError):
-                command_devices(conservatory(), {"far": True}, installation.settings_file)
+                command_devices("conservatory", conservatory(), {"far": True}, installation.settings_file)
 
 
 def _quick_control(**overrides):

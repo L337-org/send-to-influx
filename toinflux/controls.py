@@ -477,6 +477,12 @@ def delete_control(name, settings_file=None) -> None:
     Raises:
         ConfigError: the control does not exist, or could not be removed
     """
+    # Imported here because toinflux.transitions imports this module for the name rules, and
+    # a module-level import would be circular. Here rather than at the two callers so a third
+    # one cannot forget: a log left behind is read by the next control to take the name, which
+    # would then hold devices frozen on the strength of what a different control did.
+    from toinflux.transitions import forget_control
+
     path = control_path(name, settings_file)
     try:
         os.unlink(path)
@@ -484,6 +490,9 @@ def delete_control(name, settings_file=None) -> None:
         raise ConfigError(f"no control named {name!r} at {path!r}") from exc
     except OSError as exc:
         raise ConfigError(f"cannot delete control {name!r} at {path!r}: {exc}") from exc
+    # After the document is gone: the log is bookkeeping, and failing to remove it must not
+    # leave a control that is half-deleted.
+    forget_control(name, settings_file)
 
 
 def _render_names(values):
@@ -635,60 +644,9 @@ def _check_stages(document, devices, errors) -> None:
         errors.append("output.stages: must be a non-empty list")
         return
 
-    _check_transitions_fit_the_window(document, output, devices, errors)
-
     device_names = set(devices)
     for index, stage in enumerate(stages):
         _check_one_stage(f"output.stages[{index}]", stage, device_names, errors)
-
-
-def _check_transitions_fit_the_window(document, output, devices, errors) -> None:
-    """Refuse a transition minimum longer than the cycle window.
-
-    **The minimum binds inside a window and not across the boundary between them.** A dwell
-    too short for a device to honour collapses the window onto one rung, which is correct -
-    but the planner is handed only this window's demand and keeps nothing from the last one,
-    so it cannot see that the rung it is choosing is a change from one window ago. With a
-    300-second cycle and a 600-second minimum, a demand drifting either side of a rung
-    switches the devices every 300 seconds, which is exactly what the minimum forbade.
-
-    The two settings are asking for different things: decide this often, and do not change
-    more often than that. Where the second is longer than the first, the document is
-    incoherent rather than merely awkward, and saying so is better than half-honouring it.
-
-    **Rejected: quietly widening the window** to the largest of ``cycle_seconds`` and every
-    minimum, which would make the combination work. It was rejected for this version because
-    the operator asked for two things and would silently get neither - a control deciding
-    every ten minutes when its document says five. It remains the obvious way to cope if this
-    ever has to be tolerated rather than refused.
-
-    Also rejected: tracking transitions across windows, which is correct in every case and
-    would make the minimum mean what it says. It puts state in the loop that must then
-    survive a restart, or the guarantee lapses at exactly the moment a control is restarted -
-    a worse promise than not making one.
-
-    Args:
-        document (dict): the parsed control document
-        output (dict): its ``output`` section, already known to be a mapping
-        devices (dict or None): the devices section, where it was usable
-        errors (list): appended to with any problems found
-    """
-    cycle = output.get("cycle_seconds", DEFAULT_CYCLE_SECONDS)
-    if not (_is_number(cycle) and cycle > 0):
-        # Already reported above; comparing against it would add a second complaint about
-        # one fault and name a number nobody wrote.
-        return
-    minima = [("output.min_transition_seconds", output.get("min_transition_seconds"))]
-    for key, spec in sorted((devices or {}).items(), key=lambda item: repr(item[0])):
-        if isinstance(spec, dict) and "min_transition_seconds" in spec:
-            minima.append((f"devices.{key}.min_transition_seconds", spec["min_transition_seconds"]))
-    for where, minimum in minima:
-        if _is_number(minimum) and minimum > cycle:
-            errors.append(
-                f"{where}: is {minimum!r}, longer than the {cycle!r}s cycle window, so a "
-                f"device would be changed at every window boundary regardless - shorten it, "
-                f"or lengthen output.cycle_seconds to at least it"
-            )
 
 
 def _check_one_stage(where, stage, device_names, errors) -> None:

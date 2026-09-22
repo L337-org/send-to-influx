@@ -20,7 +20,7 @@ from simple_pid import PID
 from toinflux.exceptions import ConfigError
 from toinflux.controls import DEFAULT_CYCLE_SECONDS, rule_names
 from toinflux.rules import RuleEvaluationError, parse_rule
-from toinflux.staging import build_ladder, cap_ladder, plan_window
+from toinflux.staging import build_ladder, cap_ladder, plan_window, reachable_ladder
 
 
 class Controller:
@@ -74,13 +74,17 @@ class Controller:
             time_fn=time_fn,
         )
 
-    def step(self, bindings, dt=None):
+    def step(self, bindings, dt=None, frozen=frozenset(), states=None):
         """Run one cycle and return how the window should be spent.
 
         Args:
             bindings (dict): name -> value for every input and parameter the rules read
             dt (float or None): seconds since the previous cycle, for tests; None lets
                 simple-pid measure it from the clock. Must be a positive finite number.
+            frozen (frozenset): devices whose ``min_transition_seconds`` has not elapsed, so
+                the window may only use rungs that leave them where they are
+            states (dict or None): device name to the state it is currently in, which is what
+                "leave them where they are" is measured against
 
         Returns:
             tuple: Dwell, filling one cycle window
@@ -112,6 +116,12 @@ class Controller:
             cap = self._max_level_rule.evaluate(bindings)
             ladder = cap_ladder(self.ladder, cap)
             limits = (ladder[0].level, ladder[-1].level)
+        # After the cap and deliberately *not* reflected in `limits` above. A cap is a
+        # standing instruction and the integral should stop winding towards what it forbids;
+        # a frozen device is a wait of a window or two, and narrowing the limits for it would
+        # have the PID forget the demand it is part way through building and pay it back as
+        # overshoot the moment the device came free.
+        ladder = reachable_ladder(ladder, frozen, states or {})
         self.pid.setpoint = setpoint
         if limits is not None:
             # The limits follow the cap. Left at the full ladder's range, the integral would

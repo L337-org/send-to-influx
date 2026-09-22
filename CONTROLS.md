@@ -187,11 +187,15 @@ window at 1500 and 35% at 750.
   would assume it was off, which is how a heater stays on.
 * `level` must be a number. `true` would validate and then sort as 1, inserting a rung.
 * `min_transition_seconds` protects hardware that objects to frequent switching - a relay, a
-  compressor - rather than smoothing the loop, which is the PID's job. Tens of seconds is the
-  usual range. It is enforced per device, and only for devices that actually change between the
-  two rungs. **It may not exceed `cycle_seconds`** and is refused if it does: the limit binds
-  within a window, not across the boundary between them, so a longer one would be broken at
-  every boundary anyway.
+  compressor - rather than smoothing the loop, which is the PID's job. It is enforced per
+  device, and only for devices that actually change between the two rungs.
+* **It may be longer than `cycle_seconds`**, and the two are unrelated settings: how often the
+  loop recomputes, and how often a given piece of hardware may be switched. A device still
+  inside its minimum is held where it is, and the window is planned from the rungs that leave
+  it there - so a fast loop can drive a responsive device while a slow one beside it is
+  protected. The record of when each device last moved is kept in the state directory and
+  survives a restart, because the supervisor restarts a control on every document edit and a
+  guarantee that lapsed there would be no guarantee at all.
 * `max_level` caps the **ladder**, not the demand. Capping the demand still proportions
   between rungs above the cap; capping the ladder does not.
 

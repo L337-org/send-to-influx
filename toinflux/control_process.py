@@ -35,6 +35,7 @@ from toinflux.general import load_settings, render_values, source_class
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
 from toinflux.staging import build_ladder
+from toinflux.transitions import TransitionLog
 
 #: How long a cycle waits when the document names nothing.
 
@@ -82,40 +83,59 @@ def gather(document, settings, session, settings_file=None, now=None):
     return bindings
 
 
-def command_devices(document, commands, settings_file=None) -> None:
-    """Put a control's devices into the states given.
+def command_devices(name, document, commands, settings_file=None, transitions=None) -> None:
+    """Put a control's devices into the states given, and note which of them moved.
 
     Grouped by source and instance so one handler serves every device on the same bridge,
     and closed on the way out: a handler opens a session whether or not anything uses it,
     and a control commanding two heaters every cycle would otherwise leak two sockets a
     cycle.
 
+    **The transition log is written here and nowhere else.** Both the control process and
+    the supervisor command devices, and ``min_transition_seconds`` is only kept if every one
+    of those is recorded - so the record is taken at the single point they share rather than
+    at each of them, where a path added later would simply not have it. That is also why the
+    control's name is the first argument and not optional: there is no such thing as
+    commanding a control's devices without knowing whose they are.
+
+    Recorded after the command, so a device the far end refused is not written down as having
+    moved. A partial failure across two bridges therefore records the bridge that answered
+    and not the one that did not, which is the truth about what happened.
+
     Args:
+        name (str): the control whose devices these are
         document (dict): the control document
         commands (dict): the control's own device names, to the state each should take
         settings_file (str or None): the settings path the process was started with
+        transitions (TransitionLog or None): the log to write to; one is opened for this
+            control when None, which is what a caller with no loop of its own wants
 
     Raises:
         ConfigError: where a device names a source that cannot actuate anything
         SourceConnectionError: where the far end refused or could not be reached
     """
     declared = document.get("devices") or {}
+    commanded: dict = {}
     targets: dict = {}
-    for name, state in commands.items():
-        spec = declared.get(name)
+    # `device_key` rather than `name`, which is the control's: this loop used to call its
+    # variable `name` and shadowed the parameter added above it, so the transition log was
+    # written under the last device's key instead of the control's. Caught by a test rather
+    # than by review, and only because the test asked for the log by the control's name.
+    for device_key, state in commands.items():
+        spec = declared.get(device_key)
         if not isinstance(spec, dict):
-            raise ConfigError(f"control device {name!r} is not declared in this control's devices section")
-        missing = [key for key in ("source", "device") if not spec.get(key)]
+            raise ConfigError(f"control device {device_key!r} is not declared in this control's devices section")
+        missing = [field for field in ("source", "device") if not spec.get(field)]
         if missing:
             # ConfigError rather than the KeyError a bare lookup gives: the supervisor calls
             # this to make a dead control's devices safe and handles the project's own
             # types, so a KeyError from one corrupt document would escape that handler and
             # stop every other control being supervised.
-            raise ConfigError(f"control device {name!r} declares no {render_values(missing)}")
+            raise ConfigError(f"control device {device_key!r} declares no {render_values(missing)}")
         # The control's own key travels with the bridge-side name, because it is the one an
         # operator can act on: a fault with this declaration is fixed by editing the entry
         # they wrote, not the device name the far end knows it by.
-        targets.setdefault((spec["source"], spec.get("instance")), []).append((name, spec["device"], state))
+        targets.setdefault((spec["source"], spec.get("instance")), []).append((device_key, spec["device"], state))
     for (source, instance), devices in sorted(targets.items(), key=lambda item: str(item[0])):
         # Asked of the class, before a handler is built. Building one loads settings and
         # opens a session, so refusing afterwards costs a socket for a source that is about
@@ -156,6 +176,10 @@ def command_devices(document, commands, settings_file=None) -> None:
                     raise ConfigError(
                         f"control device {key!r} cannot be commanded: {exc}",
                     ) from exc
+                commanded[key] = bool(state)
+    if commanded:
+        log = TransitionLog(name, settings_file) if transitions is None else transitions
+        log.record(commanded)
 
 
 class ControlProcess:
@@ -189,6 +213,10 @@ class ControlProcess:
         errors = validate_control(name, self.document, self.settings)
         if errors:
             raise ConfigError(f"control {name!r} is not valid:\n  " + "\n  ".join(errors))
+        # Opened once and carried, not read per command: it is this process's own record of
+        # what it has done, and re-reading it every cycle would cost a file read to learn
+        # what it already knows.
+        self.transitions = TransitionLog(name, settings_file)
         self.gate = Gate(self.document)
         self.controller = Controller(self.document)
         self.ladder = build_ladder(self.document["output"]["stages"])
@@ -226,7 +254,7 @@ class ControlProcess:
         """
         if commands is None:
             return
-        command_devices(self.document, commands, self.settings_file)
+        command_devices(self.name, self.document, commands, self.settings_file, self.transitions)
 
     def _gather(self):
         """Return this cycle's bindings, reading them at most once.
@@ -318,7 +346,13 @@ class ControlProcess:
             ConfigError: where the window or the cap is unusable
         """
         bindings = self._gather()
-        demand = self.controller.step(bindings, dt)
+        # Asked before the step, so the plan is built from what this window may actually do
+        # rather than built and then contradicted. A device still inside its minimum keeps
+        # the state it is in, and the demand is met as closely as the rungs that remain allow.
+        frozen = self.transitions.frozen(
+            self.controller.min_transition_for, tuple(self.document.get("devices") or {}), self.cycle_seconds
+        )
+        demand = self.controller.step(bindings, dt, frozen=frozen, states=self.transitions.states())
         for dwell in demand:
             self._apply(dict(dwell.stage.states))
             sleep(dwell.seconds)

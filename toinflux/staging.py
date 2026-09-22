@@ -204,6 +204,40 @@ class Dwell:
     seconds: float
 
 
+def reachable_ladder(ladder, frozen, states):
+    """Return the rungs a control may move to while some devices must not change.
+
+    A frozen device pins every rung that would move it: if the far heater may not switch
+    yet, the only rungs available are the ones that leave it where it is. The demand is then
+    bracketed within what is left, so the control does the best it can rather than switching
+    a device it has promised not to.
+
+    **Where no rung matches, the whole ladder is returned.** That happens when the devices
+    are in a combination the ladder does not describe - after a safe state, on a document
+    with no all-off rung - and there is then no such thing as "keeping them where they are".
+    The minimum is a promise about wear, not a safety interlock; the safe state is the safety
+    mechanism, and refusing to actuate at all here would turn a wear heuristic into an outage.
+
+    Args:
+        ladder (tuple): Stage in ladder order
+        frozen (frozenset): device names that must keep the state they are in
+        states (dict): device name to the state it is currently in
+
+    Returns:
+        tuple: the rungs that may be commanded, in ladder order
+    """
+    if not frozen:
+        return ladder
+    available = tuple(
+        rung
+        for rung in ladder
+        # `in states` rather than a default: a frozen device nobody has a state for cannot
+        # pin anything, and treating it as False would pin every rung that switches it on.
+        if all(rung.states.get(device) == states[device] for device in frozen if device in states)
+    )
+    return available or ladder
+
+
 def plan_window(ladder, demand, cycle_seconds, min_transition_for):
     """Return how a cycle window is split between rungs to average out at a demand.
 

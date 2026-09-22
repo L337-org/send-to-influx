@@ -29,7 +29,7 @@ background.
 | any collector under `toinflux/` (not the MCP modules) | [architecture/collectors.md](architecture/collectors.md) |
 | reading from InfluxDB, or any query construction | `toinflux/influx.py`'s read half, and [architecture/collectors.md](architecture/collectors.md) |
 | `sendtoinflux.py`, `toinflux/general.py`, `toinflux/process.py`, `toinflux/controls.py`, `toinflux/rules.py` | [architecture/runtime.md](architecture/runtime.md) |
-| the control loop: `toinflux/supervision.py`, `control_process.py`, `controller.py`, `gating.py`, `schedule.py`, `staging.py`, `inputs.py` | [CONTROLS.md](CONTROLS.md) for the document format, [architecture/runtime.md](architecture/runtime.md) for how it runs |
+| the control loop: `toinflux/supervision.py`, `control_process.py`, `controller.py`, `gating.py`, `schedule.py`, `staging.py`, `transitions.py`, `inputs.py` | [CONTROLS.md](CONTROLS.md) for the document format, [architecture/runtime.md](architecture/runtime.md) for how it runs |
 | running an external command from anywhere | `toinflux.process.run_command`, and [architecture/runtime.md](architecture/runtime.md) |
 | `packaging/`, `toinflux/credentials.py`, `toinflux/credential_cli.py`, or adding a settings section | [architecture/packaging.md](architecture/packaging.md) |
 | adding a data source | the checklist in [CONTRIBUTING.md](CONTRIBUTING.md) |
