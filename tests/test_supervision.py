@@ -1089,3 +1089,49 @@ class TestTwoEnabledControlsClaimingOneActuator:
         state_directory.write_control(_quick("bbb", {"porch": {"source": "hue", "device": "porch-heater"}}))
         supervisor = Supervisor(["aaa", "bbb"], settings_file=state_directory.settings_file)
         assert sorted(supervisor.children) == ["aaa", "bbb"]
+
+
+class TestOneControlThatWillNotStart:
+    """`start` raises where a pipe or a spawn fails, and `start_all` runs before `run`'s own
+    try block - so a failure on one control propagated out of the supervisor thread and
+    killed it, leaving any already-started controls spawned, actuating, and watched by
+    nothing: no heartbeat read, no restart, no safe state on death. The collector carried on,
+    so from the outside it looked like a working install."""
+
+    def test_the_others_still_start(self, supervisor, monkeypatch):
+        real = supervisor.start
+        failed = []
+
+        def refuse_the_first(name):
+            """Fail the alphabetically first control and start the rest.
+
+            Args:
+                name (str): the control to start
+
+            Raises:
+                ConfigError: for the chosen control
+            """
+            if name == "conservatory" and not failed:
+                failed.append(name)
+                raise ConfigError("could not make a heartbeat pipe")
+            return real(name)
+
+        monkeypatch.setattr(supervisor, "start", refuse_the_first)
+        supervisor.start_all()
+        assert failed == ["conservatory"], "the failure never happened, so this proves nothing"
+        assert supervisor.children["porch"].running, "one control's failure stopped another starting"
+
+    def test_the_failure_is_counted_and_backed_off(self, supervisor, monkeypatch):
+        """Handled as `_restart` already handles it, so a repeatedly unstartable control does
+        not become a respawn loop."""
+        monkeypatch.setattr(supervisor, "start", _refuse_to_spawn)
+        supervisor.start_all()
+        conservatory = supervisor.children["conservatory"]
+        assert conservatory.failures == 1
+        assert conservatory.restart_at is not None
+
+    def test_it_does_not_escape_to_the_caller(self, supervisor, monkeypatch):
+        """The whole point: this runs on the supervisor's own thread, outside any try block
+        that would survive it."""
+        monkeypatch.setattr(supervisor, "start", _refuse_to_spawn)
+        supervisor.start_all()

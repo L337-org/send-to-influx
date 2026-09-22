@@ -502,8 +502,12 @@ def _writing_availability(settings, settings_file, supervisor=None):
     Returns:
         dict: what the client may do about controls, and how to change it
     """
-    # One sentence, two states, used by both branches below: a control only starts by itself
-    # where something is watching for it.
+    # **Two different answers, because the two paths are not the same.** A control written by
+    # a tool is announced to the supervisor, so it starts without a restart. A control written
+    # by hand is not: nothing watches the control directory, and a reload is queued only by
+    # the write tools. Saying "the service picks it up" to somebody being told to save a file
+    # themselves is the one place that wording does real harm, since they are the only reader
+    # for whom it is false.
     if supervisor is None:
         pickup = (
             "this service is not currently supervising any control, so a newly stored one "
@@ -511,7 +515,11 @@ def _writing_availability(settings, settings_file, supervisor=None):
             "no control is stored yet"
         )
     else:
-        pickup = "the service picks up a stored control without a restart"
+        pickup = "the service picks up a control written through these tools without a restart"
+    by_hand = (
+        "the service does not watch this directory, so restart it after saving, or have "
+        "somebody enable controls.mcp_write and ask again"
+    )
     if control_writes_enabled(settings):
         return {
             "available": True,
@@ -538,7 +546,7 @@ def _writing_availability(settings, settings_file, supervisor=None):
         "meanwhile": (
             "compose the document and give it to the operator to save as "
             f"{control_dir(settings_file)}/<name>.yaml - it is the same format described "
-            f"here. Note that {pickup}"
+            f"here. Note that {by_hand}"
         ),
     }
 

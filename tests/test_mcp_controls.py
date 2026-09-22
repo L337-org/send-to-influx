@@ -695,12 +695,19 @@ class TestWhetherANewControlWillActuallyStart:
         settings = {"sources": ["hue"], "controls": {"enabled": True, "mcp_write": mcp_write}}
         return _control_schema_result(settings, "/etc/send-to-influx/settings.yaml", supervisor)["writing"]
 
-    def test_hand_saving_advice_admits_a_restart_is_needed_when_nothing_is_supervising(self):
-        """The wrong advice would land on precisely the person most likely to read it."""
-        assert "restarted" in self._writing(False, None)["meanwhile"]
+    @pytest.mark.parametrize("supervisor", [None, "running"], ids=["no-supervisor", "supervising"])
+    def test_hand_saving_advice_always_says_a_restart_is_needed(self, supervisor):
+        """Nothing watches the control directory, so a file written by hand is picked up by
+        nothing - a reload is queued by the write tools and by no other path.
 
-    def test_hand_saving_advice_says_no_restart_is_needed_when_something_is_supervising(self):
-        assert "without a restart" in self._writing(False, _Reloading())["meanwhile"]
+        This previously asserted the opposite while a supervisor was running, which was a
+        test defending the wrong behaviour: the advice it pinned is given to the one reader
+        for whom "the service picks it up" is false, because they are being told to save the
+        file themselves.
+        """
+        advice = self._writing(False, _Reloading() if supervisor else None)["meanwhile"]
+        assert "restart" in advice, advice
+        assert "does not watch" in advice, advice
 
     def test_the_write_tools_carry_the_same_caveat(self):
         """A model told its save takes effect would otherwise wait for a heater that nothing

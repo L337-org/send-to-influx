@@ -464,10 +464,22 @@ class Supervisor:
         child.stall_seconds = window
 
     def start_all(self) -> None:
-        """Start every control that is not already running."""
-        for name, child in self.children.items():
+        """Start every control that is not already running.
+
+        **One that cannot be started does not take the others with it.** ``start`` raises
+        ``ConfigError`` where a pipe or a spawn fails, and this runs before ``run``'s own try
+        block - so a failure on the third control propagated out of the supervisor thread and
+        killed it, leaving the first two spawned, actuating, and watched by nothing: no
+        heartbeat read, no restart, no safe state on death. The collector carried on, so from
+        the outside it looked like a working install.
+
+        Handled the same way :meth:`_restart` already handles it, which is where the rule was
+        already written down: the failure is counted against that control, it waits out a
+        backoff, and the rest start normally.
+        """
+        for child in list(self.children.values()):
             if not child.running:
-                self.start(name)
+                self._restart(child)
 
     def poll(self, timeout=0.5):
         """Take one pass: reload what changed, read what arrived, notice deaths, restart.

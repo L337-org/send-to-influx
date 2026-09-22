@@ -50,10 +50,13 @@ on a packaged install, beside `settings.yaml` in a source checkout. They are wri
 running service, and by an MCP client on its behalf where `mcp_write` permits it, though
 hand-editing works and `--check-config` will tell you if you got it wrong.
 
-A change is picked up without restarting the service, however it was made: the supervisor
-reconciles a control with its document, so a saved edit restarts that loop, a deleted
-document stops it and makes its devices safe, and a document that will not parse leaves the
-running control alone rather than killing it over a half-finished edit.
+**A change made through the MCP tools** is picked up without restarting the service: the
+supervisor reconciles a control with its document, so a saved edit restarts that loop, a
+deleted document stops it and makes its devices safe, and a document that will not parse
+leaves the running control alone rather than killing it over a half-finished edit.
+
+**A file edited by hand needs a restart.** Nothing watches this directory; the reconcile is
+triggered by the write tools, not by the filesystem.
 
 The document
 ------------
@@ -170,8 +173,9 @@ window at 1500 and 35% at 750.
 
 * Stages sort by declared `level`, and "the next stage up" is by level rather than list
   order.
-* Among stages of equal level the earliest declared wins, then the one changing fewest
-  devices.
+* Among stages of equal level the earliest declared wins. Declaration order is how you say
+  which element should do the steady-state work: the far heater first, so the near one,
+  sitting next to the sensor, only trims.
 * **Every stage must assign every device the control owns.** A stage saying nothing about a
   device is not a stage turning it off, and this is refused - an operator reading the ladder
   would assume it was off, which is how a heater stays on.
