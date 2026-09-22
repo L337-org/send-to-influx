@@ -2064,23 +2064,28 @@ class TestTheControlSubsystemOptIn:
         args = argparse.Namespace(settings=None, print=False, dump=False)
         assert sendtoinflux._start_control_supervisor({}, args) is None
 
-    def test_being_switched_on_with_no_controls_says_so_rather_than_starting(self, caplog):
-        """Said at INFO, because switching the subsystem on before writing any control is the
+    def test_being_switched_on_with_no_controls_still_supervises(self, caplog):
+        """An empty store is supervised anyway, which is what lets the first control start.
+
+        Said at INFO, because switching the subsystem on before writing any control is the
         ordinary first state - and where `controls.mcp_write` is on, writing them over MCP is
         the intended route, so there is nothing the operator should have done differently.
-
-        The line names the directory, which is what makes it useful to somebody part-way
-        through setting up rather than a reprimand for being there.
+        The line names the directory, which makes it useful to somebody part-way through
+        setting up rather than a reprimand for being there.
         """
         args = argparse.Namespace(settings=None, print=False, dump=False)
         with patch("sendtoinflux.list_controls", return_value=[]):
             with caplog.at_level(logging.INFO):
-                assert sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args) is None
-        assert "none are stored yet" in caplog.text
-        assert "controls" in caplog.text, "the line should say where they go"
-        assert not [
-            r for r in caplog.records if r.levelno >= logging.WARNING
-        ], "an empty control store is not a fault, so it must not be logged as one"
+                supervisor = sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)
+        try:
+            assert supervisor is not None, "with nothing supervising, a control created later cannot start"
+            assert "none are stored yet" in caplog.text
+            assert "controls" in caplog.text, "the line should say where they go"
+            assert not [
+                r for r in caplog.records if r.levelno >= logging.WARNING
+            ], "an empty control store is not a fault, so it must not be logged as one"
+        finally:
+            supervisor.stop_all()
 
     def test_it_supervises_every_stored_control(self):
         """A stand-in rather than a mock: a MagicMock invents a truthy value for any
@@ -2177,7 +2182,15 @@ class TestTheSupervisorBanner:
         assert "Supervising 1 control(s)" in caplog.text
         assert "bent" not in caplog.text
 
-    def test_nothing_starts_when_no_control_survives(self, caplog):
+    def test_it_says_so_when_no_control_survives_and_still_supervises(self, caplog):
+        """The failure is reported, and the supervisor starts anyway.
+
+        It used to return None here, which meant an operator who fixed the broken document
+        over MCP had nothing to send the reload to and had to restart the service. The same
+        reasoning as the empty store: what makes a repair take effect is something being
+        there to hear about it.
+        """
+
         class _Supervisor:
             children = {}
 
@@ -2187,6 +2200,14 @@ class TestTheSupervisorBanner:
                 Args:
                     names (iterable): what was found on disk
                     settings_file (str or None): unused here
+                """
+
+            def run(self, stop, poll_seconds=0.5):
+                """Do nothing, as a stand-in.
+
+                Args:
+                    stop (threading.Event): unused
+                    poll_seconds (float): unused
                 """
 
             def stop_all(self):
@@ -2199,9 +2220,45 @@ class TestTheSupervisorBanner:
             patch("sendtoinflux.atexit.register") as register,
         ):
             with caplog.at_level(logging.ERROR):
-                assert sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args) is None
+                assert sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args) is not None
         assert "No stored control could be supervised" in caplog.text
-        register.assert_not_called()
+        register.assert_called_once()
+
+    def test_no_banner_where_nothing_is_supervised(self, caplog):
+        """ "Supervising 0 control(s): none" is a second way of saying what the line above
+        already said."""
+
+        class _Supervisor:
+            children = {}
+
+            def __init__(self, names, settings_file=None):
+                """Supervise nothing at all.
+
+                Args:
+                    names (iterable): what was found on disk
+                    settings_file (str or None): unused here
+                """
+
+            def run(self, stop, poll_seconds=0.5):
+                """Do nothing, as a stand-in.
+
+                Args:
+                    stop (threading.Event): unused
+                    poll_seconds (float): unused
+                """
+
+            def stop_all(self):
+                """Do nothing, as a stand-in."""
+
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        with (
+            patch("sendtoinflux.Supervisor", _Supervisor),
+            patch("sendtoinflux.list_controls", return_value=[]),
+            patch("sendtoinflux.atexit.register"),
+        ):
+            with caplog.at_level(logging.INFO):
+                sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)
+        assert "Supervising" not in caplog.text
 
 
 class TestTheDebuggingModesStartNothing:

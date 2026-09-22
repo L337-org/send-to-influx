@@ -786,19 +786,17 @@ def _list_controls_result(settings_file, supervisor):
         "supervisor_running": supervision is not None,
     }
     if supervision is None:
-        # **A bare `false` here reads as a fault, and usually is not one.** With no control
-        # stored, no supervisor is started by design - there is nothing to supervise - and a
-        # client shown only `supervisor_running: false` reported to its operator that the
-        # supervisor was not running, which sounds like something crashed. Absence cannot
-        # explain itself, so it is explained: the healthy case says so, and the case that is
-        # genuinely wrong says that instead.
+        # **A bare `false` said nothing about what it meant**, and a client shown only
+        # `supervisor_running: false` reported to its operator that the supervisor was not
+        # running, which sounds like something crashed. It once meant "no control is stored,
+        # so none is needed", which was the common case and not a fault at all; a supervisor
+        # now runs whenever controls are enabled, so this branch is the genuinely odd one and
+        # says so. Absence cannot explain itself either way.
         result["supervisor_state"] = (
-            "no control is stored, so none needs supervising - the normal state for an "
-            "installation that has not created one yet"
-            if not names
-            else "controls are stored but nothing is supervising them: either none could be "
-            "started, which the service log says at ERROR, or they were created after it "
-            "started and it has not been restarted since"
+            "nothing is supervising controls in this process, so a control stored now will "
+            "not start until the service is restarted. An installation with controls enabled "
+            "supervises them whether or not any are stored, so this is unusual: the service "
+            "log says why it did not start"
         )
     return result
 

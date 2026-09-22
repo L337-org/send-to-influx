@@ -969,3 +969,64 @@ class TestTheStatusSnapshot:
         # and beating.
         assert status.silent_for == 6.0
         assert status.failures == 2
+
+
+class TestAnInstallationWithNoControlsYet:
+    """The first control somebody creates has to start like any other.
+
+    An empty store used to mean no supervisor at all - "a thread and a banner about nothing",
+    which was true until the MCP write tools existed. After that it meant the create-and-run
+    path could not work even once: the tool wrote the document, had nothing to send the
+    reload to, and reported that a restart was needed. The first control is exactly the one
+    an operator is watching, so it is the worst one to make them restart for.
+    """
+
+    @pytest.fixture
+    def empty(self, state_directory):
+        """Yield a supervisor started over a store with nothing in it.
+
+        Yields:
+            tuple: (the supervisor, the installation)
+        """
+        installation = state_directory
+
+        def argv_for(name):
+            """Start a control from this checkout rather than the installed console script.
+
+            Args:
+                name (str): the control to start
+
+            Returns:
+                list: the command
+            """
+            return [
+                sys.executable,
+                os.path.join(ROOT, "sendtoinflux.py"),
+                "--control",
+                name,
+                "--settings",
+                installation.settings_file,
+            ]
+
+        running = Supervisor(
+            [], settings_file=installation.settings_file, argv_for=argv_for, backoff=lambda failures: 0.05 * failures
+        )
+        try:
+            yield running, installation
+        finally:
+            running.stop_all()
+
+    def test_it_supervises_nothing_without_complaint(self, empty):
+        supervisor, _installation = empty
+        assert dict(supervisor.children) == {}
+        assert supervisor.poll(timeout=0.1) == []
+
+    def test_the_first_control_created_starts_without_a_restart(self, empty, bridge):
+        """The whole point. A control written into an empty store and announced is taken on,
+        started, and beats - with nothing restarted in between."""
+        supervisor, installation = empty
+        bridge.lights["12"] = plug("study-heater")
+        installation.write_control(_quick("study", {"study": {"source": "hue", "device": "study-heater"}}))
+        supervisor.request_reload("study")
+        _wait_for(supervisor, "beat", "study")
+        assert supervisor.children["study"].process is not None
