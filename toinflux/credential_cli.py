@@ -109,7 +109,10 @@ def _require_systemd_creds():
     except ProcessError as exc:
         raise CredentialCliError(f"checking the systemd-creds version: {exc}") from exc
     if not result.ok:
-        raise CredentialCliError(f"'systemd-creds --version' failed: {result.stderr_text or result.returncode}")
+        # !r on the external half: this is systemd-creds' own stderr, it can carry
+        # newlines, and main() prints this message straight to stderr - so an unquoted
+        # continuation line reads as a second, unrelated diagnostic.
+        raise CredentialCliError(f"'systemd-creds --version' failed: {(result.stderr_text or result.returncode)!r}")
 
     version = _parse_systemd_creds_version(result.stdout_text)
     if version is None or version < MIN_SYSTEMD_CREDS_VERSION:
@@ -325,7 +328,7 @@ def _encrypt_credential(name, value, credstore_dir=None):
         raise CredentialCliError(f"storing '{name}' in systemd-creds: {exc}") from exc
     if not result.ok:
         raise CredentialCliError(
-            f"systemd-creds encrypt failed for '{name}': {result.stderr_text or result.returncode}"
+            f"systemd-creds encrypt failed for '{name}': {(result.stderr_text or result.returncode)!r}"
         )
     try:
         os.chmod(cred_path, stat_module.S_IRUSR | stat_module.S_IWUSR)
@@ -373,7 +376,7 @@ def _decrypt_credential(name, credstore_dir=None):
         raise CredentialCliError(f"reading '{name}' back from systemd-creds: {exc}") from exc
     if not result.ok:
         raise CredentialCliError(
-            f"systemd-creds decrypt failed for '{name}': {result.stderr_text or result.returncode}"
+            f"systemd-creds decrypt failed for '{name}': {(result.stderr_text or result.returncode)!r}"
         )
     if result.stdout_truncated:
         # A credential this large is not a credential, but returning the first megabyte of

@@ -1723,3 +1723,56 @@ class TestReloadingSystemdReportsFailureSafely:
         """Escaping must not cost the diagnostic - the point is to keep what systemctl said."""
         records = self._reload_with("Failed to connect to bus: No such file", caplog)
         assert "No such file" in records[0].getMessage()
+
+
+class TestSystemdCredsOutputCannotForgeADiagnostic:
+    """The same rule for systemd-creds' stderr, which reaches the operator by a different
+    route: these are raised as CredentialCliError and main() prints the message straight to
+    stderr, so an embedded newline puts a second line there that nothing wrote.
+
+    Three call sites - the version probe, encrypt and decrypt - because a rule applied at
+    one of them is a rule that silently stops holding at the other two.
+    """
+
+    # A marker that appears in no OSError text. An earlier version of this test used the
+    # word "denied" and passed against a message that never reached the line under test,
+    # because _encrypt_credential had failed on the real credential store first and
+    # "Permission denied" satisfied the assertion.
+    FORGED = "cyclotron-8811 failed\n2026-01-01 00:00:00 ERROR    this line was not written by the tool"
+
+    @staticmethod
+    def _failing(stderr_text):
+        """Return a run_command result that failed with this stderr.
+
+        Args:
+            stderr_text (str): what the command wrote to stderr
+
+        Returns:
+            SimpleNamespace: a failed result
+        """
+        return SimpleNamespace(ok=False, returncode=1, stderr_text=stderr_text, stdout_text="", stdout_truncated=False)
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            pytest.param(lambda store: credential_cli._require_systemd_creds(), id="version"),
+            pytest.param(
+                lambda store: credential_cli._encrypt_credential("mcp_password", "s3cret", credstore_dir=store),
+                id="encrypt",
+            ),
+            pytest.param(
+                lambda store: credential_cli._decrypt_credential("mcp_password", credstore_dir=store), id="decrypt"
+            ),
+        ],
+    )
+    def test_a_newline_in_the_output_cannot_forge_a_second_line(self, call, tmp_path):
+        store = tmp_path / "credstore"
+        store.mkdir()
+        (store / "mcp_password.cred").write_bytes(b"")
+        store = str(store)
+        with patch("toinflux.credential_cli.run_command", return_value=self._failing(self.FORGED)):
+            with pytest.raises(credential_cli.CredentialCliError) as raised:
+                call(store)
+        message = str(raised.value)
+        assert "\n" not in message, f"the output reached the operator as {message.count(chr(10)) + 1} lines"
+        assert "cyclotron-8811" in message, "escaping must not cost the diagnostic, and this must be the right failure"
