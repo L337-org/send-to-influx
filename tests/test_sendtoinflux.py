@@ -2122,8 +2122,14 @@ class TestTheControlSubsystemOptIn:
         assert started["names"] == ["conservatory", "porch"]
         assert started["settings_file"] == "/tmp/settings.yaml"
         # Registered, because a signal exits through sys.exit and the daemon thread simply
-        # stops - so the last word on leaving devices safe has to run either way.
-        register.assert_called_once_with(supervisor.stop_all)
+        # stops - so the last word on leaving devices safe has to run either way. It is
+        # `_stop_supervising` rather than `stop_all` itself: the thread has to be brought
+        # down before the children are, or the exit handler and the still-running poll walk
+        # the same children at once.
+        register.assert_called_once()
+        handler, *handler_args = register.call_args.args
+        assert handler is sendtoinflux._stop_supervising
+        assert handler_args[0] is supervisor
 
 
 class TestAnEmptyControlName:
@@ -2367,3 +2373,112 @@ class TestNothingActuatesBeforeStartupValidation:
         nothing is, so the move must not have pushed it past the server."""
         order = self._order_of_startup()
         assert order.index("supervisor") < order.index("mcp"), f"wrong order: {order}"
+
+
+class TestShutdownStopsTheThreadBeforeTheDevices:
+    """`stop_all` used to be registered with atexit directly, and a signal exits through
+    `sys.exit` - which runs atexit handlers while a daemon thread is still going. The main
+    thread then walked the children terminating and releasing each one while the supervisor
+    thread did the same in `poll()`, and `_release` guards none of it."""
+
+    def test_the_event_is_set_and_the_thread_joined_before_devices_are_made_safe(self):
+        """Ordering asserted directly: all three succeed in isolation and only the sequence
+        is the defect."""
+        order = []
+
+        class _Thread:
+            def join(self, timeout=None):
+                """Record the join.
+
+                Args:
+                    timeout (float or None): ignored
+                """
+                order.append(f"joined({timeout})")
+
+            def is_alive(self):
+                """Report the thread as stopped.
+
+                Returns:
+                    bool: False
+                """
+                return False
+
+        class _Supervisor:
+            def stop_all(self):
+                """Record the safe-state pass."""
+                order.append("stop_all")
+
+        sendtoinflux.SHUTDOWN.clear()
+        try:
+            sendtoinflux._stop_supervising(_Supervisor(), _Thread())
+        finally:
+            sendtoinflux.SHUTDOWN.clear()
+        assert order == [f"joined({sendtoinflux.SUPERVISOR_JOIN_SECONDS})", "stop_all"], order
+
+    def test_the_shutdown_event_is_set_first(self):
+        """Joining without asking it to stop would wait out the whole bound every time."""
+        seen = []
+
+        class _Thread:
+            def join(self, timeout=None):
+                """Record whether the event was set by the time the join happened.
+
+                Args:
+                    timeout (float or None): ignored
+                """
+                seen.append(sendtoinflux.SHUTDOWN.is_set())
+
+            def is_alive(self):
+                """Report the thread as stopped.
+
+                Returns:
+                    bool: False
+                """
+                return False
+
+        class _Supervisor:
+            def stop_all(self):
+                """Do nothing."""
+
+        sendtoinflux.SHUTDOWN.clear()
+        try:
+            sendtoinflux._stop_supervising(_Supervisor(), _Thread())
+        finally:
+            sendtoinflux.SHUTDOWN.clear()
+        assert seen == [True], "the thread was joined before it was asked to stop"
+
+    def test_a_wedged_supervisor_still_gets_its_devices_made_safe(self, caplog):
+        """The bound exists so a wedged supervisor cannot stop the process exiting, and the
+        fallback is to make the devices safe from here anyway - the race is back, but only
+        where the alternative is leaving heaters on with certainty rather than by chance."""
+        stopped = []
+
+        class _Thread:
+            def join(self, timeout=None):
+                """Do nothing, as a thread that will not stop.
+
+                Args:
+                    timeout (float or None): ignored
+                """
+
+            def is_alive(self):
+                """Report the thread as still running.
+
+                Returns:
+                    bool: True
+                """
+                return True
+
+        class _Supervisor:
+            def stop_all(self):
+                """Record that the safe-state pass ran anyway."""
+                stopped.append(True)
+
+        sendtoinflux.SHUTDOWN.clear()
+        try:
+            with caplog.at_level(logging.WARNING):
+                sendtoinflux._stop_supervising(_Supervisor(), _Thread())
+        finally:
+            sendtoinflux.SHUTDOWN.clear()
+        assert stopped == [True]
+        assert "did not stop within" in caplog.text

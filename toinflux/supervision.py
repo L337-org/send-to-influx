@@ -69,6 +69,11 @@ MINIMUM_STALL_SECONDS = 30.0
 #: How long to wait for a killed control to actually go before giving up on it.
 KILL_GRACE_SECONDS = 5.0
 
+# How long each pass waits for a pipe to become readable. Named rather than left as a
+# default argument because the collector's shutdown has to wait at least this long for the
+# loop to notice it has been asked to stop, and a number copied there would drift.
+DEFAULT_POLL_SECONDS = 0.5
+
 
 @dataclass
 class Child:
@@ -316,6 +321,7 @@ class Supervisor:
         # RuntimeError rather than a stale number.
         self._children_lock = threading.Lock()
         self._stopped = False
+        self._stop_lock = threading.Lock()
         self.children = {}
         self.events = []
         # No lock around this one: the supervisor is not reachable from another thread
@@ -697,7 +703,7 @@ class Supervisor:
             logging.error("Control %r could not be restarted: %r. Trying again later", child.name, exc)
             self._record("start-failed", child.name, repr(exc))
 
-    def run(self, stop, poll_seconds=0.5) -> None:
+    def run(self, stop, poll_seconds=DEFAULT_POLL_SECONDS) -> None:
         """Poll until asked to stop, then stop every control.
 
         One thread runs this, and it is the only thread in the design. That is not the same
@@ -956,9 +962,15 @@ class Supervisor:
         which is not the same as being safe: it was idempotent by accident of somebody
         else's internals, while a comment at the call site asserted it as a property.
         """
-        if self._stopped:
-            return
-        self._stopped = True
+        # Under a lock, not a bare check-then-set. Two threads can reach here: the
+        # supervisor's own `finally` and the collector's exit handler. The handler joins the
+        # thread first, so ordinarily only one arrives - but that join is bounded, and on a
+        # wedged supervisor both would pass an unguarded `if not self._stopped` before either
+        # set it, and then walk the same children terminating and releasing each one twice.
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
         for child in self.children.values():
             if not child.running:
                 continue

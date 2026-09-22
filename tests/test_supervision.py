@@ -13,6 +13,7 @@ import dataclasses
 import logging
 import os
 import sys
+import threading
 import time
 from collections import deque
 from types import SimpleNamespace
@@ -1151,3 +1152,43 @@ class TestAnOmittedInstanceStillCounts:
             supervisor = Supervisor(["aaa", "bbb"], settings_file=state_directory.settings_file)
         assert sorted(supervisor.children) == ["aaa"]
         assert "is not being started" in caplog.text
+
+
+class TestStoppingIsOnceOnlyUnderConcurrency:
+    """Two threads can reach `stop_all`: the supervisor's own `finally` and the collector's
+    exit handler. The handler joins the thread first, so ordinarily only one arrives - but
+    that join is bounded, and on a wedged supervisor both would pass an unguarded
+    `if not self._stopped` before either set it, then walk the same children terminating and
+    releasing each one twice."""
+
+    def test_deciding_to_stop_waits_on_the_lock(self, supervisor):
+        """Proven by holding the lock and watching a caller block on it, rather than by
+        racing two threads and hoping the interleaving shows up.
+
+        The lock guards the decision and not the walk, deliberately: once a thread has won it
+        is the only one doing the work, and holding it across the terminate would make a
+        second caller wait on a child that may be wedged rather than return at once.
+        """
+        started, finished = threading.Event(), threading.Event()
+
+        def stop():
+            """Call stop_all from another thread."""
+            started.set()
+            supervisor.stop_all()
+            finished.set()
+
+        supervisor._stop_lock.acquire()
+        caller = threading.Thread(target=stop, daemon=True)
+        caller.start()
+        try:
+            assert started.wait(timeout=5), "the thread never ran"
+            assert not finished.wait(timeout=0.3), "stop_all decided without taking the lock"
+        finally:
+            supervisor._stop_lock.release()
+        assert finished.wait(timeout=10), "stop_all never completed once the lock was free"
+        caller.join(timeout=5)
+
+    def test_a_second_call_still_does_nothing(self, supervisor):
+        """The behaviour the lock protects, which must survive the locking."""
+        supervisor.stop_all()
+        supervisor.stop_all()

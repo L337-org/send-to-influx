@@ -22,7 +22,7 @@ from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_la
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.controls import control_dir, controls_enabled, list_controls, validate_stored_controls
 from toinflux.control_process import heartbeat_writer, run_control
-from toinflux.supervision import Supervisor
+from toinflux.supervision import DEFAULT_POLL_SECONDS, KILL_GRACE_SECONDS, Supervisor
 
 try:
     __version__ = version("send-to-influx")
@@ -53,6 +53,11 @@ STALL_INTERVAL_MULTIPLIER = 3
 # network loop, so it needs an explicit stop signal. How cleanly it then disconnects
 # differs between single- and multi-source mode; see signal_handler for the detail.
 SHUTDOWN = threading.Event()
+
+# Long enough for the supervisor to notice the event on its next pass and run its own
+# stop_all, which sends SIGTERM and waits out the kill grace before giving up on a child.
+# Derived from those two rather than picked, so it cannot drift away from what it waits for.
+SUPERVISOR_JOIN_SECONDS = DEFAULT_POLL_SECONDS + KILL_GRACE_SECONDS + 2.0
 
 
 def print_source_data(source, data):
@@ -752,10 +757,7 @@ def _start_control_supervisor(settings, args):
         logging.error("No stored control could be supervised, so none are running")
     thread = threading.Thread(target=supervisor.run, args=(SHUTDOWN,), name="control-supervisor", daemon=True)
     thread.start()
-    # The supervisor's own loop stops its controls when SHUTDOWN is set, but a signal exits
-    # this process through sys.exit and the daemon thread simply stops - so the last word on
-    # leaving devices safe belongs here, where it runs either way. stop_all is idempotent.
-    atexit.register(supervisor.stop_all)
+    atexit.register(_stop_supervising, supervisor, thread)
     if supervised:
         # From what is actually being supervised rather than from what was found on disk: a
         # control skipped for being unreadable said so on its own line, and a banner counting
@@ -764,6 +766,44 @@ def _start_control_supervisor(settings, args):
         # "Supervising 0 control(s): none" adds a second way of saying it.
         logging.info("Supervising %s control(s): %s", len(supervised), render_values(supervised))
     return supervisor
+
+
+def _stop_supervising(supervisor, thread) -> None:
+    """Bring the supervisor's thread down, then make sure every device is safe.
+
+    **The thread is stopped before the devices are, which it was not.** ``stop_all`` used to
+    be registered directly, and a signal exits through ``sys.exit`` - which runs atexit
+    handlers while a daemon thread is still going. So the main thread walked the children,
+    terminating and releasing each one, while the supervisor thread was inside ``poll()``
+    doing the same thing to the same children: ``_release`` closes a descriptor, unregisters
+    it from the selector and clears the fields, none of it guarded, so the second one through
+    met a ``None`` process or a closed descriptor and raised. An exception there aborts the
+    atexit handler, and every control after it in the walk keeps its devices energised.
+
+    Not an exotic race. ``systemctl stop`` signals every process in the cgroup at once, so
+    every control reaches EOF at exactly the moment this runs.
+
+    Joining first makes the ordinary path single-threaded: the loop sees the event, leaves,
+    and runs its own ``stop_all`` from the ``finally``, after which this one returns
+    immediately because it is once-only. The join is bounded because a wedged supervisor must
+    not stop the process exiting, and the fallback on a timeout is to make the devices safe
+    from here anyway - the race is then back, but only in the case where the alternative is
+    leaving heaters on with certainty rather than by chance.
+
+    Args:
+        supervisor (Supervisor): the supervisor to stop
+        thread (threading.Thread): the thread running it
+    """
+    SHUTDOWN.set()
+    # One poll interval to notice, its own stop_all's grace period to use, and a margin.
+    thread.join(timeout=SUPERVISOR_JOIN_SECONDS)
+    if thread.is_alive():
+        logging.warning(
+            "The control supervisor did not stop within %ss, so its devices are being made safe "
+            "from the exit handler while it is still running",
+            SUPERVISOR_JOIN_SECONDS,
+        )
+    supervisor.stop_all()
 
 
 def _run_control_and_exit(args):
