@@ -608,15 +608,20 @@ class Supervisor:
             # must not cost a working control its process.
             _usable_control(name, self.settings_file)
         except ConfigError as exc:
-            # WARNING rather than ERROR, matching the same situation at start-up above: the
-            # document could not be read and the control carries on with the one it has.
-            # Nothing failed - refusing to kill a working control over a half-written file is
-            # the design working - but the operator's edit did not take effect, which is
-            # precisely what WARNING is for. The two paths said the same thing at different
-            # levels, which made one of them look worse than the other for no reason.
-            logging.warning(
-                "Control %r was not reloaded and is still running the document it started with: %r", name, exc
-            )
+            # Two different situations, and telling an operator the wrong one sends them
+            # looking in the wrong place. Where a control *is* running, refusing to kill it
+            # over a half-written file is the design working, so this is a WARNING: nothing
+            # failed, but the edit did not take effect. Where nothing is running - the
+            # document was already invalid when the supervisor started, and this reload is
+            # the attempt to fix it - saying it "carries on with the document it started
+            # with" describes a process that does not exist, and the control is still not
+            # running, which is an ERROR.
+            if child is not None and child.running:
+                logging.warning(
+                    "Control %r was not reloaded and is still running the document it started with: %r", name, exc
+                )
+            else:
+                logging.error("Control %r is still not running: the stored document is not valid: %r", name, exc)
             self._record("reload-failed", name, repr(exc))
             return
         known = child is not None

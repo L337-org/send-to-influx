@@ -402,6 +402,36 @@ class TestADocumentThatChanged:
         ], "a control that kept working is not an error"
         _wait_for(supervisor, "beat", "conservatory")
 
+    def test_a_reload_that_fails_for_a_control_that_never_started_is_an_error(self, state_directory, caplog):
+        """The other half of the case above, and the one an operator actually meets. A
+        document that was already invalid when the supervisor started is skipped, so nothing
+        is running; the operator then edits it to fix it and asks for a reload. Where the
+        edit is still wrong, saying the control "is still running the document it started
+        with" describes a process that does not exist and reads as though the loop is safely
+        carrying on - so it says at ERROR that the control is still not running.
+
+        Found on a real install: a control refused at start-up for a transition minimum
+        longer than its cycle window, where every subsequent attempt to fix it would have
+        been reported as a working control declining an edit.
+        """
+        installation = state_directory
+        names = _two_controls(installation)
+        _bend(installation, "conservatory")
+        running = Supervisor(
+            names, settings_file=installation.settings_file, argv_for=lambda name: [sys.executable, "-c", "pass"]
+        )
+        try:
+            assert "conservatory" not in running.children, "an unreadable document is skipped at construction"
+            with caplog.at_level(logging.DEBUG):
+                running.request_reload("conservatory")
+                event = _wait_for(running, "reload-failed", "conservatory")
+            assert "not valid YAML" in event.detail
+            assert "is still not running" in caplog.text
+            assert "still running the document it started with" not in caplog.text
+            assert [r for r in caplog.records if r.levelno >= logging.ERROR], "nothing is running, so this is an error"
+        finally:
+            running.stop_all()
+
     def test_an_ordinary_restart_picks_up_an_edit_nobody_announced(self, supervisor, state_directory):
         """A control can be edited by hand and then die on its own, with no reload asked for.
         The child re-reads its own document on the way up either way, so a parent still
