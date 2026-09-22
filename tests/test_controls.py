@@ -894,3 +894,68 @@ class TestAnOmittedInstanceIsAmbiguousNotDistinct:
         """Which of the pair is read first must not decide the answer."""
         omitted, explicit = ("hue", None, "far"), ("hue", "bridge1", "far")
         assert actuators_may_be_one(omitted, explicit) is actuators_may_be_one(explicit, omitted) is True
+
+
+class TestATransitionMinimumLongerThanTheWindow:
+    """The minimum binds inside a window and not across the boundary between them, so a
+    minimum longer than the cycle is a limit the planner cannot keep: a demand drifting
+    either side of a rung switches the devices at every boundary regardless.
+
+    Refused rather than half-honoured, because the two settings are then asking for
+    different things - decide this often, do not change more often than that - and the
+    document is incoherent rather than merely awkward.
+    """
+
+    def test_an_output_minimum_longer_than_the_cycle_is_refused(self):
+        document = a_valid_control()
+        document["output"]["cycle_seconds"] = 300
+        document["output"]["min_transition_seconds"] = 600
+        assert any("longer than" in error for error in validate_control("conservatory", document))
+
+    def test_a_per_device_minimum_is_checked_too(self):
+        """A device override is the likelier place to put a long one, since it is where a
+        specific slow heater would be described."""
+        document = a_valid_control()
+        document["output"]["cycle_seconds"] = 300
+        key = sorted(document["devices"])[0]
+        document["devices"][key]["min_transition_seconds"] = 900
+        errors = validate_control("conservatory", document)
+        assert any(f"devices.{key}.min_transition_seconds" in error for error in errors)
+
+    def test_equal_to_the_window_is_allowed(self):
+        """The boundary itself is honourable: one change per window is exactly the limit.
+
+        The shipped example relies on this - its `cycle_seconds` and its `heater_far`
+        override are both 900 - so refusing equality would refuse the documented example.
+        """
+        document = a_valid_control()
+        document["output"]["cycle_seconds"] = 900
+        document["output"]["min_transition_seconds"] = 900
+        for spec in document["devices"].values():
+            spec["min_transition_seconds"] = 900
+        assert validate_control("conservatory", document) == []
+
+    def test_an_omitted_cycle_is_compared_against_the_default(self):
+        """`cycle_seconds` is optional, so the comparison has to use what the loop will
+        actually run with rather than skipping the check."""
+        document = a_valid_control()
+        del document["output"]["cycle_seconds"]
+        document["output"]["min_transition_seconds"] = 1200
+        assert any("longer than" in error for error in validate_control("conservatory", document))
+
+    def test_an_unusable_cycle_does_not_add_a_second_complaint(self):
+        """It is already reported on its own line, and comparing against it would name a
+        number nobody wrote."""
+        document = a_valid_control()
+        document["output"]["cycle_seconds"] = "soon"
+        document["output"]["min_transition_seconds"] = 600
+        errors = validate_control("conservatory", document)
+        assert any("cycle_seconds" in error and "positive number" in error for error in errors)
+        assert not [error for error in errors if "longer than" in error]
+
+    def test_the_message_says_both_ways_to_fix_it(self):
+        document = a_valid_control()
+        document["output"]["cycle_seconds"] = 300
+        document["output"]["min_transition_seconds"] = 600
+        error = next(e for e in validate_control("conservatory", document) if "longer than" in e)
+        assert "shorten it" in error and "cycle_seconds" in error
