@@ -925,8 +925,8 @@ class TestATransitionMinimumLongerThanTheWindow:
     def test_equal_to_the_window_is_allowed(self):
         """The boundary itself is honourable: one change per window is exactly the limit.
 
-        The shipped example relies on this - its `cycle_seconds` and its `heater_far`
-        override are both 900 - so refusing equality would refuse the documented example.
+        Not hypothetical: a real install runs a 60-second window with a 60-second minimum,
+        which is how "do not switch this more than once a minute" is written.
         """
         document = a_valid_control()
         document["output"]["cycle_seconds"] = 900

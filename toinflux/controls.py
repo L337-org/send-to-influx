@@ -157,7 +157,7 @@ CONTROL_EXAMPLE = {
     },
     "pid": {"input": "inside", "setpoint": "max(target, dew + 5)", "kp": 12.0, "ki": 0.02, "kd": 0.0},
     "output": {
-        "cycle_seconds": 900,
+        "cycle_seconds": 300,
         "min_transition_seconds": 60,
         "max_level": "if(grid_co2 > 300, 750, 2250)",
         "stages": [
