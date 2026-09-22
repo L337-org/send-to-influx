@@ -871,3 +871,93 @@ class TestEachToolReachesItsOwnWorker:
             self._call("save_control", {"name": "broken", "document": {}}, state_directory.settings_file)
         assert "get_control_schema" in str(raised.value)
         assert "nothing has been written" in str(raised.value)
+
+
+class TestTheEnabledDefaultAgreesWithTheGate:
+    """`enabled` is optional and an omitted key means enabled - `Gate` and `_describe` both
+    read it as `get(..., True)`. The write tools read it as `is True`, so a document without
+    the key was reported disabled while the supervisor started actuating it. A caller told a
+    control is off does not go and turn it off, which is the one direction this must not be
+    wrong in."""
+
+    def test_saving_a_document_with_no_enabled_key_reports_it_enabled(self, state_directory):
+        document = conservatory()
+        del document["enabled"]
+        result = _save_control_result("conservatory", document, state_directory.settings_file, _Reloading())
+        assert result["enabled"] is True
+
+    def test_the_gate_agrees(self, state_directory):
+        """The assertion above is only worth anything against what actually runs it."""
+        from toinflux.gating import Gate
+
+        document = conservatory()
+        del document["enabled"]
+        assert Gate(document).enabled is True
+
+    def test_enabling_a_document_with_no_key_is_a_no_op(self, state_directory):
+        """It was already enabled, so there is nothing to write and nothing to restart."""
+        document = conservatory()
+        del document["enabled"]
+        state_directory.write_control(document)
+        supervisor = _Reloading()
+        result = _set_enabled_result("conservatory", True, state_directory.settings_file, supervisor)
+        assert result["changed"] is False
+        assert supervisor.requests == []
+
+
+class TestTheWriteToolsDoNotInterleave:
+    """All three are read-modify-writes and the SDK runs them on worker threads, so two calls
+    can interleave: a `set_control_enabled` that loaded before a `save_control` stored would
+    write its stale copy afterwards and silently undo the edit."""
+
+    def test_the_store_happens_under_the_write_lock(self, state_directory, monkeypatch):
+        """Asserted at the moment of writing rather than by racing two threads and hoping:
+        a timing test that passes is not evidence the window is closed."""
+        import toinflux.mcp_controls as module
+
+        held = []
+        real = module.store_control
+
+        def watched(name, document, settings_file=None):
+            """Record whether the lock is held while the store runs.
+
+            Args:
+                name (str): the control's name
+                document (dict): the document being written
+                settings_file (str or None): the settings path
+            """
+            held.append(module._WRITE_LOCK.locked())
+            return real(name, document, settings_file)
+
+        monkeypatch.setattr(module, "store_control", watched)
+        _save_control_result("conservatory", conservatory(), state_directory.settings_file, _Reloading())
+        assert held == [True], "save_control stored without holding the write lock"
+
+    def test_setting_enabled_holds_it_across_the_read_and_the_write(self, state_directory):
+        """The whole read-modify-write, not just the store - a lock around the write alone
+        leaves exactly the window this exists to close."""
+        import toinflux.mcp_controls as module
+
+        state_directory.write_control(conservatory(enabled=False))
+        held = []
+        real = module.load_control
+
+        def watched(name, settings_file=None):
+            """Record whether the lock is held while the document is read.
+
+            Args:
+                name (str): the control's name
+                settings_file (str or None): the settings path
+
+            Returns:
+                dict: the loaded document
+            """
+            held.append(module._WRITE_LOCK.locked())
+            return real(name, settings_file)
+
+        module.load_control = watched
+        try:
+            _set_enabled_result("conservatory", True, state_directory.settings_file, _Reloading())
+        finally:
+            module.load_control = real
+        assert held == [True], "the document was read outside the lock, so an edit can land between"

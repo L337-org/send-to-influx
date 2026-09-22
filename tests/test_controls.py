@@ -684,3 +684,56 @@ class TestWhetherWritingControlsIsPermitted:
     @pytest.mark.parametrize("settings", [{}, {"controls": None}, {"controls": "yes"}, {"controls": []}])
     def test_a_block_that_is_not_a_mapping_does_not_permit_writing(self, settings):
         assert control_writes_enabled(settings) is False
+
+
+class TestTwoKeysForOneActuator:
+    """Two device keys naming one physical light are not two devices, and the ladder treats
+    them as though they were: a stage may set one true and the other false, both commands go
+    out, and which one lands last is decided by mapping order. That validated cleanly."""
+
+    def test_two_keys_for_the_same_device_are_refused(self):
+        document = a_valid_control()
+        document["devices"] = {
+            "a": {"source": "hue", "device": "heater_far"},
+            "b": {"source": "hue", "device": "heater_far"},
+        }
+        document["output"]["stages"] = [
+            {"level": 0, "set": {"a": False, "b": False}},
+            {"level": 750, "set": {"a": True, "b": False}},
+        ]
+        assert any("same actuator" in error for error in validate_control("conservatory", document))
+
+    def test_the_message_names_both_keys_and_the_device(self):
+        """So the fix is obvious from the error rather than from reading the ladder."""
+        document = a_valid_control()
+        document["devices"] = {
+            "a": {"source": "hue", "device": "heater_far"},
+            "b": {"source": "hue", "device": "heater_far"},
+        }
+        document["output"]["stages"] = [{"level": 0, "set": {"a": False, "b": False}}]
+        error = next(e for e in validate_control("conservatory", document) if "same actuator" in e)
+        assert "'a'" in error and "'b'" in error and "heater_far" in error
+
+    def test_the_same_device_name_on_different_sources_is_fine(self):
+        """Identity is the whole triple. Two sources may each have a device called `far` and
+        they are not the same actuator."""
+        document = a_valid_control()
+        document["devices"] = {
+            "a": {"source": "hue", "device": "heater_far"},
+            "b": {"source": "philipshue", "device": "heater_far"},
+        }
+        document["output"]["stages"] = [{"level": 0, "set": {"a": False, "b": False}}]
+        assert not [e for e in validate_control("conservatory", document) if "same actuator" in e]
+
+    def test_different_instances_of_one_device_name_are_fine(self):
+        """Two bridges each with a light called `heater_far` are two actuators."""
+        document = a_valid_control()
+        document["devices"] = {
+            "a": {"source": "hue", "device": "heater_far", "instance": "bridge1"},
+            "b": {"source": "hue", "device": "heater_far", "instance": "bridge2"},
+        }
+        document["output"]["stages"] = [{"level": 0, "set": {"a": False, "b": False}}]
+        assert not [e for e in validate_control("conservatory", document) if "same actuator" in e]
+
+    def test_an_ordinary_document_is_unaffected(self):
+        assert validate_control("conservatory", a_valid_control()) == []

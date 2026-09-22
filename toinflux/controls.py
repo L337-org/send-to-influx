@@ -803,10 +803,50 @@ def validate_control_structure(name, document):
     _check_scalars(name, document, errors)
     _check_mapping_of(document, "inputs", errors, ("source", "field"), ("max_age",))
     devices = _check_mapping_of(document, "devices", errors, ("source", "device"), ("min_transition_seconds",))
+    _check_one_key_per_actuator(document, devices, errors)
     _check_pid(document, errors)
     _check_stages(document, devices, errors)
     _check_active_period(document, errors)
     return errors
+
+
+def _check_one_key_per_actuator(document, devices, errors) -> None:
+    """Refuse two device keys that name the same physical actuator.
+
+    Two keys pointing at one light are not two devices, and the ladder treats them as if
+    they were: a stage may set one true and the other false, and both commands are sent in
+    whatever order the mapping yields. The rung's effect is then decided by dict ordering,
+    which is not a thing a control should depend on and not a thing an operator reading the
+    ladder would expect. It validated cleanly before this.
+
+    Identity is ``(source, instance, device)`` because that is what reaches the far end -
+    two keys differing only in an absent versus explicit instance are the same actuator to
+    the bridge, so the instance is normalised rather than compared as written.
+
+    Args:
+        document (dict): the parsed control document
+        devices (dict or None): the devices section, where it was usable
+        errors (list): appended to with any problems found
+    """
+    if not devices:
+        return
+    seen = {}
+    for key, spec in sorted(devices.items(), key=lambda item: repr(item[0])):
+        if not isinstance(spec, dict):
+            continue
+        identity = (spec.get("source"), spec.get("instance"), spec.get("device"))
+        if None in (identity[0], identity[2]):
+            # A missing source or device is already reported by the shape check above, and
+            # guessing an identity from half of one would invent a second complaint.
+            continue
+        seen.setdefault(identity, []).append(key)
+    for identity, keys in seen.items():
+        if len(keys) > 1:
+            errors.append(
+                f"devices: {_render_names(keys)} all name the same actuator "
+                f"({identity[2]!r} on {identity[0]!r}) - a stage could set them to opposite "
+                f"states and which one wins would depend on ordering"
+            )
 
 
 def validate_stored_controls(settings_file=None) -> None:

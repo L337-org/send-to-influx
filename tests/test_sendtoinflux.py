@@ -2290,3 +2290,37 @@ class TestTheDebuggingModesStartNothing:
         args = argparse.Namespace(settings=None, print=False, dump=False)
         with patch("sendtoinflux.list_controls", return_value=[]):
             sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)
+
+
+class TestControlCannotBeCombinedWithTheDebuggingModes:
+    """`--print` and `--dump` promise to start nothing and actuate nothing. The `--control`
+    branch runs before the guards that keep that promise for the supervisor and the MCP
+    server, so `--control NAME --print` started a real control loop commanding real devices -
+    the loudest possible breach of the quietest flag."""
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            pytest.param({"print": True, "dump": False}, id="print"),
+            pytest.param({"print": False, "dump": True}, id="dump"),
+            pytest.param({"print": True, "dump": True}, id="both"),
+        ],
+    )
+    def test_the_combination_is_refused_before_anything_starts(self, flags, caplog):
+        args = argparse.Namespace(settings=None, control="conservatory", heartbeat_fd=None, **flags)
+        with patch("sendtoinflux.run_control") as ran:
+            with caplog.at_level(logging.CRITICAL):
+                with pytest.raises(SystemExit) as exit_code:
+                    sendtoinflux._run_control_and_exit(args)
+        assert exit_code.value.code == 2
+        assert not ran.called, "the control loop was entered despite the refusal"
+        assert "--control cannot be combined" in caplog.text
+
+    def test_an_ordinary_control_run_is_unaffected(self):
+        """The guard must be the two debugging flags and nothing else."""
+        args = argparse.Namespace(settings=None, control="conservatory", heartbeat_fd=None, print=False, dump=False)
+        with patch("sendtoinflux.run_control") as ran:
+            with pytest.raises(SystemExit) as exit_code:
+                sendtoinflux._run_control_and_exit(args)
+        assert exit_code.value.code == 0
+        assert ran.called

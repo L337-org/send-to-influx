@@ -769,9 +769,20 @@ def _start_control_supervisor(settings, args):
 def _run_control_and_exit(args):
     """Run one control as this process, and exit with what it did.
 
+    **Refuses `--print` and `--dump`.** Those promise to start nothing and actuate nothing,
+    and this path runs before the guards that keep that promise for the supervisor and the
+    MCP server - so `--control NAME --print` started a real control loop commanding real
+    devices, the loudest possible breach of the quietest flag. Refused rather than ignored:
+    somebody who typed both wanted one of them, and guessing which is worse than saying so.
+    The check lives here rather than at the call site so it cannot be walked past by a second
+    caller.
+
     Args:
         args (argparse.Namespace): the parsed command line
     """
+    if args.print or args.dump:
+        logging.critical("--control cannot be combined with --print or --dump: those start nothing by design")
+        sys.exit(2)
     beat = heartbeat_writer(args.heartbeat_fd) if args.heartbeat_fd is not None else None
     try:
         run_control(args.control, settings_file=args.settings, heartbeat=beat)

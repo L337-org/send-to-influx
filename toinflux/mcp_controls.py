@@ -43,6 +43,8 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import logging
+import threading
+
 
 from toinflux.controls import (
     CONTROL_EXAMPLE,
@@ -64,6 +66,19 @@ from toinflux.controls import list_controls as stored_control_names
 from toinflux.controls import save_control as store_control
 from toinflux.exceptions import ConfigError, ToolParamError
 from toinflux.mcp_common import configured_sources, register_tool
+
+# One writer at a time across the control-write tools. Each of them is a read-modify-write -
+# `set_control_enabled` most obviously, but `save_control` also reads the stored document to
+# report what changed - and the MCP SDK runs them on anyio worker threads, so two calls can
+# interleave. Without this, a `set_control_enabled` that loaded before a `save_control` stored
+# would write its stale copy afterwards and silently undo the edit, breaking the narrow tool's
+# one promise: that it changes `enabled` and nothing else.
+#
+# A plain lock rather than per-control, because the set is tiny, the operations are
+# sub-millisecond file writes, and a lock per name is a map that has to be reaped. It does not
+# reach a hand-edit made outside the process; `save_control`'s atomic rename is what keeps a
+# reader from seeing a half-written file there.
+_WRITE_LOCK = threading.Lock()
 
 
 def _supervision_by_name(supervisor):
@@ -613,6 +628,22 @@ def _save_control_result(name, document, settings_file, supervisor):
         ToolParamError: the document is not valid
     """
     document = _validated_document(name, document)
+    with _WRITE_LOCK:
+        return _save_validated(name, document, settings_file, supervisor)
+
+
+def _save_validated(name, document, settings_file, supervisor):
+    """Store a document already known to be valid, under the write lock.
+
+    Args:
+        name (str): the control's name
+        document (dict): the document to store, already validated
+        settings_file (str or None): the settings path the process was started with
+        supervisor (Supervisor or None): the running supervisor, where there is one
+
+    Returns:
+        dict: the tool's result
+    """
     replaced = name in set(stored_control_names(settings_file))
     changes = _changes_against_stored(name, document, settings_file) if replaced else None
     store_control(name, document, settings_file)
@@ -629,7 +660,11 @@ def _save_control_result(name, document, settings_file, supervisor):
     result = {
         "saved": name,
         "replaced_existing": replaced,
-        "enabled": document.get("enabled") is True,
+        # `get(..., True)`, matching `Gate` and `_describe`: an omitted key means enabled.
+        # `is True` reported a document with no `enabled` key as disabled while the
+        # supervisor started actuating it, which is the one direction this must not be
+        # wrong in - a caller told a control is off does not go and turn it off.
+        "enabled": document.get("enabled", True) is True,
         "reload": _reload_outcome(supervisor, name),
     }
     if changes is not None:
@@ -708,8 +743,34 @@ def _set_enabled_result(name, enabled, settings_file, supervisor):
     """
     if not isinstance(enabled, bool):
         raise ToolParamError(f"enabled must be true or false (got {enabled!r})")
+    with _WRITE_LOCK:
+        return _set_enabled_locked(name, enabled, settings_file, supervisor)
+
+
+def _set_enabled_locked(name, enabled, settings_file, supervisor):
+    """Flip one control's enabled flag, under the write lock.
+
+    Separate so the whole read-modify-write is inside the lock rather than only the store:
+    the load, the edit and the save have to be one step, or a `save_control` landing between
+    them is silently undone by this stale copy.
+
+    Args:
+        name (str): the control's name
+        enabled (bool): the state to put it in
+        settings_file (str or None): the settings path the process was started with
+        supervisor (Supervisor or None): the running supervisor, where there is one
+
+    Returns:
+        dict: the tool's result
+
+    Raises:
+        ToolParamError: the stored document is not valid
+    """
     document = load_control(name, settings_file)
-    was = document.get("enabled") is True
+    # `get(..., True)` for the same reason as the save result: an omitted key is enabled,
+    # so `is True` made enabling an already-enabled control look like a change and rewrite
+    # the document for nothing.
+    was = document.get("enabled", True) is True
     if was == enabled:
         return {
             "control": name,
@@ -744,7 +805,8 @@ def _delete_control_result(name, settings_file, supervisor):
     Returns:
         dict: the tool's result
     """
-    remove_stored_control(name, settings_file)
+    with _WRITE_LOCK:
+        remove_stored_control(name, settings_file)
     logging.info("Control %r was deleted over MCP", name)
     return {
         "deleted": name,
