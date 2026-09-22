@@ -2324,3 +2324,46 @@ class TestControlCannotBeCombinedWithTheDebuggingModes:
                 sendtoinflux._run_control_and_exit(args)
         assert exit_code.value.code == 0
         assert ran.called
+
+
+class TestNothingActuatesBeforeStartupValidation:
+    """The supervisor spawns children that command real devices. Started before the fatal
+    nothing-to-collect check, it actuated heaters and then had them killed a moment later
+    when an unusable source configuration exited the process.
+
+    Ordering is asserted directly because nothing else in the suite can see it: both calls
+    succeed in isolation, and the defect is only which came first.
+    """
+
+    @staticmethod
+    def _order_of_startup():
+        """Run main far enough to record the order of the three startup steps.
+
+        Returns:
+            list: the steps in the order they ran
+        """
+        order = []
+        with (
+            patch("sendtoinflux.sys.argv", ["sendtoinflux"]),
+            patch("sendtoinflux.toinflux.load_settings", return_value={"sources": ["hue"]}),
+            patch("sendtoinflux._configure_logging_or_exit"),
+            patch("sendtoinflux._requested_sources", return_value=["hue"]),
+            patch("sendtoinflux.toinflux.expand_sources", return_value=[("hue", None)]),
+            patch("sendtoinflux._exit_if_nothing_to_collect", side_effect=lambda *a, **k: order.append("validated")),
+            patch("sendtoinflux._start_control_supervisor", side_effect=lambda *a, **k: order.append("supervisor")),
+            patch("sendtoinflux.maybe_start_mcp_server", side_effect=lambda *a, **k: order.append("mcp")),
+            patch("sendtoinflux.run_one_worker", side_effect=SystemExit(0)),
+        ):
+            with pytest.raises(SystemExit):
+                sendtoinflux.main()
+        return order
+
+    def test_the_supervisor_starts_after_the_nothing_to_collect_check(self):
+        order = self._order_of_startup()
+        assert order[:2] == ["validated", "supervisor"], f"the supervisor started too early: {order}"
+
+    def test_the_supervisor_still_starts_before_the_mcp_server(self):
+        """A client connecting immediately should be told what is running rather than that
+        nothing is, so the move must not have pushed it past the server."""
+        order = self._order_of_startup()
+        assert order.index("supervisor") < order.index("mcp"), f"wrong order: {order}"

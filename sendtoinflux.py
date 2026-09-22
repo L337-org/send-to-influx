@@ -906,11 +906,6 @@ def main() -> None:
         # in one process that the supervisor expects to kill independently.
         _run_control_and_exit(args)
 
-    # Kept, because the MCP control tools report on it. Started here rather than after the
-    # server so that a client connecting immediately is told what is running rather than
-    # that nothing is.
-    supervisor = _start_control_supervisor(settings, args)
-
     requested = _requested_sources(settings, args)
     units = toinflux.expand_sources(requested, settings)
 
@@ -924,11 +919,18 @@ def main() -> None:
         ", ".join(worker_label(*unit) for unit in units) or "none",
     )
 
-    # After the nothing-to-collect check, not before: with zero sources configured,
-    # configured_sources() would expose nothing over MCP anyway, so starting the
-    # server here would only be a brief bind/log-noise/state-file-write cycle on a
-    # path meant to be a clean early exit.
+    # After the nothing-to-collect check, not before. For the supervisor that is the
+    # stronger requirement of the two: it spawns children that command real devices, and
+    # started any earlier it would actuate heaters and then have them killed when an
+    # unusable source configuration exits the process a moment later. Startup validation
+    # finishes before anything is switched on.
+    #
+    # Still before the MCP server, so a client connecting immediately is told what is
+    # running rather than that nothing is. For the server itself the reason is smaller: with
+    # zero sources configured it would expose nothing anyway, so starting it would be a
+    # brief bind/log-noise/state-file-write cycle on a path meant to be a clean early exit.
     _exit_if_nothing_to_collect(units, requested, settings, args)
+    supervisor = _start_control_supervisor(settings, args)
     maybe_start_mcp_server(settings, args, supervisor=supervisor)
     if args.dump:
         if len(requested) > 1:

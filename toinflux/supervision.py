@@ -44,7 +44,7 @@ import time
 from dataclasses import dataclass
 
 from toinflux.control_process import command_devices
-from toinflux.controls import control_path, load_control, validate_control
+from toinflux.controls import actuators_owned, control_is_enabled, control_path, load_control, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import commands_for
 from toinflux.process import TimeoutExpired, spawn
@@ -312,18 +312,42 @@ class Supervisor:
         self.events = []
         # No lock around this one: the supervisor is not reachable from another thread
         # until its constructor has returned.
-        for name in names:
+        # Sorted so that when two enabled controls claim one actuator, the same one is kept
+        # on every machine and every start. Which of the pair wins is arbitrary; that it is
+        # the *same* one each time is not, because an operator watching a heater needs the
+        # answer to hold still while they fix it.
+        claimed = {}
+        for name in sorted(names):
             # Read now rather than at each start: a control that cannot be read is a
             # configuration fault, and finding that out per restart would turn it into a
             # respawn loop that logs the same message for ever.
             try:
                 document = _usable_control(name, settings_file)
-                self.children[name] = Child(name=name, document=document, stall_seconds=stall_seconds(document))
             except ConfigError as exc:
                 # That control's problem, not everybody's. Refusing to supervise anything
                 # because one stored document is corrupt would stop the heating over a file
                 # nobody is using, and this runs inside the collector's main process.
                 logging.error("Control %r cannot be supervised and is being skipped: %r", name, exc)
+                continue
+            # **The last line of the one-enabled-control-per-actuator rule.** The MCP tools
+            # refuse to create or enable a second one and `--check-config` reports a pair, but
+            # neither runs when somebody edits two files by hand and restarts - and this is
+            # the only place left before two loops start fighting over a heater, each with
+            # its own PID and its own safe state, neither able to detect the other.
+            if control_is_enabled(document):
+                shared = actuators_owned(document) & set(claimed)
+                if shared:
+                    actuator = sorted(shared, key=repr)[0]
+                    logging.error(
+                        "Control %r is not being started: %r is already enabled and commands %r - "
+                        "two enabled controls must not share an actuator, so disable one",
+                        name,
+                        claimed[actuator],
+                        actuator[2],
+                    )
+                    continue
+                claimed.update({identity: name for identity in actuators_owned(document)})
+            self.children[name] = Child(name=name, document=document, stall_seconds=stall_seconds(document))
 
     def _default_argv(self, name):
         """Return the argv that starts one control through the installed console script.

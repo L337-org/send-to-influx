@@ -1030,3 +1030,62 @@ class TestAnInstallationWithNoControlsYet:
         supervisor.request_reload("study")
         _wait_for(supervisor, "beat", "study")
         assert supervisor.children["study"].process is not None
+
+
+class TestTwoEnabledControlsClaimingOneActuator:
+    """The last line of the one-enabled-control-per-actuator rule.
+
+    The MCP tools refuse to create or enable a second one and `--check-config` reports a
+    pair, but neither runs when somebody edits two files by hand and restarts the service.
+    This is the only place left before two loops start fighting over a heater.
+    """
+
+    @staticmethod
+    def _install(state_directory, second_enabled=True):
+        """Write two controls that both command the same device.
+
+        Args:
+            state_directory (Installation): the installation to write into
+            second_enabled (bool): whether the second one is enabled
+
+        Returns:
+            Installation: the installation
+        """
+        shared = {"far": {"source": "hue", "device": "far"}}
+        state_directory.write_control(_quick("aaa", dict(shared)))
+        state_directory.write_control(_quick("bbb", dict(shared), enabled=second_enabled))
+        return state_directory
+
+    def test_only_one_is_supervised(self, state_directory, caplog):
+        installation = self._install(state_directory)
+        with caplog.at_level(logging.ERROR):
+            supervisor = Supervisor(["bbb", "aaa"], settings_file=installation.settings_file)
+        assert sorted(supervisor.children) == ["aaa"]
+        assert "is not being started" in caplog.text
+
+    def test_the_message_names_the_control_that_holds_it(self, state_directory, caplog):
+        installation = self._install(state_directory)
+        with caplog.at_level(logging.ERROR):
+            Supervisor(["bbb", "aaa"], settings_file=installation.settings_file)
+        assert "'aaa' is already enabled" in caplog.text
+
+    def test_which_one_wins_does_not_depend_on_listing_order(self, state_directory):
+        """An operator watching a heater needs the answer to hold still while they fix it."""
+        installation = self._install(state_directory)
+        forwards = Supervisor(["aaa", "bbb"], settings_file=installation.settings_file)
+        backwards = Supervisor(["bbb", "aaa"], settings_file=installation.settings_file)
+        assert sorted(forwards.children) == sorted(backwards.children) == ["aaa"]
+
+    def test_a_disabled_duplicate_is_still_supervised(self, state_directory):
+        """Disabled is not the same as absent: the gate stops it actuating, and it must still
+        be listed, reloadable and startable the moment somebody enables it."""
+        installation = self._install(state_directory, second_enabled=False)
+        supervisor = Supervisor(["aaa", "bbb"], settings_file=installation.settings_file)
+        assert sorted(supervisor.children) == ["aaa", "bbb"]
+
+    def test_controls_on_different_actuators_are_both_supervised(self, state_directory):
+        state_directory.bridge.lights["9"] = plug("porch-heater")
+        state_directory.write_control(_quick("aaa", {"far": {"source": "hue", "device": "far"}}))
+        state_directory.write_control(_quick("bbb", {"porch": {"source": "hue", "device": "porch-heater"}}))
+        supervisor = Supervisor(["aaa", "bbb"], settings_file=state_directory.settings_file)
+        assert sorted(supervisor.children) == ["aaa", "bbb"]

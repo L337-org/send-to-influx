@@ -6,6 +6,7 @@ import stat as stat_module
 import pytest
 import yaml
 from toinflux.controls import (
+    shared_actuator_problems,
     BUILT_IN_SAFE_STATES,
     CONTROL_EXAMPLE,
     control_dir,
@@ -737,3 +738,88 @@ class TestTwoKeysForOneActuator:
 
     def test_an_ordinary_document_is_unaffected(self):
         assert validate_control("conservatory", a_valid_control()) == []
+
+
+class TestOnlyOneEnabledControlPerActuator:
+    """Two loops commanding one heater fight: each runs its own PID against its own setpoint
+    and each applies its own safe state, so whichever commanded last wins until the other's
+    next cycle. Neither can detect the other, and nothing inside a single document can see
+    it, which is why this is checked across them."""
+
+    @staticmethod
+    def _pair(**second):
+        """Return two controls that both command the example's devices.
+
+        Args:
+            **second: top-level keys for the second control
+
+        Returns:
+            dict: name to document
+        """
+        return {"conservatory": a_valid_control(), "spare": dict(a_valid_control(), name="spare", **second)}
+
+    def test_two_enabled_controls_sharing_an_actuator_is_a_problem(self):
+        problems = shared_actuator_problems(self._pair())
+        assert problems, "two enabled controls on one heater was accepted"
+        assert "conservatory" in problems[0] and "spare" in problems[0]
+
+    def test_the_problem_names_the_actuator(self):
+        """The physical device as the bridge names it, not the document's key for it - an
+        operator chasing a hot room looks at the heater, not at somebody's YAML."""
+        assert "Conservatory heater far" in " ".join(shared_actuator_problems(self._pair()))
+
+    def test_a_disabled_duplicate_is_allowed(self):
+        """Preparing a replacement before switching over is a workflow, not a fault - and it
+        is exactly what `save_control` does when it stores a clashing control disabled."""
+        assert shared_actuator_problems(self._pair(enabled=False)) == []
+
+    def test_one_control_alone_is_fine(self):
+        assert shared_actuator_problems({"conservatory": a_valid_control()}) == []
+
+    def test_controls_on_different_actuators_are_fine(self):
+        documents = self._pair()
+        documents["spare"]["devices"] = {"porch": {"source": "hue", "device": "porch-heater"}}
+        documents["spare"]["output"]["stages"] = [{"level": 0, "set": {"porch": False}}]
+        assert shared_actuator_problems(documents) == []
+
+    def test_the_answer_does_not_depend_on_listing_order(self):
+        """The same pair must give the same answer on every machine and every start."""
+        documents = self._pair()
+        forwards = shared_actuator_problems(documents)
+        backwards = shared_actuator_problems(dict(reversed(list(documents.items()))))
+        assert forwards == backwards
+
+    def test_check_config_actually_refuses_the_pair(self, state_directory):
+        """Through `validate_stored_controls`, not through the helper.
+
+        The tests above call `shared_actuator_problems` directly, which would pass whether or
+        not anything in the product called it - and removing the call from
+        `validate_stored_controls` did pass them. This is the one that fails if the check is
+        computed and then dropped on the floor.
+        """
+        shared = {"heater_far": {"source": "hue", "device": "Conservatory heater far"}}
+        for name in ("aaa", "bbb"):
+            document = a_valid_control()
+            document["name"] = name
+            document["devices"] = dict(shared)
+            document["output"]["stages"] = [
+                {"level": 0, "set": {"heater_far": False}},
+                {"level": 1500, "set": {"heater_far": True}},
+            ]
+            state_directory.write_control(document, name=name)
+        with pytest.raises(ConfigError, match="both command"):
+            validate_stored_controls(state_directory.settings_file)
+
+    def test_check_config_accepts_them_when_one_is_disabled(self, state_directory):
+        shared = {"heater_far": {"source": "hue", "device": "Conservatory heater far"}}
+        for name, enabled in (("aaa", True), ("bbb", False)):
+            document = a_valid_control()
+            document["name"] = name
+            document["enabled"] = enabled
+            document["devices"] = dict(shared)
+            document["output"]["stages"] = [
+                {"level": 0, "set": {"heater_far": False}},
+                {"level": 1500, "set": {"heater_far": True}},
+            ]
+            state_directory.write_control(document, name=name)
+        validate_stored_controls(state_directory.settings_file)

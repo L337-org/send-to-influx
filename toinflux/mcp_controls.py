@@ -48,6 +48,8 @@ import threading
 
 from toinflux.controls import (
     CONTROL_EXAMPLE,
+    actuators_owned,
+    enabled_owner_of,
     CONTROL_KEY_HELP,
     CONTROL_RULE_SLOTS,
     BUILT_IN_SAFE_STATES,
@@ -608,6 +610,50 @@ def _validated_document(name, document):
     return document
 
 
+def _enabled_owner_elsewhere(name, document, settings_file):
+    """Return the enabled control already commanding one of this document's actuators.
+
+    **One enabled control per actuator.** Two loops sharing a heater each run their own PID
+    against their own setpoint and each apply their own safe state, so whichever commanded
+    last wins until the other's next cycle - and neither can detect it. Nothing inside a
+    single document can see the clash, which is why this reads the others.
+
+    A document that will not parse is skipped rather than guessed at: what it owns is exactly
+    what cannot be determined, and refusing a new control over a broken old one would leave
+    somebody unable to proceed without first fixing a file they may not have written.
+
+    Args:
+        name (str): the control being written, excluded from its own check
+        document (dict): the document being written
+        settings_file (str or None): the settings path the process was started with
+
+    Returns:
+        tuple or None: ``(owner name, actuator)``, or None where nothing else claims them
+    """
+    stored = {}
+    for other in stored_control_names(settings_file):
+        if other == name:
+            continue
+        try:
+            stored[other] = load_control(other, settings_file)
+        except ConfigError:
+            continue
+    return enabled_owner_of(actuators_owned(document), stored, excluding=name)
+
+
+def _describe_actuator(identity):
+    """Render an actuator identity for a message.
+
+    Args:
+        identity (tuple): ``(source, instance, device)``
+
+    Returns:
+        str: a phrase naming it
+    """
+    source, instance, device = identity
+    return f"{device!r} on {source!r}" + (f" ({instance!r})" if instance else "")
+
+
 def _save_control_result(name, document, settings_file, supervisor):
     """Validate, store and apply one control document.
 
@@ -644,6 +690,33 @@ def _save_validated(name, document, settings_file, supervisor):
     Returns:
         dict: the tool's result
     """
+    # **Stored disabled rather than refused, where an enabled control already owns one of
+    # these actuators.** Refusing throws away a document somebody has just composed and makes
+    # them ask again with one key changed; storing it enabled puts two loops on one heater,
+    # each running its own PID and each applying its own safe state, with neither able to
+    # detect the other. Disabling keeps the work, keeps the invariant, and leaves one obvious
+    # next step - which the result states plainly, because returning a document different
+    # from the one it was given is only acceptable if it says so.
+    withheld = None
+    if document.get("enabled", True) is True:
+        clash = _enabled_owner_elsewhere(name, document, settings_file)
+        if clash is not None:
+            owner, actuator = clash
+            document = dict(document, enabled=False)
+            withheld = {
+                "enabled": False,
+                "because": (
+                    f"control {owner!r} is enabled and already commands "
+                    f"{_describe_actuator(actuator)}; two enabled controls must not share one"
+                ),
+                "to_enable_this_one": f"disable {owner!r} with set_control_enabled, then enable {name!r}",
+            }
+            logging.warning(
+                "Control %r was stored disabled: %r is enabled and already commands %s",
+                name,
+                owner,
+                _describe_actuator(actuator),
+            )
     replaced = name in set(stored_control_names(settings_file))
     changes = _changes_against_stored(name, document, settings_file) if replaced else None
     store_control(name, document, settings_file)
@@ -669,6 +742,8 @@ def _save_validated(name, document, settings_file, supervisor):
     }
     if changes is not None:
         result["changed"] = changes
+    if withheld is not None:
+        result["stored_disabled"] = withheld
     return result
 
 
@@ -778,6 +853,18 @@ def _set_enabled_locked(name, enabled, settings_file, supervisor):
             "changed": False,
             "detail": f"control {name!r} was already {'enabled' if enabled else 'disabled'}; nothing was written",
         }
+    if enabled:
+        # Refused rather than stored, because unlike a save there is nothing to preserve:
+        # the document already exists and the caller asked for exactly one thing, so the
+        # honest answer is that it cannot have it and which control is in the way.
+        clash = _enabled_owner_elsewhere(name, document, settings_file)
+        if clash is not None:
+            owner, actuator = clash
+            raise ToolParamError(
+                f"control {name!r} was not enabled: {owner!r} is enabled and already commands "
+                f"{_describe_actuator(actuator)}, and two enabled controls must not share one. "
+                f"Disable {owner!r} first, then enable {name!r}"
+            )
     document["enabled"] = enabled
     _validated_document(name, document)
     store_control(name, document, settings_file)

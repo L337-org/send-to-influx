@@ -961,3 +961,53 @@ class TestTheWriteToolsDoNotInterleave:
         finally:
             module.load_control = real
         assert held == [True], "the document was read outside the lock, so an edit can land between"
+
+
+class TestOneEnabledControlPerActuator:
+    """Two loops commanding one heater fight, and neither can tell. The rule is that only one
+    *enabled* control may own an actuator - a duplicate stored disabled is how somebody
+    prepares a replacement before switching over."""
+
+    def test_a_clashing_control_is_stored_disabled_rather_than_refused(self, stored):
+        """Refusing would throw away a document just composed and make the caller ask again
+        with one key changed. Disabling keeps the work and keeps the invariant."""
+        result = _save_control_result("spare", conservatory(name="spare"), stored.settings_file, _Reloading())
+        assert result["enabled"] is False
+        assert result["stored_disabled"]["because"].startswith("control 'conservatory' is enabled")
+
+    def test_it_says_what_to_do_about_it(self, stored):
+        """A refusal that does not say which control is in the way leaves somebody reading
+        every document to find out."""
+        result = _save_control_result("spare", conservatory(name="spare"), stored.settings_file, _Reloading())
+        assert "disable 'conservatory'" in result["stored_disabled"]["to_enable_this_one"]
+
+    def test_the_document_on_disk_is_the_disabled_one(self, stored):
+        """The result saying `enabled: false` is worth nothing if the file says otherwise."""
+        _save_control_result("spare", conservatory(name="spare"), stored.settings_file, _Reloading())
+        assert _get_control_result("spare", stored.settings_file)["document"]["enabled"] is False
+
+    def test_enabling_it_is_refused_and_names_the_holder(self, stored):
+        _save_control_result("spare", conservatory(name="spare"), stored.settings_file, _Reloading())
+        with pytest.raises(ToolParamError, match="conservatory"):
+            _set_enabled_result("spare", True, stored.settings_file, _Reloading())
+
+    def test_disabling_the_holder_first_lets_it_be_enabled(self, stored):
+        """The workflow the messages describe has to actually work end to end."""
+        _save_control_result("spare", conservatory(name="spare"), stored.settings_file, _Reloading())
+        _set_enabled_result("conservatory", False, stored.settings_file, _Reloading())
+        assert _set_enabled_result("spare", True, stored.settings_file, _Reloading())["changed"] is True
+
+    def test_a_control_on_its_own_actuators_is_unaffected(self, stored):
+        """The rule must not refuse an ordinary second control."""
+        other = conservatory(name="porch")
+        other["devices"] = {"porch": {"source": "hue", "device": "porch-heater"}}
+        other["output"]["stages"] = [{"level": 0, "set": {"porch": False}}, {"level": 1500, "set": {"porch": True}}]
+        result = _save_control_result("porch", other, stored.settings_file, _Reloading())
+        assert result["enabled"] is True
+        assert "stored_disabled" not in result
+
+    def test_replacing_a_control_does_not_clash_with_itself(self, stored):
+        """It owns those actuators already - excluding itself is what makes an edit possible."""
+        result = _save_control_result("conservatory", conservatory(), stored.settings_file, _Reloading())
+        assert result["enabled"] is True
+        assert "stored_disabled" not in result

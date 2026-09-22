@@ -810,6 +810,84 @@ def validate_control_structure(name, document):
     return errors
 
 
+def actuator_identity(spec):
+    """Return what identifies one device entry at the far end, or None where it cannot.
+
+    ``(source, instance, device)``, because that triple is what reaches the bridge: two
+    entries differing only in an absent versus explicit instance are one actuator to it.
+
+    Args:
+        spec (object): a ``devices`` entry
+
+    Returns:
+        tuple or None: the identity, or None where the entry is unusable
+    """
+    if not isinstance(spec, dict):
+        return None
+    source, device = spec.get("source"), spec.get("device")
+    if source is None or device is None:
+        return None
+    return (source, spec.get("instance"), device)
+
+
+def control_is_enabled(document):
+    """Whether a stored document will actuate.
+
+    ``get(..., True)`` because an omitted key means enabled - the same reading
+    :class:`toinflux.gating.Gate` uses, and the one that decides whether devices move.
+
+    Args:
+        document (object): a parsed control document
+
+    Returns:
+        bool: True where the control is enabled
+    """
+    return isinstance(document, dict) and document.get("enabled", True) is True
+
+
+def actuators_owned(document):
+    """Return the actuator identities one control commands.
+
+    Args:
+        document (object): a parsed control document
+
+    Returns:
+        set: the identities, empty where the document has no usable devices section
+    """
+    devices = document.get("devices") if isinstance(document, dict) else None
+    if not isinstance(devices, dict):
+        return set()
+    return {identity for identity in (actuator_identity(spec) for spec in devices.values()) if identity is not None}
+
+
+def enabled_owner_of(actuators, documents, excluding=None):
+    """Return the first enabled control already commanding any of these actuators.
+
+    **One enabled control per actuator, ever.** Two loops sharing a heater fight: each runs
+    its own PID against its own setpoint, each applies its own safe state, and whichever
+    commanded last wins until the other's next cycle. Nothing in either one can detect it.
+
+    Names are considered in sorted order so the answer does not depend on directory listing
+    order - the same pair must give the same answer on every machine and every start.
+
+    Args:
+        actuators (set): the identities being claimed
+        documents (dict): name to parsed document, the stored controls to check against
+        excluding (str or None): a control to ignore, being the one doing the claiming
+
+    Returns:
+        tuple or None: ``(owner name, actuator)`` for the first clash, or None where there
+        is none
+    """
+    for name in sorted(documents):
+        if name == excluding or not control_is_enabled(documents[name]):
+            continue
+        shared = actuators & actuators_owned(documents[name])
+        if shared:
+            return name, sorted(shared, key=repr)[0]
+    return None
+
+
 def _check_one_key_per_actuator(document, devices, errors) -> None:
     """Refuse two device keys that name the same physical actuator.
 
@@ -859,15 +937,59 @@ def validate_stored_controls(settings_file=None) -> None:
         ConfigError: one or more stored controls is unreadable or structurally wrong
     """
     problems = []
+    documents = {}
     for name in list_controls(settings_file):
         try:
             document = load_control(name, settings_file)
         except ConfigError as exc:
             problems.append(str(exc))
             continue
-        problems.extend(f"control {name!r}: {error}" for error in validate_control(name, document))
+        errors = validate_control(name, document)
+        problems.extend(f"control {name!r}: {error}" for error in errors)
+        if not errors:
+            # Only documents that are usable on their own. A broken one has already said so,
+            # and reading actuators out of it would add a second complaint about the same
+            # fault - or invent one, since its devices section may be the thing that is wrong.
+            documents[name] = document
+    problems.extend(shared_actuator_problems(documents))
     if problems:
         raise ConfigError("\n  ".join(["control configuration is invalid:"] + problems))
+
+
+def shared_actuator_problems(documents):
+    """Return one problem per pair of enabled controls commanding the same actuator.
+
+    Checked across documents because nothing inside one can see it: each control validates
+    perfectly, starts its own process, runs its own PID against its own setpoint and applies
+    its own safe state. Whichever commanded last wins until the other's next cycle, and
+    neither can tell. A heater that will not hold a temperature and a journal showing two
+    healthy controls is a long evening.
+
+    Reported for enabled controls only. A duplicate stored *disabled* is how somebody
+    prepares a replacement before switching over, which is a workflow rather than a fault.
+
+    Args:
+        documents (dict): name to parsed document, already individually valid
+
+    Returns:
+        list: a problem per clash, naming both controls and the actuator
+    """
+    problems = []
+    claimed = {}
+    for name in sorted(documents):
+        if not control_is_enabled(documents[name]):
+            continue
+        for identity in sorted(actuators_owned(documents[name]), key=repr):
+            if identity in claimed:
+                source, instance, device = identity
+                where = f"{device!r} on {source!r}" + (f" ({instance!r})" if instance else "")
+                problems.append(
+                    f"controls {claimed[identity]!r} and {name!r} are both enabled and both "
+                    f"command {where} - two loops commanding one device fight, so disable one"
+                )
+            else:
+                claimed[identity] = name
+    return problems
 
 
 def controls_enabled(settings):
