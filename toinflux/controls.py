@@ -830,7 +830,7 @@ def _check_one_key_per_actuator(document, devices, errors) -> None:
     """
     if not devices:
         return
-    seen = {}
+    seen: dict = {}
     for key, spec in sorted(devices.items(), key=lambda item: repr(item[0])):
         if not isinstance(spec, dict):
             continue
