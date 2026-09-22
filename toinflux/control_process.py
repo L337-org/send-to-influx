@@ -29,7 +29,7 @@ import requests
 
 from toinflux.controller import Controller
 from toinflux.controls import DEFAULT_CYCLE_SECONDS, load_control, validate_control
-from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.gating import DeviceGuard, Gate, commands_for
 from toinflux.general import load_settings, render_values, source_class
 from toinflux.inputs import input_max_age, read_input, source_handler
@@ -139,8 +139,23 @@ def command_devices(document, commands, settings_file=None) -> None:
                 f"source that can, or remove the device from this control"
             )
         with source_handler(source, settings_file=settings_file, instance=instance) as handler:
-            for _key, device, state in devices:
-                handler.mcp_set_device_state(device, on=bool(state))
+            for key, device, state in devices:
+                try:
+                    handler.mcp_set_device_state(device, on=bool(state))
+                except ToolParamError as exc:
+                    # **A stored document is not a caller mistake.** `mcp_set_device_state`
+                    # raises this for a device it cannot resolve, which is right when a model
+                    # asked - the model can pick another. Here the name came from a control
+                    # document, so no retry fixes it and the loop must stop: ToolParamError is
+                    # not a ConfigError, so it escaped the child's own handler and arrived as
+                    # a traceback, and the supervisor restarted the control with backoff for
+                    # ever against a name that will never resolve.
+                    #
+                    # The control's own key is added because the document is what has to be
+                    # edited, and the handler only knows the bridge's name for the device.
+                    raise ConfigError(
+                        f"control device {key!r} cannot be commanded: {exc}",
+                    ) from exc
 
 
 class ControlProcess:

@@ -24,7 +24,7 @@ import requests
 from tests.harness import faults, invariants
 from tests.harness.installation import conservatory
 from toinflux.control_process import ControlProcess, command_devices, gather, heartbeat_writer
-from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.rules import RuleEvaluationError, parse_rule
 
 # Inside the conservatory's 23:35-05:25 window, and well outside it.
@@ -557,3 +557,63 @@ class TestRecoveringFromAFailedCycle:
         integral = control.controller.pid._integral
         control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
         assert control.controller.pid._integral != integral, "the integral stopped moving, so it is being reset"
+
+
+class TestADeviceTheBridgeDoesNotHave:
+    """The name came from a stored document, so no retry fixes it.
+
+    `mcp_set_device_state` raises `ToolParamError` for a device it cannot resolve, which is
+    right when a model asked - the model can pick another. Here it escaped the child's own
+    handler, which catches `ConfigError`, so the control died with a traceback and the
+    supervisor restarted it with backoff for ever against a name that will never resolve.
+    """
+
+    @pytest.fixture
+    def misnamed(self, state_directory):
+        """Write a control naming a device the stub bridge does not have.
+
+        Returns:
+            Installation: the installation holding it
+        """
+        document = conservatory()
+        document["devices"] = {"far": {"source": "hue", "device": "no-such-light"}}
+        document["output"]["stages"] = [
+            {"level": 0, "set": {"far": False}},
+            {"level": 1500, "set": {"far": True}},
+        ]
+        state_directory.write_control(document)
+        return state_directory
+
+    def test_it_is_a_config_error_the_child_can_report(self, misnamed, bridge, influx):
+        control = ControlProcess("conservatory", settings_file=misnamed.settings_file)
+        try:
+            with pytest.raises(ConfigError):
+                control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            control.guard.close()
+            control.close()
+
+    def test_the_message_names_the_control_s_own_key_and_what_the_bridge_has(self, misnamed, bridge, influx):
+        """The document is what has to be edited, and the handler only knows the bridge's
+        name for the device - so both halves are needed to act on it."""
+        control = ControlProcess("conservatory", settings_file=misnamed.settings_file)
+        try:
+            with pytest.raises(ConfigError) as raised:
+                control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            control.guard.close()
+            control.close()
+        assert "'far'" in str(raised.value), "the control's own device key is missing"
+        assert "no-such-light" in str(raised.value)
+        assert "available devices" in str(raised.value), "the bridge's own list is what makes it actionable"
+
+    def test_the_original_is_kept_as_the_cause(self, misnamed, bridge, influx):
+        """Wrapping must not discard what was raised."""
+        control = ControlProcess("conservatory", settings_file=misnamed.settings_file)
+        try:
+            with pytest.raises(ConfigError) as raised:
+                control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            control.guard.close()
+            control.close()
+        assert isinstance(raised.value.__cause__, ToolParamError)
