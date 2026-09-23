@@ -186,6 +186,27 @@ class TransitionLog:
         # device frozen until real time caught up with the jump.
         return max(0.0, float(moment) - float(entry["at"]))
 
+    def released(self, device):
+        """Whether a device's last move was one the minimum does not govern.
+
+        A safe state overrides the minimum in both directions: it is applied whatever the
+        clock says, and the control is not then made to wait out a full minimum before it
+        may act again. Recording it as an ordinary transition would enforce the second half
+        anyway - a heater forced off by a transient fault would sit there for the whole
+        minimum after the fault cleared, which is the setting protecting the hardware from
+        the safety mechanism.
+
+        So the state is recorded, because the planner needs to know where the devices
+        actually are, and the timing is marked as not binding.
+
+        Args:
+            device (str): the device name
+
+        Returns:
+            bool: True where the last command was a safe state
+        """
+        return bool((self.entries.get(device) or {}).get("forced"))
+
     def frozen(self, min_transition_for, devices, cycle_seconds, now=None):
         """Return the devices that may not change state yet.
 
@@ -210,11 +231,15 @@ class TransitionLog:
             if elapsed is None:
                 # Never commanded, so there is nothing it is too soon after.
                 continue
+            if self.released(device):
+                # Last moved by a safe state, which the minimum does not govern in either
+                # direction. The next ordinary command restores the normal rule.
+                continue
             if elapsed + allowance < float(min_transition_for(device)):
                 held.add(device)
         return frozenset(held)
 
-    def record(self, commands, now=None) -> None:
+    def record(self, commands, now=None, forced=False) -> None:
         """Note the devices whose state this command actually changes.
 
         Only the ones that change: commanding a heater off when it is already off is not a
@@ -225,14 +250,24 @@ class TransitionLog:
         Args:
             commands (dict): device name to the state it has just been set to
             now (float or None): epoch seconds; read from the clock when None
+            forced (bool): True where this is a safe state rather than a control decision,
+                which the minimum governs in neither direction - see :meth:`released`
         """
         moment = float(self._clock() if now is None else now)
         changed = False
         for device, state in commands.items():
             entry = self.entries.get(device)
             if entry is not None and bool(entry.get("state")) == bool(state):
+                # No move, so nothing to time. The mark still has to go when an ordinary
+                # command confirms a state a safe state put the device in, or the exemption
+                # would outlive the safe state that earned it.
+                if entry.get("forced") and not forced:
+                    del entry["forced"]
+                    changed = True
                 continue
             self.entries[device] = {"state": bool(state), "at": moment}
+            if forced:
+                self.entries[device]["forced"] = True
             changed = True
         if changed:
             self._write()

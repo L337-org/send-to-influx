@@ -11,6 +11,7 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import json
+import logging
 import os
 
 import pytest
@@ -341,3 +342,146 @@ class TestAMinimumLongerThanTheWindowIsKept:
         command_devices(name, document, {"far": False}, state_directory.settings_file)
         log = TransitionLog(name, state_directory.settings_file)
         assert log.states() == {"far": False}
+
+
+class TestASafeStateTrumpsTheMinimum:
+    """Both directions, which is the point.
+
+    Going in it always did: a safe state is commanded directly rather than planned, so no
+    minimum was ever consulted. Going out it did not - the safe state was recorded like any
+    other move, so a heater forced off by a transient fault sat there for a whole minimum
+    after the fault cleared. That is the setting protecting the hardware from the safety
+    mechanism, which is the wrong way round.
+
+    The state is still recorded, because the planner has to know where the devices actually
+    are; it is the timing that stops binding.
+    """
+
+    def test_a_forced_move_is_recorded_so_the_planner_knows_where_it_is(self, state_directory):
+        log, _now = _log(state_directory)
+        log.record({"heater": False}, forced=True)
+        assert log.states() == {"heater": False}
+
+    def test_but_does_not_hold_the_control_off_afterwards(self, state_directory):
+        log, now = _log(state_directory)
+        log.record({"heater": True})
+        now[0] += 5
+        log.record({"heater": False}, forced=True)
+        now[0] += 5
+        assert log.frozen(lambda _d: 900, ("heater",), 10) == frozenset()
+
+    def test_an_ordinary_move_afterwards_restores_the_normal_rule(self, state_directory):
+        """The exemption belongs to the safe state that earned it, not to the device."""
+        log, now = _log(state_directory)
+        log.record({"heater": False}, forced=True)
+        now[0] += 5
+        log.record({"heater": True})
+        now[0] += 5
+        assert log.frozen(lambda _d: 900, ("heater",), 10) == frozenset({"heater"})
+
+    def test_an_ordinary_command_confirming_the_forced_state_clears_it_too(self, state_directory):
+        """The state does not change, so nothing is timed - but the exemption must still go,
+        or a safe state that happened to leave the device where the ladder wanted it would
+        exempt it for ever."""
+        log, now = _log(state_directory)
+        log.record({"heater": False}, forced=True)
+        now[0] += 5
+        log.record({"heater": False})
+        assert log.released("heater") is False
+
+    def test_it_survives_a_restart_like_everything_else_here(self, state_directory):
+        first, now = _log(state_directory)
+        first.record({"heater": False}, forced=True)
+        second, _ = _log(state_directory, now=now)
+        assert second.released("heater") is True
+        assert second.frozen(lambda _d: 900, ("heater",), 10) == frozenset()
+
+
+class TestWhatACycleSaysForItself:
+    """Nothing in this subsystem said anything during a healthy cycle, so a control holding
+    the wrong temperature produced a curve and no record of what it was thinking. At DEBUG,
+    because it is per cycle and the answer to "is it working" is not in the log by default.
+    """
+
+    @staticmethod
+    def _controller(**output):
+        """Return a controller over a three-rung ladder.
+
+        Args:
+            **output: overrides for the output section
+
+        Returns:
+            Controller: ready to step
+        """
+        from toinflux.controller import Controller
+
+        return Controller(
+            {
+                "parameters": {"target": 20.0},
+                "inputs": {"inside": {"source": "hue", "field": "t"}},
+                "pid": {"input": "inside", "setpoint": "target", "kp": 100.0, "ki": 0.0, "kd": 0.0},
+                "output": dict(
+                    {
+                        "cycle_seconds": 300,
+                        "min_transition_seconds": 60,
+                        "stages": [
+                            {"level": 0, "set": {"far": False, "near": False}},
+                            {"level": 750, "set": {"far": True, "near": False}},
+                            {"level": 1500, "set": {"far": True, "near": True}},
+                        ],
+                    },
+                    **output,
+                ),
+                "devices": {"far": {"source": "hue", "device": "far"}, "near": {"source": "hue", "device": "near"}},
+            }
+        )
+
+    def test_it_records_what_it_read_what_it_chased_and_what_it_asked_for(self, caplog):
+        """The terms a tuning argument is actually had in. Without them, kp is guesswork."""
+        with caplog.at_level(logging.DEBUG):
+            self._controller().step({"inside": 16.0, "target": 20.0}, dt=300)
+        line = caplog.text
+        assert "input=16.000" in line
+        assert "setpoint=20.000" in line
+        assert "demand=400.0" in line
+        assert "p=400.0" in line, "the PID's own terms, so a runaway integral is visible"
+        assert "level 0 for 140s" in line and "level 750 for 160s" in line
+
+    def test_a_held_device_is_named_when_it_is_holding(self, caplog):
+        """The case that is otherwise unreadable: the demand asks for almost nothing and the
+        control commands level 750 anyway, because `far` may not switch off yet. Without the
+        held list that looks like a loop doing the opposite of what it was told."""
+        with caplog.at_level(logging.DEBUG):
+            self._controller().step(
+                {"inside": 18.5, "target": 20.0}, dt=300, frozen=frozenset({"far"}), states={"far": True}
+            )
+        assert "demand=150.0" in caplog.text
+        assert "level 750 for 300s" in caplog.text
+        assert "held='far'" in caplog.text
+
+    def test_nothing_is_held_when_nothing_is_held(self, caplog):
+        """An empty list every cycle is noise that teaches people to skim the line."""
+        with caplog.at_level(logging.DEBUG):
+            self._controller().step({"inside": 16.0, "target": 20.0}, dt=300)
+        assert "held=" not in caplog.text
+
+    def test_it_says_nothing_at_info(self, caplog):
+        """Once per cycle is once every few seconds on a fast control."""
+        with caplog.at_level(logging.INFO):
+            self._controller().step({"inside": 16.0, "target": 20.0}, dt=300)
+        assert caplog.text == ""
+
+    def test_the_rungs_it_commands_name_the_devices(self, state_directory, bridge, caplog):
+        """`level 750` does not say which heater that turned on, and the question asked of
+        this log is always about a particular device."""
+        from toinflux.control_process import ControlProcess
+
+        document = TestAMinimumLongerThanTheWindowIsKept._control(state_directory, minimum=1, cycle=1)
+        control = ControlProcess(document, settings_file=state_directory.settings_file)
+        try:
+            with caplog.at_level(logging.DEBUG):
+                control.cycle(dt=1, sleep=lambda _seconds: None)
+            assert "far=" in caplog.text, "the commanded states are not in the log"
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()

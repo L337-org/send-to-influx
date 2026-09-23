@@ -13,11 +13,14 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
+import logging
+
 import math
 
 from simple_pid import PID
 
 from toinflux.exceptions import ConfigError
+from toinflux.general import render_values
 from toinflux.controls import DEFAULT_CYCLE_SECONDS, rule_names
 from toinflux.rules import RuleEvaluationError, parse_rule
 from toinflux.staging import build_ladder, cap_ladder, plan_window, reachable_ladder
@@ -129,7 +132,25 @@ class Controller:
             # spent capped would be paid back as overshoot the moment it lifted.
             self.pid.output_limits = limits
         demand = self.pid(process_variable, dt=dt)
-        return plan_window(ladder, demand, self.cycle_seconds, self.min_transition_for)
+        plan = plan_window(ladder, demand, self.cycle_seconds, self.min_transition_for)
+        # **What the loop decided, once per cycle, at DEBUG.** Nothing in this subsystem said
+        # anything during a healthy cycle: a control holding the wrong temperature produced a
+        # temperature curve and no record of what it was thinking, so tuning it meant guessing
+        # at kp from the outside. The terms are the ones a tuning argument is actually had in -
+        # what it read, what it was chasing, what it asked for, and what the ladder could give
+        # it - and the rungs are named because a demand that cannot be reached looks identical
+        # to one that was met until you can see which rung was chosen.
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(
+                "input=%.3f setpoint=%.3f demand=%.1f (p=%.1f i=%.1f d=%.1f) plan=%s%s",
+                process_variable,
+                setpoint,
+                demand,
+                *self.pid.components,
+                ", ".join(f"level {dwell.stage.level:g} for {dwell.seconds:.0f}s" for dwell in plan),
+                f", held={render_values(sorted(frozen))}" if frozen else "",
+            )
+        return plan
 
     def min_transition_for(self, device):
         """Return a device's minimum transition time in seconds.

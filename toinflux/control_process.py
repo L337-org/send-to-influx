@@ -83,7 +83,7 @@ def gather(document, settings, session, settings_file=None, now=None):
     return bindings
 
 
-def command_devices(name, document, commands, settings_file=None, transitions=None) -> None:
+def command_devices(name, document, commands, settings_file=None, transitions=None, forced=False) -> None:
     """Put a control's devices into the states given, and note which of them moved.
 
     Grouped by source and instance so one handler serves every device on the same bridge,
@@ -109,6 +109,10 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
         settings_file (str or None): the settings path the process was started with
         transitions (TransitionLog or None): the log to write to; one is opened for this
             control when None, which is what a caller with no loop of its own wants
+        forced (bool): True where this is a safe state rather than a decision the ladder
+            made. A safe state overrides ``min_transition_seconds`` going in, and must not
+            then hold the control off going out: a heater forced off by a transient fault
+            would otherwise sit there for a whole minimum after the fault had cleared
 
     Raises:
         ConfigError: where a device names a source that cannot actuate anything
@@ -179,7 +183,7 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
                 commanded[key] = bool(state)
     if commanded:
         log = TransitionLog(name, settings_file) if transitions is None else transitions
-        log.record(commanded)
+        log.record(commanded, forced=forced)
 
 
 class ControlProcess:
@@ -227,7 +231,7 @@ class ControlProcess:
             name,
             self.document.get("safe_state", "unenergised"),
             tuple(self.document.get("devices") or {}),
-            self._apply,
+            self._apply_safe,
         )
 
     @property
@@ -239,7 +243,7 @@ class ControlProcess:
         """
         return float((self.document.get("output") or {}).get("cycle_seconds", DEFAULT_CYCLE_SECONDS))
 
-    def _apply(self, commands) -> None:
+    def _apply(self, commands, forced=False) -> None:
         """Command the devices, for the guard and the fail-safe alike.
 
         None is an instruction rather than an omission: it is what ``commands_for`` returns
@@ -251,10 +255,26 @@ class ControlProcess:
         Args:
             commands (dict or None): device name to the state it should take, or None to
                 touch nothing at all
+            forced (bool): True where this is a safe state rather than a decision the ladder
+                made, so ``min_transition_seconds`` governs neither this move nor the next
         """
         if commands is None:
             return
-        command_devices(self.name, self.document, commands, self.settings_file, self.transitions)
+        command_devices(self.name, self.document, commands, self.settings_file, self.transitions, forced=forced)
+
+    def _apply_safe(self, commands) -> None:
+        """Command the devices into a safe state.
+
+        Separate from :meth:`_apply` because it is what the device guard is handed, and the
+        guard has no opinion about transition minimums to pass along - every command that
+        reaches it is a safe state by construction. Keeping the distinction in the method
+        rather than in an argument the guard would have to carry means a future caller picks
+        it by choosing which one to call.
+
+        Args:
+            commands (dict or None): device name to the state it should take, or None
+        """
+        self._apply(commands, forced=True)
 
     def _gather(self):
         """Return this cycle's bindings, reading them at most once.
@@ -303,7 +323,7 @@ class ControlProcess:
                 # demand built from a window the actuators were deliberately idle through.
                 self.controller.hold()
                 if decision.apply:
-                    self._apply(commands_for(decision.apply, tuple(self.document.get("devices") or {})))
+                    self._apply_safe(commands_for(decision.apply, tuple(self.document.get("devices") or {})))
                 # Only now is the edge spent. If the command above raised, this is not
                 # reached, the gate still believes it is acting, and the next cycle delivers
                 # the same closing edge again - which is the retry.
@@ -354,6 +374,18 @@ class ControlProcess:
         )
         demand = self.controller.step(bindings, dt, frozen=frozen, states=self.transitions.states())
         for dwell in demand:
+            # Per rung rather than per cycle, and the states in full: "level 750" does not
+            # say which heater that turned on, and the question being asked of this log is
+            # always about a particular device.
+            logging.debug(
+                "Control %r commanding level %g for %.0fs: %s",
+                self.name,
+                dwell.stage.level,
+                dwell.seconds,
+                ", ".join(
+                    f"{device}={'on' if state else 'off'}" for device, state in sorted(dwell.stage.states.items())
+                ),
+            )
             self._apply(dict(dwell.stage.states))
             sleep(dwell.seconds)
 
@@ -369,7 +401,7 @@ class ControlProcess:
         logging.error("Control %r could not complete a cycle, going to its safe state: %r", self.name, reason)
         self.controller.hold()
         try:
-            self._apply(commands_for(self.guard.safe_state, tuple(self.document.get("devices") or {})))
+            self._apply_safe(commands_for(self.guard.safe_state, tuple(self.document.get("devices") or {})))
         except (SourceConnectionError, ConfigError) as exc:
             # The one place a broad-ish catch is right: the cycle has already failed, and a
             # device that cannot be reached to be made safe is exactly what the supervisor's

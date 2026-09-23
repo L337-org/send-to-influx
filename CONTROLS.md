@@ -193,9 +193,14 @@ window at 1500 and 35% at 750.
   loop recomputes, and how often a given piece of hardware may be switched. A device still
   inside its minimum is held where it is, and the window is planned from the rungs that leave
   it there - so a fast loop can drive a responsive device while a slow one beside it is
-  protected. The record of when each device last moved is kept in the state directory and
-  survives a restart, because the supervisor restarts a control on every document edit and a
-  guarantee that lapsed there would be no guarantee at all.
+  protected. The record of when each device last moved is kept in the state directory, one
+  file per control, and survives a restart, because the supervisor restarts a control on every
+  document edit and a guarantee that lapsed there would be no guarantee at all.
+* **A safe state overrides it in both directions.** Going in, the safe state is commanded
+  whatever the clock says. Coming out, the control may act immediately rather than waiting a
+  full minimum - otherwise a heater forced off by a transient fault would sit there long after
+  the fault had cleared, which is the setting protecting the hardware from the safety
+  mechanism. The next ordinary command restores the normal rule.
 * `max_level` caps the **ladder**, not the demand. Capping the demand still proportions
   between rungs above the cap; capping the ladder does not.
 
@@ -375,6 +380,24 @@ devices:
     device: Propagator mat
 safe_state: unenergised
 ```
+
+Watching one run
+----------------
+
+A control says nothing during a healthy cycle, which is right for a service that runs for
+months and wrong when you are tuning one. Run with `-v`, or set `loglevel: DEBUG`, and each
+cycle records what it read, what it was chasing, what the PID asked for, and what the ladder
+could actually give it:
+
+```
+input=16.000 setpoint=20.000 demand=400.0 (p=400.0 i=0.0 d=-0.0) plan=level 0 for 140s, level 750 for 160s
+```
+
+`held=` appears when a device is inside its `min_transition_seconds` and the window had to be
+planned around it. That is the line worth knowing about, because a held device makes a control
+look like it is doing the opposite of what it was told - a demand of 150 commanding level 750
+for the whole window is correct when the far heater may not switch off yet, and inexplicable
+without it.
 
 What is checked, and when
 -------------------------

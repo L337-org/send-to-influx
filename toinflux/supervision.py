@@ -863,7 +863,7 @@ class Supervisor:
                 # No log passed, so one is opened for this control and closed again. The
                 # child owning the other one is already dead by the time this runs - that is
                 # what "make its devices safe" is for - so the two never write at once.
-                command_devices(name, document, commands, self.settings_file)
+                command_devices(name, document, commands, self.settings_file, forced=True)
             except (ConfigError, SourceConnectionError) as exc:
                 # Logged rather than raised: the supervisor's job is to keep going, and a
                 # bridge that cannot be reached now is one the next restart will try again.
