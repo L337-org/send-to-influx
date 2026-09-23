@@ -349,26 +349,39 @@ class Supervisor:
             # neither runs when somebody edits two files by hand and restarts - and this is
             # the only place left before two loops start fighting over a heater, each with
             # its own PID and its own safe state, neither able to detect the other.
-            if control_is_enabled(document):
-                # Pairwise rather than a set intersection: an absent instance means "the
-                # first configured target", so it is ambiguous against an explicit one rather
-                # than distinct from it, and a set would have let the two spellings past.
-                mine = sorted(actuators_owned(document), key=repr)
-                clash = next(
-                    ((who, held, ours) for ours in mine for who, held in claimed if actuators_may_be_one(ours, held)),
-                    None,
+            if not control_is_enabled(document):
+                # **Not started at all, rather than started and gated.** A control process
+                # asserts its safe state before its first cycle, and the gate that reads
+                # `enabled` does not run until after that - so starting a disabled document
+                # commanded its devices off. Harmless for a control nobody else shares an
+                # actuator with, and not harmless at all for the case the store deliberately
+                # creates: `save_control` stores a document that clashes with a running
+                # control *disabled* rather than refusing it, so a disabled replacement
+                # naming a live control's heater switched that heater off on arrival.
+                #
+                # Nothing is lost by leaving it alone. Enabling it asks for a reload, and the
+                # reload path already takes on a control that was not a child before.
+                logging.info("Control %r is not enabled, so no process is started for it", name)
+                continue
+            # Pairwise rather than a set intersection: an absent instance means "the
+            # first configured target", so it is ambiguous against an explicit one rather
+            # than distinct from it, and a set would have let the two spellings past.
+            mine = sorted(actuators_owned(document), key=repr)
+            clash = next(
+                ((who, held, ours) for ours in mine for who, held in claimed if actuators_may_be_one(ours, held)),
+                None,
+            )
+            if clash is not None:
+                owner, _held, actuator = clash
+                logging.error(
+                    "Control %r is not being started: %r is already enabled and commands %r - "
+                    "two enabled controls must not share an actuator, so disable one",
+                    name,
+                    owner,
+                    actuator[2],
                 )
-                if clash is not None:
-                    owner, _held, actuator = clash
-                    logging.error(
-                        "Control %r is not being started: %r is already enabled and commands %r - "
-                        "two enabled controls must not share an actuator, so disable one",
-                        name,
-                        owner,
-                        actuator[2],
-                    )
-                    continue
-                claimed.extend((name, identity) for identity in mine)
+                continue
+            claimed.extend((name, identity) for identity in mine)
             self.children[name] = Child(name=name, document=document, stall_seconds=stall_seconds(document))
 
     def _default_argv(self, name):
@@ -605,9 +618,10 @@ class Supervisor:
             self._drop(child, name)
             return
         try:
-            # Read here only to decide whether to stop what is running. An unusable document
-            # must not cost a working control its process.
-            _usable_control(name, self.settings_file)
+            # Read here both to decide whether to stop what is running and to see whether it
+            # is still enabled. An unusable document must not cost a working control its
+            # process.
+            document = _usable_control(name, self.settings_file)
         except ConfigError as exc:
             # Two different situations, and telling an operator the wrong one sends them
             # looking in the wrong place. Where a control *is* running, refusing to kill it
@@ -624,6 +638,13 @@ class Supervisor:
             else:
                 logging.error("Control %r is still not running: the stored document is not valid: %r", name, exc)
             self._record("reload-failed", name, repr(exc))
+            return
+        if not control_is_enabled(document):
+            # The other half of not starting disabled documents. A control disabled while it
+            # is running must let go of its devices - that is what disabling one means - and
+            # `_stop` makes them safe on the way out. One that was already stopped has
+            # nothing to do, and must not be started to be stopped again.
+            self._disable(child, name)
             return
         known = child is not None
         if not known:
@@ -644,6 +665,31 @@ class Supervisor:
         child.restart_at = self._clock()
         self._record("reloaded", name, "its document changed" if known else "it is newly stored")
         self._restart(child)
+
+    def _disable(self, child, name) -> None:
+        """Stop supervising a control whose document is no longer enabled.
+
+        Distinct from :meth:`_drop`, which is for a document that has been deleted: this one
+        still exists and may be enabled again, so the name stays in the store and only the
+        process goes.
+
+        Args:
+            child (Child or None): the control, where one was running
+            name (str): its name, for the log line and the event
+        """
+        if child is None:
+            self._record("disabled", name, "it was not being supervised")
+            return
+        if child.running:
+            # Makes the devices safe on the way out, which is the point: a heater held on by
+            # a control that has just been disabled must not stay on.
+            self._stop(child, "its document is no longer enabled")
+        else:
+            self.make_safe(name)
+        with self._children_lock:
+            del self.children[name]
+        logging.info("Control %r is no longer enabled, so it is not being run", name)
+        self._record("disabled", name, "its document is no longer enabled")
 
     def _drop(self, child, name) -> None:
         """Stop supervising a control whose document has been deleted.

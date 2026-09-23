@@ -1107,12 +1107,76 @@ class TestTwoEnabledControlsClaimingOneActuator:
         backwards = Supervisor(["bbb", "aaa"], settings_file=installation.settings_file)
         assert sorted(forwards.children) == sorted(backwards.children) == ["aaa"]
 
-    def test_a_disabled_duplicate_is_still_supervised(self, state_directory):
-        """Disabled is not the same as absent: the gate stops it actuating, and it must still
-        be listed, reloadable and startable the moment somebody enables it."""
+    def test_a_disabled_duplicate_is_not_started_at_all(self, state_directory):
+        """This test used to assert the opposite, on the reasoning that "the gate stops it
+        actuating". The gate does not get the chance: a control process asserts its safe
+        state before its first cycle, and the gate that reads `enabled` runs after that.
+
+        So starting a disabled document commanded its devices off - and `save_control`
+        deliberately stores a document clashing with a running control *disabled* rather
+        than refusing it, which made a disabled replacement switch off the live control's
+        heater the moment it arrived.
+        """
         installation = self._install(state_directory, second_enabled=False)
         supervisor = Supervisor(["aaa", "bbb"], settings_file=installation.settings_file)
-        assert sorted(supervisor.children) == ["aaa", "bbb"]
+        assert sorted(supervisor.children) == ["aaa"]
+
+    def test_a_disabled_control_commands_nothing_at_all(self, state_directory):
+        """The regression itself, at the bridge rather than at the children mapping.
+
+        Its own device rather than the shared one, because two controls commanding one
+        heater cannot be told apart at the far end - and the live control switching its own
+        heater off is the loop working, which is exactly what an earlier version of this test
+        mistook for the bug.
+        """
+        state_directory.bridge.lights["9"] = plug("porch-heater")
+        state_directory.write_control(_quick("aaa", {"far": {"source": "hue", "device": "far"}}))
+        state_directory.write_control(
+            _quick("bbb", {"porch": {"source": "hue", "device": "porch-heater"}}, enabled=False)
+        )
+        supervisor = Supervisor(["aaa", "bbb"], settings_file=state_directory.settings_file)
+        try:
+            state_directory.bridge.clear()
+            supervisor.start_all()
+            _wait_for(supervisor, "beat", "aaa")
+            commanded = [command.name for command in state_directory.bridge.commanded()]
+            assert "porch-heater" not in commanded, f"the disabled control commanded its devices: {commanded}"
+            assert "far" in commanded, "the enabled control did not run, so this proves nothing"
+        finally:
+            supervisor.stop_all()
+
+    def test_enabling_it_starts_it_without_a_restart(self, state_directory):
+        """What not starting it costs, and it costs nothing: enabling asks for a reload, and
+        the reload path already takes on a control that was not a child before."""
+        installation = self._install(state_directory, second_enabled=False)
+        state_directory.write_control(_quick("bbb", {"porch": {"source": "hue", "device": "porch-heater"}}))
+        state_directory.bridge.lights["9"] = plug("porch-heater")
+        supervisor = Supervisor(["aaa"], settings_file=installation.settings_file)
+        try:
+            supervisor.start_all()
+            supervisor.request_reload("bbb")
+            _wait_for(supervisor, "reloaded", "bbb")
+            assert "bbb" in supervisor.children
+        finally:
+            supervisor.stop_all()
+
+    def test_disabling_a_running_control_stops_it_and_releases_its_devices(self, state_directory):
+        """The other half. Disabling one is what it means to let go of the heaters, so a
+        control disabled while it is running must not leave one on."""
+        installation = self._install(state_directory, second_enabled=False)
+        supervisor = Supervisor(["aaa"], settings_file=installation.settings_file)
+        try:
+            supervisor.start_all()
+            _wait_for(supervisor, "beat", "aaa")
+            installation.bridge.lights[installation.bridge.id_of("far")]["state"]["on"] = True
+            installation.bridge.clear()
+            state_directory.write_control(_quick("aaa", {"far": {"source": "hue", "device": "far"}}, enabled=False))
+            supervisor.request_reload("aaa")
+            _wait_for(supervisor, "disabled", "aaa")
+            assert "aaa" not in supervisor.children
+            assert installation.bridge.energised()["far"] is False, "a disabled control kept its heater on"
+        finally:
+            supervisor.stop_all()
 
     def test_controls_on_different_actuators_are_both_supervised(self, state_directory):
         state_directory.bridge.lights["9"] = plug("porch-heater")

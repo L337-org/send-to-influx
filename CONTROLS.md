@@ -66,7 +66,7 @@ The document
 | `active_period` | no | {from, to, end_state}: a daily wall-clock window in the control's own timezone |
 | `devices` | yes | name -> {source, device, instance, min_transition_seconds}: what the control switches |
 | `enable_when` | no | a rule gating actuation; the control acts only while it evaluates non-zero |
-| `enabled` | no | true or false; false keeps the document without running the loop |
+| `enabled` | no | true or false; false keeps the document and runs no process for it at all |
 | `inputs` | yes | name -> {source, field, instance, max_age}: the readings the rules may use |
 | `name` | no | the control's own name, which must match the file it is stored as |
 | `output` | yes | cycle_seconds, min_transition_seconds, an optional max_level rule, and the stage ladder |
@@ -164,6 +164,13 @@ server rebooted, and the wrong one for a heater.
 An active period is a wall-clock window in the control's own timezone, and it follows
 daylight saving the way a wall clock does: a window inside the hour the clocks skip does not
 happen that day, and one inside the hour they repeat happens twice.
+
+A disabled control has no process. That is not the same as a running one held back by its
+gate: a control asserts its safe state before its first cycle, so a disabled document that
+was started would command its devices off - and `save_control` deliberately stores a document
+clashing with a running control *disabled* rather than refusing it, so a disabled replacement
+would switch off the live control's heater on arrival. Enabling one starts it without a
+restart; disabling a running one stops it and puts its devices in their safe state.
 
 A control actuates when `enabled` **and** inside the active period **and** `enable_when`
 holds. Any falling edge applies the end state and holds the loop; any rising edge resumes it
