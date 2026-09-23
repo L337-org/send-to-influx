@@ -938,6 +938,43 @@ class TestATransitionMinimumLongerThanTheWindow:
             ), f"{bad!r} was accepted as a transition minimum"
 
 
+class TestAnInputInstanceThatIsNotAName:
+    """The same key, the same handler, and for a while only one of the two was checked.
+
+    `inputs` and `devices` both take an optional `instance` and both hand it to
+    `source_handler`, so the wrong shape fails the same way - one cycle later, while
+    resolving the handler or quoting the value into a query. Checking devices and not inputs
+    made one mistake report itself two different ways depending on where it was written.
+    """
+
+    @pytest.mark.parametrize("bad", [["bridge1"], {"host": "bridge1"}, 7, "", "   ", None])
+    def test_it_is_refused(self, bad):
+        document = a_valid_control()
+        document["inputs"]["inside"]["instance"] = bad
+        errors = validate_control("conservatory", document)
+        assert any("inputs.inside.instance" in error for error in errors), f"{bad!r} was accepted"
+
+    def test_a_real_name_is_accepted(self):
+        document = a_valid_control()
+        document["inputs"]["inside"]["instance"] = "bridge1"
+        assert validate_control("conservatory", document) == []
+
+    def test_an_omitted_one_is_still_how_you_mean_the_first_target(self):
+        document = a_valid_control()
+        document["inputs"]["inside"].pop("instance", None)
+        assert validate_control("conservatory", document) == []
+
+    def test_the_message_names_the_section_it_was_found_in(self):
+        """`devices.inside.instance` for a fault in `inputs` would send somebody to the wrong
+        half of their document."""
+        document = a_valid_control()
+        document["inputs"]["inside"]["instance"] = 7
+        document["devices"]["heater_far"]["instance"] = 7
+        errors = validate_control("conservatory", document)
+        assert any("inputs.inside.instance" in error for error in errors)
+        assert any("devices.heater_far.instance" in error for error in errors)
+
+
 class TestADeviceInstanceThatIsNotAName:
     """`instance` is optional and was never shape-checked, so a list or a mapping validated
     cleanly and then reached `command_devices`, which groups by `(source, instance)` - and a

@@ -955,11 +955,12 @@ def validate_control_structure(name, document):
             errors.append(f"{key}: is required and has nothing under it")
 
     _check_scalars(name, document, errors)
-    _check_mapping_of(document, "inputs", errors, ("source", "field"), ("max_age",), INPUT_KEYS)
+    inputs = _check_mapping_of(document, "inputs", errors, ("source", "field"), ("max_age",), INPUT_KEYS)
     devices = _check_mapping_of(
         document, "devices", errors, ("source", "device"), ("min_transition_seconds",), DEVICE_KEYS
     )
-    _check_instances_are_names(devices, errors)
+    _check_instances_are_names("inputs", inputs, errors)
+    _check_instances_are_names("devices", devices, errors)
     _check_one_key_per_actuator(document, devices, errors)
     _check_pid(document, errors)
     _check_stages(document, devices, errors)
@@ -1086,8 +1087,8 @@ def enabled_owner_of(actuators, documents, excluding=None):
     return None
 
 
-def _check_instances_are_names(devices, errors) -> None:
-    """Refuse a device ``instance`` that is not a usable name.
+def _check_instances_are_names(section, entries, errors) -> None:
+    """Refuse an ``instance`` that is not a usable name.
 
     It is optional and was never shape-checked, so a list or a mapping validated cleanly and
     then reached ``command_devices``, which groups devices by ``(source, instance)`` - and a
@@ -1096,17 +1097,24 @@ def _check_instances_are_names(devices, errors) -> None:
     refused too: it is not ``None``, so it does not mean "the first configured target", and
     it names nothing.
 
+    **Both sections, not just devices.** ``inputs`` takes the same key and hands it to the
+    same ``source_handler``, so an input instance of the wrong shape fails the same way one
+    cycle later, while resolving the handler or quoting the value into a query. Checking one
+    section and not the other made the same mistake report itself in two different ways
+    depending on where it was written.
+
     Args:
-        devices (dict or None): the devices section, where it was usable
+        section (str): the section being checked, for the message
+        entries (dict or None): that section, where it was usable
         errors (list): appended to with any problems found
     """
-    for key, spec in sorted((devices or {}).items(), key=lambda item: repr(item[0])):
+    for key, spec in sorted((entries or {}).items(), key=lambda item: repr(item[0])):
         if not isinstance(spec, dict) or "instance" not in spec:
             continue
         instance = spec["instance"]
         if not isinstance(instance, str) or not instance.strip():
             errors.append(
-                f"devices.{key}.instance: must be a non-empty name where it is given, got {instance!r} - "
+                f"{section}.{key}.instance: must be a non-empty name where it is given, got {instance!r} - "
                 f"omit it entirely to mean the first configured target"
             )
 

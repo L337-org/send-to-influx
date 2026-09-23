@@ -121,6 +121,12 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
     declared = document.get("devices") or {}
     commanded: dict = {}
     targets: dict = {}
+    # Opened before a single device moves, for two reasons. It is what lets the record below
+    # run in a `finally` without the risk of raising there and masking the failure that got
+    # us there. And an unusable name or state directory is then found before the heaters are
+    # touched rather than after, which is the right order for a fault that stops us writing
+    # down what we did.
+    log = TransitionLog(name, settings_file) if transitions is None else transitions
     # `device_key` rather than `name`, which is the control's: this loop used to call its
     # variable `name` and shadowed the parameter added above it, so the transition log was
     # written under the last device's key instead of the control's. Caught by a test rather
@@ -140,6 +146,37 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
         # operator can act on: a fault with this declaration is fixed by editing the entry
         # they wrote, not the device name the far end knows it by.
         targets.setdefault((spec["source"], spec.get("instance")), []).append((device_key, spec["device"], state))
+    try:
+        _command_each(targets, commanded, settings_file)
+    finally:
+        # **In a finally, because a partial failure is the dangerous case.** Two heaters on
+        # two bridges, the first commanded and the second unreachable: the exception used to
+        # carry past the record, so the first had moved and nothing knew when. The next cycle
+        # or the next restart would then switch it again inside its minimum - the one thing
+        # this log exists to prevent, arriving exactly when the far end is already misbehaving.
+        if commanded:
+            log.record(commanded, forced=forced)
+
+
+def _command_each(targets, commanded, settings_file) -> None:
+    """Command every device, noting in `commanded` each one that the far end accepted.
+
+    Split out so the caller can record what succeeded whether this returns or raises. The
+    mapping is filled in place rather than returned for the same reason: a return value is
+    lost when an exception is on its way out, and what was already commanded is exactly what
+    must not be.
+
+    Args:
+        targets (dict): (source, instance) -> [(control's key, far-end name, state)]
+        commanded (dict): filled in with the control's key -> state, for each device the far
+            end accepted
+        settings_file (str or None): the settings path the process was started with
+
+    Raises:
+        ConfigError: where a device names a source that cannot actuate anything, or the far
+            end cannot resolve the device the document names
+        SourceConnectionError: where the far end refused or could not be reached
+    """
     for (source, instance), devices in sorted(targets.items(), key=lambda item: str(item[0])):
         # Asked of the class, before a handler is built. Building one loads settings and
         # opens a session, so refusing afterwards costs a socket for a source that is about
@@ -181,9 +218,6 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
                         f"control device {key!r} cannot be commanded: {exc}",
                     ) from exc
                 commanded[key] = bool(state)
-    if commanded:
-        log = TransitionLog(name, settings_file) if transitions is None else transitions
-        log.record(commanded, forced=forced)
 
 
 class ControlProcess:

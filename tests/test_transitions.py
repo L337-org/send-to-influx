@@ -485,3 +485,91 @@ class TestWhatACycleSaysForItself:
         finally:
             control.guard.stop("the test is finished")
             control.close()
+
+
+class TestAPartialFailureStillRecordsWhatMoved:
+    """Two devices, the first commanded and the second unreachable.
+
+    The record used to sit after the whole grouped loop, so the exception carried straight
+    past it: the first device had moved at the far end and nothing knew when. The next cycle
+    or the next restart would switch it again inside its minimum - the failure this log
+    exists to prevent, arriving exactly when the far end is already misbehaving.
+    """
+
+    @staticmethod
+    def _two_device_control(installation):
+        """Store a control over two devices on one bridge.
+
+        Args:
+            installation (Installation): the installation to write into
+
+        Returns:
+            dict: the stored document
+        """
+        from tests.harness.bridge import plug
+        from tests.harness.installation import conservatory
+
+        installation.bridge.lights["9"] = plug("second")
+        document = conservatory(name="pair")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["devices"] = {
+            "one": {"source": "hue", "device": "far"},
+            "two": {"source": "hue", "device": "second"},
+        }
+        document["output"] = dict(
+            document["output"],
+            cycle_seconds=1,
+            min_transition_seconds=900,
+            stages=[
+                {"level": 0, "set": {"one": False, "two": False}},
+                {"level": 1500, "set": {"one": True, "two": True}},
+            ],
+        )
+        document["output"].pop("max_level", None)
+        installation.write_control(document, name="pair")
+        return document
+
+    def test_the_device_that_moved_is_written_down_although_the_call_failed(self, state_directory, bridge, monkeypatch):
+        from toinflux.control_process import command_devices
+        from toinflux.exceptions import SourceConnectionError
+        from toinflux.philipshue import Hue
+
+        document = self._two_device_control(state_directory)
+        calls = []
+        real = Hue.mcp_set_device_state
+
+        def one_then_fail(self, device, **kwargs):
+            """Accept the first device and refuse every one after it.
+
+            Args:
+                self (DataHandler): the handler
+                device (str): the far-end device name
+                **kwargs: the states asked for
+
+            Returns:
+                object: whatever the real method returns, for the first device
+
+            Raises:
+                SourceConnectionError: on every device after the first
+            """
+            calls.append(device)
+            if len(calls) > 1:
+                raise SourceConnectionError("the bridge stopped answering")
+            return real(self, device, **kwargs)
+
+        monkeypatch.setattr(Hue, "mcp_set_device_state", one_then_fail)
+        with pytest.raises(SourceConnectionError):
+            command_devices("pair", document, {"one": True, "two": True}, state_directory.settings_file)
+
+        log = TransitionLog("pair", state_directory.settings_file)
+        assert log.states() == {"one": True}, "the device that actually moved was not recorded"
+        assert log.elapsed("one") is not None
+
+    def test_and_is_therefore_held_by_its_minimum_afterwards(self, state_directory, bridge):
+        """The consequence, which is the reason the record matters: the failure must not
+        hand the device a free transition on the next cycle."""
+        log, now = _log(state_directory, name="pair")
+        log.record({"one": True})
+        now[0] += 5
+        assert log.frozen(lambda _d: 900, ("one", "two"), 1) == frozenset({"one"})
