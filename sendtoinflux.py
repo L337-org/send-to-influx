@@ -830,17 +830,31 @@ def _stop_supervising(supervisor, thread) -> None:
         supervisor.stop_all()
         return
     if supervisor.teardown == "running":
-        # **Not a second walk of the same children.** That is the race the join exists to
-        # avoid, and running it here would have two threads releasing the same descriptors.
-        # Said plainly rather than by omission: this used to call `stop_all` and log that it
-        # was making the devices safe, and the call returned immediately against a flag the
-        # other thread had already set - the fallback reading as done in the one case it
-        # exists for.
+        # **Wait for it rather than walking the same children behind it.** A second walk is
+        # the race the join exists to avoid - two threads releasing one descriptor - but
+        # giving up here would leave whatever it had not reached yet energised, which is the
+        # outcome the whole handler exists to prevent.
+        #
+        # Waiting is safe because a teardown that has *started* is not wedged: every step in
+        # it is bounded, a kill cannot be ignored, and each safe-state command carries its
+        # source's own timeout. So this grants one more full teardown budget, which bounds
+        # the wait at twice the estimate rather than leaving it open.
         logging.warning(
-            "The control supervisor is still stopping after %.0fs and this process is exiting, so "
-            "some devices may not have reached their safe state. They are commanded again at the "
-            "next start",
+            "The control supervisor is still stopping after %.0fs, so this is waiting another %.0fs "
+            "for it to finish rather than commanding the same devices from here",
             deadline,
+            deadline,
+        )
+        thread.join(timeout=deadline)
+        if supervisor.teardown == "finished":
+            return
+        # Out of patience rather than out of options: say which controls were left, because
+        # that is the list somebody has to go and look at.
+        logging.error(
+            "The control supervisor did not finish stopping within %.0fs, so these controls may "
+            "have devices still energised: %s. They are commanded safe again at the next start",
+            deadline * 2,
+            render_values(sorted(supervisor.children)),
         )
         return
     logging.warning(

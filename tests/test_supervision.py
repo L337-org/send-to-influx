@@ -25,7 +25,13 @@ from tests.harness import census, faults, invariants
 from tests.harness.bridge import plug
 from tests.harness.installation import conservatory
 from toinflux.exceptions import ConfigError
-from toinflux.supervision import Supervisor, _snapshot, stall_seconds
+from toinflux.supervision import (
+    KILL_GRACE_SECONDS,
+    SAFE_STATE_GRACE_SECONDS,
+    Supervisor,
+    _snapshot,
+    stall_seconds,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -1286,3 +1292,33 @@ class TestStoppingIsOnceOnlyUnderConcurrency:
         """The behaviour the lock protects, which must survive the locking."""
         supervisor.stop_all()
         supervisor.stop_all()
+
+
+class TestHowLongATeardownIsAllowed:
+    """What the exit handler sizes its wait from.
+
+    Two mistakes here have already cost a heater staying on. A fixed bound gave up part way
+    through a sequential walk as soon as there was more than one control; then a bound
+    counting only the kill grace was still short, because the walk also commands each
+    control's safe state, which is a request to a bridge and the slower half of the pair.
+    """
+
+    def test_it_grows_with_the_number_of_controls(self, state_directory):
+        state_directory.bridge.lights["9"] = plug("porch-heater")
+        state_directory.write_control(_quick("aaa", {"far": {"source": "hue", "device": "far"}}))
+        one = Supervisor(["aaa"], settings_file=state_directory.settings_file)
+        state_directory.write_control(_quick("bbb", {"porch": {"source": "hue", "device": "porch-heater"}}))
+        two = Supervisor(["aaa", "bbb"], settings_file=state_directory.settings_file)
+        assert two.teardown_seconds() == 2 * one.teardown_seconds()
+
+    def test_it_budgets_the_safe_state_command_and_not_only_the_kill(self, state_directory):
+        """The walk kills the child *and then* commands its devices safe. Counting only the
+        kill made this an underestimate on exactly the installations it was added for."""
+        state_directory.write_control(_quick("aaa", {"far": {"source": "hue", "device": "far"}}))
+        supervisor = Supervisor(["aaa"], settings_file=state_directory.settings_file)
+        assert supervisor.teardown_seconds() > KILL_GRACE_SECONDS, "the safe-state command is not budgeted for"
+        assert supervisor.teardown_seconds() == KILL_GRACE_SECONDS + SAFE_STATE_GRACE_SECONDS
+
+    def test_an_empty_supervisor_still_gets_a_sensible_bound(self, state_directory):
+        """A join of zero would report every shutdown as a timeout."""
+        assert Supervisor([], settings_file=state_directory.settings_file).teardown_seconds() > 0

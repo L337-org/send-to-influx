@@ -58,6 +58,13 @@ from toinflux.gating import commands_for
 from toinflux.general import load_settings
 from toinflux.process import TimeoutExpired, spawn
 
+#: How long one control's safe-state command may take, for sizing a shutdown wait. It is a
+#: request to a bridge rather than a signal to a process, so it is bounded by that source's
+#: own timeout rather than by anything here - generous, because the cost of guessing low is
+#: giving up part way through a teardown and leaving a heater on, and the cost of guessing
+#: high is a slower exit on a machine that is already shutting down.
+SAFE_STATE_GRACE_SECONDS = 10.0
+
 #: How many cycles a control may miss before it is killed and restarted. Three, because one
 #: missed beat is a slow cycle and two is a bad afternoon, while three in a row is a control
 #: that is not coming back on its own.
@@ -1065,15 +1072,18 @@ class Supervisor:
     def teardown_seconds(self):
         """Return how long a full :meth:`stop_all` can take, for sizing a join.
 
-        Each child in turn gets a SIGTERM, up to ``KILL_GRACE_SECONDS`` to answer it, and a
-        kill if it does not - so the bound is per control and not per supervisor. A caller
-        that joined on a fixed timeout gave up part way through the walk on any installation
-        with more than one slow device, which is when the devices most need it to finish.
+        Each child in turn gets a SIGTERM, up to ``KILL_GRACE_SECONDS`` to answer it, a kill
+        if it does not, **and then its safe state commanded from here** - which is a request
+        to a bridge and the slower half of the two. Counting only the kill grace made this an
+        underestimate on exactly the installations it was added for, so the deadline still
+        expired part way through the walk.
+
+        Both per control rather than per supervisor, because the walk is sequential.
 
         Returns:
             float: seconds
         """
-        return KILL_GRACE_SECONDS * max(1, len(self.children))
+        return (KILL_GRACE_SECONDS + SAFE_STATE_GRACE_SECONDS) * max(1, len(self.children))
 
     def _record(self, kind, name, detail) -> None:
         """Note something that happened, for a caller watching.
