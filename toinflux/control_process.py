@@ -434,8 +434,12 @@ class ControlProcess:
                 self.name,
                 dwell.stage.level,
                 dwell.seconds,
+                # !r on the key: a device name comes from the control document, an MCP client
+                # can write one, and nothing constrains its characters - so an unquoted one
+                # containing a newline writes its own line into the journal. The same reason
+                # `_render_names` exists two modules away.
                 ", ".join(
-                    f"{device}={'on' if state else 'off'}" for device, state in sorted(dwell.stage.states.items())
+                    f"{device!r}={'on' if state else 'off'}" for device, state in sorted(dwell.stage.states.items())
                 ),
             )
             self._apply(dict(dwell.stage.states))

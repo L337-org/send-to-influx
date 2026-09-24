@@ -485,7 +485,7 @@ class TestWhatACycleSaysForItself:
         try:
             with caplog.at_level(logging.DEBUG):
                 control.cycle(dt=1, sleep=lambda _seconds: None)
-            assert "far=" in caplog.text, "the commanded states are not in the log"
+            assert "'far'=" in caplog.text, "the commanded states are not in the log"
         finally:
             control.guard.stop("the test is finished")
             control.close()
@@ -669,3 +669,48 @@ class TestTheMinimumHoldsOverALongRun:
         log.record({"heater": True})
         now[0] += 900
         assert log.frozen(lambda _device: 900, ("heater",)) == frozenset()
+
+
+class TestADeviceNameCannotForgeALogLine:
+    """Device keys come from the control document, an MCP client can write one, and nothing
+    constrains their characters - so an unquoted one containing a newline writes its own line
+    into the journal, and into whatever is reading it.
+
+    The same reason `_render_names` exists in the store, applied to the per-rung debug record
+    that names which device each rung switched.
+    """
+
+    FORGED = "heater\n2026-01-01 00:00:00 ERROR    this line was not written by the service"
+
+    def test_a_newline_in_a_device_key_stays_on_one_line(self, state_directory, bridge, caplog):
+        from toinflux.control_process import ControlProcess
+        from toinflux.controls import save_control
+
+        from tests.harness.installation import conservatory
+
+        document = conservatory(name="forged")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["devices"] = {self.FORGED: {"source": "hue", "device": "far"}}
+        document["output"] = dict(
+            document["output"],
+            cycle_seconds=1,
+            min_transition_seconds=1,
+            stages=[{"level": 0, "set": {self.FORGED: False}}, {"level": 1500, "set": {self.FORGED: True}}],
+        )
+        document["output"].pop("max_level", None)
+        save_control("forged", document, state_directory.settings_file)
+
+        control = ControlProcess("forged", settings_file=state_directory.settings_file)
+        try:
+            with caplog.at_level(logging.DEBUG):
+                control.cycle(dt=1, sleep=lambda _seconds: None)
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+        commanding = [record for record in caplog.records if "commanding level" in record.getMessage()]
+        assert commanding, "the rung was never logged, so this proves nothing"
+        for record in commanding:
+            message = record.getMessage()
+            assert "\n" not in message, f"a device name reached the log as {message.count(chr(10)) + 1} lines"
+        assert "\\n" in commanding[0].getMessage(), "the newline should survive as an escape rather than vanish"
