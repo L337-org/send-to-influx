@@ -1,0 +1,672 @@
+"""Tests for one control's loop, driven against the stub endpoints.
+
+Real HTTP both ways: the control reads its inputs from the stub InfluxDB and commands its
+devices on the stub bridge, through the project's own handlers. What is checked is mostly
+what the *bridge* recorded, because that is the only account of what a control did that the
+control did not write.
+"""
+
+__author__ = "Gavin Lucas"
+__copyright__ = "Copyright (C) 2026 Gavin Lucas"
+__license__ = "MIT"
+
+import datetime
+import logging
+import os
+import selectors
+import signal
+import subprocess
+import sys
+
+import pytest
+import requests
+
+from tests.harness import faults, invariants
+from tests.harness.installation import conservatory
+from toinflux.control_process import ControlProcess, command_devices, gather, heartbeat_writer
+from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
+from toinflux.rules import RuleEvaluationError, parse_rule
+
+# Inside the conservatory's 23:35-05:25 window, and well outside it.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NIGHT = datetime.datetime(2026, 1, 15, 2, 0, tzinfo=datetime.timezone.utc)
+DAY = datetime.datetime(2026, 1, 15, 12, 0, tzinfo=datetime.timezone.utc)
+
+
+@pytest.fixture
+def control(state_directory):
+    """Yield a built control process for the example conservatory.
+
+    Takes ``state_directory`` rather than ``installation`` so this process resolves the
+    control store the way a supervised child does, from the environment.
+
+    Yields:
+        ControlProcess: the control, closed afterwards
+    """
+    installation = state_directory
+    installation.write_control(conservatory())
+    process = ControlProcess("conservatory", settings_file=installation.settings_file)
+    try:
+        yield process
+    finally:
+        process.guard.close()
+        process.close()
+
+
+def _unevaluable_rule():
+    """Return a parsed rule that produces nan, which is not an answer to act on.
+
+    Reachable from finite input, which is why the gate refuses it rather than reading it as
+    true - `not nan` is False, so an unevaluable gate would otherwise let a control actuate
+    because its answer could not be computed.
+
+    Returns:
+        Rule: the parsed rule
+    """
+    return parse_rule("1e400 - 1e400")
+
+
+def _never_sleep(_seconds):
+    """Spend no real time waiting out a dwell.
+
+    Args:
+        _seconds (float): how long the loop wanted to wait, ignored
+    """
+
+
+class TestACycleThatRuns:
+    def test_a_cold_room_energises_and_the_state_is_one_the_ladder_declares(self, control, bridge):
+        """The whole loop end to end: read 16 degrees against an 18 degree target, run the
+        PID, pick rungs, command the bridge."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert bridge.commanded(), "nothing was commanded at all"
+        assert invariants.states_were_declared(bridge, control.document).violations == []
+        assert any(state for state in bridge.energised().values()), bridge.energised()
+
+    def test_the_devices_are_commanded_through_the_source_the_document_names(self, control, bridge):
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert {command.name for command in bridge.commanded()} <= {"far", "near"}
+
+    def test_a_warm_room_asks_for_nothing(self, control, bridge, influx):
+        """The other half of the loop working: the setpoint is met, so the ladder settles at
+        its bottom rung rather than heating anyway."""
+        influx.write_reading("conservatory_temperature", 24.0)
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert bridge.energised() == {"far": False, "near": False}
+
+
+class TestWhenItShouldNotBeActing:
+    def test_outside_the_active_period_nothing_is_read_at_all(self, control, bridge, influx):
+        """The gate's check order is only worth having if the cost is deferred: a control
+        outside its window should not pay for a sensor read to be told so."""
+        influx.clear()
+        bridge.clear()
+        decision = control.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        assert decision.actuating is False
+        assert influx.requests == []
+
+    def test_the_first_cycle_outside_the_window_is_not_an_edge(self, control, bridge):
+        """A control starting up has not *become* inactive, so nothing is commanded for a
+        transition that did not happen."""
+        bridge.clear()
+        assert control.cycle(dt=60, moment=DAY, sleep=_never_sleep).edge is None
+        assert bridge.commanded() == []
+
+    def test_leaving_the_window_puts_the_devices_in_the_end_state(self, control, bridge):
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        decision = control.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        assert decision.edge == "closed"
+        assert bridge.energised() == {"far": False, "near": False}
+
+
+class TestAFailedCycleIsNotAFailedControl:
+    def test_a_stale_reading_fails_safe_and_the_control_carries_on(self, control, bridge, influx):
+        """Acting on a value that stopped being true a day ago is the failure the bound
+        exists to prevent. The next cycle with fresh data works.
+
+        The stored point is aged *and* the bridge is unreachable, which is the real shape of
+        it: a stale reading triggers a live fetch, so a reachable device would simply
+        refresh it and there would be nothing stale to act on. The collector has stopped and
+        the device is unreachable - then, and only then, is what InfluxDB holds all there is.
+        """
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        influx.age_reading("conservatory_temperature", 86400)
+        with faults.frozen(influx), faults.unreachable(bridge):
+            assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+        influx.write_reading("conservatory_temperature", 16.0)
+        assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is not None
+
+    def test_the_fail_safe_commands_the_devices_when_it_can_reach_them(self, control, bridge):
+        """The stale-reading case above cannot show this: in that example the sensor and the
+        heaters are on the same bridge, so the outage that strands the reading also strands
+        the command. A gate that cannot be evaluated fails the same cycle with everything
+        still reachable, which is where the safe state actually lands."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert any(bridge.energised().values()), "nothing was on to be made safe"
+        control.gate._enable_when = _unevaluable_rule()
+        assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+        assert bridge.energised() == {"far": False, "near": False}
+
+    def test_an_unreachable_database_fails_safe_rather_than_stopping(self, control, bridge, influx):
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        with faults.unreachable(influx):
+            assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+        assert bridge.energised() == {"far": False, "near": False}
+
+    def test_a_bridge_that_cannot_be_reached_to_be_made_safe_is_logged_not_raised(
+        self, control, bridge, influx, caplog
+    ):
+        """There is nothing left for the control to do about it, and the supervisor's own
+        safe-state pass is what covers the case."""
+        with faults.unreachable(influx), faults.unreachable(bridge):
+            assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+        assert "could not reach its devices" in caplog.text
+
+
+class TestGathering:
+    def test_a_reading_past_its_max_age_is_a_cycle_failure_not_a_config_fault(self, installation, influx, bridge):
+        """RuleEvaluationError, so the fail-safe covers the cycle and the control is still
+        there next time - the same distinction the loop uses for its own rules.
+
+        The device is unreachable as well as the point being old, because a stale reading
+        triggers a live fetch: with a reachable bridge there would be nothing stale left to
+        refuse.
+        """
+        influx.age_reading("conservatory_temperature", 86400)
+        with faults.frozen(influx), faults.unreachable(bridge):
+            with pytest.raises(RuleEvaluationError, match="past the"):
+                with requests.Session() as session:
+                    gather(conservatory(), installation.settings, session, settings_file=installation.settings_file)
+
+    def test_the_parameters_are_there_for_the_rules_to_read(self, installation):
+        with requests.Session() as session:
+            bindings = gather(conservatory(), installation.settings, session, settings_file=installation.settings_file)
+        assert bindings["target"] == 18.0
+        assert bindings["inside"] == 16.0
+
+
+class TestLeaveUnchanged:
+    """`leave_unchanged` is an instruction, not an omission - and every path that can
+    produce it has to say so, because the one that did not crashed the control at the exact
+    moment its window closed."""
+
+    @pytest.fixture
+    def left_alone(self, state_directory):
+        """Yield a control that is to be left alone at both ends.
+
+        Yields:
+            ControlProcess: the control, closed afterwards
+        """
+        document = conservatory(safe_state="leave_unchanged")
+        document["active_period"] = dict(document["active_period"], end_state="leave_unchanged")
+        state_directory.write_control(document)
+        process = ControlProcess("conservatory", settings_file=state_directory.settings_file)
+        try:
+            yield process
+        finally:
+            process.guard.close()
+            process.close()
+
+    def test_the_window_closing_touches_nothing(self, left_alone, bridge):
+        left_alone.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        bridge.clear()
+        decision = left_alone.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        assert decision.edge == "closed"
+        assert bridge.commanded() == []
+
+    def test_a_failed_cycle_touches_nothing(self, left_alone, bridge, influx):
+        left_alone.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        bridge.clear()
+        with faults.unreachable(influx):
+            assert left_alone.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+        assert bridge.commanded() == []
+
+
+class TestCommandingDevices:
+    def test_a_source_with_no_write_path_is_refused(self, installation):
+        document = conservatory()
+        document["devices"] = {"far": {"source": "openmeteo", "device": "far"}}
+        with pytest.raises(ConfigError, match="cannot switch a device"):
+            command_devices("conservatory", document, {"far": True}, installation.settings_file)
+
+    def test_a_writable_source_that_cannot_switch_a_device_is_refused_too(self, installation):
+        """The case the old check let through. `MCP_WRITABLE` says only that *some* write
+        path exists, and the shapes differ per source: Speedtest's is `mcp_trigger_run()`,
+        which cannot actuate anything. It passed the check and raised AttributeError on the
+        next line - and AttributeError is not one of the types the supervisor's safe-state
+        pass handles, so one control's document could end the thread supervising all of
+        them.
+
+        Asserted against the real handler rather than a stub, because the claim is about
+        what this project actually ships: a source that is writable and cannot switch a
+        device.
+        """
+        from toinflux.speedtest import Speedtest
+
+        assert Speedtest.MCP_WRITABLE is True
+        assert not hasattr(Speedtest, "mcp_set_device_state")
+
+        document = conservatory()
+        document["devices"] = {"far": {"source": "speedtest", "device": "far"}}
+        with pytest.raises(ConfigError, match="cannot switch a device"):
+            command_devices("conservatory", document, {"far": True}, installation.settings_file)
+
+    def test_the_refusal_names_the_control_s_own_device_keys(self, installation):
+        """What an operator edits is the entry they wrote, not the name the far end knows
+        the device by - and not the instance, which cannot be the fault here: actuating is
+        a property of the source, so every instance of it answers the same way."""
+        document = conservatory()
+        document["devices"] = {
+            "upstairs": {"source": "speedtest", "device": "line-1"},
+            "downstairs": {"source": "speedtest", "device": "line-2"},
+        }
+        with pytest.raises(ConfigError) as exc:
+            command_devices(
+                "conservatory", document, {"upstairs": True, "downstairs": False}, installation.settings_file
+            )
+        assert "'downstairs'" in str(exc.value) and "'upstairs'" in str(exc.value)
+        assert "line-1" not in str(exc.value)
+
+    def test_it_refuses_before_building_a_handler(self, installation):
+        """Speedtest is deliberately *not* configured on this installation. Asked of the
+        class, the refusal names the real fault; asked of a constructed handler, settings
+        are loaded first and the answer is "not found in settings" - which sends an operator
+        off to configure a source that could never have worked anyway.
+
+        Building one also opens a session, and the supervisor calls this on every death.
+        """
+        assert "speedtest" not in installation.settings
+        document = conservatory()
+        document["devices"] = {"far": {"source": "speedtest", "device": "far"}}
+        with pytest.raises(ConfigError) as exc:
+            command_devices("conservatory", document, {"far": True}, installation.settings_file)
+        assert "cannot switch a device" in str(exc.value)
+        assert "not found in settings" not in str(exc.value)
+
+    def test_a_device_declaring_no_source_is_a_config_error_not_a_key_error(self, installation):
+        """The supervisor calls this to make a dead control's devices safe and handles the
+        project's own types, so a KeyError out of one corrupt document would escape that
+        handler and stop every other control being supervised."""
+        document = conservatory()
+        document["devices"] = {"far": {"device": "far"}}
+        with pytest.raises(ConfigError, match="declares no"):
+            command_devices("conservatory", document, {"far": True}, installation.settings_file)
+
+    def test_a_device_the_document_does_not_declare_is_refused(self, installation):
+        with pytest.raises(ConfigError, match="not declared"):
+            command_devices("conservatory", conservatory(), {"nosuchdevice": True}, installation.settings_file)
+
+    def test_the_far_end_s_refusal_reaches_the_caller(self, installation, bridge):
+        with faults.erroring(bridge, 503):
+            with pytest.raises(SourceConnectionError):
+                command_devices("conservatory", conservatory(), {"far": True}, installation.settings_file)
+
+
+def _quick_control(**overrides):
+    """Return the example control with a window short enough to watch.
+
+    Args:
+        **overrides: top-level keys to replace
+
+    Returns:
+        dict: a control document
+    """
+    document = conservatory(**overrides)
+    document["output"] = dict(document["output"], cycle_seconds=1, min_transition_seconds=1)
+    # No window, so the child acts whatever time the test happens to run at. The period is
+    # covered in process by the tests above; what this file's child processes are for is
+    # everything that only exists once there is a process.
+    document.pop("active_period", None)
+    return document
+
+
+def _next_beat(beats, timeout=15):
+    """Return the next heartbeat line, or fail if none arrives in time.
+
+    Bounded, and every read of the pipe goes through it. A bare ``readline()`` on a control
+    that has stopped beating blocks for ever, so a regression in the heartbeat hangs the
+    suite instead of failing it - which is how the first version of these tests behaved when
+    the beat was deliberately removed to check they would notice.
+
+    Args:
+        beats (io.TextIOBase): the read end of the heartbeat pipe
+        timeout (float): how long to wait
+
+    Returns:
+        str: the line, without its newline
+
+    Raises:
+        AssertionError: nothing arrived, or the pipe reached EOF
+    """
+    selector = selectors.DefaultSelector()
+    selector.register(beats, selectors.EVENT_READ)
+    try:
+        assert selector.select(timeout=timeout), f"no heartbeat within {timeout}s"
+    finally:
+        selector.close()
+    line = beats.readline()
+    assert line, "the heartbeat pipe reached EOF instead of beating"
+    return line.strip()
+
+
+def _start_control(installation, name="conservatory", extra=()):
+    """Start a real control process with a heartbeat pipe, and return it.
+
+    Returns:
+        tuple: the child and the read end of its heartbeat pipe, as a file object
+    """
+    read_fd, write_fd = os.pipe()
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            os.path.join(ROOT, "sendtoinflux.py"),
+            "--control",
+            name,
+            "--settings",
+            installation.settings_file,
+            "--heartbeat-fd",
+            str(write_fd),
+            *extra,
+        ],
+        pass_fds=(write_fd,),
+        stderr=subprocess.PIPE,
+        text=True,
+        env=installation.environment(),
+    )
+    os.close(write_fd)
+    return child, os.fdopen(read_fd, "r")
+
+
+class TestTheHeartbeatWriter:
+    def test_it_says_the_pipe_has_gone_once_rather_than_every_cycle(self, caplog):
+        """A control with a fifteen-minute cycle would otherwise log the same warning four
+        times an hour for as long as it runs, and a pipe that has gone does not come back."""
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        beat = heartbeat_writer(write_fd)
+        with caplog.at_level(logging.WARNING):
+            for _ in range(5):
+                beat()
+        assert caplog.text.count("heartbeat could not be written") == 1
+
+    def test_a_beat_reaches_the_other_end(self, tmp_path):
+        read_fd, write_fd = os.pipe()
+        beat = heartbeat_writer(write_fd)
+        beat()
+        with os.fdopen(read_fd, "r") as beats:
+            assert float(beats.readline()) > 0
+
+
+class TestAsARealProcess:
+    """Everything that only exists once there is a process: the entry point, the heartbeat,
+    and what a signal leaves behind."""
+
+    def test_it_beats_once_a_cycle_and_commands_the_bridge(self, installation, bridge):
+        installation.write_control(_quick_control())
+        child, beats = _start_control(installation)
+        try:
+            first, second = _next_beat(beats), _next_beat(beats)
+            assert float(first) > 0 and float(second) >= float(first)
+            assert bridge.commanded(), "the control never reached the bridge"
+        finally:
+            child.kill()
+            child.wait(timeout=30)
+            beats.close()
+
+    def test_the_safe_state_is_asserted_before_anything_is_read(self, installation, bridge, influx):
+        """A control that has just been restarted after a kill has devices in an unknown
+        state, and finding out what the temperature is can wait until they are not."""
+        installation.write_control(_quick_control())
+        influx.clear()
+        child, beats = _start_control(installation)
+        try:
+            _next_beat(beats)
+            first = bridge.commanded()[0]
+            assert first.state == {"on": False}, bridge.commanded()[:3]
+        finally:
+            child.kill()
+            child.wait(timeout=30)
+            beats.close()
+
+    def test_a_handled_signal_leaves_the_devices_safe(self, installation, bridge):
+        """systemctl stop signals every process in the unit's cgroup at once, so a control
+        handles its own SIGTERM - and the exit handler only runs because that handler exits
+        rather than letting the default action kill the process."""
+        installation.write_control(_quick_control())
+        child, beats = _start_control(installation)
+        try:
+            _next_beat(beats)
+            child.send_signal(signal.SIGTERM)
+            assert child.wait(timeout=30) == 0
+            assert bridge.energised() == {"far": False, "near": False}
+        finally:
+            child.kill()
+            beats.close()
+
+    def test_the_pipe_reaches_eof_when_the_control_dies(self, installation):
+        """Death detection, free: the write end closes however the process dies, so a parent
+        blocked on the read gets told without asking anybody."""
+        installation.write_control(_quick_control())
+        child, beats = _start_control(installation)
+        try:
+            _next_beat(beats)
+            child.kill()
+            child.wait(timeout=30)
+            # Bounded, and the same way a supervisor will wait: a readable pipe that yields
+            # nothing is EOF. A bare read() would prove the same thing by hanging for ever
+            # when it is wrong, which is not a test result.
+            selector = selectors.DefaultSelector()
+            selector.register(beats, selectors.EVENT_READ)
+            try:
+                assert selector.select(timeout=10), "the pipe never became readable"
+                assert beats.readline() == "", "the pipe never reached EOF"
+            finally:
+                selector.close()
+        finally:
+            beats.close()
+
+    def test_a_control_that_cannot_run_says_so_and_exits_rather_than_looping(self, installation):
+        """A configuration fault is not something a respawn fixes, so it must be
+        distinguishable from a crash - the operator's problem, reported as theirs."""
+        child, beats = _start_control(installation, name="nosuchcontrol")
+        try:
+            assert child.wait(timeout=30) == 1
+            assert "cannot run" in child.stderr.read()
+        finally:
+            beats.close()
+
+
+class TestAnEndStateThatCouldNotBeCommanded:
+    """One transient bridge failure at the end of the active period used to strand the
+    devices for the whole day.
+
+    The closing edge was recorded as spent before its command had been run, so the failure
+    left nothing to retry: the next cycle saw no change, so no edge and no actuation, and
+    the loop slept with the heaters still on until the window reopened. Nothing else covered
+    it - the fail-safe applies `safe_state` rather than the `end_state` that just failed, and
+    the supervisor only makes devices safe when a control dies or is stopped.
+    """
+
+    def test_the_devices_are_commanded_again_on_the_next_cycle(self, control, bridge):
+        """The retry, and the whole point of the fix."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert bridge.energised()["far"] is True, "the control should have been heating"
+        with faults.unreachable(bridge):
+            control.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        decision = control.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        assert decision.edge == "closed", "the failed edge was not re-delivered, so nothing retries it"
+        assert bridge.energised() == {"far": False, "near": False}
+
+    def test_a_successful_close_is_not_repeated(self, control, bridge):
+        """The converse, because a retry that never stops is its own defect: edge-triggering
+        exists so a control does not re-command devices already in place every cycle."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert control.cycle(dt=60, moment=DAY, sleep=_never_sleep).edge == "closed"
+        bridge.clear()
+        assert control.cycle(dt=60, moment=DAY, sleep=_never_sleep).edge is None
+        assert bridge.commanded() == []
+
+
+class TestRecoveringFromAFailedCycle:
+    """A transient failure must not cost the control its ability to respond.
+
+    `_fail_safe` holds the controller, so the loop does not integrate an error it never acted
+    on. Nothing released that hold: the gate had not closed, so no `opened` edge followed, so
+    the `resume` on that branch never ran. The PID stayed in manual mode and simple-pid
+    returns the last demand unchanged while it is there - measured at 642 whether the room
+    was 5 degrees or 25, which is a heater stuck on and a control that has stopped being one.
+
+    The existing coverage asserted the next cycle returned a decision rather than None, which
+    is true of a wholly unresponsive loop.
+    """
+
+    def test_the_controller_is_automatic_again_on_the_next_cycle(self, control, bridge):
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        control._fail_safe(SourceConnectionError("a transient failure"))
+        assert control.controller.pid.auto_mode is False, "the fail-safe should have held it"
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert control.controller.pid.auto_mode is True, "nothing ever let go of the hold"
+
+    def test_the_demand_responds_to_the_room_again(self, control, influx, bridge):
+        """The property the mode is only a proxy for: a held loop answers the same whatever
+        it is told, so asserting on the mode alone would miss a different way of freezing."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        control._fail_safe(SourceConnectionError("a transient failure"))
+
+        def demand_at(temperature):
+            """Run one cycle with the room at that temperature and return what was commanded.
+
+            Args:
+                temperature (float): the conservatory temperature to report
+
+            Returns:
+                list: the device states commanded during the cycle
+            """
+            influx.write_reading("temperature_conservatory", temperature)
+            bridge.clear()
+            control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            return bridge.commanded()
+
+        cold = demand_at(5.0)
+        warm = demand_at(25.0)
+        assert cold != warm, f"the loop answered the same for 5 and 25 degrees: {cold} then {warm}"
+
+    def test_an_ordinary_cycle_is_unaffected(self, control, bridge):
+        """`set_auto_mode(True)` only resets when the mode actually changes, which is what
+        lets the cycle call it unconditionally. A loop already running must not be reset
+        every cycle - that would discard the integral continuously and never converge."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        integral = control.controller.pid._integral
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert control.controller.pid._integral != integral, "the integral stopped moving, so it is being reset"
+
+
+class TestADeviceTheBridgeDoesNotHave:
+    """The name came from a stored document, so no retry fixes it.
+
+    `mcp_set_device_state` raises `ToolParamError` for a device it cannot resolve, which is
+    right when a model asked - the model can pick another. Here it escaped the child's own
+    handler, which catches `ConfigError`, so the control died with a traceback and the
+    supervisor restarted it with backoff for ever against a name that will never resolve.
+    """
+
+    @pytest.fixture
+    def misnamed(self, state_directory):
+        """Write a control naming a device the stub bridge does not have.
+
+        Returns:
+            Installation: the installation holding it
+        """
+        document = conservatory()
+        document["devices"] = {"far": {"source": "hue", "device": "no-such-light"}}
+        document["output"]["stages"] = [
+            {"level": 0, "set": {"far": False}},
+            {"level": 1500, "set": {"far": True}},
+        ]
+        state_directory.write_control(document)
+        return state_directory
+
+    def test_it_is_a_config_error_the_child_can_report(self, misnamed, bridge, influx):
+        control = ControlProcess("conservatory", settings_file=misnamed.settings_file)
+        try:
+            with pytest.raises(ConfigError):
+                control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            control.guard.close()
+            control.close()
+
+    def test_the_message_names_the_control_s_own_key_and_what_the_bridge_has(self, misnamed, bridge, influx):
+        """The document is what has to be edited, and the handler only knows the bridge's
+        name for the device - so both halves are needed to act on it."""
+        control = ControlProcess("conservatory", settings_file=misnamed.settings_file)
+        try:
+            with pytest.raises(ConfigError) as raised:
+                control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            control.guard.close()
+            control.close()
+        assert "'far'" in str(raised.value), "the control's own device key is missing"
+        assert "no-such-light" in str(raised.value)
+        assert "available devices" in str(raised.value), "the bridge's own list is what makes it actionable"
+
+    def test_the_original_is_kept_as_the_cause(self, misnamed, bridge, influx):
+        """Wrapping must not discard what was raised."""
+        control = ControlProcess("conservatory", settings_file=misnamed.settings_file)
+        try:
+            with pytest.raises(ConfigError) as raised:
+                control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            control.guard.close()
+            control.close()
+        assert isinstance(raised.value.__cause__, ToolParamError)
+
+
+class TestANonFiniteReadingIsRefusedWhereItHasAName:
+    """The other half of the nan defence, at the layer that knows which input it was.
+
+    `gather`'s docstring used to say the controller checked finiteness "because that is where
+    a nan does its damage". It is not where a nan does its damage: a nan reaching
+    `max(target, dew + 5)` comes out finite, so the check at the far end sees nothing wrong.
+    Refused here too, where the input has a name to report it by.
+    """
+
+    @staticmethod
+    def _gathering(value, installation, monkeypatch):
+        """Run gather with one input reading `value`.
+
+        Args:
+            value (float): what the reading holds
+            installation (Installation): the installation
+            monkeypatch (pytest.MonkeyPatch): to stub the read
+
+        Returns:
+            dict: the bindings
+        """
+        from types import SimpleNamespace
+
+        from tests.harness.installation import conservatory
+
+        document = conservatory()
+        document["inputs"] = {"inside": {"source": "hue", "field": "temperature_conservatory"}}
+        document["parameters"] = {"target": 18.0}
+        monkeypatch.setattr(
+            "toinflux.control_process.read_input",
+            lambda *a, **k: SimpleNamespace(value=value, timestamp=0.0, age=0.0, live=False),
+        )
+        monkeypatch.setattr("toinflux.control_process.input_max_age", lambda *a, **k: 900.0)
+        return gather(document, installation.settings, None, settings_file=installation.settings_file)
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_it_fails_the_cycle_rather_than_reaching_the_rules(self, value, installation, monkeypatch):
+        with pytest.raises(RuleEvaluationError) as raised:
+            self._gathering(value, installation, monkeypatch)
+        assert "inside" in str(raised.value), "the message must name the input"
+
+    def test_a_number_still_arrives(self, installation, monkeypatch):
+        assert self._gathering(16.5, installation, monkeypatch)["inside"] == 16.5
+
+    def test_it_is_this_cycle_and_not_this_control(self, installation, monkeypatch):
+        """RuleEvaluationError rather than ConfigError: a bad point is not a bad document,
+        and the next point written may be fine. The loop catches this one and fails safe."""
+        with pytest.raises(RuleEvaluationError):
+            self._gathering(float("nan"), installation, monkeypatch)

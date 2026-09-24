@@ -8,9 +8,11 @@ __license__ = "MIT"
 import copy
 import ipaddress
 import logging
+import math
 import os
 import stat
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse
 import yaml
@@ -26,6 +28,69 @@ from toinflux.exceptions import ConfigError
 
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_LOG_BACKUP_COUNT = 3
+
+# The per-source key, beside `interval` and `timeout`, bounding how often anything may go
+# live to this source. It lives here rather than in toinflux.inputs, which is the only
+# thing that honours it, because inputs imports influx and influx imports this module:
+# validating it here and importing the name the other way would be an import cycle.
+MINIMUM_INTERVAL_KEY = "minimum_interval"
+
+# The per-source key overriding how long one of its readings stays worth acting on. Same
+# three-level shape as the key above: the source class's default, this override, then an
+# individual control input's own max_age. An operator who knows their estate goes stale
+# faster than the class assumes should not have to edit every control document to say so.
+MAX_AGE_KEY = "max_age"
+
+
+#: What every continuation line of a multi-line log record is prefixed with. Two spaces is
+#: enough because the only property that matters is that it is not a digit: a real entry
+#: begins with the year, so an indented line cannot be read as the start of one.
+LOG_CONTINUATION_INDENT = "  "
+
+
+class IndentedFormatter(logging.Formatter):
+    """A formatter whose records cannot forge a second log entry.
+
+    Every entry this project writes begins with a timestamp, and the packaged install sends
+    them to ``/var/log/send-to-influx.log`` through rsyslog - a plain, line-oriented file. So
+    a newline anywhere in a record lets whatever follows it start a line of its own, and a
+    line of its own can be written to look exactly like a genuine entry::
+
+        2026-09-18 08:23:58 ERROR    Could not make control 'conservatory' safe: ...
+        AttributeError: no such attribute
+        2026-09-18 01:00:00 INFO     Conservatory heating is off      <- forged
+
+    That text arrives from outside: a vendor library's exception message, a YAML parser
+    quoting a document, a device name somebody chose. Rendering external values with ``%r``
+    is the first defence and covers the values this project interpolates deliberately; it
+    cannot cover a traceback, whose final line is the exception's message verbatim at column
+    zero.
+
+    Indenting every line after the first closes it for all of them at once, and costs
+    nothing a reader wants: a stack trace stays a stack trace, two spaces further in.
+    Stripping the newlines instead would defend the same ground and turn a traceback into
+    one long smear, which is the diagnostic this exists to preserve.
+    """
+
+    def format(self, record):
+        """Format one record, indenting everything after its first line.
+
+        Args:
+            record (logging.LogRecord): the record to render
+
+        Returns:
+            str: the formatted record, with no line after the first able to begin like an entry
+        """
+        rendered = super().format(record)
+        # splitlines() rather than split("\n"), and it earns the difference: a lone carriage
+        # return breaks a line for a terminal and for several log readers, and so do the form
+        # feed, the next-line character and the unicode separators. Splitting on "\n" alone
+        # leaves every one of those able to start a line this has not indented, which is the
+        # whole thing being prevented. Rejoining with "\n" normalises them on the way out.
+        lines = rendered.splitlines()
+        if len(lines) <= 1:
+            return rendered
+        return lines[0] + "\n" + "\n".join(LOG_CONTINUATION_INDENT + line for line in lines[1:])
 
 
 def configure_logging(
@@ -46,7 +111,7 @@ def configure_logging(
     Raises:
         ConfigError: the logfile path cannot be opened for writing
     """
-    fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    fmt = IndentedFormatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     root = logging.getLogger()
 
     resolved_level = getattr(logging, str(loglevel).upper(), None)
@@ -132,6 +197,36 @@ def render_values(values, separator=", ", empty="none"):
     # by one string and display another.
     quoted = sorted(repr(value) for value in values)
     return separator.join(quoted) or empty
+
+
+def resolve_state_dir(settings_file=None):
+    """Return the directory this installation keeps runtime state in.
+
+    Runtime state is what the service writes as it runs - OAuth client registrations,
+    control configurations - as distinct from configuration, which an admin writes. The
+    two have different homes because they have different owners: ``/etc/send-to-influx``
+    is root-owned and the service runs as ``send-to-influx``, so nothing there is
+    writable by it.
+
+    Under systemd this is the unit's ``StateDirectory``, read from the environment rather
+    than hardcoded so that a source checkout or a screen session - which this project
+    treats as equally first class - finds it unset and keeps the historical location
+    beside the settings file, writable by whoever is running the process.
+
+    Args:
+        settings_file (str or None): the settings path the process was started with, used
+            to anchor the off-systemd default; None means the project-root default
+
+    Returns:
+        str: the directory runtime state lives in
+    """
+    # Colon-separated when a unit declares several; take the first, so adding a second
+    # StateDirectory= later cannot silently move everything that lives here.
+    state_dir = os.environ.get("STATE_DIRECTORY", "").split(os.pathsep)[0].strip()
+    if state_dir:
+        return state_dir
+    base_dir = os.path.abspath(os.path.dirname(__file__) + "/..")
+    return os.path.dirname(os.path.join(base_dir, settings_file or "settings.yaml"))
 
 
 def flatten_dict(data, parent_key="", sep="_"):
@@ -853,13 +948,17 @@ def _validate_influx_block(influx):
     return errors
 
 
-def _unusable_source_block(source, settings):
+def source_block_problem(source, settings):
     """Return the one error that stops a source section being validated at all, or None.
 
     Split from the field checks below both to keep them within the complexity limit and
     because these four faults are terminal: none of the field checks can run, and reporting
     them anyway would bury the real cause under "interval is required" for a section that
     has no fields.
+
+    Public because a control document names sources too, and needs the same question
+    answered before it is accepted: see :func:`toinflux.controls.validate_control_sources`.
+    One definition of "this source is not configured" rather than two that can drift.
 
     Args:
         source (str): source name, already lowercased
@@ -912,13 +1011,12 @@ def _validate_source_block(source, settings, is_v2):
     """
     if not source:
         return []
-    unusable = _unusable_source_block(source, settings)
+    unusable = source_block_problem(source, settings)
     if unusable:
         return [unusable]
     errors = []
     source_cfg = settings[source]
-    if "interval" not in source_cfg:
-        errors.append(f"{source}.interval is required")
+    errors.extend(_validate_interval(source, source_cfg))
     if is_v2:
         if "db" not in source_cfg and "bucket" not in source_cfg:
             errors.append(f"{source}.db (or {source}.bucket for InfluxDB v2) is required")
@@ -929,7 +1027,86 @@ def _validate_source_block(source, settings, is_v2):
     # leave writes off. Fail loud instead - a user who set it meant to enable it.
     if "mcp_read_write" in source_cfg and not isinstance(source_cfg["mcp_read_write"], bool):
         errors.append(f"{source}.mcp_read_write must be true or false (got {source_cfg['mcp_read_write']!r})")
+    errors.extend(_validate_duration(source, source_cfg, MINIMUM_INTERVAL_KEY))
+    errors.extend(_validate_duration(source, source_cfg, MAX_AGE_KEY))
     return errors
+
+
+def _validate_interval(source, source_cfg):
+    """Return errors for a source's collection interval.
+
+    Previously checked only for presence, so `interval: .nan` passed --check-config and then
+    reached a worker's `time.sleep`, which raises. The same is true of a string, a bool or a
+    negative number, all of which a YAML file can hold and none of which `sleep` accepts.
+
+    The accepted shape is the one `_stall_threshold_seconds` in sendtoinflux.py already
+    requires before it will use the value: a real number, finite, and greater than zero.
+
+    Args:
+        source (str): the source name, for the message
+        source_cfg (dict): that source's settings section
+
+    Returns:
+        list: error strings, empty when the interval is usable
+    """
+    if "interval" not in source_cfg:
+        return [f"{source}.interval is required"]
+    value = source_cfg["interval"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return [f"{source}.interval must be a number of seconds (got {value!r})"]
+    if not math.isfinite(value):
+        return [f"{source}.interval must be a finite number of seconds (got {value!r})"]
+    if value <= 0:
+        return [f"{source}.interval must be greater than zero (got {value!r})"]
+    return []
+
+
+def _validate_duration(source, source_cfg, key):
+    """Return errors for one of a source's optional duration overrides.
+
+    Shared by ``minimum_interval`` and ``max_age``, which differ in meaning and not at all
+    in what a usable value looks like.
+
+    Checked here rather than where it is read because a control process resolves these at
+    startup, long after --check-config is the place anyone is looking for a clear message.
+
+    A bool is refused for the reason it is refused in a control's stage levels: `bool`
+    subclasses `int`, so `minimum_interval: true` would validate and then act as a one
+    second bound, which is not what typing `true` meant. `.nan` and `.inf` are refused
+    because neither fails loudly later - a nan bound never holds and an inf one always
+    does, so the setting silently means its own opposite.
+
+    Zero is allowed, unlike the collection ``interval``, which would spin a worker. It means
+    different things for the two keys and is meaningful for both.
+
+    ``minimum_interval: 0`` says the source may be read live whenever a control wants it,
+    which is right for one that costs nothing to ask - Nuki's state has already arrived over
+    an open subscription.
+
+    ``max_age: 0`` says the input tolerates no staleness of its own. It does **not** mean a
+    live read every cycle: the trigger is the larger of this and the source's minimum
+    interval, so with a minimum of 900 a stored point is still used until it is 900 seconds
+    old. What it does is hand the decision entirely to the source, and - once the control
+    loop exists - leave nothing fresh enough to act on, so the safe state applies.
+
+    Args:
+        source (str): the source name, for the message
+        source_cfg (dict): that source's settings section
+        key (str): which duration key to check
+
+    Returns:
+        list: error strings, empty when the key is absent or usable
+    """
+    if key not in source_cfg:
+        return []
+    value = source_cfg[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return [f"{source}.{key} must be a number of seconds (got {value!r})"]
+    if not math.isfinite(value):
+        return [f"{source}.{key} must be a finite number of seconds (got {value!r})"]
+    if value < 0:
+        return [f"{source}.{key} must not be negative (got {value!r})"]
+    return []
 
 
 def _log_config_warnings(warnings_found, settings_path, warn) -> None:
@@ -1061,11 +1238,43 @@ def validate_settings(settings, source=None, settings_path="settings.yaml", warn
     hue_warnings.extend(myenergi_warnings)
     errors.extend(_validate_mqtt_block(settings, sources))
     errors.extend(mcp_block_errors(settings))
+    errors.extend(_validate_controls_block(settings))
     _log_config_warnings(hue_warnings, settings_path, warn)
     if errors:
         for error in errors:
             logging.critical("%s: %s", settings_path, error)
         raise ConfigError("; ".join(errors))
+
+
+def _validate_controls_block(settings):
+    """Return errors for the ``controls`` block's own switches.
+
+    Both switches are read with a strict ``is True`` - see
+    :func:`toinflux.controls.controls_enabled` for why - which means a mistyped
+    ``enabled: "true"`` is silently off rather than wrong. That is the worst shape for an
+    operator: the subsystem simply does not run, and nothing says why. Checking the type
+    here turns it into a ``--check-config`` error at the moment it is written.
+
+    Only the two switches. The controls themselves are separate documents under the state
+    directory with their own validation (:func:`toinflux.controls.validate_stored_controls`),
+    which needs the store rather than this dict.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        list: error strings for the controls block, empty when it is usable
+    """
+    block = settings.get("controls")
+    if block is None:
+        return []
+    if not isinstance(block, dict):
+        return [f"controls must be a mapping of settings (got {type(block).__name__})"]
+    return [
+        f"controls.{key} must be true or false (got {block[key]!r})"
+        for key in ("enabled", "mcp_write")
+        if key in block and not isinstance(block[key], bool)
+    ]
 
 
 def _contains_real_secret(settings):
@@ -1257,3 +1466,95 @@ def load_settings(settings_file=None):
     except yaml.YAMLError as e:
         logging.critical("Error in %s - %s", settings_path, e)
         raise ConfigError(f"Error in {settings_path} - {e}") from e
+
+
+class RepeatingProblem:
+    """Report a failure that recurs every cycle without saying it every cycle.
+
+    A control cycles for as long as the service runs, so a fault that does not clear - a
+    bridge that stays unreachable, an input whose source stopped publishing - produces the
+    identical line every ``cycle_seconds`` for ever. At a one-minute cycle that is 1,440
+    copies a day of a message that said everything it had to say the first time, and it
+    buries whatever else the journal was going to tell you.
+
+    The shape here is the one ``heartbeat_writer`` already uses in the control process: say
+    it once, then stay quiet, and say something when it changes. Repeats are kept at DEBUG
+    rather than dropped, so ``-v`` still shows every occurrence when somebody is actually
+    watching, and the recovery line carries the count so the gap in the journal is explained
+    rather than merely absent.
+
+    Keyed, because one control has several inputs and two of them failing for different
+    reasons are two problems: a shared key would report the first and hide the second.
+    """
+
+    def __init__(self, repeat_after=3600.0, clock=time.monotonic):
+        """Prepare an empty record of what is currently failing.
+
+        Args:
+            repeat_after (float): seconds before an unchanged problem is reported again, so a
+                fault lasting days leaves periodic evidence rather than one line in week-old
+                logs
+            clock (callable): the monotonic clock, injectable for tests
+        """
+        self._repeat_after = repeat_after
+        self._clock = clock
+        self._seen: dict = {}
+
+    def report(self, key, level, message, *args) -> None:
+        """Log a problem, at ``level`` the first time and at DEBUG while it is unchanged.
+
+        Args:
+            key (object): what this problem is about - a control, an input, a device
+            level (int): the level to use for a new or changed problem
+            message (str): a %-style format string
+            *args: its arguments, which also decide whether the problem has changed
+        """
+        # The rendered message is the identity, so a failure whose *reason* changes is
+        # reported again at full level: "unreachable" becoming "authentication failed" is
+        # news, and a key alone would have swallowed it.
+        rendered = message % args if args else message
+        now = self._clock()
+        seen = self._seen.get(key)
+        if seen is not None and seen[0] == rendered and now - seen[1] < self._repeat_after:
+            self._seen[key] = (rendered, seen[1], seen[2] + 1)
+            logging.debug("%s (still, %s times)", rendered, seen[2] + 1)
+            return
+        if seen is not None and seen[0] == rendered:
+            logging.log(level, "%s (still, after %s more)", rendered, seen[2])
+        else:
+            logging.log(level, "%s", rendered)
+        self._seen[key] = (rendered, now, 1)
+
+    def cleared(self, key, message, *args) -> None:
+        """Note that a problem has stopped, where one was being reported.
+
+        Silent where nothing was wrong, so an ordinary cycle says nothing.
+
+        Args:
+            key (object): what was failing
+            message (str): a %-style format string for the recovery line
+            *args: its arguments
+        """
+        seen = self._seen.pop(key, None)
+        if seen is None:
+            return
+        logging.info("%s (after %s failure(s))", message % args if args else message, seen[2])
+
+
+def close_session(session) -> None:
+    """Close a handler's ``requests.Session``, swallowing any error.
+
+    **In a leaf module rather than in the MCP layer**, which is where it used to live and
+    where ``inputs.py`` could not reach it - that module deliberately does not import the MCP
+    stack, so it closed its handler with a bare ``opened.close()`` inside a ``finally``. An
+    exception there replaces whatever was propagating out of the ``try``, so a
+    ``SourceConnectionError`` from a failed read would have been reported as whatever went
+    wrong while tidying up after it.
+
+    Args:
+        session (requests.Session): the handler's session
+    """
+    try:
+        session.close()
+    except Exception:  # pragma: no cover - close() should not raise; cleanup must never mask a result
+        logging.debug("Ignoring error closing a handler session", exc_info=True)

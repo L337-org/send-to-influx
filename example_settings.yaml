@@ -108,6 +108,30 @@ mcp:
   # started the process can write there. Set this only to override both.
   # state_file: "/var/lib/send-to-influx/mcp-oauth-state.json"
 
+# Unattended control loops: one process per stored control, each holding something at a
+# target by switching devices. Off unless switched on here, because a control actuates
+# devices on its own, and an install that has not asked for that does not get it.
+#
+# This is deliberately not the per-source mcp_read_write flag. Wanting a heating loop is
+# not the same as granting a connected model device-write access, and one setting quietly
+# governing both would force anyone wanting the first to accept the second.
+#
+# The controls themselves are not configured here: each is its own YAML document under the
+# state directory (/var/lib/send-to-influx/controls on the packaged install), created and
+# edited by the running service or by an MCP client on its behalf. See the README's
+# "Control loops" section.
+controls:
+  # Uncomment the line below to run the stored controls (default: off)
+  # enabled: true
+  # Opt in to letting an MCP client create, edit and delete control loops for you.
+  # Off by default, and separate from "enabled" above: running the loops you wrote is
+  # not the same as letting an AI assistant write them. With this off, an assistant can
+  # still read your controls and draft one for you to save by hand; with it on, it saves
+  # the file itself and the service picks it up without a restart. A control it writes
+  # actuates devices unattended for as long as it exists. Has no effect unless the MCP
+  # server is enabled (see the mcp block above) and "enabled" above is true.
+  mcp_write: false
+
 # Hue bridge settings
 hue:
   # The database to use
@@ -146,6 +170,10 @@ hue:
   timeout: 5
   # Interval in seconds between data collection
   interval: 300
+  # Uncomment the line below to change how often a control may read this source live (default: 10 seconds)
+  # minimum_interval: 10
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 900 seconds)
+  # max_age: 900
   # Temperature unit (C/F/K)
   temperature_units: "C"
   # Skip TLS certificate verification. Defaults to true since Hue bridges are commonly
@@ -170,6 +198,10 @@ speedtest:
   mcp_read_write: false
   # Interval in seconds between data collection
   interval: 21600
+  # Uncomment the line below to change how often a control may read this source live (default: 3600 seconds)
+  # minimum_interval: 3600
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 86400 seconds)
+  # max_age: 86400
   # Timeout for the speedtest scan
   timeout: 5
   # The fields to collect from the Speedtest results
@@ -185,6 +217,10 @@ openmeteo:
   db: "weather_db"
   # Interval in seconds between data collection (15 minutes minimum recommended)
   interval: 900
+  # Uncomment the line below to change how often a control may read this source live (default: 600 seconds)
+  # minimum_interval: 600
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 3600 seconds)
+  # max_age: 3600
   # Latitude and longitude for the weather location
   latitude: 51.5
   longitude: -2.6
@@ -194,6 +230,12 @@ openmeteo:
   # See https://open-meteo.com/en/docs for a full list of available variables
   fields:
     - "temperature_2m"
+    # The temperature the air would have to fall to for water to condense out of it. A
+    # conservatory held just above it does not stream with condensation, which is the
+    # motivating case for the control loops - see the README's "Control loops" section.
+    # Collected by default because it costs nothing extra: the API returns every requested
+    # variable in one response.
+    - "dew_point_2m"
     - "relative_humidity_2m"
     - "precipitation"
     - "cloud_cover"
@@ -206,6 +248,10 @@ carbonintensity:
   db: "grid_db"
   # Interval in seconds between data collection (half-hourly data, 1800 minimum)
   interval: 1800
+  # Uncomment the line below to change how often a control may read this source live (default: 900 seconds)
+  # minimum_interval: 900
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 3600 seconds)
+  # max_age: 3600
   # Timeout for requests to the Carbon Intensity API
   timeout: 10
   # Set to true to also collect the national generation fuel mix percentages
@@ -238,6 +284,10 @@ zappi:
   db: "zappi_db"
   # Interval in seconds between data collection
   interval: 300
+  # Uncomment the line below to change how often a control may read this source live (default: 60 seconds)
+  # minimum_interval: 60
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 300 seconds)
+  # max_age: 300
   # The serial number of the Zappi device. This form - one serial at the top of the
   # block - collects a single device and tags it device=zappi in InfluxDB, exactly as
   # it always has. Add an optional `label:` here to tag it with a name of your own
@@ -273,6 +323,10 @@ harvi:
   db: "myenergi_db"
   # Interval in seconds between data collection
   interval: 300
+  # Uncomment the line below to change how often a control may read this source live (default: 60 seconds)
+  # minimum_interval: 60
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 300 seconds)
+  # max_age: 300
   # The serial number of the Harvi device. Also sent as the MyEnergi API's digest
   # username, which the API accepts for any device on the account. Add an optional
   # `label:` to choose the InfluxDB `device` tag, or a `devices:` list for more than
@@ -293,6 +347,10 @@ eddi:
   db: "myenergi_db"
   # Interval in seconds between data collection
   interval: 300
+  # Uncomment the line below to change how often a control may read this source live (default: 60 seconds)
+  # minimum_interval: 60
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 300 seconds)
+  # max_age: 300
   # The serial number of the Eddi device. Also sent as the MyEnergi API's digest
   # username, which the API accepts for any device on the account. Add an optional
   # `label:` to choose the InfluxDB `device` tag, or a `devices:` list for more than
@@ -315,6 +373,10 @@ octopus:
   db: "octopus_db"
   # Interval in seconds between data collection (half-hourly data, 1800 minimum)
   interval: 1800
+  # Uncomment the line below to change how often a control may read this source live (default: 1800 seconds)
+  # minimum_interval: 1800
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 172800 seconds)
+  # max_age: 172800
   # Your Octopus Energy API key (from https://octopus.energy/dashboard/developer/)
   api_key: "your_octopus_api_key"
   # Your electricity meter MPAN (13-digit number, found on your bill)
@@ -343,6 +405,10 @@ nuki:
   timeout: 3
   # Interval in seconds between data collection
   interval: 300
+  # Uncomment the line below to change how often a control may read this source live (default: 0 seconds)
+  # minimum_interval: 0
+  # Uncomment the line below to change how long a reading stays usable by a control (default: 900 seconds)
+  # max_age: 900
   # No per-lock configuration is needed: every lock provisioned to the broker
   # publishes under its own topic namespace and is reported automatically, with
   # fields prefixed by the lock's own name from the Nuki app - give each lock a

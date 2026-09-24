@@ -22,6 +22,15 @@ them, and the client recovers silently via its refresh token).
 
 The ``mcp`` SDK is imported only here (like ``paho-mqtt`` in toinflux/mqtt.py),
 keeping every other execution path importable without it.
+
+**Every access token is stamped with this server's own resource** (RFC 8707), and the
+bearer middleware refuses a token issued for anything else. Accepted limitation: a client
+that asks for a *different* resource is not refused at the authorization endpoint - it is
+issued a token for this resource instead. This server protects exactly one resource and
+can honestly assert no other, so nothing is minted claiming to be for somebody else; and
+leaving the comparison in one place, the SDK's middleware, is worth more than refusing
+earlier with a second copy of the URL-matching rules that could disagree with it.
+
 """
 
 __author__ = "Gavin Lucas"
@@ -40,7 +49,7 @@ import time
 from urllib.parse import urlparse
 
 from toinflux.exceptions import ConfigError
-from toinflux.general import parse_mcp_bind_address
+from toinflux.general import parse_mcp_bind_address, resolve_state_dir
 
 ACCESS_TOKEN_TTL_SECONDS = 3600
 REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600
@@ -169,7 +178,7 @@ class OAuthStateStore:
                 os.chmod(self.state_path, 0o600)
             except OSError as exc:
                 logging.warning(
-                    "MCP OAuth state file %s is group/other accessible and could not be " "tightened to 0600: %s",
+                    "MCP OAuth state file %r is group/other accessible and could not be " "tightened to 0600: %r",
                     self.state_path,
                     exc,
                 )
@@ -189,7 +198,7 @@ class OAuthStateStore:
             return
         except (OSError, ValueError) as exc:
             logging.warning(
-                "MCP OAuth state file %s could not be read (%s) - starting with empty state; "
+                "MCP OAuth state file %r could not be read (%r) - starting with empty state; "
                 "connected clients will need to re-authenticate",
                 self.state_path,
                 exc,
@@ -222,7 +231,7 @@ class OAuthStateStore:
                 # A failed save degrades to pre-persistence behaviour (state lost on
                 # restart) - report it once per call, don't take the server down.
                 logging.error(
-                    "Could not persist MCP OAuth state to %s: %s - client registrations and "
+                    "Could not persist MCP OAuth state to %r: %r - client registrations and "
                     "refresh tokens will not survive a restart",
                     self.state_path,
                     exc,
@@ -346,14 +355,7 @@ def resolve_state_path(settings, settings_file=None):
     # beside settings.yaml, writable by whoever is running the process. No new configuration,
     # and no behaviour change off systemd.
     #
-    # Colon-separated when a unit declares several; take the first, so adding a second
-    # StateDirectory= later cannot silently move this file.
-    state_dir = os.environ.get("STATE_DIRECTORY", "").split(os.pathsep)[0].strip()
-    if state_dir:
-        return os.path.join(state_dir, "mcp-oauth-state.json")
-    base_dir = os.path.abspath(os.path.dirname(__file__) + "/..")
-    settings_dir = os.path.dirname(os.path.join(base_dir, settings_file or "settings.yaml"))
-    return os.path.join(settings_dir, "mcp-oauth-state.json")
+    return os.path.join(resolve_state_dir(settings_file), "mcp-oauth-state.json")
 
 
 def _transport_security_settings(public_url):
@@ -439,7 +441,7 @@ def run_options(settings):  # noqa: DOC502 - ConfigError propagates from parse_m
     return {**app_options(settings), "port": port}
 
 
-def build_mcp_server(settings, settings_file=None):
+def build_mcp_server(settings, settings_file=None, supervisor=None):
     """Construct the MCPServer application for the given settings.
 
     Everything SDK-related is imported here, not at module level - see the
@@ -455,6 +457,10 @@ def build_mcp_server(settings, settings_file=None):
     Args:
         settings (dict): parsed settings dictionary (validated, post-substitution)
         settings_file (str or None): settings path, for anchoring the default state file
+        supervisor (Supervisor or None): the running control supervisor, where there is
+            one, so the control tools can say whether a control's process is up. Passed in
+            rather than looked up: it runs in a thread of this same process, and None is a
+            third answer rather than "nothing is running"
 
     Returns:
         mcp.server.mcpserver.MCPServer: a configured MCPServer instance
@@ -477,11 +483,17 @@ def build_mcp_server(settings, settings_file=None):
     public_url = mcp_settings["public_url"].strip().rstrip("/")
     state_path = resolve_state_path(settings, settings_file)
 
+    # Computed once and used for both the token's own resource and the value the bearer
+    # middleware checks it against. Two spellings of the same URL would mean the server
+    # refusing every token it had itself issued.
+    resource_server_url = f"{public_url}{MCP_HTTP_PATH}"
+
     provider = SendToInfluxOAuthProvider(
         public_url=public_url,
         expected_user=mcp_settings["user"],
         expected_password=mcp_settings["password"],
         state_store=OAuthStateStore(state_path),
+        resource_server_url=resource_server_url,
     )
 
     server = MCPServer(
@@ -493,7 +505,13 @@ def build_mcp_server(settings, settings_file=None):
         auth_server_provider=provider,
         auth=AuthSettings(
             issuer_url=public_url,
-            resource_server_url=f"{public_url}{MCP_HTTP_PATH}",
+            resource_server_url=resource_server_url,
+            # A bearer token is accepted only where it was issued for this resource. Off by
+            # omission until now, which the SDK warns about and 3.0 changes: it becomes the
+            # default wherever resource_server_url is set. Turning it on without stamping
+            # the resource on issued tokens - which is where this stood - would refuse every
+            # token the server had minted, so the two changes are one change.
+            validate_token_resource=True,
             client_registration_options=ClientRegistrationOptions(enabled=True),
             revocation_options=RevocationOptions(enabled=True),
         ),
@@ -548,6 +566,7 @@ def build_mcp_server(settings, settings_file=None):
     # registered. The control_device prompt and the device-write tools are only
     # registered when a source is opted in via <source>.mcp_read_write - when none
     # is, neither appears on the server at all (least privilege).
+    from toinflux.mcp_controls import register_control_tools
     from toinflux.mcp_dashboards import register_dashboard_tools
     from toinflux.mcp_prompts import register_prompts
     from toinflux.mcp_read import register_read_tools
@@ -564,6 +583,7 @@ def build_mcp_server(settings, settings_file=None):
     register_resources(server, settings, settings_file)
     register_prompts(server, settings, settings_file, enabled_sources=enabled_sources)
     register_write_tools(server, settings, settings_file, enabled_sources=enabled_sources)
+    register_control_tools(server, settings, settings_file, supervisor=supervisor)
 
     return server
 
@@ -578,7 +598,7 @@ class SendToInfluxOAuthProvider:
     client/redirect binding itself - this class only stores, loads, and issues.
     """
 
-    def __init__(self, public_url, expected_user, expected_password, state_store):
+    def __init__(self, public_url, expected_user, expected_password, state_store, resource_server_url):
         """Bind the provider to the URL it issues against and the single account it accepts.
 
         Args:
@@ -586,8 +606,13 @@ class SendToInfluxOAuthProvider:
             expected_user (str): the configured mcp.user
             expected_password (str): the configured mcp.password
             state_store (OAuthStateStore): persistence for clients and refresh tokens
+            resource_server_url (str): the protected resource these tokens are for, which is
+                stamped on every access token. Passed in rather than rebuilt here so that it
+                and the value the bearer middleware compares against are one string: two
+                spellings of the same URL would refuse every token the server had issued
         """
         self.public_url = public_url
+        self.resource_server_url = resource_server_url
         self._expected_user = expected_user
         self._expected_password = expected_password
         self.state = state_store
@@ -687,7 +712,7 @@ class SendToInfluxOAuthProvider:
             return OAuthClientInformationFull.model_validate(raw)
         except ValidationError as exc:
             logging.warning(
-                "Dropping malformed MCP OAuth client entry '%s' from %s: %s",
+                "Dropping malformed MCP OAuth client entry %r from %r: %r",
                 client_id,
                 self.state.state_path,
                 exc,
@@ -863,6 +888,12 @@ class SendToInfluxOAuthProvider:
             scopes=scopes,
             expires_at=int(now + ACCESS_TOKEN_TTL_SECONDS),
             subject=subject,
+            # The RFC 8707 resource indicator: which protected resource this token is for.
+            # Always this server, because this server protects exactly one resource and can
+            # honestly assert no other. A client that asked for a different one is not
+            # refused here and is issued a token for this resource instead - see the
+            # accepted limitation in the module docstring.
+            resource=self.resource_server_url,
         )
         self.state.prune_expired_refresh_tokens()
         self.state.refresh_tokens[_hash_token(refresh_token)] = {
@@ -910,7 +941,7 @@ class SendToInfluxOAuthProvider:
             del self._auth_codes[key]
 
 
-def start_mcp_server_thread(settings, settings_file=None):
+def start_mcp_server_thread(settings, settings_file=None, supervisor=None):
     """Start the MCP server in a daemon thread and return the thread.
 
     Config-shaped failures (ConfigError from build_mcp_server) are logged as
@@ -922,6 +953,7 @@ def start_mcp_server_thread(settings, settings_file=None):
     Args:
         settings (dict): parsed settings dictionary (validated)
         settings_file (str or None): settings path, threaded through for the state file default
+        supervisor (Supervisor or None): the running control supervisor, where there is one
 
     Returns:
         threading.Thread: the started daemon thread running the server
@@ -931,7 +963,7 @@ def start_mcp_server_thread(settings, settings_file=None):
     def server_worker():
         while True:
             try:
-                server = build_mcp_server(settings, settings_file)
+                server = build_mcp_server(settings, settings_file, supervisor=supervisor)
                 logging.info(
                     "MCP server listening on %s:%s (public URL %s)",
                     host,
@@ -941,10 +973,10 @@ def start_mcp_server_thread(settings, settings_file=None):
                 server.run(transport="streamable-http", **run_options(settings))
                 logging.error("MCP server exited unexpectedly; restarting in %ss", SERVER_RESTART_SECONDS)
             except ConfigError as exc:
-                logging.critical("MCP server cannot start and will not be retried: %s", exc)
+                logging.critical("MCP server cannot start and will not be retried: %r", exc)
                 return
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                logging.error("MCP server failed: %s. Restarting in %ss.", exc, SERVER_RESTART_SECONDS)
+                logging.error("MCP server failed: %r. Restarting in %ss.", exc, SERVER_RESTART_SECONDS)
             time.sleep(SERVER_RESTART_SECONDS)
 
     thread = threading.Thread(target=server_worker, name="mcp-server", daemon=True)

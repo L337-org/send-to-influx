@@ -474,3 +474,20 @@ class TestExamplePlaceholdersAreRecognised:
             f"- otherwise it is read as a real credential the moment anyone uncomments it, which starts a "
             f"worker that authenticates in a loop and trips the real-secret permissions check."
         )
+
+
+class TestASlotSuffixIsWholeString:
+    """`$` matches before a trailing newline, so an anchored pattern checked with match() is
+    not a whole-string test - and this one decides which bridge slot a credential overlays."""
+
+    @pytest.mark.parametrize("suffix", ["2\n", "2\nrm -rf", "2 "])
+    def test_a_suffix_with_trailing_text_is_not_canonical(self, suffix):
+        from toinflux.credentials import _slot_suffix
+
+        assert _slot_suffix(f"hue_host{suffix}", "hue_host") is None
+
+    @pytest.mark.parametrize("suffix", ["2", "3", "17"])
+    def test_a_plain_suffix_still_is(self, suffix):
+        from toinflux.credentials import _slot_suffix
+
+        assert _slot_suffix(f"hue_host{suffix}", "hue_host") == suffix

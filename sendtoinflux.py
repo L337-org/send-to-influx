@@ -8,6 +8,7 @@ __license__ = "MIT"
 import sys
 import time
 import json
+import atexit
 import math
 import signal
 import logging
@@ -16,8 +17,12 @@ import threading
 import faulthandler
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
+from toinflux.general import render_values
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.controls import control_dir, controls_enabled, list_controls, validate_stored_controls
+from toinflux.control_process import heartbeat_writer, run_control
+from toinflux.supervision import DEFAULT_POLL_SECONDS, Supervisor
 
 try:
     __version__ = version("send-to-influx")
@@ -48,6 +53,12 @@ STALL_INTERVAL_MULTIPLIER = 3
 # network loop, so it needs an explicit stop signal. How cleanly it then disconnects
 # differs between single- and multi-source mode; see signal_handler for the detail.
 SHUTDOWN = threading.Event()
+
+# The fixed part of how long to wait for the supervisor to stop: one poll interval to notice
+# the event, and a margin. The rest is per control and comes from `Supervisor.teardown_seconds`,
+# because stop_all terminates and waits for each child in turn - this used to be the whole
+# bound, so an installation with two slow devices gave up part way through its own teardown.
+SUPERVISOR_JOIN_MARGIN_SECONDS = DEFAULT_POLL_SECONDS + 2.0
 
 
 def print_source_data(source, data):
@@ -250,7 +261,7 @@ class _StreamSink:
             data = self.data_handler.get_data()
         except SourceConnectionError as exc:
             probe_ok = False
-            logging.warning("Health probe for streaming source '%s' failed: %s", self.source, exc)
+            logging.warning("Health probe for streaming source '%s' failed: %r", self.source, exc)
         else:
             try:
                 self._write(data)
@@ -328,7 +339,7 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures) -> None:
             use_buffer=False,
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        logging.warning("Failed to write heartbeat for '%s': %s", data_handler.worker_label, exc)
+        logging.warning("Failed to write heartbeat for '%s': %r", data_handler.worker_label, exc)
     finally:
         data_handler.influx_header = original_header
 
@@ -442,7 +453,7 @@ def create_source_worker(unit, source_start_delay, args, stopped_sources, last_a
                 maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
                 _stamp_activity(last_activity, unit)
             except ConfigError as exc:
-                logging.critical("'%s' has a configuration problem and will not be retried: %s", label, exc)
+                logging.critical("'%s' has a configuration problem and will not be retried: %r", label, exc)
                 maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
                 stopped_sources.add(unit)
                 return
@@ -450,7 +461,7 @@ def create_source_worker(unit, source_start_delay, args, stopped_sources, last_a
                 failure_count += 1
                 restart_delay = get_backoff_delay(failure_count)
                 logging.warning(
-                    "'%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                    "'%s' failed: %r. Restarting in %s seconds (attempt %s).",
                     label,
                     exc,
                     restart_delay,
@@ -497,7 +508,7 @@ def signal_handler(sig, _frame):
     sys.exit(0)
 
 
-def maybe_start_mcp_server(settings, args):
+def maybe_start_mcp_server(settings, args, supervisor=None):
     """Start the embedded MCP server thread when enabled and in a collection mode.
 
     ``--print`` and ``--dump`` are interactive debugging modes that never touch
@@ -509,6 +520,8 @@ def maybe_start_mcp_server(settings, args):
     Args:
         settings (dict): loaded settings dict
         args (argparse.Namespace): parsed CLI arguments
+        supervisor (Supervisor or None): the running control supervisor, where there is
+            one, so the control tools can report whether a control's process is up
 
     Returns:
         threading.Thread or None: the server thread, or None when not started
@@ -519,7 +532,7 @@ def maybe_start_mcp_server(settings, args):
         return None
     from toinflux.mcpserver import start_mcp_server_thread
 
-    return start_mcp_server_thread(settings, args.settings)
+    return start_mcp_server_thread(settings, args.settings, supervisor=supervisor)
 
 
 def _configure_logging_or_exit(settings, args):
@@ -566,7 +579,7 @@ def register_thread_dump_handler() -> None:
     try:
         faulthandler.register(signal.SIGUSR1, all_threads=True)
     except (ValueError, OSError) as exc:
-        logging.warning("Could not register SIGUSR1 thread-dump handler: %s", exc)
+        logging.warning("Could not register SIGUSR1 thread-dump handler: %r", exc)
 
 
 def _exit_if_nothing_to_collect(units, requested, settings, args) -> None:
@@ -675,6 +688,16 @@ def _check_config_and_exit(settings, args):
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         sys.exit(1)
+    # Stored controls are checked here too, because they are configuration even though
+    # they do not live in settings.yaml. An operator running --check-config is asking
+    # whether this installation would start cleanly, and a control with a stage that
+    # forgets a device would otherwise be discovered by the control process at the
+    # moment it was meant to start actuating a heater.
+    try:
+        validate_stored_controls(args.settings, settings)
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        sys.exit(1)
     # A config that validates cleanly but configures nothing to collect isn't "OK" -
     # it's the same "nothing to collect" state _exit_if_nothing_to_collect() stops a
     # real run for, so --check-config must not report success on it either.
@@ -685,7 +708,189 @@ def _check_config_and_exit(settings, args):
             file=sys.stderr,
         )
         sys.exit(1)
+    if not controls_enabled(settings) and list_controls(args.settings):
+        # Said here too, because this is where somebody checks when a control is not running
+        # and "Configuration OK" is exactly the answer that sends them looking elsewhere.
+        print(
+            f"Note: control documents are stored in {control_dir(args.settings)} but "
+            f"controls.enabled is not true, so none will run.",
+            file=sys.stderr,
+        )
     print("Configuration OK")
+    sys.exit(0)
+
+
+def _start_control_supervisor(settings, args):
+    """Start the control supervisor in its own thread, or return None.
+
+    Returns None only where the subsystem is switched off, so the ordinary collector
+    install starts nothing. An enabled installation with an empty store still gets a
+    supervisor, because that is what lets the first control created over MCP run.
+
+    **Nothing is started under --print or --dump**, for the same reason those modes start
+    no MCP server, and with more at stake: they are interactive debugging commands that
+    print a reading and exit, and starting the supervisor made them spawn a child per
+    control and actuate real devices. --dump was the worse half - the atexit handler then
+    commanded every device to its safe state on the way out, so asking what a source
+    currently reports switched the operator's heating off.
+
+    Args:
+        settings (dict): the parsed settings document
+        args (argparse.Namespace): the parsed command line
+
+    Returns:
+        Supervisor or None: the running supervisor, already started
+    """
+    if args.print or args.dump:
+        return None
+    if not controls_enabled(settings):
+        # **Silence here is what made "my control is not running" undiagnosable.** The
+        # subsystem is off unless switched on, and returning quietly is right for the
+        # installations that never use it - but somebody who has written a control document
+        # and is watching the journal for it got nothing at all: no error, no mention of
+        # controls, and a service collecting normally. The documents are only read to say so,
+        # which costs one directory listing on a path that then does nothing else.
+        stored = list_controls(args.settings)
+        if stored:
+            logging.warning(
+                "%s control document(s) are stored in %s but controls.enabled is not true, so " "none will run: %s",
+                len(stored),
+                control_dir(args.settings),
+                render_values(stored),
+            )
+        return None
+    names = list_controls(args.settings)
+    supervisor = Supervisor(names, settings_file=args.settings)
+    supervised = list(supervisor.children)
+    # **Started even with nothing to supervise**, which it did not used to be. An empty
+    # supervisor looked like a thread and a banner about nothing, and that was true until
+    # the MCP write tools existed - now it is the thing that lets the *first* control an
+    # operator creates actually start. Without it, an install that enables controls and then
+    # creates one over MCP has nowhere to send the reload request, and the control sits on
+    # disk until the service is restarted, which is exactly the restart this subsystem exists
+    # to avoid. The same applies when every stored control was unusable and one is then
+    # fixed. One idle selector loop is a small price for the create-and-run path working.
+    if not names:
+        logging.info(
+            "Controls are enabled and none are stored yet. They live in %s, one YAML document "
+            "each, and one created from here will start without a restart",
+            control_dir(args.settings),
+        )
+    elif not supervised:
+        # Every stored control was unusable, and each said so as it was skipped.
+        logging.error("No stored control could be supervised, so none are running")
+    thread = threading.Thread(target=supervisor.run, args=(SHUTDOWN,), name="control-supervisor", daemon=True)
+    thread.start()
+    atexit.register(_stop_supervising, supervisor, thread)
+    if supervised:
+        # From what is actually being supervised rather than from what was found on disk: a
+        # control skipped for being unreadable said so on its own line, and a banner counting
+        # it too would have an operator looking for a process that was never started. Absent
+        # entirely where nothing is supervised, because the lines above already said why and
+        # "Supervising 0 control(s): none" adds a second way of saying it.
+        logging.info("Supervising %s control(s): %s", len(supervised), render_values(supervised))
+    return supervisor
+
+
+def _stop_supervising(supervisor, thread) -> None:
+    """Bring the supervisor's thread down, then make sure every device is safe.
+
+    **The thread is stopped before the devices are, which it was not.** ``stop_all`` used to
+    be registered directly, and a signal exits through ``sys.exit`` - which runs atexit
+    handlers while a daemon thread is still going. So the main thread walked the children,
+    terminating and releasing each one, while the supervisor thread was inside ``poll()``
+    doing the same thing to the same children: ``_release`` closes a descriptor, unregisters
+    it from the selector and clears the fields, none of it guarded, so the second one through
+    met a ``None`` process or a closed descriptor and raised. An exception there aborts the
+    atexit handler, and every control after it in the walk keeps its devices energised.
+
+    Not an exotic race. ``systemctl stop`` signals every process in the cgroup at once, so
+    every control reaches EOF at exactly the moment this runs.
+
+    Joining first makes the ordinary path single-threaded: the loop sees the event, leaves,
+    and runs its own ``stop_all`` from the ``finally``, after which this one returns
+    immediately because it is once-only. The join is bounded because a wedged supervisor must
+    not stop the process exiting, and the fallback on a timeout is to make the devices safe
+    from here anyway - the race is then back, but only in the case where the alternative is
+    leaving heaters on with certainty rather than by chance.
+
+    Args:
+        supervisor (Supervisor): the supervisor to stop
+        thread (threading.Thread): the thread running it
+    """
+    SHUTDOWN.set()
+    # One poll interval to notice, its own teardown to run, and a margin. **Scaled by the
+    # number of controls**, because the teardown terminates and waits for each child in turn:
+    # a fixed timeout gave up part way through the walk on any installation with more than one
+    # slow device, which is precisely when it matters that it finishes.
+    deadline = SUPERVISOR_JOIN_MARGIN_SECONDS + supervisor.teardown_seconds()
+    thread.join(timeout=deadline)
+    if not thread.is_alive():
+        # Its own `finally` has already run the teardown; this is once-only and returns.
+        supervisor.stop_all()
+        return
+    if supervisor.teardown == "running":
+        # **Wait for it rather than walking the same children behind it.** A second walk is
+        # the race the join exists to avoid - two threads releasing one descriptor - but
+        # giving up here would leave whatever it had not reached yet energised, which is the
+        # outcome the whole handler exists to prevent.
+        #
+        # Waiting is safe because a teardown that has *started* is not wedged: every step in
+        # it is bounded, a kill cannot be ignored, and each safe-state command carries its
+        # source's own timeout. So this grants one more full teardown budget, which bounds
+        # the wait at twice the estimate rather than leaving it open.
+        logging.warning(
+            "The control supervisor is still stopping after %.0fs, so this is waiting another %.0fs "
+            "for it to finish rather than commanding the same devices from here",
+            deadline,
+            deadline,
+        )
+        thread.join(timeout=deadline)
+        if supervisor.teardown == "finished":
+            return
+        # Out of patience rather than out of options: say which controls were left, because
+        # that is the list somebody has to go and look at.
+        logging.error(
+            "The control supervisor did not finish stopping within %.0fs, so these controls may "
+            "have devices still energised: %s. They are commanded safe again at the next start",
+            deadline * 2,
+            render_values(sorted(supervisor.children)),
+        )
+        return
+    logging.warning(
+        "The control supervisor did not stop within %.0fs, so its devices are being made safe "
+        "from the exit handler while it is still running",
+        deadline,
+    )
+    supervisor.stop_all()
+
+
+def _run_control_and_exit(args):
+    """Run one control as this process, and exit with what it did.
+
+    **Refuses `--print` and `--dump`.** Those promise to start nothing and actuate nothing,
+    and this path runs before the guards that keep that promise for the supervisor and the
+    MCP server - so `--control NAME --print` started a real control loop commanding real
+    devices, the loudest possible breach of the quietest flag. Refused rather than ignored:
+    somebody who typed both wanted one of them, and guessing which is worse than saying so.
+    The check lives here rather than at the call site so it cannot be walked past by a second
+    caller.
+
+    Args:
+        args (argparse.Namespace): the parsed command line
+    """
+    if args.print or args.dump:
+        logging.critical("--control cannot be combined with --print or --dump: those start nothing by design")
+        sys.exit(2)
+    beat = heartbeat_writer(args.heartbeat_fd) if args.heartbeat_fd is not None else None
+    try:
+        run_control(args.control, settings_file=args.settings, heartbeat=beat)
+    except ConfigError as exc:
+        # A configuration fault, so no retry helps and the supervisor should not respawn
+        # this one until somebody has changed something. Reported as the operator's problem
+        # rather than as a traceback.
+        logging.critical("Control %r cannot run: %r", args.control, exc)
+        sys.exit(1)
     sys.exit(0)
 
 
@@ -755,6 +960,26 @@ def main() -> None:
             "If no sources are configured, the process logs that plainly and exits."
         ),
     )
+    arg_parse.add_argument(
+        "--control",
+        required=False,
+        dest="control",
+        type=str,
+        help=(
+            "run one stored control as this process, rather than collecting. "
+            "One process per control; the supervisor starts these, and an operator rarely does"
+        ),
+    )
+    arg_parse.add_argument(
+        "--heartbeat-fd",
+        required=False,
+        dest="heartbeat_fd",
+        type=int,
+        help=(
+            "an inherited pipe to beat down once per cycle, so a supervisor can tell a slow "
+            "control from a dead one. Set by the supervisor when it starts a control"
+        ),
+    )
     args = arg_parse.parse_args()
 
     # load settings once for defaults and configured source list
@@ -770,6 +995,16 @@ def main() -> None:
 
     _configure_logging_or_exit(settings, args)
 
+    if args.control is not None:
+        # `is not None` rather than truthiness: `--control ""` is a name somebody meant to
+        # pass, and treating it as absent would start the collector instead of saying the
+        # name is unusable. An empty name fails in the store, which is where it should.
+        #
+        # Before the collector's own setup, and it never returns to it: a control process
+        # collects nothing, serves no MCP, and starting a worker here would put two things
+        # in one process that the supervisor expects to kill independently.
+        _run_control_and_exit(args)
+
     requested = _requested_sources(settings, args)
     units = toinflux.expand_sources(requested, settings)
 
@@ -783,12 +1018,19 @@ def main() -> None:
         ", ".join(worker_label(*unit) for unit in units) or "none",
     )
 
-    # After the nothing-to-collect check, not before: with zero sources configured,
-    # configured_sources() would expose nothing over MCP anyway, so starting the
-    # server here would only be a brief bind/log-noise/state-file-write cycle on a
-    # path meant to be a clean early exit.
+    # After the nothing-to-collect check, not before. For the supervisor that is the
+    # stronger requirement of the two: it spawns children that command real devices, and
+    # started any earlier it would actuate heaters and then have them killed when an
+    # unusable source configuration exits the process a moment later. Startup validation
+    # finishes before anything is switched on.
+    #
+    # Still before the MCP server, so a client connecting immediately is told what is
+    # running rather than that nothing is. For the server itself the reason is smaller: with
+    # zero sources configured it would expose nothing anyway, so starting it would be a
+    # brief bind/log-noise/state-file-write cycle on a path meant to be a clean early exit.
     _exit_if_nothing_to_collect(units, requested, settings, args)
-    maybe_start_mcp_server(settings, args)
+    supervisor = _start_control_supervisor(settings, args)
+    maybe_start_mcp_server(settings, args, supervisor=supervisor)
     if args.dump:
         if len(requested) > 1:
             logging.error("The --dump option requires --source when running in multi-source mode.")
@@ -832,10 +1074,10 @@ def _dump_source_and_exit(units, args):
             data_handler = toinflux.get_class(source, args.settings, instance=instance)
             collected[instance] = data_handler.get_data()
         except ConfigError as exc:
-            logging.critical("'%s' has a configuration problem: %s", worker_label(source, instance), exc)
+            logging.critical("'%s' has a configuration problem: %r", worker_label(source, instance), exc)
             sys.exit(1)
         except SourceConnectionError as exc:
-            logging.error("'%s' failed: %s", worker_label(source, instance), exc)
+            logging.error("'%s' failed: %r", worker_label(source, instance), exc)
             failed.append(instance)
 
     if instanced:
@@ -881,14 +1123,14 @@ def run_one_worker(unit, args) -> None:
             failure_count = 0
             maybe_send_heartbeat(args, data_handler, source, ok=True, consecutive_failures=0)
         except ConfigError as exc:
-            logging.critical("'%s' has a configuration problem and will not be retried: %s", label, exc)
+            logging.critical("'%s' has a configuration problem and will not be retried: %r", label, exc)
             maybe_send_heartbeat(args, data_handler, source, ok=False, consecutive_failures=failure_count + 1)
             sys.exit(1)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             failure_count += 1
             restart_delay = get_backoff_delay(failure_count)
             logging.warning(
-                "'%s' failed: %s. Restarting in %s seconds (attempt %s).",
+                "'%s' failed: %r. Restarting in %s seconds (attempt %s).",
                 label,
                 exc,
                 restart_delay,

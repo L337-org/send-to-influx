@@ -20,5 +20,14 @@ mypy~=2.3.1
 # packaging in, but only at >=22, and packaging.licenses arrived in 24.2 - so a floor
 # that actually has the module is declared here rather than inherited by luck.
 packaging~=26.3.0
+# The process harness serves its stub Hue bridge over TLS, because a real bridge is HTTPS
+# with a self-signed certificate and pointing the collector's own handler at plain HTTP
+# would exercise a path that does not exist. The certificate is generated per run rather
+# than committed - a private key in a fixture is a private key in the repository, whatever
+# it is for - and this is the only way to generate one without shelling out to openssl.
+# abi3 wheels, so one build serves every supported minor: verified with
+# `pip download cryptography~=48.0.1 --only-binary=:all: --python-version 310` and 314,
+# which resolve to cp39-abi3 and cp311-abi3 manylinux wheels.
+cryptography~=48.0.1
 types-PyYAML~=6.0.12
 types-requests~=2.33.0

@@ -149,7 +149,7 @@ def _hue_list_devices_result(settings, settings_file):
                 for device in handler.mcp_list_writable_devices():
                     devices.append({**device, "bridge": instance})
             except SourceConnectionError as exc:
-                logging.warning("Could not list devices on Hue bridge %s: %s", instance, exc)
+                logging.warning("Could not list devices on Hue bridge %s: %r", instance, exc)
                 unreachable.append({"bridge": instance, "error": str(exc)})
         result = {"source": "hue", "devices": devices}
         if unreachable:

@@ -24,9 +24,11 @@ import ast
 import os
 import re
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -1053,6 +1055,58 @@ def _joins_inside_raises(source):
     return found
 
 
+def _collection_constants(tree):
+    """Return the module-level names bound to a collection literal.
+
+    Args:
+        tree (ast.Module): the parsed module
+
+    Returns:
+        set: the names
+    """
+    names = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        built = (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id in ("frozenset", "set", "list", "tuple", "dict")
+        )
+        if isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict)) or built:
+            names.update(target.id for target in node.targets if isinstance(target, ast.Name))
+    return names
+
+
+def _collections_inside_raises(source, imported=()):
+    """Find collection constants interpolated straight into the message of a raise.
+
+    The other half of the join check. ``f"must be one of {SOME_TUPLE}"`` renders a Python
+    tuple repr into a message a user reads, with the same two failure modes the renderer
+    exists for, and the join detector cannot see it because there is no join.
+
+    Args:
+        source (str): the module's text
+        imported (iterable): collection names this module imports from another of ours
+
+    Returns:
+        list: ``(line, name)`` for each offending interpolation
+    """
+    tree = ast.parse(source)
+    collections = _collection_constants(tree) | set(imported)
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise):
+            continue
+        for piece in ast.walk(node):
+            if not isinstance(piece, ast.FormattedValue):
+                continue
+            if isinstance(piece.value, ast.Name) and piece.value.id in collections:
+                found.append((piece.lineno, piece.value.id))
+    return found
+
+
 def test_every_collection_interpolated_into_an_error_is_rendered_safely():
     """A collection *interpolated into* an error message goes through ``render_values``.
 
@@ -1061,7 +1115,12 @@ def test_every_collection_interpolated_into_an_error_is_rendered_safely():
 
     It covers a collection interpolated into an f-string inside a ``raise`` - a list of
     identifiers, field keys, device names, bridge names - which is where both real
-    defects were.
+    defects were. Two shapes: a bare ``", ".join(...)``, and a name bound to a collection
+    constant, resolved across modules because the three sites review found had imported
+    theirs from another module and a per-module view could not see them.
+
+    It does not cover a collection built inline in the message, or one arriving through a
+    parameter, because neither is recognisable from the raise itself.
 
     It does not cover ``raise ConfigError("; ".join(errors))``, where the items are
     prose we wrote: "mqtt.broker_host is required for MQTT-based sources". Rendering
@@ -1098,11 +1157,26 @@ def test_every_collection_interpolated_into_an_error_is_rendered_safely():
     # A guard that searched nothing looks identical to a clean tree.
     assert len(candidates) >= 15, f"only found {len(candidates)} module(s) to check, so discovery is broken"
 
+    trees = {path: ast.parse(path.read_text(encoding="utf-8")) for path in candidates}
+    # Resolved across modules, because the collection that went wrong here was imported:
+    # BUILT_IN_SAFE_STATES is defined in controls.py and interpolated raw in two others,
+    # which a per-module view cannot see at all.
+    constants_by_module = {
+        ".".join(path.relative_to(REPO_ROOT).with_suffix("").parts): {
+            name: True for name in _collection_constants(tree)
+        }
+        for path, tree in trees.items()
+    }
+
     offenders = []
     for path in candidates:
         relative = path.relative_to(REPO_ROOT)
-        for line, expression in _joins_inside_raises(path.read_text(encoding="utf-8")):
+        text = path.read_text(encoding="utf-8")
+        for line, expression in _joins_inside_raises(text):
             offenders.append(f"{relative}:{line}  {expression}")
+        imported = _imported_names(trees[path], constants_by_module)
+        for line, name in _collections_inside_raises(text, imported):
+            offenders.append(f"{relative}:{line}  {{{name}}}")
     assert not offenders, (
         f"these raise a message built with a bare join; use {VALUE_RENDERER}() so a "
         f"non-string value cannot crash the report and a newline cannot forge a log "
@@ -1173,3 +1247,1032 @@ class TestTheCollectionGuardActuallyDetects:
         line, expression = _joins_inside_raises("\n\ndef f(xs):\n    raise ValueError(f'{\", \".join(xs)}')\n")[0]
         assert line == 4
         assert "join" in expression
+
+
+# The one module allowed to import subprocess. Everything else goes through
+# toinflux.process.run_command, whose protections (no shell, an allow-listed
+# environment, a mandatory timeout, a capped read) are worth nothing if a single call
+# site opts out.
+PROCESS_HELPER = Path("toinflux") / "process.py"
+
+
+def _imports_subprocess(source):
+    """Whether a module imports subprocess, in any of the forms Python allows.
+
+    Parsed rather than pattern-matched. The first version was a regex anchored at the
+    start of a line, which `import os, subprocess` walked straight past - a guard with a
+    bypass is worse than none, because it reads as enforcement while providing none. The
+    grammar already knows what an import is, so ask it.
+
+    Args:
+        source (str): the module's text
+
+    Returns:
+        bool: True if subprocess is imported by any spelling
+    """
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            if any(alias.name == "subprocess" or alias.name.startswith("subprocess.") for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "subprocess" or (node.module or "").startswith("subprocess."):
+                return True
+    return False
+
+
+def test_only_the_process_helper_starts_a_process():
+    """Shipped code reaches subprocess through toinflux.process, never directly.
+
+    This is the guard that makes the helper real. Before it existed the credential CLI
+    called ``subprocess.run`` four times, each inheriting the caller's whole environment
+    with no timeout, and the next author would have copied the nearest example. Prose
+    saying "use the helper" fails silently the first time someone does not read it.
+
+    Tests are excluded: they legitimately spawn processes to probe what the platform
+    does, and ``tests/test_process.py`` in particular has to, because what it asserts
+    only exists at the boundary.
+    """
+    candidates = [
+        path
+        for path in _modules_that_carry_a_header()
+        if path.relative_to(REPO_ROOT).parts[0] in PRODUCT_CODE_ROOTS and path.relative_to(REPO_ROOT) != PROCESS_HELPER
+    ]
+    # A guard that searched nothing looks identical to a clean tree.
+    assert len(candidates) >= 15, f"only found {len(candidates)} module(s) to check, so discovery is broken"
+
+    offenders = [
+        str(path.relative_to(REPO_ROOT)) for path in candidates if _imports_subprocess(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "these modules import subprocess directly instead of using "
+        f"toinflux.process.run_command: {', '.join(offenders)}"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import subprocess",
+        "import os, subprocess",
+        "import subprocess as sp",
+        "import os, subprocess as sp",
+        "from subprocess import run",
+        "from subprocess import run as r",
+        "def f():\n    import subprocess\n",
+    ],
+)
+def test_the_subprocess_guard_sees_every_import_spelling(source):
+    """The guard must not be dodgeable by how the import is written.
+
+    `import os, subprocess` slipped past the first version, which anchored a regex at the
+    start of a line. Parametrised over every form Python accepts, including one nested in
+    a function, because a guard with a known bypass reads as enforcement and provides
+    none.
+    """
+    assert _imports_subprocess(source), f"not detected: {source!r}"
+
+
+def test_the_subprocess_guard_does_not_fire_on_unrelated_imports():
+    """Guards the guard: something matching everything would pass the check above while
+    reporting every module in the tree as an offender."""
+    assert not _imports_subprocess("import os\nfrom pathlib import Path\nsubprocess = None\n")
+
+
+def _bound_names(target):
+    """Yield every name a single assignment target binds.
+
+    Recursive because a target nests: `A, (B, *rest) = ...` binds three names, and reading
+    only `ast.Name` at the top would report the whole statement as binding nothing.
+
+    Args:
+        target (ast.AST): one element of an assignment's `targets`
+
+    Yields:
+        str: each bound name
+    """
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, ast.Starred):
+        yield from _bound_names(target.value)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            yield from _bound_names(element)
+
+
+def _module_level_rebindings(source):
+    """Return every module-level name this source assigns, defines or classes twice.
+
+    Imports are deliberately not counted, and neither is a function or class redefinition
+    that shadows an import: pyflakes already reports both as F811, and flake8 is a required
+    check here, so counting them again would put two failures on one fault. What F811 does
+    *not* see is a plain assignment rebound - `X = re.compile(...)` twice - which is the
+    case this exists for. Verified by probing pyflakes rather than assumed.
+
+    Only the module's own top-level statements, so a name defined once in each arm of an
+    `if TYPE_CHECKING:` or a `try/except ImportError` is not reported: those are one binding
+    chosen at runtime, which is the normal way to write them.
+
+    Args:
+        source (str): the module's source text
+
+    Returns:
+        set: the rebound names, empty when every top-level name is bound once
+    """
+    names = []
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                names.extend(_bound_names(target))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.append(node.target.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(node.name)
+    return {name for name, count in Counter(names).items() if count > 1}
+
+
+def test_no_module_binds_a_top_level_name_twice():
+    """A shadowed module-level name is invisible in review and can disable a check.
+
+    `_DURATION_RE` was defined twice in toinflux/mcp_read.py: a `^\\d+[smhdw]$` validator for
+    the `group_by` interval, and 500 lines later a `(?:\\d+[wdhms])+` parser for retention
+    strings. The second won at import time, so the validator silently became a prefix match
+    on a value interpolated into `GROUP BY time(...)`, and `1h);DROP MEASUREMENT x` passed it.
+
+    Neither definition is wrong to read. That is the whole problem: review sees two correct
+    constants, never the pair, and the test suite went on passing because every case it
+    checked failed at the first character rather than at the prefix. A machine comparing
+    names across the file is the only reader that sees it.
+
+    Covers tests too, where a redefined `def test_...` replaces the first one and takes it
+    out of the run without failing anything.
+    """
+    offenders = {}
+    for path in _every_python_file():
+        rebound = _module_level_rebindings(path.read_text(encoding="utf-8"))
+        if rebound:
+            offenders[path] = rebound
+    assert not offenders, "module-level names bound twice: " + "; ".join(
+        f"{path}: {', '.join(sorted(names))}" for path, names in sorted(offenders.items())
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "X = 1\nX = 2\n",
+        "def f():\n    pass\n\n\ndef f():\n    pass\n",
+        "class C:\n    pass\n\n\nclass C:\n    pass\n",
+        "X: int = 1\nX: int = 2\n",
+        "import re\nX = re.compile('a')\nX = re.compile('b')\n",
+        "X, Y = 1, 2\nX = 3\n",
+        "X, (Y, *Z) = 1, (2, 3)\nZ = 4\n",
+        "X = Y = 1\nY = 2\n",
+    ],
+)
+def test_the_rebinding_guard_sees_each_kind_of_definition(source):
+    """A constant, a function, a class, an annotated assignment and a destructured one.
+
+    The real case was a plain constant, but a redefined function or class disappears the same
+    way, and a guard that only looked at assignments would report a file as clean while one of
+    its tests never ran.
+
+    Destructuring is here because reading only the top-level `ast.Name` of a target sees no
+    names at all in `X, Y = ...`, so the statement would look like it bound nothing and every
+    later rebinding of X would go unreported. Nested and starred targets bind names too.
+    """
+    assert _module_level_rebindings(source), f"not detected: {source!r}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "X = 1\nY = 2\n",
+        "def f():\n    x = 1\n    x = 2\n",
+        "try:\n    import fast as impl\nexcept ImportError:\n    import slow as impl\n",
+        "import typing\nif typing.TYPE_CHECKING:\n    X = 1\nelse:\n    X = 2\n",
+        "class C:\n    X = 1\n\n\nclass D:\n    X = 2\n",
+        "import os\nimport os\n",
+        "from a import parse\n\n\ndef parse():\n    pass\n",
+    ],
+)
+def test_the_rebinding_guard_leaves_legitimate_code_alone(source):
+    """Guards the guard: one that fired on these would be switched off within a day.
+
+    A local rebound inside a function, the same name bound in each arm of a try/except or a
+    TYPE_CHECKING split, and the same attribute name on two classes are all normal. Only a
+    module's own top-level statements count.
+
+    The last two are real faults that this guard deliberately does not report, because
+    pyflakes already reports both as F811 and flake8 is a required check. Two failures for
+    one fault teaches people to read neither. Probed against pyflakes rather than assumed:
+    it flags a repeated import and a function shadowing one, and stays silent on a repeated
+    assignment, which is the gap this fills.
+    """
+    assert not _module_level_rebindings(source), f"false positive: {source!r}"
+
+
+def test_every_source_declares_a_minimum_interval():
+    """A source must say how often anything may go live to it, rather than inheriting a guess.
+
+    The base class leaves ``MINIMUM_INTERVAL`` as None, which falls back to the operator's
+    collection ``interval``. That is a safe answer and a poor one: the interval is how often
+    *this* operator wants data, and says nothing about what the far end tolerates. Someone
+    polling a free public API every six hours has not thereby decided it may be asked every
+    six hours.
+
+    So the fallback exists for a source under development, and shipping one without a number
+    fails here. The value is a judgement about somebody else's endpoint, which is exactly the
+    kind of decision that should be made deliberately rather than inherited.
+    """
+    from toinflux.general import known_sources, source_class
+
+    missing = sorted(source for source in known_sources() if source_class(source).MINIMUM_INTERVAL is None)
+    assert not missing, (
+        f"these sources inherit the interval fallback instead of declaring a minimum interval: "
+        f"{', '.join(missing)}. Set MINIMUM_INTERVAL on each class, with the reasoning beside it"
+    )
+
+
+def test_every_source_declares_a_default_max_age():
+    """A source must say how long its readings stay worth acting on.
+
+    Deliberately separate from ``MINIMUM_INTERVAL``, and the first attempt derived one from
+    the other, which is wrong in both directions. Nuki's minimum interval is 0 because an
+    MQTT read sends nothing, so a multiple of it made every reading instantly stale; Octopus
+    data is around a day behind by nature, so a multiple of its rate limit would have put a
+    healthy feed permanently in the fail-safe.
+
+    How often a source may be asked and how long its answer stays true are unrelated
+    questions, so each gets its own answer and each has to be chosen.
+    """
+    from toinflux.general import known_sources, source_class
+
+    missing = sorted(source for source in known_sources() if source_class(source).DEFAULT_MAX_AGE is None)
+    assert not missing, (
+        f"these sources declare no default max age: {', '.join(missing)}. Set DEFAULT_MAX_AGE on "
+        f"each class, reasoned from how long its readings stay true rather than from its rate limit"
+    )
+
+
+def test_the_example_settings_quote_the_real_per_source_defaults():
+    """A default written into the shipped example must be the one the code uses.
+
+    example_settings.yaml documents `minimum_interval` and `max_age` per source and names
+    each default in the comment above it. Those numbers live on the handler classes, so a
+    hand-written copy in a YAML comment is exactly the kind of thing that is right the day
+    it is written and wrong six months later - and wrong in the file an operator trusts.
+
+    Checked by reading both and comparing, rather than by remembering to update two places.
+    """
+    from toinflux.general import known_sources, source_class
+
+    text = (REPO_ROOT / "example_settings.yaml").read_text(encoding="utf-8")
+    wrong, missing = [], []
+    for source in sorted(known_sources()):
+        handler = source_class(source)
+        section = re.search(rf"^{re.escape(source)}:$(.*?)(?=^\S|\Z)", text, re.M | re.S)
+        if not section:
+            continue
+        for key, expected in (("minimum_interval", handler.MINIMUM_INTERVAL), ("max_age", handler.DEFAULT_MAX_AGE)):
+            found = re.search(
+                rf"^  # Uncomment[^\n]*\(default: (\d+) seconds\)\n  # {key}: (\d+)$", section.group(1), re.M
+            )
+            if not found:
+                missing.append(f"{source}.{key}")
+            elif {int(found.group(1)), int(found.group(2))} != {expected}:
+                wrong.append(f"{source}.{key}: example says {found.group(1)}/{found.group(2)}, code says {expected}")
+    assert not missing, "sources documented in example_settings.yaml without these keys: " + ", ".join(missing)
+    assert not wrong, "example_settings.yaml disagrees with the handler classes: " + "; ".join(wrong)
+
+
+def _pattern_text(node):
+    """Return the literal text of a pattern expression, or None where it cannot be read.
+
+    An f-string's constant parts count, because that is where the anchors are written: a
+    pattern spelled ``rf"^{re.escape(field)}$"`` is as anchored as a plain one, and the old
+    regex-based version of this guard could not see it at all.
+
+    Args:
+        node (ast.AST): the expression the pattern was given as
+
+    Returns:
+        str or None: the readable text, or None where there is none
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        parts = [p.value for p in node.values if isinstance(p, ast.Constant) and isinstance(p.value, str)]
+        return "".join(parts) if parts else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _pattern_text(node.left), _pattern_text(node.right)
+        return None if left is None or right is None else left + right
+    return None
+
+
+def _module_patterns(tree):
+    """Return the pattern text of every module-level name that holds one.
+
+    Both spellings are used in this project: a compiled ``re.compile(...)`` constant, and a
+    bare pattern string shared between a validator and the parser that must agree with it.
+
+    Args:
+        tree (ast.Module): the parsed module
+
+    Returns:
+        dict: name to pattern text, the text None where the pattern cannot be read
+    """
+    patterns = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "compile"
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == "re"
+        ):
+            text = _pattern_text(value.args[0]) if value.args else None
+        else:
+            text = _pattern_text(value)
+            if text is None:
+                continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                patterns[target.id] = text
+    return patterns
+
+
+def _imported_names(tree, by_module):
+    """Return what a module imports, resolved through the module that defines it.
+
+    Resolved rather than guessed from the name alone: two modules may spell a constant the
+    same way, and a guard that answered from a global pool of names would eventually answer
+    about the wrong one.
+
+    Args:
+        tree (ast.Module): the parsed module
+        by_module (dict): dotted module name to that module's own map of name to whatever
+            the caller is tracking
+
+    Returns:
+        dict: local name to the defining module's value for it
+    """
+    resolved = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.module is None:
+            continue
+        source = by_module.get(node.module, {})
+        for alias in node.names:
+            if alias.name in source:
+                resolved[alias.asname or alias.name] = source[alias.name]
+    return resolved
+
+
+def _resolve_pattern(node, patterns):
+    """Return the pattern text an argument names, or None where it cannot be read.
+
+    A name is looked up rather than given up on, because the shared-constant spelling -
+    ``re.match(CONTROL_NAME_PATTERN, name)`` - is the idiom this project actually uses for
+    the patterns that decide filenames.
+
+    Args:
+        node (ast.AST): the expression the pattern was given as
+        patterns (dict): known pattern names, local and imported
+
+    Returns:
+        str or None: the pattern text, or None where it is not readable
+    """
+    if isinstance(node, ast.Name):
+        return patterns.get(node.id)
+    return _pattern_text(node)
+
+
+def _is_anchored(text):
+    """Whether a pattern carries a real anchor.
+
+    A bare ``"^" in text`` would fire on ``[^a-z]``, where the caret negates a character
+    class and anchors nothing, and on an escaped literal caret. A guard that refuses a
+    legitimate pattern is a guard somebody switches off, so escapes and character classes
+    come out before the question is asked.
+
+    Args:
+        text (str): the pattern
+
+    Returns:
+        bool: whether it anchors either end
+    """
+    without_escapes = re.sub(r"\\.", "", text)
+    without_classes = re.sub(r"\[[^]]*]", "", without_escapes)
+    return "^" in without_classes or "$" in without_classes
+
+
+def _anchored_match_calls(source, imported=None):
+    """Return anchored patterns checked with ``.match()``, and the calls this cannot read.
+
+    ``$`` matches before a trailing newline, so ``re.match(r"^x$", "x\\n")`` succeeds. An
+    anchored pattern read with ``match()`` therefore is not the whole-string test it looks
+    like, which matters most where the string becomes a filename or reaches a query.
+
+    Parsed rather than grepped, and that is not a tidying-up. The regex this replaced read
+    the pattern literal as ``r?["']``, so every ``rf"..."`` was invisible to it - and it
+    was invisible in exactly the way the two hand sweeps before it were.
+
+    Args:
+        source (str): the module's source text
+        imported (dict or None): pattern text for names this module imports, from
+            :func:`_imported_names`
+
+    Returns:
+        tuple: ``(offenders, unreadable)``, each a list of ``(line, snippet)``. A call whose
+        pattern cannot be read is reported rather than skipped silently: the one site this
+        guard could not read turned out to be a real instance of the bug.
+    """
+    tree = ast.parse(source)
+    patterns = dict(imported or {})
+    patterns.update(_module_patterns(tree))
+    offenders, unreadable = [], []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "match"):
+            continue
+        owner = node.func.value
+        if isinstance(owner, ast.Name) and owner.id == "re":
+            text = _resolve_pattern(node.args[0], patterns) if node.args else None
+            snippet = "re.match()"
+        elif isinstance(owner, ast.Name) and owner.id in patterns:
+            text = patterns[owner.id]
+            snippet = f"{owner.id}.match()"
+        elif (
+            isinstance(owner, ast.Call)
+            and isinstance(owner.func, ast.Attribute)
+            and owner.func.attr == "compile"
+            and isinstance(owner.func.value, ast.Name)
+            and owner.func.value.id == "re"
+        ):
+            text = _resolve_pattern(owner.args[0], patterns) if owner.args else None
+            snippet = "re.compile(...).match()"
+        elif isinstance(owner, ast.Name) and owner.id.isupper():
+            # A shouted name this module neither defines nor imports from one of ours.
+            # Not readable from here, and not to be passed over on that account.
+            text, snippet = None, f"{owner.id}.match()"
+        else:
+            # Somebody else's match(): a difflib matcher, a parser's own method. Not a
+            # regex question.
+            continue
+        if text is None:
+            unreadable.append((node.lineno, snippet))
+        elif _is_anchored(text):
+            offenders.append((node.lineno, snippet))
+    return offenders, unreadable
+
+
+def test_no_anchored_pattern_is_read_with_match():
+    """An anchored pattern checked with ``match()`` is not a whole-string test.
+
+    ``$`` matches before a trailing newline, so ``"conservatory\\n"`` passed the control-name
+    allow-list, ``"host2\\n"`` was read as naming a second Hue bridge, ``"2\\n"`` as a
+    canonical credential slot, and ``"1h);DROP"`` reached InfluxDB through the ``group_by``
+    validator - that last one on main, for months.
+
+    This guard exists because sweeping for it by hand did not work twice, and the first
+    machine version of it had the same shape of blind spot: it read the pattern literal with
+    a regex of its own, which could not see ``rf"^...$"``. Parsing the module is what closed
+    that, and it immediately found two more sites.
+
+    ``fullmatch`` is the fix in every case, and the anchors can go with it.
+
+    Product code only, for two reasons. The risk is product-side - a name that becomes a
+    filename, a value that reaches a query - and the tests that do this parse lines from
+    ``splitlines()``, which has already removed the newline, so ``match`` there is ordinary
+    line parsing rather than a latent hole. Scoping this way also keeps the guard from
+    reporting its own examples, which is why the subprocess guard is scoped the same way.
+    """
+    product = [path for path in _every_python_file() if path.relative_to(REPO_ROOT).parts[0] in PRODUCT_CODE_ROOTS]
+    trees = {path: ast.parse(path.read_text(encoding="utf-8")) for path in product}
+    patterns_by_module = {
+        ".".join(path.relative_to(REPO_ROOT).with_suffix("").parts): _module_patterns(tree)
+        for path, tree in trees.items()
+    }
+    offenders, unreadable = [], []
+    for path, tree in trees.items():
+        imported = _imported_names(tree, patterns_by_module)
+        found, skipped = _anchored_match_calls(path.read_text(encoding="utf-8"), imported)
+        offenders += [f"{path.relative_to(REPO_ROOT)}:{line} {snippet}" for line, snippet in found]
+        unreadable += [f"{path.relative_to(REPO_ROOT)}:{line} {snippet}" for line, snippet in skipped]
+    assert not offenders, "anchored patterns read with match() instead of fullmatch(): " + "; ".join(offenders)
+    # Reported as a failure rather than logged and passed over. A guard that meets a case it
+    # cannot read and says nothing is indistinguishable from one that found nothing, and the
+    # single site this could not read was a real instance of the bug.
+    assert not unreadable, (
+        "match() calls whose pattern this guard cannot read - use fullmatch(), or define the "
+        "pattern where it can be seen: " + "; ".join(unreadable)
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'X_RE = re.compile(r"^\\d+$")\nX_RE.match(value)\n',
+        'X_RE = re.compile(r"^\\d+")\nX_RE.match(value)\n',
+        're.match(r"^[a-z]+$", value)\n',
+        "re.match(r'^[a-z]+$', value)\n",
+        're.match(rf"^{re.escape(field)}$", value)\n',
+        'PATTERN = r"^[a-z]+$"\nre.match(PATTERN, value)\n',
+        'PATTERN = r"^[a-z]+$"\nre.compile(PATTERN).match(value)\n',
+    ],
+)
+def test_the_anchored_match_guard_sees_every_spelling(source):
+    """Five ways to write it, and every one of them has been missed by something. The hand
+    sweeps missed the inline literal; the regex version of this guard could not see an
+    f-string prefix or a pattern held in a named constant, and two real sites were sitting
+    behind exactly those."""
+    assert _anchored_match_calls(source)[0], f"not detected: {source!r}"
+
+
+def test_the_anchored_match_guard_reports_what_it_cannot_read():
+    """A guard that meets a case it does not understand and says nothing is indistinguishable
+    from one that found nothing. The single site this could not read - a pattern imported
+    from another module - turned out to be a real instance of the bug, and it surfaced only
+    because the skip was reported rather than swallowed."""
+    assert _anchored_match_calls("IMPORTED_RE.match(value)\n") == ([], [(1, "IMPORTED_RE.match()")])
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'X_RE = re.compile(r"^\\d+$")\nX_RE.fullmatch(value)\n',
+        're.fullmatch(r"^[a-z]+$", value)\n',
+        'X_RE = re.compile(r"\\d+")\nX_RE.match(value)\n',
+        're.match(r"[a-z]+", value)\n',
+        "re.search(r'^[a-z]+$', value)\n",
+        're.match(r"[^a-z]+", value)\n',
+        'X_RE = re.compile(r"[^,]+")\nX_RE.match(value)\n',
+    ],
+)
+def test_the_anchored_match_guard_leaves_the_rest_alone(source):
+    """fullmatch is the fix, an unanchored match is how a tokeniser works, and search is a
+    different question entirely. A guard firing on those would be switched off.
+
+    The last two are the caret that anchors nothing: inside a character class it negates,
+    and reading it as an anchor would refuse the ordinary way to write "up to the next
+    comma"."""
+    assert _anchored_match_calls(source) == ([], []), f"false positive: {source!r}"
+
+
+def test_the_runtime_state_a_control_writes_is_ignored():
+    """Off systemd, a control writes beside settings.yaml - which in a checkout is the
+    repository root, so running one leaves its directories here.
+
+    Asked of git rather than by reading .gitignore, because what matters is the answer git
+    gives: a later rule can re-include a path, and a pattern that looks right can be wrong
+    about a directory. The names come from the constants the code actually uses, so renaming
+    one and forgetting the ignore rule fails here rather than in somebody's `git status`.
+    """
+    from toinflux.controls import CONTROL_DIR_NAME
+    from toinflux.inputs import LOCK_DIR_NAME
+
+    for name in (CONTROL_DIR_NAME, LOCK_DIR_NAME):
+        try:
+            finished = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "check-ignore", f"{name}/"],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+        except OSError as exc:
+            finished = None
+            failure = str(exc)
+        # check-ignore answers 0 for ignored and 1 for not; anything else is git declining to
+        # answer at all. Same handling as `_tracked_files` above, and for the same reason: no
+        # git or no checkout is a fact about the environment rather than about this repo, but
+        # a skip must never be how a merge gate quietly stops running - so under CI it fails.
+        if finished is None or finished.returncode not in (0, 1):
+            failure = failure if finished is None else (finished.stderr.strip() or f"exit {finished.returncode}")
+            if os.environ.get("CI"):
+                raise RuntimeError(
+                    f"cannot ask git whether {name}/ is ignored ({failure}), and CI is set - this "
+                    f"check is a merge gate there, so it must fail rather than skip"
+                )
+            pytest.skip(
+                f"not a git checkout, or git is unavailable ({failure}) - the ignore rules are not checkable here"
+            )
+        assert finished.returncode == 0, f"{name}/ is runtime state the code writes, and is not in .gitignore"
+
+
+def _rule_call_sites(relative):
+    """Return the rule-slot parse sites in one module, and why any were unreadable.
+
+    A *slot* is a place the runtime turns a piece of a control document into a rule. The
+    shared helper's own call to the parser is not one: it is the mechanism every slot goes
+    through, so counting it would report one slot more than exist.
+
+    Args:
+        relative (str): the module's path relative to the repository root
+
+    Returns:
+        tuple: the number of slot call sites found, and a reason string where the module
+        could not be read at all
+
+    Raises:
+        AssertionError: never; an unreadable module is reported rather than raised
+    """
+    path = REPO_ROOT / relative
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError) as exc:
+        return 0, f"{relative} could not be parsed: {exc!r}"
+    sites = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        # Inside the shared helper, the parse call is the mechanism rather than a slot.
+        if node.name == "_rule":
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name):
+                if inner.func.id in ("_rule", "parse_rule"):
+                    sites += 1
+    return sites, ""
+
+
+def test_the_rule_slot_table_describes_every_slot_the_runtime_parses():
+    """A rule slot the runtime honours and `CONTROL_RULE_SLOTS` has never heard of passes
+    `--check-config` and kills the control at startup - which is the exact failure the
+    table exists to prevent, arriving through the table itself being incomplete.
+
+    Counted rather than matched by name: the runtime binds each slot to its own attribute,
+    so there is no shared loop to read the list off. A guard that cannot find the call
+    sites at all fails saying so rather than passing on a count of zero.
+    """
+    from toinflux.controls import CONTROL_RULE_SLOTS
+
+    found = 0
+    unreadable = []
+    for relative in ("toinflux/controller.py", "toinflux/gating.py"):
+        sites, reason = _rule_call_sites(relative)
+        found += sites
+        if reason:
+            unreadable.append(reason)
+
+    assert not unreadable, "; ".join(unreadable)
+    assert found, (
+        "no rule parse sites were found in the runtime at all, so this guard is no longer "
+        "guarding anything - it looks for calls to `_rule` or `parse_rule`, and one of "
+        "those has been renamed"
+    )
+    assert found == len(CONTROL_RULE_SLOTS), (
+        f"the runtime parses {found} rule slot(s) but CONTROL_RULE_SLOTS describes "
+        f"{len(CONTROL_RULE_SLOTS)}. A slot the validator does not know about is one that "
+        f"passes --check-config and fails at startup instead"
+    )
+
+
+def test_every_source_that_claims_to_actuate_devices_can():
+    """`MCP_ACTUATES_DEVICES` is a promise that `mcp_set_device_state()` exists, and a
+    control calls that method on the strength of the flag alone.
+
+    The reverse of this pair is how the flag came to exist. `command_devices` tested
+    `MCP_WRITABLE`, which says only that *some* write path exists - Speedtest's is
+    `mcp_trigger_run()` - so a control naming Speedtest as a device source passed the check
+    and raised AttributeError on the next line. That is not one of the types the
+    supervisor's safe-state pass handles, so one control's document could end the thread
+    supervising all of them.
+
+    A flag and the method it promises, in different files, is exactly the pair a machine
+    should be comparing rather than a reviewer.
+
+    Read from the source registry rather than by walking `DataHandler.__subclasses__()`.
+    The registry is what decides whether a name in a control document resolves at all, so
+    a handler it does not list cannot be reached by a control and does not need the promise
+    kept; and reaching every subclass would mean importing every module first, which is a
+    larger claim about the tree than this guard needs to make.
+    """
+    from toinflux.general import known_sources, source_class
+
+    names = known_sources()
+    assert names, "the source registry is empty, so this guard is guarding nothing"
+
+    liars = []
+    for name in names:
+        handler = source_class(name)
+        if getattr(handler, "MCP_ACTUATES_DEVICES", False) and not hasattr(handler, "mcp_set_device_state"):
+            liars.append(name)
+    liars.sort()
+    assert not liars, (
+        f"{', '.join(liars)} declare MCP_ACTUATES_DEVICES without defining "
+        f"mcp_set_device_state(), which a control calls on the strength of that flag alone"
+    )
+
+
+def test_every_permitted_control_key_is_described_for_a_client():
+    """`CONTROL_KEY_HELP` is what `get_control_schema` hands a client that has to write a
+    control document. A key added to the permitted set without a line there is a key nobody
+    outside this repository can use, because being told is the only way to learn the format -
+    and the store refuses an unknown key, so guessing does not work either.
+
+    The reverse matters as much: a description for a key the store no longer permits tells a
+    client to write something that will be refused.
+    """
+    from toinflux.controls import CONTROL_KEY_HELP, CONTROL_KEYS
+
+    undescribed = sorted(CONTROL_KEYS - set(CONTROL_KEY_HELP))
+    stale = sorted(set(CONTROL_KEY_HELP) - CONTROL_KEYS)
+    assert not undescribed, (
+        f"{', '.join(undescribed)} may appear in a control document and CONTROL_KEY_HELP does "
+        f"not describe them, so get_control_schema tells a client nothing about them"
+    )
+    assert not stale, (
+        f"CONTROL_KEY_HELP describes {', '.join(stale)}, which the store does not permit - a "
+        f"client following it would write a document that is refused for an unknown key"
+    )
+
+
+def test_the_controls_reference_names_every_key_and_function():
+    """`CONTROLS.md` is what somebody writing a control by hand reads, and it was written by
+    generating it from these same constants. Committed, it is static text that drifts.
+
+    Documentation drifting from the format is not hypothetical here: the design note's worked
+    example read an input it never declared, and stayed that way until rules were validated.
+    A key or a rule function that exists and is not in the reference is one nobody hand-editing
+    a document can find out about.
+    """
+    from toinflux.controls import CONTROL_KEYS
+    from toinflux.rules import FUNCTION_ARITY
+
+    reference = (REPO_ROOT / "CONTROLS.md").read_text(encoding="utf-8")
+    missing_keys = sorted(key for key in CONTROL_KEYS if f"`{key}`" not in reference)
+    missing_functions = sorted(name for name in FUNCTION_ARITY if f"`{name}`" not in reference)
+    assert not missing_keys, f"CONTROLS.md does not mention the control key(s): {', '.join(missing_keys)}"
+    assert not missing_functions, f"CONTROLS.md does not mention the rule function(s): {', '.join(missing_functions)}"
+
+
+def test_the_worked_examples_in_the_reference_survive_being_pasted():
+    """`CONTROLS.md` tells a reader to start from one of its worked examples, so the test is
+    not that the file contains the right characters but that pasting them yields a control
+    this project accepts. Parsed with the same loader the store uses and run through the same
+    validator.
+
+    Every one of them, and they must be the documents actually shipped rather than prose that
+    has drifted from them: the reference and `get_control_schema` are two copies of the same
+    thing, and a reader following the one that went stale gets an error from the one that did
+    not.
+
+    YAML makes that less obvious than it sounds. Under PyYAML's 1.1 resolver an unquoted
+    `23:35` is the integer 1415, while `05:25` is the string it looks like - the sexagesimal
+    pattern needs a leading non-zero digit. `yaml.safe_dump` quotes exactly the values that
+    would otherwise change type, so the generated example is right by construction; this guard
+    is for the day somebody edits the file by hand and reasons about it the way a person does.
+    """
+    from toinflux.controls import CONTROL_EXAMPLES, validate_control
+
+    reference = (REPO_ROOT / "CONTROLS.md").read_text(encoding="utf-8")
+    blocks = [block for block in re.findall(r"```yaml\n(.*?)```", reference, re.S) if "name:" in block]
+    expected = {entry["document"]["name"]: entry["document"] for entry in CONTROL_EXAMPLES.values()}
+    assert len(blocks) == len(
+        expected
+    ), f"expected {len(expected)} worked control examples in CONTROLS.md, found {len(blocks)}"
+
+    for block in blocks:
+        document = yaml.safe_load(block)
+        assert isinstance(document, dict), "a worked example does not parse as a mapping"
+        name = document.get("name")
+        problems = validate_control(name, document)
+        assert not problems, f"the {name!r} example in CONTROLS.md does not validate: " + "; ".join(problems)
+        assert name in expected, f"CONTROLS.md carries an example {name!r} that the store does not ship"
+        assert document == expected[name], f"the {name!r} example in CONTROLS.md has drifted from the shipped one"
+
+
+# The one place a swallowed exception is rendered with %s rather than %r, and why.
+# Keyed by module and the name of the function the call sits in, not by line number,
+# so editing the file above it does not silently move the exemption somewhere else.
+SWALLOWED_EXCEPTION_RENDERED_FOR_A_PERSON = {("sendtoinflux.py", "_configure_logging_or_exit")}
+
+
+LOG_LEVEL_METHODS = frozenset({"debug", "info", "warning", "error", "critical", "exception"})
+# `logging.log(level, msg, *args)` takes the level first, so its format string and its
+# arguments both sit one place further along than every other call above. Named here
+# rather than handled at the call site because forgetting it is invisible: the guard goes
+# on passing and simply stops looking, which is the failure mode a guard must not have.
+LOG_METHOD_WITH_LEVEL_FIRST = "log"
+
+
+def _format_specifier_positions(text):
+    """Return the index of each %-conversion's specifier character, skipping ``%%``.
+
+    Args:
+        text (str): the format string's source, which may span several concatenated literals
+
+    Returns:
+        list: one index per conversion, in order, so the Nth matches the Nth argument
+    """
+    found = []
+    index = 0
+    while index < len(text) - 1:
+        if text[index] != "%":
+            index += 1
+            continue
+        if text[index + 1] == "%":
+            index += 2
+            continue
+        cursor = index + 1
+        while cursor < len(text) and text[cursor] in "-+ #0123456789.*":
+            cursor += 1
+        if cursor < len(text):
+            found.append(cursor)
+        index = cursor + 1
+    return found
+
+
+def _enclosing_function_names(tree):
+    """Map each node to the name of the function containing it.
+
+    Args:
+        tree (ast.Module): the parsed module
+
+    Returns:
+        dict: id(node) -> the innermost enclosing function's name
+    """
+    names = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for inner in ast.walk(node):
+                names.setdefault(id(inner), node.name)
+    return names
+
+
+def _swallowing_handlers(tree):
+    """Yield every ``except X as e:`` handler that does not re-raise.
+
+    Args:
+        tree (ast.Module): the parsed module
+
+    Yields:
+        ast.ExceptHandler: a handler that binds its exception and swallows it
+    """
+    for handler in (node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)):
+        if handler.name is None:
+            continue
+        if any(isinstance(node, ast.Raise) for node in ast.walk(handler)):
+            continue
+        yield handler
+
+
+def _exception_renderings(source, tree, handler):
+    """Yield how each log call in one handler renders the exception it caught.
+
+    Args:
+        source (str): the module's source, for reading a format string's own span
+        tree (ast.Module): the parsed module
+        handler (ast.ExceptHandler): the handler to look inside
+
+    Yields:
+        tuple: (the enclosing function's name, line number, the conversion character used)
+    """
+    starts = [0]
+    for line in source.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    enclosing = _enclosing_function_names(tree)
+    for call in (node for node in ast.walk(handler) if isinstance(node, ast.Call)):
+        method = getattr(call.func, "attr", None)
+        if method not in LOG_LEVEL_METHODS and method != LOG_METHOD_WITH_LEVEL_FIRST:
+            continue
+        first = 1 if method == LOG_METHOD_WITH_LEVEL_FIRST else 0
+        fmt = call.args[first] if len(call.args) > first else None
+        if not isinstance(fmt, ast.Constant) or not isinstance(fmt.value, str):
+            continue
+        span = source[starts[fmt.lineno - 1] + fmt.col_offset : starts[fmt.end_lineno - 1] + fmt.end_col_offset]
+        specifiers = _format_specifier_positions(span)
+        carries_traceback = any(
+            keyword.arg == "exc_info" and getattr(keyword.value, "value", True) for keyword in call.keywords
+        )
+        for position, argument in enumerate(call.args[first + 1 :]):
+            if isinstance(argument, ast.Name) and argument.id == handler.name and position < len(specifiers):
+                conversion = "duplicated" if carries_traceback else span[specifiers[position]]
+                yield enclosing.get(id(call), "<module>"), call.lineno, conversion
+
+
+def _swallowed_exception_log_calls():
+    """Yield every log call that renders a caught-and-not-re-raised exception.
+
+    Yields:
+        tuple: (module path, enclosing function name, line number, the conversion used)
+    """
+    for path in _modules_that_carry_a_header():
+        if path.relative_to(REPO_ROOT).parts[0] not in PRODUCT_CODE_ROOTS:
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, str(path))
+        module = str(path.relative_to(REPO_ROOT))
+        for handler in _swallowing_handlers(tree):
+            for function, line, conversion in _exception_renderings(source, tree, handler):
+                yield module, function, line, conversion
+
+
+def test_a_swallowed_exception_keeps_its_type_in_the_log():
+    """An exception that is caught, logged and not re-raised is rendered with ``%r``.
+
+    The log line is the only record that it happened, so the type has to be in it. Nothing
+    else carries it: there is no traceback, and no ``raise ... from exc`` chain for a reader
+    to follow. ``ConfigError('hue.host is not set')`` and
+    ``SourceConnectionError('hue.host is not set')`` render identically under ``%s``, and
+    those two mean opposite things - one is stop, the other is retry.
+
+    Deliberately not applied to an exception that is re-raised, where ``from exc`` preserves
+    the chain and the traceback prints the type at the top, so ``%r`` there is noise. The
+    rule follows what the reader can otherwise recover, not a preference about quoting.
+
+    One exemption, named in ``SWALLOWED_EXCEPTION_RENDERED_FOR_A_PERSON`` above: a message
+    whose entire text is the exception, shown to somebody starting the service before it
+    exits. ``%r`` would wrap a sentence written for them in a class name and quotes.
+    """
+    wrong = [
+        f"{module}:{line} in {function}()"
+        for module, function, line, conversion in _swallowed_exception_log_calls()
+        if conversion != "r" and (module, function) not in SWALLOWED_EXCEPTION_RENDERED_FOR_A_PERSON
+    ]
+    assert not wrong, "a swallowed exception must be logged with %r so its type survives: " + ", ".join(wrong)
+
+
+def test_the_exemption_list_names_something_real():
+    """An exemption that stops matching is an exemption nobody notices has gone stale.
+
+    Without this, deleting or renaming the exempted call leaves an entry that silently
+    permits a future ``%s`` in whatever function later takes that name.
+    """
+    exempted = {
+        (module, function)
+        for module, function, _line, conversion in _swallowed_exception_log_calls()
+        if conversion != "r"
+    }
+    stale = SWALLOWED_EXCEPTION_RENDERED_FOR_A_PERSON - exempted
+    assert not stale, f"these exemptions no longer match a %s log call and should be removed: {stale}"
+
+
+def test_an_exception_is_not_rendered_twice_into_one_record():
+    """Where ``exc_info`` attaches the traceback, the message does not also name the exception.
+
+    The rule above exists because a swallowed exception's log line is the only record of it,
+    so the type has to be in that line. ``exc_info=True`` puts the type in the record by
+    another route - the traceback's last line is the type and the message - so repeating it
+    in the summary prints it twice in the same entry:
+
+        WARNING  Error handling MQTT message on topic 'sensors/x': RuntimeError('boom')
+          Traceback (most recent call last):
+            ...
+          RuntimeError: boom
+
+    The message carries what the traceback cannot: which topic, which control, which file.
+    ``mcp_common.py`` already logs this way, and this is the rule it was following.
+    """
+    duplicated = [
+        f"{module}:{line} in {function}()"
+        for module, function, line, conversion in _swallowed_exception_log_calls()
+        if conversion == "duplicated"
+    ]
+    assert not duplicated, (
+        "these pass exc_info and also render the exception into the message, printing it "
+        "twice in one record: " + ", ".join(duplicated)
+    )
+
+
+def test_every_product_module_is_findable_from_the_contributor_docs():
+    """A new module under `toinflux/` appears in CONTRIBUTING.md's tree and AGENTS.md's routing.
+
+    Both are steps in CONTRIBUTING.md's own "Checklist when adding a module under
+    `toinflux/`". The checklist did not hold: seven modules carrying the entire control
+    loop - the supervisor, the control process, the PID, the gate, the schedule, the stage
+    ladder and the input reader - were in neither file, added by the same branch that wrote
+    the checklist. Prose asking somebody to remember is what this repository turns into a
+    test, so here it is.
+
+    A wildcard line counts. `toinflux/mcp_*.py` is one row for the whole MCP surface in both
+    files, and expanding it per module would make both documents worse to read.
+    """
+    contributing = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+    def findable(module, text):
+        """Whether this module is named in that document, directly or by a wildcard.
+
+        Args:
+            module (str): the module's file name, e.g. "supervision.py"
+            text (str): the document's contents
+
+        Returns:
+            bool: True where a reader would be routed to it
+        """
+        if module in text:
+            return True
+        stem = module.removesuffix(".py")
+        return any(f"{prefix}_*.py" in text or f"{prefix}*.py" in text for prefix in (stem.split("_")[0],))
+
+    modules = sorted(path.name for path in (REPO_ROOT / "toinflux").glob("*.py") if path.name != "__init__.py")
+    missing = {
+        "CONTRIBUTING.md": [m for m in modules if not findable(m, contributing)],
+        "AGENTS.md": [m for m in modules if not findable(m, agents)],
+    }
+    assert not any(missing.values()), (
+        "these modules are not findable from the contributor documentation, which "
+        f"CONTRIBUTING.md's own checklist requires: {missing}"
+    )

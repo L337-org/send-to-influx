@@ -603,7 +603,8 @@ Key points:
   so package upgrades and reboots don't make the client re-authenticate.
 - **Read-only by default.** Device-control tools are opt-in per collector and aren't registered at
   all unless enabled in that collector's own settings block - when none is enabled, the write tools
-  don't exist on the server.
+  don't exist on the server. The same is true of the control-loop write tools, which need
+  `controls.mcp_write` on top of `controls.enabled`.
 
 **Example nginx config.** Give the server its own subdomain and serve it at the root - its OAuth
 flow uses several root-level routes (`/authorize`, `/token`, `/.well-known/oauth-*`, `/login`), so a
@@ -831,6 +832,48 @@ History queries run against InfluxDB through a fixed, parameterised query builde
 query from the model - with field names checked against the measurement's live field list, time
 ranges normalised in the app, and a capped result size.
 
+Control loops
+-------------
+
+A **control** holds something at a target by switching devices: a conservatory at a temperature,
+using two heaters on smart plugs. It reads its inputs from the data already being collected, runs a
+PID, and spends each cycle window across the rungs of a stage ladder - so two heaters can average a
+demand that neither of them can produce on its own.
+
+Controls are **off unless you switch them on**, because a control actuates devices with nobody
+watching:
+
+```yaml
+controls:
+  enabled: true      # run the stored controls
+  mcp_write: true    # let a connected model write them for you
+```
+
+That is deliberately not the per-source `mcp_read_write` flag. Wanting a heating loop is not the
+same as granting a connected model device-write access, and one setting governing both would force
+anyone wanting the first to accept the second.
+
+`mcp_write` is the second, separate opt-in, and neither implies the other. It lets a connected
+model create, change and delete controls, effective without a restart - a bigger grant than
+`mcp_read_write`, which permits an action now where this permits a standing rule that keeps
+acting. With it off, a model can still read your controls and compose one for you to save by
+hand; it just cannot save it itself.
+
+Each control is its own YAML document under the state directory (`/var/lib/send-to-influx/controls`
+on the packaged install), not part of `settings.yaml`: they are created and edited by the running
+service rather than by hand.
+
+**One process per control, supervised.** The main process starts one child per stored control,
+watches a heartbeat from each, and restarts one that dies or stops beating with a growing backoff.
+Every death is followed by the parent putting that control's devices into their safe state itself -
+a child that was killed or lost power did not get the chance.
+
+**[CONTROLS.md](CONTROLS.md) is the reference**: the document format key by key, the rule language
+and the things about it that bite, safe states and the active period, the stage ladder, a worked
+example, and what `--check-config` checks. The same reference is available at runtime from the
+`get_control_schema` MCP tool, built from the same constants, so a connected model composing a
+control is not guessing.
+
 Usage
 -----
 >$ ./.venv/bin/python ./sendtoinflux.py --help  
@@ -847,7 +890,11 @@ Usage
 > &emsp; -d, --dump            dump the data to the console one time and exit. This requires a source to be specified  
 > &emsp; -p, --print           print the raw data rather than sending it to InfluxDB  
 > &emsp; -s, --source SOURCE   the source of the data to send to InfluxDB (hue, zappi, etc.). If this parameter is omitted, all sources in the settings file
-> &emsp;                       'sources' list are started. If no sources are configured, the process logs that plainly and exits.
+> &emsp;                       'sources' list are started. If no sources are configured, the process logs that plainly and exits.  
+> &emsp; --control CONTROL     run one stored control as this process, rather than collecting. One process per control; the supervisor starts these, and an
+> &emsp;                       operator rarely does  
+> &emsp; --heartbeat-fd FD     an inherited pipe to beat down once per cycle, so a supervisor can tell a slow control from a dead one. Set by the supervisor
+> &emsp;                       when it starts a control
 
 ### Exit codes
 
