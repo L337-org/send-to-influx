@@ -571,3 +571,51 @@ class TestMalformedNumbers:
         with pytest.raises(RuleSyntaxError, match="not a valid number"):
             parse_rule("1and 2", NAMES)
         assert parse_rule("1 and 2", NAMES).evaluate({}) == 1.0
+
+
+class TestNanIsNotSwallowedByAComparison:
+    """`min`, `max` and `clamp` compare, and every comparison against nan is False.
+
+    So `max(18.0, nan)` was 18.0 and `clamp(nan, 0, 100)` was 0.0: a garbage reading came out
+    of the shipped example's own `max(target, dew + 5)` as a plausible setpoint, and the
+    controller's finite check - documented as the last line of defence - had nothing left to
+    catch. `min` happened to propagate where `max` did not, so the same reading gave
+    different answers depending on the order the operator wrote the arguments in.
+    """
+
+    NAN = float("nan")
+
+    @pytest.mark.parametrize(
+        "expression, bindings",
+        [
+            pytest.param("max(target, dew + 5)", {"target": 18.0, "dew": NAN}, id="the-shipped-example"),
+            pytest.param("max(a, b)", {"a": NAN, "b": 3.0}, id="max-nan-first"),
+            pytest.param("max(b, a)", {"a": NAN, "b": 3.0}, id="max-nan-second"),
+            pytest.param("min(a, b)", {"a": NAN, "b": 3.0}, id="min-nan-first"),
+            pytest.param("min(b, a)", {"a": NAN, "b": 3.0}, id="min-nan-second"),
+            pytest.param("clamp(x, 0, 100)", {"x": NAN}, id="clamp-value"),
+            pytest.param("clamp(1, x, 100)", {"x": NAN}, id="clamp-lower-bound"),
+            pytest.param("min(a, b, c)", {"a": 1.0, "b": NAN, "c": 3.0}, id="buried-in-the-middle"),
+        ],
+    )
+    def test_it_comes_out_the_other_side(self, expression, bindings):
+        result = parse_rule(expression, sorted(bindings)).evaluate(bindings)
+        assert math.isnan(result), f"{expression} turned a nan into {result!r}"
+
+    @pytest.mark.parametrize(
+        "expression, bindings, expected",
+        [
+            pytest.param("max(a, b)", {"a": 1.0, "b": 2.0}, 2.0, id="max"),
+            pytest.param("min(a, b)", {"a": 1.0, "b": 2.0}, 1.0, id="min"),
+            pytest.param("clamp(a, 0, 10)", {"a": 50.0}, 10.0, id="clamp-high"),
+            pytest.param("clamp(a, 0, 10)", {"a": -5.0}, 0.0, id="clamp-low"),
+        ],
+    )
+    def test_ordinary_values_are_untouched(self, expression, bindings, expected):
+        assert parse_rule(expression, sorted(bindings)).evaluate(bindings) == expected
+
+    def test_an_infinity_is_not_a_nan_and_still_compares(self):
+        """Infinity orders properly, so these functions have a correct answer for it and
+        should give it. It is the controller's finite check that refuses it later."""
+        result = parse_rule("min(a, b)", ["a", "b"]).evaluate({"a": float("inf"), "b": 3.0})
+        assert result == 3.0

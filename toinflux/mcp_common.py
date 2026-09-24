@@ -15,12 +15,11 @@ __license__ = "MIT"
 
 import functools
 import inspect
-import logging
 
 from mcp.server.mcpserver.exceptions import ToolError
 
 from toinflux.exceptions import ConfigError, ToInfluxError, ToolParamError
-from toinflux.general import INSTANCED_SOURCES, expand_sources, get_class, render_values
+from toinflux.general import INSTANCED_SOURCES, close_session, expand_sources, get_class, render_values
 
 # Every failure this project raises deliberately inherits ToInfluxError, and that base is what the
 # translation catches. It was a tuple of two types, and a tuple is a list that goes stale: ConfigError
@@ -261,17 +260,3 @@ def resolve_handler(source, settings, settings_file, instance=None):
             close_session(handler.session)
             raise ToolParamError(f"source {source!r} is not usable: {exc}") from exc
     return handler
-
-
-def close_session(session):
-    """Best-effort close of a handler's ``requests.Session``, swallowing any error.
-
-    This runs in cleanup paths and must never mask the real result or exception.
-
-    Args:
-        session (requests.Session): the handler's session
-    """
-    try:
-        session.close()
-    except Exception:  # pragma: no cover - close() shouldn't raise; never let cleanup break a tool
-        logging.debug("Ignoring error closing an MCP handler session", exc_info=True)

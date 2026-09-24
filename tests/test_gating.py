@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from tests.harness.installation import conservatory
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import DeviceGuard, Gate, commands_for
 from toinflux.rules import RuleEvaluationError
@@ -500,3 +501,50 @@ class TestAClosingEdgeIsNotSpentUntilItIsApplied:
         assert gate.decide({"outside": 5.0}, DAY).actuating is False
         assert gate.decide({"outside": 5.0}, NIGHT).edge == "opened"
         assert gate.decide({"outside": 5.0}, NIGHT).edge is None
+
+
+class TestTheNaiveMomentContractHoldsOnEveryPath:
+    """`decide`'s docstring promises ConfigError for a naive moment without qualification.
+
+    The check used to live inside `is_inside`, which is reached only for a control that is
+    enabled *and* declares an active period - so a disabled control, or one with no period,
+    accepted a naive datetime. A guarantee that holds on some paths is worse than one that is
+    not claimed, because the caller who relies on it is the one who does not test it.
+    """
+
+    NAIVE = datetime.datetime(2026, 1, 1, 12, 0)
+
+    @staticmethod
+    def _gate(**overrides):
+        """Return a gate over a control with the given overrides.
+
+        Args:
+            **overrides: top-level document keys to set
+
+        Returns:
+            Gate: the gate
+        """
+        document = conservatory()
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document.update(overrides)
+        return Gate(document)
+
+    @pytest.mark.parametrize(
+        "overrides, why",
+        [
+            pytest.param({"enabled": False}, "a disabled control never reached the check", id="disabled"),
+            pytest.param({}, "a control with no active period never reached it either", id="no-active-period"),
+            pytest.param(
+                {"active_period": {"from": "09:00", "to": "17:00"}}, "the path that always checked", id="with-period"
+            ),
+        ],
+    )
+    def test_it_is_refused(self, overrides, why):
+        with pytest.raises(ConfigError):
+            self._gate(**overrides).decide({}, self.NAIVE)
+
+    def test_an_aware_moment_is_accepted_on_all_of_them(self):
+        aware = datetime.datetime(2026, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
+        for overrides in ({"enabled": False}, {}, {"active_period": {"from": "09:00", "to": "17:00"}}):
+            assert self._gate(**overrides).decide({}, aware) is not None

@@ -35,6 +35,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import math
 import re
 from dataclasses import dataclass
 from toinflux.exceptions import ConfigError, ToInfluxError
@@ -439,6 +440,16 @@ class _Call:
             chosen = self.arguments[1] if condition else self.arguments[2]
             return chosen.evaluate(bindings)
         values = [argument.evaluate(bindings) for argument in self.arguments]
+        # **A nan must come out of these, not be quietly dropped by them.** Arithmetic
+        # propagates one on its own, and the controller checks the finished rule before the
+        # PID sees it - but `min`, `max` and `clamp` are comparisons, and every comparison
+        # against nan is False. `max(18.0, nan)` is 18.0 and `clamp(nan, 0, 100)` is 0.0, so
+        # a garbage reading came out of the worked example's own `max(target, dew + 5)` as a
+        # plausible setpoint and the last line of defence never saw it. Worse, `min` happened
+        # to propagate where `max` did not, so the same reading gave different answers
+        # depending on the order the operator wrote the arguments in.
+        if any(isinstance(value, float) and math.isnan(value) for value in values):
+            return math.nan
         if self.function == "min":
             return min(values)
         if self.function == "max":

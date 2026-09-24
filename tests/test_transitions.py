@@ -17,8 +17,8 @@ import os
 import pytest
 
 from toinflux.exceptions import ConfigError
-from toinflux.staging import build_ladder, reachable_ladder
-from toinflux.transitions import EARLY_FRACTION, TransitionLog, forget_control, transition_path
+from toinflux.staging import build_ladder, plan_window, reachable_ladder
+from toinflux.transitions import TransitionLog, forget_control, transition_path
 
 
 def _log(installation, name="conservatory", now=None):
@@ -59,7 +59,7 @@ class TestWhatCountsAsATransition:
         so it must not be frozen on the strength of a missing record."""
         log, _now = _log(state_directory)
         assert log.elapsed("heater") is None
-        assert log.frozen(lambda _d: 600, ("heater",), 60) == frozenset()
+        assert log.frozen(lambda _d: 600, ("heater",)) == frozenset()
 
 
 class TestSurvivingARestart:
@@ -82,7 +82,7 @@ class TestSurvivingARestart:
         first.record({"heater": False})
         now[0] += 5
         second, _ = _log(state_directory, now=now)
-        assert second.frozen(lambda _d: 120, ("heater",), 10) == frozenset({"heater"})
+        assert second.frozen(lambda _d: 120, ("heater",)) == frozenset({"heater"})
 
     def test_a_safe_state_that_changes_nothing_does_not_free_the_device(self, state_directory):
         """The exact sequence: heater off at t=0, process restarts at t=5 and asserts
@@ -94,35 +94,39 @@ class TestSurvivingARestart:
         restarted, _ = _log(state_directory, now=now)
         restarted.record({"heater": False})
         now[0] += 5
-        assert restarted.frozen(lambda _d: 120, ("heater",), 10) == frozenset({"heater"})
+        assert restarted.frozen(lambda _d: 120, ("heater",)) == frozenset({"heater"})
 
 
-class TestTheEarlyAllowance:
-    """Without it the check is asked once per window and always rounds the minimum up to the
-    next whole one, which is invisible and permanent."""
+class TestTheMinimumIsNeverAnticipated:
+    """A device is free once its minimum has elapsed and not a moment before.
 
-    def test_a_minimum_that_comes_due_early_in_the_window_is_allowed_now(self, state_directory):
-        # 100s elapsed of a 120s minimum, with a 60s window: the next chance to ask is at
-        # 160s, so waiting would turn a 120s minimum into 160.
+    An earlier version brought a transition forward by up to half a window, so that a
+    minimum expiring just after a boundary was not rounded up to the next one. It released
+    devices early - 899 seconds against a 900-second minimum, 100 against 120 - and being
+    early is the one direction that breaks the promise the setting makes. Asking once per
+    window means the answer can be late; it must never be early.
+    """
+
+    def test_one_second_short_of_the_minimum_is_still_held(self, state_directory):
         log, now = _log(state_directory)
         log.record({"heater": True})
-        now[0] += 100
-        assert log.frozen(lambda _d: 120, ("heater",), 60) == frozenset()
+        now[0] += 119
+        assert log.frozen(lambda _d: 120, ("heater",)) == frozenset({"heater"})
 
-    def test_a_minimum_with_most_of_the_window_still_to_run_is_not(self, state_directory):
+    def test_exactly_the_minimum_is_free(self, state_directory):
+        """The boundary belongs to the free side: "not more often than every 120 seconds"
+        is satisfied by 120."""
         log, now = _log(state_directory)
         log.record({"heater": True})
-        now[0] += 60
-        assert log.frozen(lambda _d: 120, ("heater",), 60) == frozenset({"heater"})
+        now[0] += 120
+        assert log.frozen(lambda _d: 120, ("heater",)) == frozenset()
 
-    def test_the_allowance_is_bounded_by_the_window(self, state_directory):
-        """It is a fraction of the coming window rather than a constant, so a short cycle
-        cannot let a device move long before its minimum."""
+    def test_a_long_minimum_on_a_short_cycle_is_not_shortened(self, state_directory):
+        """The regime the freeze exists for, and the one the allowance damaged most."""
         log, now = _log(state_directory)
         log.record({"heater": True})
-        now[0] += 120 - (2 * EARLY_FRACTION)
-        assert log.frozen(lambda _d: 120, ("heater",), 2) == frozenset()
-        assert log.frozen(lambda _d: 240, ("heater",), 2) == frozenset({"heater"})
+        now[0] += 870
+        assert log.frozen(lambda _d: 900, ("heater",)) == frozenset({"heater"})
 
 
 class TestAClockThatStepsBackwards:
@@ -138,7 +142,7 @@ class TestAClockThatStepsBackwards:
         log, now = _log(state_directory)
         log.record({"heater": True})
         now[0] -= 3600
-        assert log.frozen(lambda _d: 120, ("heater",), 10) == frozenset({"heater"})
+        assert log.frozen(lambda _d: 120, ("heater",)) == frozenset({"heater"})
 
 
 class TestALogThatCannotBeRead:
@@ -296,7 +300,7 @@ class TestAMinimumLongerThanTheWindowIsKept:
         control = ControlProcess(name, settings_file=state_directory.settings_file)
         try:
             control.transitions.record({"far": True})
-            frozen = control.transitions.frozen(control.controller.min_transition_for, ("far",), control.cycle_seconds)
+            frozen = control.transitions.frozen(control.controller.min_transition_for, ("far",))
             assert frozen == frozenset({"far"})
             # The ladder the next window may use: only the rung that keeps it on.
             from toinflux.staging import reachable_ladder
@@ -368,7 +372,7 @@ class TestASafeStateTrumpsTheMinimum:
         now[0] += 5
         log.record({"heater": False}, forced=True)
         now[0] += 5
-        assert log.frozen(lambda _d: 900, ("heater",), 10) == frozenset()
+        assert log.frozen(lambda _d: 900, ("heater",)) == frozenset()
 
     def test_an_ordinary_move_afterwards_restores_the_normal_rule(self, state_directory):
         """The exemption belongs to the safe state that earned it, not to the device."""
@@ -377,7 +381,7 @@ class TestASafeStateTrumpsTheMinimum:
         now[0] += 5
         log.record({"heater": True})
         now[0] += 5
-        assert log.frozen(lambda _d: 900, ("heater",), 10) == frozenset({"heater"})
+        assert log.frozen(lambda _d: 900, ("heater",)) == frozenset({"heater"})
 
     def test_an_ordinary_command_confirming_the_forced_state_clears_it_too(self, state_directory):
         """The state does not change, so nothing is timed - but the exemption must still go,
@@ -394,7 +398,7 @@ class TestASafeStateTrumpsTheMinimum:
         first.record({"heater": False}, forced=True)
         second, _ = _log(state_directory, now=now)
         assert second.released("heater") is True
-        assert second.frozen(lambda _d: 900, ("heater",), 10) == frozenset()
+        assert second.frozen(lambda _d: 900, ("heater",)) == frozenset()
 
 
 class TestWhatACycleSaysForItself:
@@ -572,4 +576,96 @@ class TestAPartialFailureStillRecordsWhatMoved:
         log, now = _log(state_directory, name="pair")
         log.record({"one": True})
         now[0] += 5
-        assert log.frozen(lambda _d: 900, ("one", "two"), 1) == frozenset({"one"})
+        assert log.frozen(lambda _d: 900, ("one", "two")) == frozenset({"one"})
+
+
+class TestTheMinimumHoldsOverALongRun:
+    """Drive hundreds of windows and measure the gaps that actually occurred.
+
+    Every other test here asks whether the rule fires. This one asks the question the rule
+    exists to answer - was any device ever switched twice inside its minimum - and it is the
+    test that would have caught the early-release allowance, which satisfied every unit test
+    written for it while releasing a device at 899 seconds against a 900-second minimum.
+
+    It also pins something worth knowing: below `minimum <= cycle_seconds` the freeze never
+    decides anything, because `plan_window` already spaces the changes on its own. That is
+    why it is not a defect that the shipped examples never freeze anything.
+    """
+
+    LADDER = build_ladder(
+        [
+            {"level": 0, "set": {"far": False, "near": False}},
+            {"level": 750, "set": {"far": True, "near": False}},
+            {"level": 1500, "set": {"far": True, "near": True}},
+        ]
+    )
+    # Wanders across every rung and lands on each of them, which is what makes devices move.
+    DEMANDS = [(step * 137) % 1600 for step in range(400)]
+
+    @classmethod
+    def _shortest_gap(cls, cycle, minimum, freeze=True):
+        """Run the planner over many windows and return the shortest gap any device saw.
+
+        Args:
+            cycle (float): the cycle window
+            minimum (float): every device's min_transition_seconds
+            freeze (bool): whether to apply the cross-window freeze at all
+
+        Returns:
+            float: the shortest interval between two changes of one device, or inf where no
+                device ever changed twice
+        """
+        now, state, last, shortest = 0.0, {"far": False, "near": False}, {}, {}
+        for demand in cls.DEMANDS:
+            held = {d for d in state if freeze and d in last and now - last[d] < minimum}
+            available = reachable_ladder(cls.LADDER, frozenset(held), state)
+            at = now
+            for dwell in plan_window(available, demand, cycle, lambda _device: minimum):
+                for device, value in dwell.stage.states.items():
+                    if state[device] != value:
+                        if device in last:
+                            shortest[device] = min(shortest.get(device, at - last[device]), at - last[device])
+                        last[device], state[device] = at, value
+                at += dwell.seconds
+            now += cycle
+        return min(shortest.values()) if shortest else float("inf")
+
+    @pytest.mark.parametrize(
+        "cycle, minimum",
+        [
+            pytest.param(300, 60, id="shipped-normal"),
+            pytest.param(300, 120, id="shipped-slow-response"),
+            pytest.param(60, 10, id="shipped-fast-adjustment"),
+            pytest.param(60, 900, id="minimum-far-longer-than-the-window"),
+            pytest.param(50, 120, id="minimum-just-over-the-window"),
+            pytest.param(29, 900, id="window-that-divides-the-minimum-badly"),
+            pytest.param(7, 120, id="very-short-window"),
+            pytest.param(13, 300, id="another-awkward-ratio"),
+            pytest.param(120, 120, id="minimum-equal-to-the-window"),
+            pytest.param(100, 60, id="minimum-under-the-window"),
+        ],
+    )
+    def test_no_device_is_ever_switched_inside_its_minimum(self, cycle, minimum):
+        gap = self._shortest_gap(cycle, minimum)
+        assert gap >= minimum, f"a device changed after {gap}s against a {minimum}s minimum"
+
+    @pytest.mark.parametrize("cycle, minimum", [(60, 900), (50, 120), (29, 900)])
+    def test_and_the_freeze_is_what_is_doing_it(self, cycle, minimum):
+        """Where the minimum is longer than the window, removing the freeze breaks it - so
+        these cases are not passing for some unrelated reason."""
+        assert self._shortest_gap(cycle, minimum, freeze=False) < minimum
+
+    @pytest.mark.parametrize("cycle, minimum", [(300, 60), (300, 120), (60, 10)])
+    def test_while_below_that_the_planner_alone_is_enough(self, cycle, minimum):
+        """The shipped examples. The freeze never fires here and does not need to: two dwells
+        each at least the minimum also space a change at a boundary from the one before it."""
+        assert self._shortest_gap(cycle, minimum, freeze=False) >= minimum
+
+    def test_lateness_is_bounded_by_one_window(self, state_directory):
+        """What asking once per window costs, stated rather than left to be discovered. It is
+        always less than the minimum itself, because the freeze only decides anything when the
+        minimum is the longer of the two."""
+        log, now = _log(state_directory)
+        log.record({"heater": True})
+        now[0] += 900
+        assert log.frozen(lambda _device: 900, ("heater",)) == frozenset()

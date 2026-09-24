@@ -10,6 +10,7 @@ import pytest
 import yaml
 from toinflux.general import (
     IndentedFormatter,
+    RepeatingProblem,
     configure_logging,
     MCP_DEFAULT_BIND_ADDRESS,
     expand_sources,
@@ -1222,3 +1223,82 @@ class TestControlsBlockValidation:
         package. The two switches are checked because they are silently ignorable."""
         sample_settings["controls"] = {"enabled": True, "something_later": 3}
         validate_settings(sample_settings)
+
+
+class TestRepeatingProblem:
+    """A fault that does not clear repeats every cycle for as long as the service runs, and
+    the identical line each time says nothing after the first."""
+
+    @staticmethod
+    def _reporter(repeat_after=100.0):
+        """Return a reporter and the clock driving it.
+
+        Args:
+            repeat_after (float): seconds before an unchanged problem is said again
+
+        Returns:
+            tuple: (RepeatingProblem, a one-element list holding the time)
+        """
+        now = [0.0]
+        return RepeatingProblem(repeat_after=repeat_after, clock=lambda: now[0]), now
+
+    def test_the_first_occurrence_is_reported_at_its_own_level(self, caplog):
+        problem, _now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            problem.report("cycle", logging.ERROR, "it broke")
+        assert [record.levelno for record in caplog.records] == [logging.ERROR]
+
+    def test_the_same_problem_again_drops_to_debug(self, caplog):
+        problem, now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(5):
+                problem.report("cycle", logging.ERROR, "it broke")
+                now[0] += 1
+        levels = [record.levelno for record in caplog.records]
+        assert levels == [logging.ERROR] + [logging.DEBUG] * 4, levels
+
+    def test_a_different_reason_is_news_again(self, caplog):
+        """Unreachable becoming authentication-failed is a different fault, and a key alone
+        would have hidden the second one behind the first."""
+        problem, _now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            problem.report("cycle", logging.ERROR, "unreachable")
+            problem.report("cycle", logging.ERROR, "authentication failed")
+        assert [record.levelno for record in caplog.records] == [logging.ERROR, logging.ERROR]
+
+    def test_a_long_running_fault_is_said_again_eventually(self, caplog):
+        """One line in week-old logs is not evidence that something is still broken."""
+        problem, now = self._reporter(repeat_after=100.0)
+        with caplog.at_level(logging.DEBUG):
+            problem.report("cycle", logging.ERROR, "it broke")
+            now[0] += 150
+            problem.report("cycle", logging.ERROR, "it broke")
+        assert [record.levelno for record in caplog.records] == [logging.ERROR, logging.ERROR]
+        assert "still" in caplog.records[1].getMessage()
+
+    def test_two_problems_do_not_hide_each_other(self, caplog):
+        problem, _now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            problem.report("inside", logging.WARNING, "inside is unreadable")
+            problem.report("outside", logging.WARNING, "outside is unreadable")
+        assert [record.levelno for record in caplog.records] == [logging.WARNING, logging.WARNING]
+
+    def test_recovery_is_reported_with_the_count(self, caplog):
+        """The gap in the journal is explained rather than merely absent."""
+        problem, now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(3):
+                problem.report("cycle", logging.ERROR, "it broke")
+                now[0] += 1
+            caplog.clear()
+            problem.cleared("cycle", "it works again")
+        assert "it works again" in caplog.text
+        assert "3" in caplog.text
+
+    def test_an_ordinary_cycle_says_nothing(self, caplog):
+        """`cleared` is called every successful cycle, so it must be silent when nothing was
+        wrong - otherwise the throttle would have swapped one repeated line for another."""
+        problem, _now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            problem.cleared("cycle", "it works again")
+        assert caplog.text == ""

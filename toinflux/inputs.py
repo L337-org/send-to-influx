@@ -39,6 +39,8 @@ from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamErr
 from toinflux.general import (
     MAX_AGE_KEY,
     MINIMUM_INTERVAL_KEY,
+    RepeatingProblem,
+    close_session,
     get_class,
     known_sources,
     render_values,
@@ -46,6 +48,12 @@ from toinflux.general import (
     source_class,
 )
 from toinflux.influx import InfluxWriteError, build_latest_query, resolve_db, run_query, single_series
+
+#: A live read happens once per cycle per control that names the input, so a source that
+#: stays down would otherwise repeat its warning for as long as the service runs. Module
+#: level because `_live_reading` is a function with nothing to hang state on, and the set of
+#: keys is bounded by the inputs an installation declares.
+_LIVE_READ_PROBLEMS = RepeatingProblem()
 
 
 def resolve_minimum_interval(source, settings):
@@ -205,7 +213,10 @@ def source_handler(source, settings_file=None, instance=None):  # noqa: DOC403 -
     finally:
         opened = getattr(handler, "session", None)
         if opened is not None:
-            opened.close()
+            # Through the shared helper, not a bare close. An exception raised here would
+            # replace whatever was propagating out of the `try` - a SourceConnectionError
+            # from a failed read reported as whatever went wrong tidying up after it.
+            close_session(opened)
 
 
 def stored_reading(session, settings, source, field, instance=None, settings_file=None, now=None):
@@ -848,7 +859,13 @@ def _live_reading(handler, source, field, instance, stored, now):
         #
         # Logged rather than swallowed: this is the difference between a control acting on
         # old data and one that cannot see its input at all, and only the log says which.
-        logging.warning(
+        # Through the reporter: a source that stays unreachable is read every cycle of every
+        # control that names it, and the identical WARNING each time says nothing after the
+        # first. Keyed per source and field, because two inputs failing for two reasons are
+        # two problems and a shared key would hide the second.
+        _LIVE_READ_PROBLEMS.report(
+            (source, field),
+            logging.WARNING,
             "Live read of %r for %r failed (%r); falling back to the stored value if there is one",
             source,
             field,

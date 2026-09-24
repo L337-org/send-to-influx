@@ -35,7 +35,7 @@ from toinflux.exceptions import ConfigError
 from toinflux.general import render_values
 from toinflux.controls import rule_names
 from toinflux.rules import RuleEvaluationError, parse_rule
-from toinflux.schedule import is_inside, parse_active_period
+from toinflux.schedule import is_inside, parse_active_period, require_aware
 
 #: What a falling edge or a failure does to the devices, when the answer is not "nothing".
 UNENERGISED = SAFE_STATE_UNENERGISED
@@ -116,6 +116,13 @@ class Gate:
                 produced something that is not an answer
             ConfigError: where the moment is naive
         """
+        # Checked here rather than only inside `is_inside`, which is where it used to live:
+        # that is reached only for a control that is enabled *and* declares an active period,
+        # so a disabled control or one without a period accepted a naive moment and the
+        # docstring above promised otherwise without qualification. A contract that holds
+        # only on some paths is worse than one that is not claimed, because the caller who
+        # relies on it is the one who does not test it.
+        require_aware(moment)
         acting, reason = self._assess(bindings, moment)
         was = self._acting
         if was is None or was == acting:

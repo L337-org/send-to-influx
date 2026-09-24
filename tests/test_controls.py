@@ -1160,3 +1160,44 @@ class TestEveryShippedExample:
             }
             if scenario != "slow_response":
                 assert not overrides, f"{scenario} shows an override with nothing to justify it: {overrides}"
+
+
+class TestANameDeclaredAsBothAnInputAndAParameter:
+    """Two docstrings said the store already refused this, and it did not.
+
+    `gather` builds the bindings as parameters and then overwrites them with inputs, so the
+    constant is shadowed permanently by the live reading: every rule evaluates, nothing is
+    logged, and adjusting the parameter at runtime changes nothing - which is the point at
+    which somebody starts doubting the machinery rather than the document.
+    """
+
+    def test_it_is_refused(self):
+        document = a_valid_control()
+        document["parameters"]["inside"] = 5.0
+        errors = validate_control("conservatory", document)
+        assert any("both declare" in error for error in errors)
+
+    def test_the_message_names_the_offending_name(self):
+        document = a_valid_control()
+        document["parameters"]["inside"] = 5.0
+        assert any("'inside'" in error for error in validate_control("conservatory", document))
+
+    def test_several_are_all_named_at_once(self):
+        """One error per run, not one per exchange with whoever is fixing it."""
+        document = a_valid_control()
+        document["parameters"]["inside"] = 5.0
+        document["parameters"]["dew"] = 5.0
+        errors = [error for error in validate_control("conservatory", document) if "both declare" in error]
+        assert len(errors) == 1
+        assert "'dew'" in errors[0] and "'inside'" in errors[0]
+
+    def test_distinct_names_are_fine(self):
+        assert validate_control("conservatory", a_valid_control()) == []
+
+    def test_a_section_of_the_wrong_shape_is_left_to_its_own_check(self):
+        """A comparison against something that is not a mapping would invent a second
+        complaint about a fault already reported precisely."""
+        document = a_valid_control()
+        document["parameters"] = "not a mapping"
+        errors = [error for error in validate_control("conservatory", document) if "both declare" in error]
+        assert errors == []

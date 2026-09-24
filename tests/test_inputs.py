@@ -1035,3 +1035,80 @@ class TestATimestampThatCannotBeBelieved:
         with caplog.at_level(logging.WARNING):
             _usable_age(float("nan"), 1_000_000.0, "hue", "temperature")
         assert "temperature" in caplog.text and "hue" in caplog.text
+
+
+class TestClosingAHandlerCannotMaskTheRealFailure:
+    """`source_handler` closed its session with a bare `opened.close()` in a `finally`.
+
+    An exception there replaces whatever was propagating out of the `try`, so a
+    SourceConnectionError from a failed read would have arrived as whatever went wrong
+    tidying up after it. The MCP layer has had a helper for exactly this for a long time;
+    `inputs.py` could not reach it, because it deliberately does not import that stack. The
+    helper now lives in the leaf module both of them already import.
+    """
+
+    def test_a_close_that_raises_does_not_replace_the_real_exception(self, installation, monkeypatch):
+        from toinflux.exceptions import SourceConnectionError
+        from toinflux.inputs import source_handler
+
+        class _Angry:
+            def close(self):
+                """Fail while being tidied up.
+
+                Raises:
+                    OSError: always
+                """
+                raise OSError("the socket had already gone")
+
+        from toinflux.general import get_class as real
+
+        def with_an_angry_session(*args, **kwargs):
+            """Return a handler whose session refuses to close.
+
+            Args:
+                *args: passed through
+                **kwargs: passed through
+
+            Returns:
+                DataHandler: the handler
+            """
+            handler = real(*args, **kwargs)
+            handler.session = _Angry()
+            return handler
+
+        monkeypatch.setattr("toinflux.inputs.get_class", with_an_angry_session)
+        with pytest.raises(SourceConnectionError, match="the real failure"):
+            with source_handler("hue", settings_file=installation.settings_file):
+                raise SourceConnectionError("the real failure")
+
+    def test_and_the_session_is_still_closed_on_the_ordinary_path(self, installation, monkeypatch):
+        from toinflux.inputs import source_handler
+
+        closed = []
+        from toinflux.general import get_class as real
+
+        def recording(*args, **kwargs):
+            """Return a handler whose close is recorded.
+
+            Args:
+                *args: passed through
+                **kwargs: passed through
+
+            Returns:
+                DataHandler: the handler
+            """
+            handler = real(*args, **kwargs)
+            original = handler.session.close
+
+            def close():
+                """Record the close and do it."""
+                closed.append(True)
+                original()
+
+            handler.session.close = close
+            return handler
+
+        monkeypatch.setattr("toinflux.inputs.get_class", recording)
+        with source_handler("hue", settings_file=installation.settings_file):
+            pass
+        assert closed == [True]

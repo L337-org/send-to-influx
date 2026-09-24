@@ -2444,6 +2444,16 @@ class TestShutdownStopsTheThreadBeforeTheDevices:
                 return False
 
         class _Supervisor:
+            teardown = "none"
+
+            def teardown_seconds(self):
+                """Return a teardown bound for one control.
+
+                Returns:
+                    float: seconds
+                """
+                return 5.0
+
             def stop_all(self):
                 """Record the safe-state pass."""
                 order.append("stop_all")
@@ -2453,7 +2463,8 @@ class TestShutdownStopsTheThreadBeforeTheDevices:
             sendtoinflux._stop_supervising(_Supervisor(), _Thread())
         finally:
             sendtoinflux.SHUTDOWN.clear()
-        assert order == [f"joined({sendtoinflux.SUPERVISOR_JOIN_SECONDS})", "stop_all"], order
+        expected = sendtoinflux.SUPERVISOR_JOIN_MARGIN_SECONDS + 5.0
+        assert order == [f"joined({expected})", "stop_all"], order
 
     def test_the_shutdown_event_is_set_first(self):
         """Joining without asking it to stop would wait out the whole bound every time."""
@@ -2477,6 +2488,16 @@ class TestShutdownStopsTheThreadBeforeTheDevices:
                 return False
 
         class _Supervisor:
+            teardown = "none"
+
+            def teardown_seconds(self):
+                """Return a teardown bound.
+
+                Returns:
+                    float: seconds
+                """
+                return 5.0
+
             def stop_all(self):
                 """Do nothing."""
 
@@ -2510,6 +2531,16 @@ class TestShutdownStopsTheThreadBeforeTheDevices:
                 return True
 
         class _Supervisor:
+            teardown = "none"
+
+            def teardown_seconds(self):
+                """Return a teardown bound.
+
+                Returns:
+                    float: seconds
+                """
+                return 5.0
+
             def stop_all(self):
                 """Record that the safe-state pass ran anyway."""
                 stopped.append(True)
@@ -2522,6 +2553,111 @@ class TestShutdownStopsTheThreadBeforeTheDevices:
             sendtoinflux.SHUTDOWN.clear()
         assert stopped == [True]
         assert "did not stop within" in caplog.text
+
+    def test_a_teardown_already_under_way_is_not_walked_a_second_time(self, caplog):
+        """The case the fallback used to read as done in. `stop_all` marks itself started
+        before it walks the children, and it walks them one at a time with a kill grace each -
+        so on any installation with more than one slow device the join expires while the other
+        thread is still inside it. Calling `stop_all` again there did nothing at all, under a
+        warning saying the devices were being made safe.
+
+        Two threads releasing the same descriptors is the race the join exists to avoid, so
+        the answer is to say so rather than to do it twice."""
+        stopped = []
+
+        class _Thread:
+            def join(self, timeout=None):
+                """Do nothing, as a thread still tearing down.
+
+                Args:
+                    timeout (float or None): ignored
+                """
+
+            def is_alive(self):
+                """Report the thread as still running.
+
+                Returns:
+                    bool: True
+                """
+                return True
+
+        class _Supervisor:
+            teardown = "running"
+
+            def teardown_seconds(self):
+                """Return a teardown bound.
+
+                Returns:
+                    float: seconds
+                """
+                return 5.0
+
+            def stop_all(self):
+                """Record a second walk, which must not happen."""
+                stopped.append(True)
+
+        sendtoinflux.SHUTDOWN.clear()
+        try:
+            with caplog.at_level(logging.WARNING):
+                sendtoinflux._stop_supervising(_Supervisor(), _Thread())
+        finally:
+            sendtoinflux.SHUTDOWN.clear()
+        assert stopped == [], "the children were walked a second time while the first walk was running"
+        assert "still stopping" in caplog.text
+        assert "may not have reached their safe state" in caplog.text, "the warning must not claim it handled it"
+
+    def test_the_wait_is_scaled_by_how_many_controls_there_are(self):
+        """A fixed bound gave up part way through the teardown it was waiting for, because
+        `stop_all` spends up to a kill grace per child in turn."""
+        joins = []
+
+        class _Thread:
+            def join(self, timeout=None):
+                """Record the bound.
+
+                Args:
+                    timeout (float or None): ignored
+                """
+                joins.append(timeout)
+
+            def is_alive(self):
+                """Report the thread as stopped.
+
+                Returns:
+                    bool: False
+                """
+                return False
+
+        class _Supervisor:
+            teardown = "none"
+
+            def __init__(self, controls):
+                """Hold how many controls to bill for.
+
+                Args:
+                    controls (int): how many children
+                """
+                self.controls = controls
+
+            def teardown_seconds(self):
+                """Return the bound for that many children.
+
+                Returns:
+                    float: seconds
+                """
+                return 5.0 * self.controls
+
+            def stop_all(self):
+                """Do nothing."""
+
+        sendtoinflux.SHUTDOWN.clear()
+        try:
+            for controls in (1, 4):
+                sendtoinflux._stop_supervising(_Supervisor(controls), _Thread())
+        finally:
+            sendtoinflux.SHUTDOWN.clear()
+        assert joins[1] > joins[0], f"four controls got no longer than one: {joins}"
+        assert joins[1] - joins[0] == 15.0, joins
 
 
 class TestControlsStoredButSwitchedOff:

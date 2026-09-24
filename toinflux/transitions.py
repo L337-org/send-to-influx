@@ -49,19 +49,19 @@ from toinflux.general import resolve_state_dir
 #: while the documents are written by hand.
 TRANSITION_DIR_NAME = "transitions"
 
-#: How much of the coming window a transition may be brought forward by, as a fraction of it.
+#: Nothing here brings a transition forward, deliberately.
 #:
-#: Without this the check is "has the minimum expired *now*", asked once per window, and a
-#: minimum that is not a whole multiple of the window is always rounded up to the next one:
-#: a 120-second minimum on a 50-second cycle becomes 150, a quarter longer than asked for,
-#: for ever and invisibly. Allowing a transition that comes due early in the window to happen
-#: at the start of it removes that bias.
+#: An earlier version allowed one to happen up to half a window early, so that a minimum
+#: falling just after a window boundary was not rounded up to the next one. It was wrong in
+#: both directions. It released devices early - measured at 899 seconds against a 900-second
+#: minimum, and at 100 against 120 - which is the one direction that breaks the promise the
+#: setting makes to the hardware. And it was unnecessary, because the freeze only ever decides
+#: anything when the minimum is longer than the window: below that, `plan_window` already
+#: keeps the spacing on its own, by requiring both dwells to be at least the minimum, which
+#: also spaces the change at a window boundary from the one before it.
 #:
-#: Half a window, because the transition is not necessarily at the boundary either - a
-#: proportioned window changes state partway through - so the change this permits is
-#: typically not early at all. Being early is the direction that costs something, so it is
-#: bounded by the window rather than by a constant nobody can size.
-EARLY_FRACTION = 0.5
+#: So the error is now always in the safe direction and is bounded by one window, which is by
+#: definition shorter than the minimum wherever this code decides anything at all.
 
 
 def transition_dir(settings_file=None):
@@ -207,24 +207,23 @@ class TransitionLog:
         """
         return bool((self.entries.get(device) or {}).get("forced"))
 
-    def frozen(self, min_transition_for, devices, cycle_seconds, now=None):
+    def frozen(self, min_transition_for, devices, now=None):
         """Return the devices that may not change state yet.
 
-        A device is free once its minimum has elapsed, or will have elapsed early enough
-        into the coming window that waiting for the next one would round the minimum up -
-        see :data:`EARLY_FRACTION`.
+        A device is free once its minimum has actually elapsed, and not a moment before.
+        The question is asked once per window, so a minimum that expires part way through
+        one is honoured at the next boundary rather than in the middle - late rather than
+        early, which is the direction that keeps the promise rather than breaking it.
 
         Args:
             min_transition_for (callable): device name -> its minimum in seconds
             devices (iterable): the control's device names
-            cycle_seconds (float): the coming window, which bounds how early a change may be
             now (float or None): epoch seconds; read from the clock when None
 
         Returns:
             frozenset: the device names that must keep the state they are in
         """
         moment = self._clock() if now is None else now
-        allowance = float(cycle_seconds) * EARLY_FRACTION
         held = set()
         for device in devices:
             elapsed = self.elapsed(device, moment)
@@ -235,7 +234,7 @@ class TransitionLog:
                 # Last moved by a safe state, which the minimum does not govern in either
                 # direction. The next ordinary command restores the normal rule.
                 continue
-            if elapsed + allowance < float(min_transition_for(device)):
+            if elapsed < float(min_transition_for(device)):
                 held.add(device)
         return frozenset(held)
 

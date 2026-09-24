@@ -269,9 +269,10 @@ def rule_names(document):
 
     Inputs then parameters, which is the order both the controller and the gate use. The
     order is not arbitrary even though the parser only needs the set: the store refuses a
-    name declared as both, and if that were ever relaxed this ordering is what decides
-    which one wins - so the three places that build it must agree, which is why they share
-    this one.
+    name declared as both - see `_check_no_name_is_both_an_input_and_a_parameter`, which was
+    written after these docstrings had claimed it for some time without it being true - and
+    if that were ever relaxed this ordering is what decides which one wins, so the three
+    places that build it must agree, which is why they share this one.
 
     Args:
         document (dict): the control document
@@ -959,6 +960,7 @@ def validate_control_structure(name, document):
     devices = _check_mapping_of(
         document, "devices", errors, ("source", "device"), ("min_transition_seconds",), DEVICE_KEYS
     )
+    _check_no_name_is_both_an_input_and_a_parameter(document, errors)
     _check_instances_are_names("inputs", inputs, errors)
     _check_instances_are_names("devices", devices, errors)
     _check_one_key_per_actuator(document, devices, errors)
@@ -1085,6 +1087,38 @@ def enabled_owner_of(actuators, documents, excluding=None):
                 if actuators_may_be_one(ours, theirs):
                     return name, ours
     return None
+
+
+def _check_no_name_is_both_an_input_and_a_parameter(document, errors) -> None:
+    """Refuse a name declared as an input and as a parameter.
+
+    Two docstrings said the store already refused this - :func:`rule_names` and
+    ``control_process.gather`` - and it did not. The consequence is silent: ``gather``
+    builds the bindings as parameters and then overwrites them with inputs, so the constant
+    the operator wrote is shadowed permanently by the live reading, the rules all evaluate,
+    and nothing anywhere says the parameter is doing nothing. Adjusting it at runtime then
+    changes nothing either, which is the point at which somebody starts doubting the
+    machinery rather than the document.
+
+    Refused rather than resolved by ordering, because there is no reading of the document
+    where declaring one name twice is what somebody meant.
+
+    Args:
+        document (dict): the control document
+        errors (list): appended to with any problems found
+    """
+    inputs = document.get("inputs")
+    parameters = document.get("parameters")
+    if not isinstance(inputs, dict) or not isinstance(parameters, dict):
+        # Whichever is the wrong shape is reported by its own check, and a comparison
+        # against something that is not a mapping would invent a second complaint.
+        return
+    both = set(inputs) & set(parameters)
+    if both:
+        errors.append(
+            f"inputs and parameters both declare {_render_names(both)}: a rule reads one set "
+            f"of names, so the parameter would be shadowed by the reading and never used"
+        )
 
 
 def _check_instances_are_names(section, entries, errors) -> None:

@@ -22,7 +22,7 @@ from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_la
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.controls import control_dir, controls_enabled, list_controls, validate_stored_controls
 from toinflux.control_process import heartbeat_writer, run_control
-from toinflux.supervision import DEFAULT_POLL_SECONDS, KILL_GRACE_SECONDS, Supervisor
+from toinflux.supervision import DEFAULT_POLL_SECONDS, Supervisor
 
 try:
     __version__ = version("send-to-influx")
@@ -54,10 +54,11 @@ STALL_INTERVAL_MULTIPLIER = 3
 # differs between single- and multi-source mode; see signal_handler for the detail.
 SHUTDOWN = threading.Event()
 
-# Long enough for the supervisor to notice the event on its next pass and run its own
-# stop_all, which sends SIGTERM and waits out the kill grace before giving up on a child.
-# Derived from those two rather than picked, so it cannot drift away from what it waits for.
-SUPERVISOR_JOIN_SECONDS = DEFAULT_POLL_SECONDS + KILL_GRACE_SECONDS + 2.0
+# The fixed part of how long to wait for the supervisor to stop: one poll interval to notice
+# the event, and a margin. The rest is per control and comes from `Supervisor.teardown_seconds`,
+# because stop_all terminates and waits for each child in turn - this used to be the whole
+# bound, so an installation with two slow devices gave up part way through its own teardown.
+SUPERVISOR_JOIN_MARGIN_SECONDS = DEFAULT_POLL_SECONDS + 2.0
 
 
 def print_source_data(source, data):
@@ -818,14 +819,35 @@ def _stop_supervising(supervisor, thread) -> None:
         thread (threading.Thread): the thread running it
     """
     SHUTDOWN.set()
-    # One poll interval to notice, its own stop_all's grace period to use, and a margin.
-    thread.join(timeout=SUPERVISOR_JOIN_SECONDS)
-    if thread.is_alive():
+    # One poll interval to notice, its own teardown to run, and a margin. **Scaled by the
+    # number of controls**, because the teardown terminates and waits for each child in turn:
+    # a fixed timeout gave up part way through the walk on any installation with more than one
+    # slow device, which is precisely when it matters that it finishes.
+    deadline = SUPERVISOR_JOIN_MARGIN_SECONDS + supervisor.teardown_seconds()
+    thread.join(timeout=deadline)
+    if not thread.is_alive():
+        # Its own `finally` has already run the teardown; this is once-only and returns.
+        supervisor.stop_all()
+        return
+    if supervisor.teardown == "running":
+        # **Not a second walk of the same children.** That is the race the join exists to
+        # avoid, and running it here would have two threads releasing the same descriptors.
+        # Said plainly rather than by omission: this used to call `stop_all` and log that it
+        # was making the devices safe, and the call returned immediately against a flag the
+        # other thread had already set - the fallback reading as done in the one case it
+        # exists for.
         logging.warning(
-            "The control supervisor did not stop within %ss, so its devices are being made safe "
-            "from the exit handler while it is still running",
-            SUPERVISOR_JOIN_SECONDS,
+            "The control supervisor is still stopping after %.0fs and this process is exiting, so "
+            "some devices may not have reached their safe state. They are commanded again at the "
+            "next start",
+            deadline,
         )
+        return
+    logging.warning(
+        "The control supervisor did not stop within %.0fs, so its devices are being made safe "
+        "from the exit handler while it is still running",
+        deadline,
+    )
     supervisor.stop_all()
 
 

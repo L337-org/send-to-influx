@@ -152,6 +152,24 @@ def _clock_time(value, where):
     return datetime.time(int(hour), int(minute))
 
 
+def require_aware(moment) -> None:
+    """Refuse a naive moment.
+
+    Public because the gate promises this in its own docstring and has to keep that promise
+    on every path, not only the one that reaches an active period: a control that is disabled
+    or declares no period never got here, so the contract held for some callers and not
+    others, which is the shape of guarantee that only fails for whoever relied on it.
+
+    Args:
+        moment (datetime.datetime): the moment to check
+
+    Raises:
+        ConfigError: where the moment carries no time zone
+    """
+    if moment.tzinfo is None or moment.tzinfo.utcoffset(moment) is None:
+        raise ConfigError("an active period needs an aware moment: a naive one names no instant to convert")
+
+
 def is_inside(period, moment):
     """Whether a moment falls within an active period.
 
@@ -177,8 +195,7 @@ def is_inside(period, moment):
     """
     if period is None:
         return True
-    if moment.tzinfo is None or moment.tzinfo.utcoffset(moment) is None:
-        raise ConfigError("an active period needs an aware moment: a naive one names no instant to convert")
+    require_aware(moment)
     # A period with no zone of its own passes None, which is astimezone's own way of
     # saying "local time", evaluated for this moment rather than for whenever the control
     # happened to start.

@@ -619,3 +619,54 @@ class TestADeviceTheBridgeDoesNotHave:
             control.guard.close()
             control.close()
         assert isinstance(raised.value.__cause__, ToolParamError)
+
+
+class TestANonFiniteReadingIsRefusedWhereItHasAName:
+    """The other half of the nan defence, at the layer that knows which input it was.
+
+    `gather`'s docstring used to say the controller checked finiteness "because that is where
+    a nan does its damage". It is not where a nan does its damage: a nan reaching
+    `max(target, dew + 5)` comes out finite, so the check at the far end sees nothing wrong.
+    Refused here too, where the input has a name to report it by.
+    """
+
+    @staticmethod
+    def _gathering(value, installation, monkeypatch):
+        """Run gather with one input reading `value`.
+
+        Args:
+            value (float): what the reading holds
+            installation (Installation): the installation
+            monkeypatch (pytest.MonkeyPatch): to stub the read
+
+        Returns:
+            dict: the bindings
+        """
+        from types import SimpleNamespace
+
+        from tests.harness.installation import conservatory
+
+        document = conservatory()
+        document["inputs"] = {"inside": {"source": "hue", "field": "temperature_conservatory"}}
+        document["parameters"] = {"target": 18.0}
+        monkeypatch.setattr(
+            "toinflux.control_process.read_input",
+            lambda *a, **k: SimpleNamespace(value=value, timestamp=0.0, age=0.0, live=False),
+        )
+        monkeypatch.setattr("toinflux.control_process.input_max_age", lambda *a, **k: 900.0)
+        return gather(document, installation.settings, None, settings_file=installation.settings_file)
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_it_fails_the_cycle_rather_than_reaching_the_rules(self, value, installation, monkeypatch):
+        with pytest.raises(RuleEvaluationError) as raised:
+            self._gathering(value, installation, monkeypatch)
+        assert "inside" in str(raised.value), "the message must name the input"
+
+    def test_a_number_still_arrives(self, installation, monkeypatch):
+        assert self._gathering(16.5, installation, monkeypatch)["inside"] == 16.5
+
+    def test_it_is_this_cycle_and_not_this_control(self, installation, monkeypatch):
+        """RuleEvaluationError rather than ConfigError: a bad point is not a bad document,
+        and the next point written may be fine. The loop catches this one and fails safe."""
+        with pytest.raises(RuleEvaluationError):
+            self._gathering(float("nan"), installation, monkeypatch)

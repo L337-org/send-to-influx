@@ -22,6 +22,7 @@ __license__ = "MIT"
 
 import datetime
 import logging
+import math
 import os
 import time
 
@@ -31,7 +32,7 @@ from toinflux.controller import Controller
 from toinflux.controls import DEFAULT_CYCLE_SECONDS, load_control, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.gating import DeviceGuard, Gate, commands_for
-from toinflux.general import load_settings, render_values, source_class
+from toinflux.general import RepeatingProblem, load_settings, render_values, source_class
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
 from toinflux.staging import build_ladder
@@ -44,8 +45,8 @@ def gather(document, settings, session, settings_file=None, now=None):
     """Return name -> value for everything a control's rules may read.
 
     Parameters first, then inputs, so a parameter can never quietly shadow a reading: the
-    store already refuses a name declared as both, and this ordering means a future
-    relaxation of that fails loudly here rather than silently preferring the constant.
+    store refuses a name declared as both, and this ordering means a future relaxation of
+    that fails loudly here rather than silently preferring the constant.
 
     Args:
         document (dict): the control document
@@ -55,10 +56,11 @@ def gather(document, settings, session, settings_file=None, now=None):
         now (float or None): the clock, for tests
 
     Returns:
-        dict: name -> value. The values are whatever the readings and parameters hold: a
-        reading is already a number by the time it arrives, and whether it is *finite* is
-        checked by the controller before the PID sees it, because that is where a nan does
-        its damage
+        dict: name -> value, every reading finite. The controller checks the finished rule
+        too, but that is not enough on its own and was relied on as though it were: a nan
+        reaching `max(target, dew + 5)` comes out of it as a plausible number, because every
+        comparison against nan is False, so the check at the far end sees nothing wrong.
+        Refused here as well, where the input has a name to report it by
 
     Raises:
         RuleEvaluationError: where a reading is too old to act on. This cycle has failed,
@@ -78,6 +80,19 @@ def gather(document, settings, session, settings_file=None, now=None):
             raise RuleEvaluationError(
                 f"input {name!r} is {reading.age:.0f}s old, past the {limit:.0f}s it may be "
                 f"acted on: reading {spec.get('field')!r} from {spec.get('source')!r}"
+            )
+        if not math.isfinite(reading.value):
+            # Same shape as the staleness check above, and the same answer: this cycle has
+            # failed, not this control. A nan or an infinity in the stored series is a bad
+            # point rather than a bad document, and the next one written may be fine.
+            #
+            # Here rather than only at the controller because a nan does not survive as a nan:
+            # `max` and `clamp` compare, every comparison against nan is False, and the
+            # worked example's own `max(target, dew + 5)` hands back the target as though
+            # nothing had happened. By the time the controller looks, there is nothing to see.
+            raise RuleEvaluationError(
+                f"input {name!r} read {reading.value!r} from {spec.get('field')!r} of "
+                f"{spec.get('source')!r}, which is not a value a control can act on"
             )
         bindings[name] = reading.value
     return bindings
@@ -255,6 +270,9 @@ class ControlProcess:
         # what it has done, and re-reading it every cycle would cost a file read to learn
         # what it already knows.
         self.transitions = TransitionLog(name, settings_file)
+        # Carried for the life of the process, because that is the span over which a fault
+        # repeats: rebuilt per cycle it would report every cycle, which is the thing it is for.
+        self._problems = RepeatingProblem()
         self.gate = Gate(self.document)
         self.controller = Controller(self.document)
         self.ladder = build_ladder(self.document["output"]["stages"])
@@ -366,6 +384,8 @@ class ControlProcess:
             elif decision.edge == "opened":
                 self.controller.resume()
                 logging.info("Control %r resumed", self.name)
+            # Said only where something was being reported, so an ordinary cycle is silent.
+            self._problems.cleared("cycle", "Control %r completed a cycle again", self.name)
             if decision.actuating:
                 # **Let go of any hold before stepping.** `_fail_safe` holds the controller so
                 # a failed cycle does not integrate an error the loop never acted on, and
@@ -403,9 +423,7 @@ class ControlProcess:
         # Asked before the step, so the plan is built from what this window may actually do
         # rather than built and then contradicted. A device still inside its minimum keeps
         # the state it is in, and the demand is met as closely as the rungs that remain allow.
-        frozen = self.transitions.frozen(
-            self.controller.min_transition_for, tuple(self.document.get("devices") or {}), self.cycle_seconds
-        )
+        frozen = self.transitions.frozen(self.controller.min_transition_for, tuple(self.document.get("devices") or {}))
         demand = self.controller.step(bindings, dt, frozen=frozen, states=self.transitions.states())
         for dwell in demand:
             # Per rung rather than per cycle, and the states in full: "level 750" does not
@@ -432,7 +450,17 @@ class ControlProcess:
         # Logged here, where it is handled, rather than where it was raised: one report per
         # failure, carrying the type as well as the message because a connection failure
         # worth retrying reads identically to a permanent one without it.
-        logging.error("Control %r could not complete a cycle, going to its safe state: %r", self.name, reason)
+        # Through the reporter rather than straight to logging: a source that stays
+        # unreachable fails every cycle, and the identical ERROR every `cycle_seconds` for
+        # ever says nothing after the first and buries everything else. The same file's
+        # heartbeat writer already says its own failure once for exactly this reason.
+        self._problems.report(
+            "cycle",
+            logging.ERROR,
+            "Control %r could not complete a cycle, going to its safe state: %r",
+            self.name,
+            reason,
+        )
         self.controller.hold()
         try:
             self._apply_safe(commands_for(self.guard.safe_state, tuple(self.document.get("devices") or {})))

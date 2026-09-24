@@ -168,7 +168,7 @@ class Controller:
         declared = (self.devices.get(device) or {}).get("min_transition_seconds")
         return float(self._default_transition if declared is None else declared)
 
-    def hold(self, last_output=None) -> None:
+    def hold(self) -> None:
         """Stop the integral accumulating while the control is not actuating.
 
         A control outside its active period, or gated off by ``enable_when``, is not
@@ -176,11 +176,15 @@ class Controller:
         chasing is not information, and integrating it means resuming with a demand built
         from a period when the actuators were deliberately idle.
 
-        Args:
-            last_output (float or None): the demand to resume from, or None to resume from
-                where the loop left off
+        **No ``last_output`` here, deliberately.** This used to take one and pass it to
+        ``set_auto_mode(False, last_output=...)``, copying :meth:`resume`'s wording - but
+        simple-pid reads that argument only in the branch that *enables* the controller
+        (verified against 2.0.1's ``set_auto_mode``), so disabling with one silently
+        discarded it. A caller that passed a demand expecting the next ``resume`` to pick up
+        from it would have got an unannounced actuation level instead, with nothing logged.
+        The value belongs to :meth:`resume`, which is where the library reads it.
         """
-        self.pid.set_auto_mode(False, last_output=last_output)
+        self.pid.set_auto_mode(False)
 
     def resume(self, last_output=None) -> None:
         """Start controlling again.

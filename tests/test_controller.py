@@ -392,3 +392,36 @@ class TestAnOmittedCycleWindow:
         del document["output"]["cycle_seconds"]
         assert Controller(document).cycle_seconds == from_process
         assert stall_seconds(document) == from_process * 3
+
+
+class TestHoldTakesNoLastOutput:
+    """`hold` used to accept `last_output` and pass it to `set_auto_mode(False, ...)`,
+    copying `resume`'s wording. simple-pid reads that argument only in the branch that
+    *enables* the controller, so disabling with one discarded it silently - a caller
+    trusting the docstring would have got an unannounced actuation level."""
+
+    def test_it_is_not_in_the_signature(self):
+        import inspect
+
+        from toinflux.controller import Controller
+
+        assert "last_output" not in inspect.signature(Controller.hold).parameters
+
+    def test_the_library_still_only_reads_it_when_enabling(self):
+        """Pinned against the installed version rather than assumed, because the whole point
+        is that the docstring and the library had drifted apart."""
+        import inspect
+
+        from simple_pid import PID
+
+        source = inspect.getsource(PID.set_auto_mode)
+        enabling = source.index("if enabled and not self._auto_mode")
+        assert source.index("last_output if") > enabling, "simple-pid now reads last_output when disabling too"
+
+    def test_resume_still_takes_one(self):
+        """It is a real option there, which is where the library reads it."""
+        import inspect
+
+        from toinflux.controller import Controller
+
+        assert "last_output" in inspect.signature(Controller.resume).parameters

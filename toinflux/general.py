@@ -12,6 +12,7 @@ import math
 import os
 import stat
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urlparse
 import yaml
@@ -1465,3 +1466,95 @@ def load_settings(settings_file=None):
     except yaml.YAMLError as e:
         logging.critical("Error in %s - %s", settings_path, e)
         raise ConfigError(f"Error in {settings_path} - {e}") from e
+
+
+class RepeatingProblem:
+    """Report a failure that recurs every cycle without saying it every cycle.
+
+    A control cycles for as long as the service runs, so a fault that does not clear - a
+    bridge that stays unreachable, an input whose source stopped publishing - produces the
+    identical line every ``cycle_seconds`` for ever. At a one-minute cycle that is 1,440
+    copies a day of a message that said everything it had to say the first time, and it
+    buries whatever else the journal was going to tell you.
+
+    The shape here is the one ``heartbeat_writer`` already uses in the control process: say
+    it once, then stay quiet, and say something when it changes. Repeats are kept at DEBUG
+    rather than dropped, so ``-v`` still shows every occurrence when somebody is actually
+    watching, and the recovery line carries the count so the gap in the journal is explained
+    rather than merely absent.
+
+    Keyed, because one control has several inputs and two of them failing for different
+    reasons are two problems: a shared key would report the first and hide the second.
+    """
+
+    def __init__(self, repeat_after=3600.0, clock=time.monotonic):
+        """Prepare an empty record of what is currently failing.
+
+        Args:
+            repeat_after (float): seconds before an unchanged problem is reported again, so a
+                fault lasting days leaves periodic evidence rather than one line in week-old
+                logs
+            clock (callable): the monotonic clock, injectable for tests
+        """
+        self._repeat_after = repeat_after
+        self._clock = clock
+        self._seen: dict = {}
+
+    def report(self, key, level, message, *args) -> None:
+        """Log a problem, at ``level`` the first time and at DEBUG while it is unchanged.
+
+        Args:
+            key (object): what this problem is about - a control, an input, a device
+            level (int): the level to use for a new or changed problem
+            message (str): a %-style format string
+            *args: its arguments, which also decide whether the problem has changed
+        """
+        # The rendered message is the identity, so a failure whose *reason* changes is
+        # reported again at full level: "unreachable" becoming "authentication failed" is
+        # news, and a key alone would have swallowed it.
+        rendered = message % args if args else message
+        now = self._clock()
+        seen = self._seen.get(key)
+        if seen is not None and seen[0] == rendered and now - seen[1] < self._repeat_after:
+            self._seen[key] = (rendered, seen[1], seen[2] + 1)
+            logging.debug("%s (still, %s times)", rendered, seen[2] + 1)
+            return
+        if seen is not None and seen[0] == rendered:
+            logging.log(level, "%s (still, after %s more)", rendered, seen[2])
+        else:
+            logging.log(level, "%s", rendered)
+        self._seen[key] = (rendered, now, 1)
+
+    def cleared(self, key, message, *args) -> None:
+        """Note that a problem has stopped, where one was being reported.
+
+        Silent where nothing was wrong, so an ordinary cycle says nothing.
+
+        Args:
+            key (object): what was failing
+            message (str): a %-style format string for the recovery line
+            *args: its arguments
+        """
+        seen = self._seen.pop(key, None)
+        if seen is None:
+            return
+        logging.info("%s (after %s failure(s))", message % args if args else message, seen[2])
+
+
+def close_session(session) -> None:
+    """Close a handler's ``requests.Session``, swallowing any error.
+
+    **In a leaf module rather than in the MCP layer**, which is where it used to live and
+    where ``inputs.py`` could not reach it - that module deliberately does not import the MCP
+    stack, so it closed its handler with a bare ``opened.close()`` inside a ``finally``. An
+    exception there replaces whatever was propagating out of the ``try``, so a
+    ``SourceConnectionError`` from a failed read would have been reported as whatever went
+    wrong while tidying up after it.
+
+    Args:
+        session (requests.Session): the handler's session
+    """
+    try:
+        session.close()
+    except Exception:  # pragma: no cover - close() should not raise; cleanup must never mask a result
+        logging.debug("Ignoring error closing a handler session", exc_info=True)

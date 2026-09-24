@@ -322,6 +322,7 @@ class Supervisor:
         # RuntimeError rather than a stale number.
         self._children_lock = threading.Lock()
         self._stopped = False
+        self._finished = False
         self._stop_lock = threading.Lock()
         self.children = {}
         self.events = []
@@ -1026,6 +1027,12 @@ class Supervisor:
             if self._stopped:
                 return
             self._stopped = True
+        # Distinct from `_stopped`, which only says somebody has begun. The exit handler has
+        # to tell "nobody has started, so do it from here" from "it is under way on the other
+        # thread and a second walk of the same children is the race the join exists to avoid".
+        # Without the distinction the handler logged that it was making the devices safe and
+        # then returned immediately, because the flag it met was already set - the fallback
+        # reading as done in exactly the case it exists for.
         for child in self.children.values():
             if not child.running:
                 continue
@@ -1041,6 +1048,32 @@ class Supervisor:
             self._release(child)
             self.make_safe(child.name)
         self._selector.close()
+        self._finished = True
+
+    @property
+    def teardown(self):
+        """Return how far :meth:`stop_all` has got, for a caller deciding whether to run it.
+
+        Returns:
+            str: ``"none"`` where nothing has begun, ``"running"`` where a walk of the
+            children is under way on another thread, ``"finished"`` where it is done
+        """
+        if not self._stopped:
+            return "none"
+        return "finished" if self._finished else "running"
+
+    def teardown_seconds(self):
+        """Return how long a full :meth:`stop_all` can take, for sizing a join.
+
+        Each child in turn gets a SIGTERM, up to ``KILL_GRACE_SECONDS`` to answer it, and a
+        kill if it does not - so the bound is per control and not per supervisor. A caller
+        that joined on a fixed timeout gave up part way through the walk on any installation
+        with more than one slow device, which is when the devices most need it to finish.
+
+        Returns:
+            float: seconds
+        """
+        return KILL_GRACE_SECONDS * max(1, len(self.children))
 
     def _record(self, kind, name, detail) -> None:
         """Note something that happened, for a caller watching.
