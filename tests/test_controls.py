@@ -1137,6 +1137,17 @@ class TestEveryShippedExample:
         assert validate_control(document["name"], document, state_directory.settings) == []
 
     @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
+    def test_it_does_not_trip_a_warning_of_our_own(self, scenario):
+        """An example that the product complains about teaches the thing it complains about.
+
+        Validation only asks whether a document is refused, and a warning is by definition
+        not a refusal, so every example passed the checks above while all four told a reader
+        to do what `--check-config` then told them off for.  It went unnoticed from the day
+        the stale-feedback warning was added until somebody read the two side by side.
+        """
+        assert control_warnings(CONTROL_EXAMPLES[scenario]["document"]) == []
+
+    @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
     def test_it_says_when_to_use_it(self, scenario):
         """The reason there are three. Without it a model picks the first, or averages
         across them, which is how a 600-second minimum arrived between a 300 and a 900."""

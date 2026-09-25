@@ -170,7 +170,11 @@ CONTROL_EXAMPLE = {
     "timezone": "Europe/London",
     "parameters": {"target": 18.0},
     "inputs": {
-        "inside": {"source": "hue", "field": "temperature_conservatory", "instance": "bridge1", "max_age": 900},
+        # At or under `output.cycle_seconds`, and it is the *feedback* input that has to be:
+        # a loop acting three times on one reading looks exactly like three times the gain,
+        # and detuning to compensate is chasing the wrong thing.  The others below stay long
+        # on purpose - an outdoor temperature and a grid carbon figure are legitimately old.
+        "inside": {"source": "hue", "field": "temperature_conservatory", "instance": "bridge1", "max_age": 300},
         "dew": {"source": "openmeteo", "field": "dew_point_2m", "max_age": 1800},
         # `outside` and `grid_co2` are declared because `enable_when` and `max_level`
         # read them. They were missing until the rule check existed, so this fixture -
@@ -240,7 +244,7 @@ CONTROL_EXAMPLES = {
             "timezone": "Europe/London",
             "parameters": {"target": 18.0},
             "inputs": {
-                "inside": {"source": "hue", "field": "temperature_conservatory", "max_age": 900},
+                "inside": {"source": "hue", "field": "temperature_conservatory", "max_age": 300},
                 "outside": {"source": "openmeteo", "field": "temperature_2m", "max_age": 1800},
             },
             # Same ladder, same units: full output three degrees below setpoint.
@@ -281,7 +285,7 @@ CONTROL_EXAMPLES = {
             "enabled": True,
             "timezone": "Europe/London",
             "parameters": {"target": 300.0},
-            "inputs": {"brightness": {"source": "hue", "field": "light_level_office", "max_age": 300}},
+            "inputs": {"brightness": {"source": "hue", "field": "light_level_office", "max_age": 30}},
             # The input is lux, so the gain is per lux: 1000 of ladder over the 200 lux
             # short of target at which the lamp should be fully up.
             "pid": {"input": "brightness", "setpoint": "target", "kp": 5.0, "ki": 0.02, "kd": 0.0},
@@ -310,7 +314,7 @@ CONTROL_EXAMPLES = {
             "enabled": True,
             "timezone": "Europe/London",
             "parameters": {"target": 21.0},
-            "inputs": {"tray": {"source": "hue", "field": "temperature_propagator", "max_age": 300}},
+            "inputs": {"tray": {"source": "hue", "field": "temperature_propagator", "max_age": 60}},
             # A seed tray has almost no thermal mass, so full output one degree down.
             "pid": {"input": "tray", "setpoint": "target", "kp": 1000.0, "ki": 2.0, "kd": 0.0},
             "output": {

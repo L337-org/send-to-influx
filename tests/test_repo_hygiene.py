@@ -2339,3 +2339,36 @@ def test_no_handler_logs_a_failure_and_then_raises_it():
         "these log a failure and then raise it, which reports it twice - raise it and let the "
         f"caller, which knows how bad it is, do the reporting: {sites}"
     )
+
+
+def test_the_documented_examples_are_the_shipped_ones():
+    """CONTROLS.md carries each example as YAML and `CONTROL_EXAMPLES` carries it as a dict,
+    and nothing held the two together.
+
+    Two copies of the same thing in two files is the shape that goes stale, and here it goes
+    stale in the worst direction: an MCP client is handed the dict, a person reads the
+    markdown, and the two quietly stop being the same advice.  Compared after parsing, so
+    key order and quoting are free to differ - the only claim is that a reader and a client
+    get the same document.
+
+    Extra blocks are fine: the file also carries fragments illustrating one setting at a
+    time, which are not documents and are not checked here.
+    """
+    from toinflux.controls import CONTROL_EXAMPLES
+
+    text = (REPO_ROOT / "CONTROLS.md").read_text(encoding="utf-8")
+    blocks = []
+    for raw in re.findall(r"```yaml\n(.*?)```", text, re.S):
+        try:
+            loaded = yaml.safe_load(raw)
+        except yaml.YAMLError:
+            # A deliberately broken snippet, of which the file has several showing what is
+            # refused. Not a document, and not this test's business.
+            continue
+        if isinstance(loaded, dict):
+            blocks.append(loaded)
+    missing = sorted(name for name, entry in CONTROL_EXAMPLES.items() if entry["document"] not in blocks)
+    assert missing == [], (
+        "these shipped examples do not appear in CONTROLS.md exactly as they are shipped, so "
+        f"the documentation and the MCP client disagree about them: {missing}"
+    )

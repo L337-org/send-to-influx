@@ -332,7 +332,7 @@ inputs:
     source: hue
     field: temperature_conservatory
     instance: bridge1
-    max_age: 900
+    max_age: 300
   dew:
     source: openmeteo
     field: dew_point_2m
@@ -403,7 +403,7 @@ inputs:
   inside:
     source: hue
     field: temperature_conservatory
-    max_age: 900
+    max_age: 300
   outside:
     source: openmeteo
     field: temperature_2m
@@ -459,7 +459,7 @@ inputs:
   brightness:
     source: hue
     field: light_level_office
-    max_age: 300
+    max_age: 30
 pid:
   input: brightness
   setpoint: target
@@ -499,7 +499,7 @@ inputs:
   tray:
     source: hue
     field: temperature_propagator
-    max_age: 300
+    max_age: 60
 pid:
   input: tray
   setpoint: target
