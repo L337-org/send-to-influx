@@ -13,6 +13,8 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
+import hashlib
+import json
 import logging
 
 import math
@@ -170,6 +172,85 @@ class Controller:
         """
         declared = (self.devices.get(device) or {}).get("min_transition_seconds")
         return float(self._default_transition if declared is None else declared)
+
+    @property
+    def fingerprint(self):
+        """Return what this controller's memory is only meaningful against.
+
+        The gains, the ladder and the window. An integral is in the output's units and is
+        bounded by the ladder's range, so the same number means one thing under one tuning and
+        something else under another - and the commonest restart a control sees is the one the
+        supervisor performs because its document was edited.
+
+        Deliberately not the whole document: a changed `enable_when`, safe state or input
+        max_age does not make the accumulated error wrong, and discarding it for those would
+        throw away the settling time this exists to save.
+
+        Returns:
+            str: a short digest, stable across processes and Python versions
+        """
+        material = json.dumps(
+            {
+                "kp": self.pid.Kp,
+                "ki": self.pid.Ki,
+                "kd": self.pid.Kd,
+                "cycle": self.cycle_seconds,
+                "ladder": [(stage.level, sorted(stage.states.items())) for stage in self.ladder],
+            },
+            sort_keys=True,
+            default=str,
+        )
+        # sha256 rather than hash(): the built-in is salted per process, so a fingerprint
+        # written by one control would never match the one that read it back.
+        return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+    def capture(self):
+        """Return the loop's own memory, as plain numbers a file can hold.
+
+        The integral is the whole point: it is what takes a slow plant an hour to rebuild and
+        the only part a restart genuinely loses. The last input and error come with it so a
+        derivative term is continuous too, though every shipped example runs kd at zero.
+
+        Returns:
+            dict: the state, or empty where the PID has nothing worth keeping
+        """
+        integral = getattr(self.pid, "_integral", None)
+        if not isinstance(integral, (int, float)) or not math.isfinite(integral):
+            return {}
+        state = {"integral": float(integral)}
+        for name in ("_last_input", "_last_error"):
+            value = getattr(self.pid, name, None)
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                state[name.lstrip("_")] = float(value)
+        return state
+
+    def resume_from(self, state) -> None:
+        """Put back a memory this loop saved before it was restarted.
+
+        The integral is clamped to the output limits on the way in, because the ladder it was
+        earned against is the ladder it is being restored into - the fingerprint says so - but
+        a file is a file and a number that escaped the range would command past the top rung.
+
+        ``_last_time`` is deliberately not restored. It belongs to this process's clock, and a
+        timestamp from a previous one would make the first interval either enormous or
+        negative depending on which way the clock had moved.
+
+        Args:
+            state (dict): what :meth:`capture` produced
+        """
+        integral = state.get("integral")
+        if not isinstance(integral, (int, float)) or not math.isfinite(integral):
+            return
+        low, high = self.pid.output_limits
+        if low is not None:
+            integral = max(low, integral)
+        if high is not None:
+            integral = min(high, integral)
+        self.pid._integral = float(integral)
+        for name in ("last_input", "last_error"):
+            value = state.get(name)
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                setattr(self.pid, f"_{name}", float(value))
 
     def hold(self) -> None:
         """Stop the integral accumulating while the control is not actuating.

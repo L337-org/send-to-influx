@@ -38,6 +38,12 @@ from toinflux.rules import RuleEvaluationError
 from toinflux.staging import build_ladder
 from toinflux.transitions import TransitionLog
 
+#: How many cycles old a stored loop memory may be and still describe the present. Five,
+#: because a restart to pick up an edit or a new build takes seconds and this covers it
+#: generously, while a machine that has been down long enough for the room to change looks at
+#: the room instead. Erring short costs only the settling time a restart already costs today.
+RESUMABLE_CYCLES = 5
+
 #: How long a cycle waits when the document names nothing.
 
 
@@ -293,6 +299,7 @@ class ControlProcess:
         self.gate = Gate(self.document)
         self.controller = Controller(self.document)
         self.ladder = build_ladder(self.document["output"]["stages"])
+        self._resume_the_loop()
         self._session = session or requests.Session()
         self._owns_session = session is None
         self._bindings = None
@@ -452,6 +459,10 @@ class ControlProcess:
             bindings, dt, frozen=frozenset(frozen - set(driven)), states=self.transitions.states()
         )
         demand = self._hold(demand, frozen & set(driven))
+        # After the step, so what is stored is what the loop actually knows now. Written every
+        # cycle: the file is a few hundred bytes and the alternative is a memory that is
+        # always one cycle out of date, which is the cycle a restart is most likely to land in.
+        self.transitions.record_loop(self.controller.capture(), self.controller.fingerprint)
         for dwell in demand:
             # Per rung rather than per cycle, and the states in full: "level 750" does not
             # say which heater that turned on, and the question being asked of this log is
@@ -478,6 +489,29 @@ class ControlProcess:
             )
             self._apply(dict(dwell.stage.states))
             sleep(dwell.seconds)
+
+    def _resume_the_loop(self) -> None:
+        """Put back the integral this control had built before it was last restarted.
+
+        **A slow plant spends a long time earning its integral**, and a restart threw it away:
+        the loop began again from nothing and took as long as it had the first time, which on
+        a room is an hour of sitting below target. The supervisor restarts a control on every
+        document edit, so that was the ordinary cost of changing a setpoint by one degree.
+
+        Declined rather than risked where the stored memory may not describe the present - see
+        `TransitionLog.loop_state` for the two guards. Starting fresh is exactly today's
+        behaviour, so the worse outcome of the two is the one that is already normal.
+        """
+        state = self.transitions.loop_state(self.controller.fingerprint, self.cycle_seconds * RESUMABLE_CYCLES)
+        if not state:
+            return
+        self.controller.resume_from(state)
+        logging.info(
+            "Control %r resumed the loop it had built before it stopped, so it does not have to "
+            "earn it again (integral %.3g)",
+            self.name,
+            state.get("integral", 0.0),
+        )
 
     def _hold(self, plan, held):
         """Return the plan with each held device pinned to the value it already has.

@@ -13,6 +13,7 @@ __license__ = "MIT"
 import json
 import logging
 import os
+import sys
 
 import pytest
 
@@ -881,3 +882,225 @@ class TestADrivenDevicesValueReachesTheLog:
             control.close()
         commanding = [r.getMessage() for r in caplog.records if "commanding" in r.getMessage()]
         assert commanding and ("=on" in commanding[0] or "=off" in commanding[0]), commanding
+
+
+class TestResumingTheLoopAfterARestart:
+    """A slow plant spends a long time earning its integral, and a restart threw it away.
+
+    The supervisor restarts a control on every document edit, so that was the ordinary cost
+    of changing a setpoint by one degree: an hour of sitting below target while the loop
+    earned back what it already knew.
+    """
+
+    FINGERPRINT = "abc123"
+
+    def test_what_was_saved_comes_back(self, state_directory):
+        log, now = _log(state_directory)
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.loop_state(self.FINGERPRINT, 300)["integral"] == 42.0
+
+    def test_a_different_document_is_not_resumed(self, state_directory):
+        """An integral is in the output's units, so the same number means one thing under one
+        tuning and something else under another - and an edit is the commonest restart."""
+        log, now = _log(state_directory)
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.loop_state("a-different-document", 300) is None
+
+    def test_a_memory_older_than_its_welcome_is_not_resumed(self, state_directory):
+        log, now = _log(state_directory)
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        now[0] += 301
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.loop_state(self.FINGERPRINT, 300) is None
+
+    def test_and_one_inside_it_is(self, state_directory):
+        log, now = _log(state_directory)
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        now[0] += 299
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.loop_state(self.FINGERPRINT, 300) is not None
+
+    def test_a_clock_that_stepped_backwards_does_not_make_it_fresh(self, state_directory):
+        log, now = _log(state_directory)
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        now[0] -= 3600
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.loop_state(self.FINGERPRINT, 300) is None
+
+    def test_nothing_stored_is_not_an_error(self, state_directory):
+        log, _now = _log(state_directory)
+        assert log.loop_state(self.FINGERPRINT, 300) is None
+
+    def test_the_device_half_still_works_beside_it(self, state_directory):
+        log, now = _log(state_directory)
+        log.record({"heater": True})
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.states() == {"heater": True}
+        assert reopened.loop_state(self.FINGERPRINT, 300)["integral"] == 42.0
+
+    def test_a_file_from_before_this_existed_is_still_read(self, state_directory):
+        """An installation upgrading in place has the older flat shape on disk. Refusing it
+        would cost every device one transition sooner than its minimum asks."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"heater": {"state": True, "at": 10.0}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file)
+        assert log.states() == {"heater": True}
+        assert log.loop_state(self.FINGERPRINT, 300) is None
+
+
+class TestWhatTheControllerKeepsAndPutsBack:
+    @staticmethod
+    def _controller(**pid):
+        """Return a controller over a simple ladder.
+
+        Args:
+            **pid: overrides for the pid section
+
+        Returns:
+            Controller: the controller
+        """
+        from toinflux.controller import Controller
+
+        return Controller(
+            {
+                "parameters": {"target": 20.0},
+                "inputs": {"inside": {"source": "hue", "field": "t"}},
+                "pid": dict({"input": "inside", "setpoint": "target", "kp": 10.0, "ki": 1.0, "kd": 0.0}, **pid),
+                "output": {
+                    "cycle_seconds": 60,
+                    "min_transition_seconds": 1,
+                    "stages": [{"level": 0, "set": {"a": False}}, {"level": 100, "set": {"a": True}}],
+                },
+                "devices": {"a": {"source": "hue", "device": "A"}},
+            }
+        )
+
+    def test_the_integral_is_what_is_kept(self, state_directory):
+        controller = self._controller()
+        controller.step({"inside": 18.0, "target": 20.0}, dt=60)
+        assert controller.capture()["integral"] > 0
+
+    def test_putting_it_back_shortens_the_climb(self, state_directory):
+        # A small error and a gentle integral, so neither run saturates at the top rung -
+        # a comparison where both are pinned at full output shows nothing, which is what an
+        # earlier version of this test did.
+        tuning = {"kp": 10.0, "ki": 0.1}
+        warm = self._controller(**tuning)
+        for _ in range(4):
+            warm.step({"inside": 19.5, "target": 20.0}, dt=60)
+        cold = self._controller(**tuning)
+        first_cold = cold.step({"inside": 19.5, "target": 20.0}, dt=60)
+        resumed = self._controller(**tuning)
+        resumed.resume_from(warm.capture())
+        first_resumed = resumed.step({"inside": 19.5, "target": 20.0}, dt=60)
+        cold_level = sum(d.stage.level * d.seconds for d in first_cold)
+        warm_level = sum(d.stage.level * d.seconds for d in first_resumed)
+        assert warm_level > cold_level, "resuming bought nothing"
+
+    def test_an_integral_beyond_the_ladder_is_clamped_on_the_way_in(self, state_directory):
+        """A file is a file. A number that escaped the range would command past the top rung."""
+        controller = self._controller()
+        controller.resume_from({"integral": 10_000_000.0})
+        assert controller.pid._integral <= controller.ladder[-1].level
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), "42", None])
+    def test_something_that_is_not_a_number_is_ignored(self, bad, state_directory):
+        controller = self._controller()
+        before = controller.pid._integral
+        controller.resume_from({"integral": bad})
+        assert controller.pid._integral == before
+
+    def test_the_clock_is_not_restored(self, state_directory):
+        """It belongs to this process. A timestamp from a previous one would make the first
+        interval either enormous or negative depending on which way the clock had moved."""
+        controller = self._controller()
+        assert "last_time" not in controller.capture()
+
+    def test_the_fingerprint_follows_the_things_the_integral_depends_on(self, state_directory):
+        base = self._controller().fingerprint
+        assert self._controller().fingerprint == base
+        assert self._controller(kp=999.0).fingerprint != base
+        assert self._controller(ki=999.0).fingerprint != base
+
+    def test_and_not_the_things_it_does_not(self, state_directory):
+        """Discarding a hard-won integral because a gate rule changed would throw away the
+        settling time this exists to save."""
+        from toinflux.controller import Controller
+
+        document = {
+            "parameters": {"target": 20.0},
+            "inputs": {"inside": {"source": "hue", "field": "t"}, "outside": {"source": "hue", "field": "o"}},
+            "pid": {"input": "inside", "setpoint": "target", "kp": 10.0, "ki": 1.0, "kd": 0.0},
+            "output": {
+                "cycle_seconds": 60,
+                "min_transition_seconds": 1,
+                "stages": [{"level": 0, "set": {"a": False}}, {"level": 100, "set": {"a": True}}],
+            },
+            "devices": {"a": {"source": "hue", "device": "A"}},
+        }
+        before = Controller(document).fingerprint
+        document["enable_when"] = "outside < 15"
+        document["safe_state"] = "leave_unchanged"
+        assert Controller(document).fingerprint == before
+
+    def test_it_is_stable_across_processes(self, state_directory):
+        """Built-in hash() is salted per process, so a fingerprint written by one control
+        would never match the one that read it back."""
+        import subprocess
+
+        code = (
+            "import sys; sys.path.insert(0, '.');"
+            "from toinflux.controls import CONTROL_EXAMPLES;"
+            "from toinflux.controller import Controller;"
+            "print(Controller(CONTROL_EXAMPLES['normal']['document']).fingerprint)"
+        )
+        runs = {
+            subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.strip()
+            for _ in range(2)
+        }
+        assert len(runs) == 1, f"the fingerprint changed between processes: {runs}"
+
+
+class TestACycleWritesDownWhatItLearned:
+    """Driving `cycle` rather than calling the store directly.
+
+    Every other test here calls `record_loop` itself, which says nothing about whether the
+    loop ever does - and deleting the call from `_spend_window` passed all of them. Fourth
+    time on this branch that a guard has been correct and unreached.
+    """
+
+    def test_the_loop_state_lands_in_the_file(self, state_directory, bridge):
+        from toinflux.control_process import ControlProcess
+
+        name = TestAMinimumLongerThanTheWindowIsKept._control(state_directory, minimum=1, cycle=1)
+        control = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            control.cycle(dt=1, sleep=lambda _seconds: None)
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+        with open(transition_path(name, state_directory.settings_file), encoding="utf-8") as handle:
+            stored = json.load(handle)
+        assert "pid" in stored, f"a cycle ran and stored no loop state: {sorted(stored)}"
+        assert "integral" in stored["pid"], stored["pid"]
+        assert stored["pid"]["fingerprint"] == control.controller.fingerprint
+
+    def test_and_the_devices_are_still_beside_it(self, state_directory, bridge):
+        """One file, two halves. A change to either must not lose the other."""
+        from toinflux.control_process import ControlProcess
+
+        name = TestAMinimumLongerThanTheWindowIsKept._control(state_directory, minimum=1, cycle=1)
+        control = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            control.cycle(dt=1, sleep=lambda _seconds: None)
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+        with open(transition_path(name, state_directory.settings_file), encoding="utf-8") as handle:
+            stored = json.load(handle)
+        assert stored["devices"], "the device half was lost when the loop half was written"

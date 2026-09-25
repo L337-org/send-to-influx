@@ -812,3 +812,114 @@ class TestCommandingADeviceSetToAValue:
         monkeypatch.setattr("toinflux.philipshue.Hue.mcp_set_device_state", lambda self, device, **kwargs: None)
         command_devices("lamp", self._document(), {"lamp": 40}, installation.settings_file)
         assert TransitionLog("lamp", installation.settings_file).states() == {"lamp": 40}
+
+
+class TestAControlResumesItsLoopOnStart:
+    """The wiring, which is the half that can be right and never reached. `Controller.resume_from`
+    and `TransitionLog.loop_state` both have their own tests; neither says the control calls them.
+    """
+
+    @staticmethod
+    def _store(installation):
+        """Write a slow lamp control and return its name.
+
+        Args:
+            installation (Installation): the installation to write into
+
+        Returns:
+            str: the control's name
+        """
+        from tests.harness.bridge import bulb
+        from tests.harness.installation import conservatory
+        from toinflux.controls import save_control
+
+        installation.bridge.lights["9"] = bulb("office-lamp")
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["parameters"] = {"target": 1000}
+        document["inputs"] = {"lux": {"source": "hue", "field": "L", "max_age": 60}}
+        document["pid"] = {"input": "lux", "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0}
+        document["devices"] = {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "brightness_pct"}}
+        document["output"] = {
+            "cycle_seconds": 60,
+            "min_transition_seconds": 15,
+            "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 100, "set": {"lamp": 100}}],
+        }
+        save_control("lamp", document, installation.settings_file)
+        return "lamp"
+
+    @staticmethod
+    def _spend(control, cycles):
+        """Step a control and store what it learned, as a running loop does.
+
+        Args:
+            control (ControlProcess): the control
+            cycles (int): how many cycles to run
+
+        Returns:
+            list: the brightness commanded each cycle
+        """
+        seen = []
+        for _ in range(cycles):
+            plan = control.controller.step({"lux": 300.0, "target": 1000}, dt=60)
+            seen.append(plan[0].stage.states["lamp"])
+            control.transitions.record_loop(control.controller.capture(), control.controller.fingerprint)
+        return seen
+
+    def test_the_second_run_starts_where_the_first_left_off(self, state_directory, bridge, caplog):
+        from toinflux.control_process import ControlProcess
+
+        name = self._store(state_directory)
+        first = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            climb = self._spend(first, 5)
+        finally:
+            first.guard.stop("done")
+            first.close()
+        with caplog.at_level(logging.INFO):
+            second = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            resumed = self._spend(second, 5)
+        finally:
+            second.guard.stop("done")
+            second.close()
+        assert climb[0] < climb[-1], "the first run did not have to climb, so this proves nothing"
+        assert resumed[0] == pytest.approx(climb[-1], abs=1), "the second run started from nothing"
+        assert "resumed the loop" in caplog.text
+
+    def test_an_edited_document_starts_afresh(self, state_directory, bridge, caplog):
+        """The commonest restart there is, and the one where the memory means something else:
+        an integral is in the output's units."""
+        from toinflux.control_process import ControlProcess
+        from toinflux.controls import load_control, save_control
+
+        name = self._store(state_directory)
+        first = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            self._spend(first, 5)
+        finally:
+            first.guard.stop("done")
+            first.close()
+        document = load_control(name, state_directory.settings_file)
+        document["pid"]["kp"] = 0.2
+        save_control(name, document, state_directory.settings_file)
+        with caplog.at_level(logging.INFO):
+            second = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            assert "resumed the loop" not in caplog.text
+        finally:
+            second.guard.stop("done")
+            second.close()
+
+    def test_a_control_that_has_never_run_starts_afresh_quietly(self, state_directory, bridge, caplog):
+        from toinflux.control_process import ControlProcess
+
+        name = self._store(state_directory)
+        with caplog.at_level(logging.INFO):
+            control = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            assert "resumed the loop" not in caplog.text
+        finally:
+            control.guard.stop("done")
+            control.close()

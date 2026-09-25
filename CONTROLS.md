@@ -541,6 +541,31 @@ look like it is doing the opposite of what it was told - a demand of 150 command
 for the whole window is correct when the far heater may not switch off yet, and inexplicable
 without it.
 
+What a control remembers
+------------------------
+
+Each control keeps a small file in the state directory - `transitions/<name>.json` - holding
+what it had done when it last ran. Two halves, both there for the same reason: a restart
+should not cost the control what it already knew.
+
+The **device half** records what each device was last commanded to and when, which is what
+makes `min_transition_seconds` survive a restart. Without it, a heater switched off a second
+before a service restart could be switched on again immediately, because the process that
+knew about it had gone.
+
+The **loop half** records the PID's integral. That is the part a slow plant spends a long
+time earning, and rebuilding it from nothing is why a restarted control can sit below target
+for an hour having already learned the answer once. It is put back only when the stored
+memory still describes the present, on two tests: the gains, ladder and cycle must be
+unchanged, because an integral is in the output's units and means something else under a
+different tuning; and it must be recent, within a few cycles, because a machine that has been
+down long enough for the room to change should look at the room rather than at what it
+remembered. Failing either, the control starts afresh - which is simply what it always did.
+`--verbose` says which happened.
+
+The file is written whenever a device actually changes, and once per cycle for the loop
+half. Deleting it costs nothing but the memory; the control rebuilds both.
+
 What is checked, and when
 -------------------------
 

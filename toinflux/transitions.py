@@ -1,4 +1,11 @@
-"""When each of a control's devices last changed state, and what that forbids now.
+"""What a control had done when it last ran: its devices, and its loop's own memory.
+
+Named for the transitions because that is the bulk of it and the part with a rule attached.
+The PID's integral lives in the same file for the same reason the device states do - it is
+what this control knew, it is worthless to anybody else, and it must not outlive the document
+that produced it.
+
+
 
 ``min_transition_seconds`` is a promise to the hardware: do not switch this more often
 than that. It used to be kept only *inside* a cycle window, because the planner is a pure
@@ -116,6 +123,7 @@ class TransitionLog:
         self._clock = clock
         self.path = transition_path(name, settings_file)
         self.entries = self._read()
+        self._pid = self._read_loop()
 
     def _read(self):
         """Return the stored entries, or an empty mapping.
@@ -132,6 +140,10 @@ class TransitionLog:
         """
         try:
             with open(self.path, encoding="utf-8") as handle:
+                # Parsed raw and checked here, before it is split into sections: the splitter
+                # answers "which half is which" and turns anything unusable into two empty
+                # ones, so a file holding a list would otherwise read as simply having nothing
+                # in it rather than as the broken file it is.
                 stored = json.load(handle)
         except FileNotFoundError:
             # Nothing has been commanded yet, which is the ordinary state of a control that
@@ -153,11 +165,109 @@ class TransitionLog:
                 self.path,
             )
             return {}
+        stored = self._sections(stored)["devices"]
         return {
             device: entry
             for device, entry in stored.items()
             if isinstance(device, str) and isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))
         }
+
+    def _read_loop(self):
+        """Return the stored loop state, or an empty mapping.
+
+        Read alongside the device entries rather than on demand: the file is opened once at
+        construction, and a second read would let the two halves disagree about which version
+        of the file they came from.
+
+        Returns:
+            dict: the loop's stored state, empty where there is none
+        """
+        try:
+            with open(self.path, encoding="utf-8") as handle:
+                return self._sections(json.load(handle))["pid"]
+        except (OSError, ValueError):
+            # Whatever went wrong has already been reported by the device half's own read,
+            # which runs first and says so once. Saying it twice would describe one unreadable
+            # file as two faults.
+            return {}
+
+    @staticmethod
+    def _sections(stored):
+        """Return a stored document as its two halves, reading the older flat shape too.
+
+        The file held a bare mapping of device to entry before the loop's own state joined
+        it. An installation upgrading in place has one of those on disk, and refusing to read
+        it would cost every device one transition sooner than its minimum asks - a silly
+        price for a format change nobody asked about.
+
+        Args:
+            stored (object): whatever was parsed out of the file
+
+        Returns:
+            dict: ``{"devices": mapping, "pid": mapping}``, either possibly empty
+        """
+        if not isinstance(stored, dict):
+            return {"devices": {}, "pid": {}}
+        if "devices" not in stored and "pid" not in stored:
+            return {"devices": stored, "pid": {}}
+        devices = stored.get("devices")
+        loop = stored.get("pid")
+        return {
+            "devices": devices if isinstance(devices, dict) else {},
+            "pid": loop if isinstance(loop, dict) else {},
+        }
+
+    def loop_state(self, fingerprint, max_age, now=None):
+        """Return the PID state worth resuming from, or None to start afresh.
+
+        **Two guards, both erring towards starting afresh**, because the failure they prevent
+        is a control commanding output on the strength of something that is no longer true,
+        and the cost of being wrong the other way is only the settling time it already has
+        today.
+
+        The fingerprint is the stricter of the two. An integral is in the output's units, so
+        it means one thing under one set of gains and ladder and something else under
+        another - and the commonest restart there is happens to be the one that changes them,
+        because the supervisor restarts a control whenever its document is edited.
+
+        Age covers the rest: a process that has been down long enough for the room to move on
+        should look at the room rather than at what it remembered.
+
+        Args:
+            fingerprint (str): what the current document's tuning and ladder hash to
+            max_age (float): how old the state may be and still describe the present
+            now (float or None): epoch seconds; read from the clock when None
+
+        Returns:
+            dict or None: the state to resume from, or None
+        """
+        state = self._pid
+        if not state or state.get("fingerprint") != fingerprint:
+            return None
+        at = state.get("at")
+        if not isinstance(at, (int, float)):
+            return None
+        moment = self._clock() if now is None else now
+        # Clamped like every other age here: a wall clock that stepped backwards must not
+        # make a stale state look fresh.
+        if not 0 <= float(moment) - float(at) <= float(max_age):
+            return None
+        return state
+
+    def record_loop(self, state, fingerprint, now=None) -> None:
+        """Note the loop's own memory, so a restart does not rebuild it from nothing.
+
+        Args:
+            state (dict): what the controller wants back, already plain numbers
+            fingerprint (str): what the current document's tuning and ladder hash to
+            now (float or None): epoch seconds; read from the clock when None
+        """
+        self._pid = {
+            **state,
+            "fingerprint": fingerprint,
+            "at": float(self._clock() if now is None else now),
+        }
+        self._write()
 
     def states(self):
         """Return what each device was last commanded to.
@@ -302,7 +412,7 @@ class TransitionLog:
             )
             try:
                 with handle:
-                    json.dump(self.entries, handle)
+                    json.dump({"devices": self.entries, "pid": self._pid}, handle)
                 os.chmod(handle.name, stat.S_IRUSR | stat.S_IWUSR)
                 os.replace(handle.name, self.path)
             except BaseException:
