@@ -496,6 +496,35 @@ class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
         controller.resume()
         assert controller.pid._integral == 0
 
+    def test_a_long_outage_holding_every_cycle_still_starts_afresh(self):
+        """The test above holds once, which is not what an outage looks like.
+
+        The fail-safe holds on *every* failing cycle, and each call used to restamp the
+        clock - so the age measured the gap since the last failure, about one cycle, however
+        long the outage ran. Six hours of failing cycles then handed back a six-hour-old
+        integral, which is the one thing RESUMABLE_HOLD_SECONDS exists to refuse.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        assert controller.pid._integral > 0, "nothing was learned, so this proves nothing"
+        for _ in range(int(6 * 3600 / 30)):
+            controller.hold()
+            clock[0] += 30
+        controller.resume()
+        assert controller.pid._integral == 0
+
+    def test_a_short_outage_holding_every_cycle_still_carries_on(self):
+        """The other side of it: repeated holds must not make a brief outage look long
+        either, or the fix would be a different bug."""
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.pid._integral
+        for _ in range(10):
+            controller.hold()
+            clock[0] += 30
+        controller.resume()
+        assert controller.pid._integral == pytest.approx(before)
+
     def test_an_explicit_last_output_still_wins(self):
         clock = [0.0]
         controller = self._settled(clock)

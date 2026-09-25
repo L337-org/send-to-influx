@@ -287,7 +287,16 @@ class Controller:
         in place but `set_auto_mode(True)` resets it, so by the time anybody wants it, it has
         gone.
         """
-        self._held = {"integral": getattr(self.pid, "_integral", 0.0), "at": self._clock()}
+        # **Only the first hold of a run records anything.** `_fail_safe` calls this on every
+        # failing cycle, so recording each time made the age in `_held_integral` measure the
+        # gap since the *last* failure rather than how long the loop has been held - always
+        # about one cycle, however long the outage. A six-hour outage would have handed back
+        # a six-hour-old integral, which is exactly what `RESUMABLE_HOLD_SECONDS` exists to
+        # refuse. `resume` clears this, so the next hold after one starts the clock again.
+        if self._held is None:
+            self._held = {"integral": getattr(self.pid, "_integral", 0.0), "at": self._clock()}
+        # Outside the guard, and idempotent while already manual: the mode is the thing that
+        # must be true after every call, whether or not this one was the first.
         self.pid.set_auto_mode(False)
 
     def resume(self, last_output=None) -> None:
