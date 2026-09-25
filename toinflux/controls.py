@@ -819,7 +819,13 @@ def _check_active_period(document, errors) -> None:
                 f"active_period.{field}: is required and must be a 24-hour HH:MM time, got {value!r}"
                 + (_unquoted_time_hint(value) if isinstance(value, int) and not isinstance(value, bool) else "")
             )
-    _check_safe_state("active_period.end_state", period.get("end_state", SAFE_STATE_UNENERGISED), errors)
+    end_state = period.get("end_state", SAFE_STATE_UNENERGISED)
+    before = len(errors)
+    _check_safe_state("active_period.end_state", end_state, errors)
+    if len(errors) == before:
+        # Only where the value itself is usable: asking the runtime about a state already
+        # known to be wrong would name the same fault twice in different words.
+        _check_state_reaches_the_devices("active_period.end_state", end_state, document, errors)
 
 
 def _unquoted_time_hint(value):
@@ -895,7 +901,11 @@ def _check_scalars(name, document, errors) -> None:
 
     _check_timezone_and_parameters(document, errors)
 
-    _check_safe_state("safe_state", document.get("safe_state", SAFE_STATE_UNENERGISED), errors)
+    safe_state = document.get("safe_state", SAFE_STATE_UNENERGISED)
+    before = len(errors)
+    _check_safe_state("safe_state", safe_state, errors)
+    if len(errors) == before:
+        _check_state_reaches_the_devices("safe_state", safe_state, document, errors)
 
 
 def validate_control(name, document, settings=None):
@@ -1357,6 +1367,38 @@ def safe_state_problem(where, value):
     if value not in BUILT_IN_SAFE_STATES:
         return f"{where}: must be one of {', '.join(BUILT_IN_SAFE_STATES)}, or a value to set, got {value!r}"
     return None
+
+
+def _check_state_reaches_the_devices(where, value, document, errors) -> None:
+    """Refuse a safe or end state the devices in this document cannot be put into.
+
+    **By asking the runtime rather than restating its rule.** `energised` means full scale,
+    and full scale is something only a percentage has: a light driven by `color_temp_k` has
+    no "all of it", because 100 kelvin is not a bright light but a nonsense. `commands_for`
+    knew that and refused at startup, while validation accepted the document and every MCP
+    tool saved it - so the first sign of trouble was a control that would not run.
+
+    Calling the real thing is what keeps the two from drifting a second time: any state the
+    runtime will not build commands for is refused here, including ones added later that
+    nobody remembers to mirror.
+
+    Args:
+        where (str): the setting's position, for the message
+        value (object): what the document holds, already known to be a usable state
+        document (dict): the parsed document, for its devices
+        errors (list): appended to with any problems found
+    """
+    # Imported here because gating imports this module, and at module level that is circular.
+    from toinflux.gating import commands_for
+
+    devices = document.get("devices")
+    if not isinstance(devices, dict) or not devices:
+        # No devices, or a shape validation has already complained about. Nothing to ask.
+        return
+    try:
+        commands_for(value, devices)
+    except ConfigError as exc:
+        errors.append(f"{where}: {exc}")
 
 
 def _check_safe_state(where, value, errors) -> None:

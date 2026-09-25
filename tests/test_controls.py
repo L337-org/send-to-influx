@@ -257,6 +257,54 @@ class TestStructuralValidation:
         errors = validate_control("conservatory", document)
         assert any(all(state in error for state in BUILT_IN_SAFE_STATES) for error in errors)
 
+    @staticmethod
+    def _driven_by(parameter, top):
+        """Return a valid control whose one device is driven by a parameter.
+
+        Args:
+            parameter (str): the device parameter, e.g. "brightness_pct"
+            top (float): the value the top rung sets it to
+
+        Returns:
+            dict: a control document
+        """
+        document = a_valid_control()
+        document["devices"] = {"lamp": {"source": "hue", "device": "Office Lamp", "parameter": parameter}}
+        document["output"] = document["output"] | {
+            "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 1000, "set": {"lamp": top}}]
+        }
+        return document
+
+    def test_energised_is_refused_where_the_parameter_has_no_full_scale(self):
+        """`energised` means full scale and only a percentage has one: 100 kelvin is not a
+        bright light, it is a nonsense.
+
+        The runtime knew that and refused at startup; validation accepted the document and
+        every MCP tool saved it, so the first sign was a control that would not run.
+        """
+        document = self._driven_by("color_temp_k", 6500) | {"safe_state": "energised"}
+        errors = validate_control("conservatory", document)
+        assert any("color_temp_k" in error and "lamp" in error for error in errors), errors
+
+    def test_energised_is_fine_where_the_parameter_is_a_percentage(self):
+        """The other half, or the check above could be refusing every driven device."""
+        document = self._driven_by("brightness_pct", 100) | {"safe_state": "energised"}
+        assert validate_control("conservatory", document) == []
+
+    def test_the_same_holds_for_an_end_state(self):
+        """Two settings, one rule, and only one of them was being checked."""
+        document = self._driven_by("color_temp_k", 6500)
+        document["active_period"] = {"from": "23:35", "to": "05:25", "end_state": "energised"}
+        errors = validate_control("conservatory", document)
+        assert any("color_temp_k" in error for error in errors), errors
+
+    def test_a_value_that_is_wrong_twice_over_is_only_reported_once(self):
+        """The runtime is asked only about states already known to be usable, or a negative
+        number would be named once as out of range and again as something no device can be
+        put into, in two different wordings."""
+        document = self._driven_by("color_temp_k", 6500) | {"safe_state": -1}
+        assert len(validate_control("conservatory", document)) == 1
+
     def test_a_non_numeric_parameter_is_reported(self):
         document = a_valid_control()
         document["parameters"]["target"] = "eighteen"
