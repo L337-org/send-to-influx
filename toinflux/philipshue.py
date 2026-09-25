@@ -12,7 +12,7 @@ import warnings
 from collections import namedtuple
 import urllib3
 import requests
-from toinflux.general import render_values
+from toinflux.general import RepeatingProblem, render_values
 from toinflux.credentials import CANONICAL_SLOT_SUFFIX_RE, PLACEHOLDER_VALUES, SENTINEL_PREFIX
 from toinflux.influx import DataHandler, escape_key_or_tag_value
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
@@ -441,6 +441,13 @@ HUE_DEVICE_CLASSES = {
 # conversion) instead of being declared above.
 HUE_TEMPERATURE_UNITS = {"F": "°F", "K": "K"}
 HUE_DEFAULT_TEMPERATURE_UNIT = "°C"
+
+
+#: A clamped value is a property of the document rather than of the moment, so it recurs every
+#: cycle for as long as the document says so. Module level for the same reason the live-read
+#: reporter is: the handler is rebuilt per worker and the set of keys is bounded by the lights
+#: an installation actually has.
+_CLAMP_PROBLEMS = RepeatingProblem()
 
 
 class Hue(DataHandler):
@@ -1258,7 +1265,14 @@ class Hue(DataHandler):
             # answer for a bound only the bulb knows - but a caller asking for 1000 K and
             # getting 2200 with nothing said has no way to learn that the light cannot go
             # that warm, and a control document carrying the value would be wrong for ever.
-            logging.warning(
+            # Through the reporter, because a control commands its driven devices every cycle
+            # whether or not the value changed: a document asking for a colour its bulb cannot
+            # reach would otherwise say so once per cycle for as long as the control runs,
+            # which is the flood this class exists to prevent. Keyed per device, so two bulbs
+            # out of range are two problems.
+            _CLAMP_PROBLEMS.report(
+                (name, "color_temp_k"),
+                logging.WARNING,
                 "Device %r cannot reach %g K, so it was set to %g K instead",
                 name,
                 color_temp_k,

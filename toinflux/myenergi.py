@@ -490,7 +490,7 @@ class MyEnergi(DataHandler):
         try:
             return response.json()
         except requests.exceptions.JSONDecodeError as e:
-            raise SourceConnectionError(f"Error parsing the MyEnergi API response - {e}") from e
+            raise SourceConnectionError(f"Error parsing the MyEnergi API response - {e!r}") from e
 
     def _parse_device_data(self, device_key, url_key):
         """Fetch data for a MyEnergi device and filter it to configured fields if set.

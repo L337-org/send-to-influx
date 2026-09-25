@@ -192,6 +192,10 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
             )
 
 
+#: Keyed per control and device, because two devices out of range are two problems.
+_SCALE_PROBLEMS = RepeatingProblem()
+
+
 def _within_scale(control, device, parameter, state):
     """Return a value the device can take, clamping it to a bound a name settles.
 
@@ -220,7 +224,13 @@ def _within_scale(control, device, parameter, state):
         return state
     clamped = max(0, min(state, full))
     if clamped != state:
-        logging.warning(
+        # Through the reporter for the same reason as the bridge's own clamp: a control
+        # commands its driven devices every cycle, so a document asking for a value out of
+        # range would say so once per cycle for ever. Copilot caught the bridge's copy of this
+        # and not ours, which is the same fault in the same shape one file away.
+        _SCALE_PROBLEMS.report(
+            (control, device),
+            logging.WARNING,
             "Control %r asked for %r on device %r, which %r tops out at %g, so it was set to %g instead",
             control,
             state,

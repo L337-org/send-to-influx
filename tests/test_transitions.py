@@ -753,6 +753,63 @@ class TestAdjustingADrivenDevice:
         assert log.frozen(lambda _device: 60, ("lamp",)) == frozenset({"lamp"})
 
 
+class TestReadingTheFile:
+    """Two halves of one document, and an older shape that has neither."""
+
+    def test_a_flat_log_with_a_device_called_pid_survives_the_upgrade(self, state_directory):
+        """A device may legitimately be named `pid` or `devices`. Treating either name as a
+        section header read the rest of the file as nothing and dropped every other device's
+        entry, on the one upgrade that had to be seamless. The writer emits both keys, so both
+        are required before a file is read as the newer shape."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"pid": {"state": True, "at": 1000.0}, "heater": {"state": False, "at": 1000.0}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states() == {"pid": True, "heater": False}
+
+    def test_a_parameter_change_is_a_move_even_at_the_same_number(self, state_directory):
+        """The no-move test compared only the value, so a device moved between parameters at
+        the same number kept the old parameter for ever - and `_hold` then refused the record
+        as being on a different scale every time, so that device never got its minimum back."""
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        log.record({"lamp": 2700}, parameters={"lamp": "color_temp_k"})
+        log.record({"lamp": 2700}, parameters={"lamp": "brightness_pct"})
+        assert log.parameters() == {"lamp": "brightness_pct"}, "the stale scale outlived the change"
+
+    def test_the_same_value_on_the_same_parameter_is_still_not_a_move(self, state_directory):
+        """Or the minimum would restart every cycle and mean nothing at all."""
+        moment = [1000.0]
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: moment[0])
+        log.record({"lamp": 40}, parameters={"lamp": "brightness_pct"})
+        moment[0] += 60
+        log.record({"lamp": 40}, parameters={"lamp": "brightness_pct"})
+        assert log.elapsed("lamp") == 60, "commanding an unchanged value restarted its clock"
+
+    def test_both_halves_come_from_one_read(self, state_directory, monkeypatch):
+        """They were read through separate opens, and `_read_loop` claimed in its own docstring
+        that they could not disagree about which version of the file they came from. The
+        control rewrites this file every cycle, so a reader landing between the two opens could
+        pair one generation's devices with another's loop state."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {"heater": {"state": True, "at": 1.0}}, "pid": {"integral": 5.0}}, handle)
+        opens = []
+        real = open
+
+        def counted(*args, **kwargs):
+            if args and str(args[0]) == path:
+                opens.append(args[0])
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", counted)
+        log = TransitionLog("conservatory", state_directory.settings_file)
+        assert log.states() == {"heater": True}
+        assert log.loop == {"integral": 5.0}
+        assert len(opens) == 1, f"the file was opened {len(opens)} times, so the halves can disagree"
+
+
 class TestAHeldDimmerKeepsTheValueItHas:
     """The two kinds of device are held still by different means, because "do not change"
     means different things to them. A switched one is kept where it is by planning the window

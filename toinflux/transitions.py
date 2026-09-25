@@ -71,6 +71,25 @@ TRANSITION_DIR_NAME = "transitions"
 #: definition shorter than the minimum wherever this code decides anything at all.
 
 
+def _usable_entries(devices):
+    """Return only the device entries that carry a moment, which is what makes them useful.
+
+    Applied here rather than inside the read, because the read now hands back both sections
+    and only this half has a shape worth insisting on.
+
+    Args:
+        devices (dict): the stored device section
+
+    Returns:
+        dict: device name to its entry, dropping anything malformed
+    """
+    return {
+        device: entry
+        for device, entry in devices.items()
+        if isinstance(device, str) and isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))
+    }
+
+
 def transition_dir(settings_file=None):
     """Return the directory transition logs are stored in.
 
@@ -122,11 +141,21 @@ class TransitionLog:
         self.settings_file = settings_file
         self._clock = clock
         self.path = transition_path(name, settings_file)
-        self.entries = self._read()
-        self._pid = self._read_loop()
+        # **One open, both halves from the same parse.** They used to be read separately, and
+        # `_read_loop` claimed in its own docstring that they could not disagree about which
+        # version of the file they came from - which the code did not provide. The control
+        # replaces this file atomically every cycle, so a reader landing between the two opens
+        # could pair one generation's device entries with another's loop state.
+        sections = self._load()
+        self.entries = _usable_entries(sections["devices"])
+        self._pid = sections["pid"]
 
-    def _read(self):
-        """Return the stored entries, or an empty mapping.
+    def _load(self):
+        """Return both stored sections, from a single read of the file.
+
+        One open rather than two, so the device entries and the loop state cannot come from
+        different generations of a file the control rewrites every cycle.
+
 
         A log that cannot be read is not a reason to refuse to run: it is a cache of when
         things happened, and the worst an empty one costs is one transition sooner than the
@@ -136,7 +165,7 @@ class TransitionLog:
         than its document says and nobody knows why.
 
         Returns:
-            dict: device name to its last state and moment
+            dict: ``{"devices": mapping, "pid": mapping}``, either possibly empty
         """
         try:
             with open(self.path, encoding="utf-8") as handle:
@@ -148,7 +177,7 @@ class TransitionLog:
         except FileNotFoundError:
             # Nothing has been commanded yet, which is the ordinary state of a control that
             # has never run. Not worth a line.
-            return {}
+            return {"devices": {}, "pid": {}}
         except (OSError, ValueError) as exc:
             logging.warning(
                 "Control %r could not read its transition log at %r, so every device may change "
@@ -157,39 +186,15 @@ class TransitionLog:
                 self.path,
                 exc,
             )
-            return {}
+            return {"devices": {}, "pid": {}}
         if not isinstance(stored, dict):
             logging.warning(
                 "Control %r found a transition log at %r that is not a mapping, so it is being ignored",
                 self.name,
                 self.path,
             )
-            return {}
-        stored = self._sections(stored)["devices"]
-        return {
-            device: entry
-            for device, entry in stored.items()
-            if isinstance(device, str) and isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))
-        }
-
-    def _read_loop(self):
-        """Return the stored loop state, or an empty mapping.
-
-        Read alongside the device entries rather than on demand: the file is opened once at
-        construction, and a second read would let the two halves disagree about which version
-        of the file they came from.
-
-        Returns:
-            dict: the loop's stored state, empty where there is none
-        """
-        try:
-            with open(self.path, encoding="utf-8") as handle:
-                return self._sections(json.load(handle))["pid"]
-        except (OSError, ValueError):
-            # Whatever went wrong has already been reported by the device half's own read,
-            # which runs first and says so once. Saying it twice would describe one unreadable
-            # file as two faults.
-            return {}
+            return {"devices": {}, "pid": {}}
+        return self._sections(stored)
 
     @staticmethod
     def _sections(stored):
@@ -208,7 +213,11 @@ class TransitionLog:
         """
         if not isinstance(stored, dict):
             return {"devices": {}, "pid": {}}
-        if "devices" not in stored and "pid" not in stored:
+        # **Both keys, not either.** The writer always emits both, so a file carrying only one
+        # is not the new shape - while an older flat log may legitimately hold a device *named*
+        # `pid` or `devices`, and reading that as a section header dropped every other device's
+        # entry on the one upgrade that had to be seamless.
+        if "devices" not in stored or "pid" not in stored:
             return {"devices": stored, "pid": {}}
         devices = stored.get("devices")
         loop = stored.get("pid")
@@ -426,7 +435,7 @@ class TransitionLog:
             # 5% is a move. Under the old comparison both were true and nothing was timed,
             # which would have made `min_transition_seconds` mean nothing at all for the one
             # kind of device whose whole job is to change by degrees.
-            if entry is not None and entry.get("state") == state:
+            if entry is not None and entry.get("state") == state and entry.get("parameter") == parameters.get(device):
                 # No move, so nothing to time. The mark still has to go when an ordinary
                 # command confirms a state a safe state put the device in, or the exemption
                 # would outlive the safe state that earned it.
