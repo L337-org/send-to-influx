@@ -1280,3 +1280,63 @@ class TestADeviceDrivenByAParameter:
             "broken": {"source": "hue", "device": "B", "parameter": "  "},
         }
         assert parameter_devices(devices) == {"lamp": "brightness_pct"}
+
+
+class TestTheExamplesGainsMatchTheirOwnLadders:
+    """`level` is a scale the operator chooses, so a gain has to be in that scale per unit of
+    input. The examples shipped kp=12 against a ladder topping out at 1500 - a 125-unit error
+    to reach the top, and nothing delivered below four - which is not a tuning that suits a
+    different plant, it is one that is wrong by three orders of magnitude.
+
+    Copied numbers are the whole point of an example, so these are pinned: a future edit that
+    changes a ladder without its gains fails here rather than on somebody's heating.
+    """
+
+    @staticmethod
+    def _full_output_error(document):
+        """Return the input error at which proportional action alone reaches the top rung.
+
+        Args:
+            document (dict): a control document
+
+        Returns:
+            float: the error, in the units of the control's input
+        """
+        top = max(stage["level"] for stage in document["output"]["stages"])
+        return top / document["pid"]["kp"]
+
+    @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
+    def test_full_output_arrives_within_a_plausible_error(self, scenario):
+        """Wide, because what is plausible depends on the input - degrees for a heater, lux
+        for a lamp. Narrow enough to catch a gain that is out by orders of magnitude, which
+        is the failure this exists for."""
+        document = CONTROL_EXAMPLES[scenario]["document"]
+        error = self._full_output_error(document)
+        assert 0.5 <= error <= 500, f"{scenario} reaches full output only at an error of {error:g}"
+
+    @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
+    def test_a_small_error_actually_delivers_something(self, scenario):
+        """The measure that matters is the level delivered over a window, not the top rung
+        touched: with a short transition minimum a demand of 36 still buys a brief burst at a
+        rung far above it, which looks like action and is not."""
+        from toinflux.controller import Controller
+
+        document = CONTROL_EXAMPLES[scenario]["document"]
+        controller = Controller(document)
+        error = self._full_output_error(document)
+        bindings = {name: 0.0 for name in rule_names(document)}
+        setpoint = controller._setpoint_rule.evaluate(bindings)
+        bindings[document["pid"]["input"]] = setpoint - error / 2
+        plan = controller.step(bindings, dt=document["output"]["cycle_seconds"])
+        cycle = document["output"]["cycle_seconds"]
+        top = max(stage["level"] for stage in document["output"]["stages"])
+        if controller.driven:
+            # A driven device's output is its value, not the rung: the window collapses onto
+            # the lower rung and carries the value in the states, so measuring the level here
+            # would read zero however bright the lamp was.
+            name = next(iter(controller.driven))
+            full = max(stage["set"][name] for stage in document["output"]["stages"])
+            delivered = plan[0].stage.states[name] / full
+        else:
+            delivered = sum(dwell.stage.level * dwell.seconds for dwell in plan) / cycle / top
+        assert delivered > 0.1, f"{scenario} delivered {delivered:.0%} of full output at half its full-output error"

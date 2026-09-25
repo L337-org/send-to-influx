@@ -173,7 +173,14 @@ CONTROL_EXAMPLE = {
         "outside": {"source": "openmeteo", "field": "temperature_2m", "max_age": 1800},
         "grid_co2": {"source": "carbonintensity", "field": "intensity_actual", "max_age": 3600},
     },
-    "pid": {"input": "inside", "setpoint": "max(target, dew + 5)", "kp": 12.0, "ki": 0.02, "kd": 0.0},
+    # **Gains are in the ladder's own units.** `level` is a scale the operator chooses - here
+    # watts, since the rungs are a 750W heater and a pair of them - so a gain has to be in
+    # that scale per degree, and `kp = top rung / the error you want full output at` is the
+    # whole of it. This example shipped kp=12 against a ladder topping out at 1500, which
+    # needed a 125-degree error to reach the top and delivered nothing at all below four
+    # degrees: numbers that look like a tuning and are three orders of magnitude out.
+    # 500 puts full output at three degrees below setpoint.
+    "pid": {"input": "inside", "setpoint": "max(target, dew + 5)", "kp": 500.0, "ki": 0.15, "kd": 0.0},
     "output": {
         "cycle_seconds": 300,
         "min_transition_seconds": 60,
@@ -230,7 +237,8 @@ CONTROL_EXAMPLES = {
                 "inside": {"source": "hue", "field": "temperature_conservatory", "max_age": 900},
                 "outside": {"source": "openmeteo", "field": "temperature_2m", "max_age": 1800},
             },
-            "pid": {"input": "inside", "setpoint": "target", "kp": 12.0, "ki": 0.02, "kd": 0.0},
+            # Same ladder, same units: full output three degrees below setpoint.
+            "pid": {"input": "inside", "setpoint": "target", "kp": 500.0, "ki": 0.15, "kd": 0.0},
             "output": {
                 "cycle_seconds": 300,
                 "min_transition_seconds": 60,
@@ -268,7 +276,9 @@ CONTROL_EXAMPLES = {
             "timezone": "Europe/London",
             "parameters": {"target": 300.0},
             "inputs": {"brightness": {"source": "hue", "field": "light_level_office", "max_age": 300}},
-            "pid": {"input": "brightness", "setpoint": "target", "kp": 0.6, "ki": 0.01, "kd": 0.0},
+            # The input is lux, so the gain is per lux: 1000 of ladder over the 200 lux
+            # short of target at which the lamp should be fully up.
+            "pid": {"input": "brightness", "setpoint": "target", "kp": 5.0, "ki": 0.02, "kd": 0.0},
             "output": {
                 "cycle_seconds": 30,
                 # How often the lamp is adjusted, which is what a minimum means for a device
@@ -295,7 +305,8 @@ CONTROL_EXAMPLES = {
             "timezone": "Europe/London",
             "parameters": {"target": 21.0},
             "inputs": {"tray": {"source": "hue", "field": "temperature_propagator", "max_age": 300}},
-            "pid": {"input": "tray", "setpoint": "target", "kp": 40.0, "ki": 0.1, "kd": 0.0},
+            # A seed tray has almost no thermal mass, so full output one degree down.
+            "pid": {"input": "tray", "setpoint": "target", "kp": 1000.0, "ki": 2.0, "kd": 0.0},
             "output": {
                 "cycle_seconds": 60,
                 "min_transition_seconds": 10,

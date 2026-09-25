@@ -241,6 +241,30 @@ window at 1500 and 35% at 750.
 * `max_level` caps the **ladder**, not the demand. Capping the demand still proportions
   between rungs above the cap; capping the ladder does not.
 
+Choosing the gains
+------------------
+
+`level` is a scale you choose - watts, percent, anything - and **the PID's gains are in that
+scale per unit of input**. Get this wrong and the loop looks broken rather than mistuned: a
+`kp` three orders of magnitude too small delivers nothing at any realistic error, and the
+integral takes hours to make up the difference, which reads as a control that does not work.
+
+The starting point is one division:
+
+```
+kp = top rung level / the error at which you want full output
+```
+
+For a ladder topping out at 1500 and full output three degrees below setpoint, `kp` is 500.
+The shipped examples are all set this way, and the comment beside each says which error it
+was chosen for, so scaling one to your own plant is a matter of changing that number.
+
+`ki` then trims the residual offset that proportional action alone always leaves. It is
+applied per second, so a useful starting value is roughly `kp / 3000` for a slow plant like a
+room and more for something small and fast; the output limits follow the ladder, so it cannot
+wind up beyond what the devices can deliver. `kd` is usually best left at zero, because a
+temperature or light reading is noisy and differentiating noise amplifies it.
+
 Switched devices and driven ones
 --------------------------------
 
@@ -319,8 +343,8 @@ inputs:
 pid:
   input: inside
   setpoint: max(target, dew + 5)
-  kp: 12.0
-  ki: 0.02
+  kp: 500.0
+  ki: 0.15
   kd: 0.0
 output:
   cycle_seconds: 300
@@ -382,8 +406,8 @@ inputs:
 pid:
   input: inside
   setpoint: target
-  kp: 12.0
-  ki: 0.02
+  kp: 500.0
+  ki: 0.15
   kd: 0.0
 output:
   cycle_seconds: 300
@@ -434,8 +458,8 @@ inputs:
 pid:
   input: brightness
   setpoint: target
-  kp: 0.6
-  ki: 0.01
+  kp: 5.0
+  ki: 0.02
   kd: 0.0
 output:
   cycle_seconds: 30
@@ -474,8 +498,8 @@ inputs:
 pid:
   input: tray
   setpoint: target
-  kp: 40.0
-  ki: 0.1
+  kp: 1000.0
+  ki: 2.0
   kd: 0.0
 output:
   cycle_seconds: 60

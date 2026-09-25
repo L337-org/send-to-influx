@@ -465,8 +465,15 @@ class ControlProcess:
                 # can write one, and nothing constrains its characters - so an unquoted one
                 # containing a newline writes its own line into the journal. The same reason
                 # `_render_names` exists two modules away.
+                # A driven device holds a number, and rendering it as on/off threw the value
+                # away entirely: a lamp at 56% and the same lamp at 5% both logged as "on",
+                # which is the one thing this line exists to tell you. The rung's own level
+                # can also read low for a driven control - the window collapses onto the
+                # lower rung and the value is carried in the states - so the states are the
+                # answer and the controller's own line above carries the demand.
                 ", ".join(
-                    f"{device!r}={'on' if state else 'off'}" for device, state in sorted(dwell.stage.states.items())
+                    f"{device!r}={('on' if state else 'off') if isinstance(state, bool) else state}"
+                    for device, state in sorted(dwell.stage.states.items())
                 ),
             )
             self._apply(dict(dwell.stage.states))

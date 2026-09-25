@@ -16,6 +16,7 @@ import os
 
 import pytest
 
+from tests.harness.bridge import bulb
 from toinflux.exceptions import ConfigError
 from toinflux.staging import build_ladder, plan_window, reachable_ladder
 from toinflux.transitions import TransitionLog, forget_control, transition_path
@@ -813,3 +814,70 @@ class TestAHeldDimmerKeepsTheValueItHas:
         finally:
             control.guard.stop("the test is finished")
             control.close()
+
+
+class TestADrivenDevicesValueReachesTheLog:
+    """Rendering a number as on/off threw the value away entirely: a lamp at 56% and the same
+    lamp at 5% both logged as "on", which is the one thing the line exists to say."""
+
+    def test_the_value_is_logged_rather_than_a_flag(self, state_directory, bridge, caplog):
+        from toinflux.control_process import ControlProcess
+        from toinflux.controls import save_control
+
+        from tests.harness.installation import conservatory
+
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        # A dimmable bulb rather than the default plug: `far` is on/off only, and the
+        # capability check refuses brightness on it - correctly, and naming the control's own
+        # device key, which is what the runtime half of the parameter validation is for.
+        state_directory.bridge.lights["9"] = bulb("office-lamp")
+        document["devices"] = {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "brightness_pct"}}
+        document["output"] = dict(
+            document["output"],
+            cycle_seconds=1,
+            min_transition_seconds=1,
+            stages=[{"level": 0, "set": {"lamp": 0}}, {"level": 1500, "set": {"lamp": 100}}],
+        )
+        document["output"].pop("max_level", None)
+        save_control("lamp", document, state_directory.settings_file)
+        control = ControlProcess("lamp", settings_file=state_directory.settings_file)
+        try:
+            with caplog.at_level(logging.DEBUG):
+                control.cycle(dt=1, sleep=lambda _seconds: None)
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+        commanding = [r.getMessage() for r in caplog.records if "commanding" in r.getMessage()]
+        assert commanding, "the rung was never logged"
+        assert "=on" not in commanding[0] and "=off" not in commanding[0], commanding[0]
+
+    def test_a_switched_device_still_reads_as_on_or_off(self, state_directory, bridge, caplog):
+        """A boolean is not more readable as 1 and 0."""
+        from toinflux.control_process import ControlProcess
+        from toinflux.controls import save_control
+
+        from tests.harness.installation import conservatory
+
+        document = conservatory(name="switched")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["devices"] = {"heater": {"source": "hue", "device": "far"}}
+        document["output"] = dict(
+            document["output"],
+            cycle_seconds=1,
+            min_transition_seconds=1,
+            stages=[{"level": 0, "set": {"heater": False}}, {"level": 1500, "set": {"heater": True}}],
+        )
+        document["output"].pop("max_level", None)
+        save_control("switched", document, state_directory.settings_file)
+        control = ControlProcess("switched", settings_file=state_directory.settings_file)
+        try:
+            with caplog.at_level(logging.DEBUG):
+                control.cycle(dt=1, sleep=lambda _seconds: None)
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+        commanding = [r.getMessage() for r in caplog.records if "commanding" in r.getMessage()]
+        assert commanding and ("=on" in commanding[0] or "=off" in commanding[0]), commanding
