@@ -23,6 +23,7 @@ from toinflux.process import (
     CommandResult,
     ProcessError,
     run_command,
+    spawn,
 )
 
 # How long a deliberately orphaned grandchild holds an inherited pipe. Long enough that
@@ -265,6 +266,48 @@ class TestEnvironmentAllowList:
         )
         seen = set(result.stdout.decode().split())
         assert seen <= set(INHERITED_ENV_KEYS) | {"EXTRA_FOR_THIS_TEST"} | _platform_injected_env()
+
+
+class TestTheJournalStream:
+    """systemd sets $JOURNAL_STREAM for a unit whose output reaches the journal, and
+    `configure_logging` reads it to decide whether to write its own timestamp or leave it to
+    whoever is already stamping every line.
+
+    It is not on the allow-list, because that list is shared with `run_command`, which pipes
+    both streams. So it is passed through here instead, and only to a child that keeps our
+    stderr. Control processes are spawned this way, and without it the supervisor's own lines
+    lost their duplicate timestamp while every control it started kept one.
+    """
+
+    @staticmethod
+    def _child_saw(destination, **kwargs):
+        """Run a child that records what it was told, and return that.
+
+        Args:
+            destination (pathlib.Path): a file for the child to write the value to
+            **kwargs: passed to `spawn`
+
+        Returns:
+            str: the value the child saw, or "absent"
+        """
+        with patch.dict(os.environ, {"JOURNAL_STREAM": "8:1234"}, clear=False):
+            child = spawn(
+                python_c(
+                    "import os, pathlib; "
+                    f"pathlib.Path({str(destination)!r}).write_text(os.environ.get('JOURNAL_STREAM', 'absent'))"
+                ),
+                **kwargs,
+            )
+            child.wait(timeout=30)
+        return destination.read_text()
+
+    def test_a_child_that_keeps_our_stderr_is_told(self, tmp_path):
+        assert self._child_saw(tmp_path / "seen") == "8:1234"
+
+    def test_a_child_whose_stderr_is_piped_is_not(self, tmp_path):
+        """It writes into a pipe, which nothing is stamping, so it would drop its timestamp
+        and get nothing in return."""
+        assert self._child_saw(tmp_path / "seen", stderr=subprocess.PIPE) == "absent"
 
 
 class TestNoShell:

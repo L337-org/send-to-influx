@@ -154,6 +154,13 @@ What it guarantees, and why the caller does not get to choose:
   secrets and its configuration from them; dropping either produces a child reporting a missing
   file or a permissions error a long way from the cause.
 
+  `JOURNAL_STREAM` is passed too, but by `spawn` rather than by the list, and only where the
+  child keeps our stderr. The list is shared with `run_command`, which pipes both streams, and
+  a child told the journal is stamping its lines while it writes into a pipe would drop its own
+  timestamp and get nothing in return. Control processes are spawned with stderr inherited, so
+  they get it; without this the supervisor's lines lost the duplicate timestamp and every
+  control it started kept one.
+
   Be generous with benign variables and strict about one category: a missing variable surfaces
   as what looks like a permissions bug, while a spare one a child never reads costs nothing. So
   identity, locale, timezone and `TMPDIR` all pass. What never passes is anything changing *what

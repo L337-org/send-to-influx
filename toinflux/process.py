@@ -53,6 +53,9 @@ from toinflux.exceptions import ConfigError, ToInfluxError
 # hypothetical here; a system PYTHONPATH on the development machine leaks into fresh
 # virtual environments, so an inherited one would silently change which modules a child
 # imports. Guarded by test_execution_altering_variables_never_reach_the_child.
+# JOURNAL_STREAM is deliberately *not* here: it is true only of a child that keeps this
+# process's stderr, and this list is shared with `run_command`, which pipes it. `spawn` passes
+# it through itself, under that condition.
 INHERITED_ENV_KEYS = (
     "PATH",
     "HOME",
@@ -443,6 +446,19 @@ def spawn(argv, *, env_extra=None, pass_fds=(), stderr=None):
         ConfigError: argv[0] could not be resolved, or the child could not be started
     """
     env = _child_environment(env_extra)
+    # **Only where the child keeps our stderr**, which is what `stderr=None` means. systemd
+    # sets this for a unit whose output reaches the journal, and `configure_logging` reads it
+    # to decide whether to write its own timestamp or leave it to whoever is already stamping
+    # every line. It is deliberately not in the allow-list: that list is shared with
+    # `run_command`, which pipes both streams, and a child told the journal is stamping its
+    # lines while writing into a pipe would drop the timestamp with nothing to replace it.
+    # Passed through rather than interpreted - what the value *means* is systemd's business,
+    # and the only thing decided here is whether it is still true for this child.
+    #
+    # Missing it is not cosmetic: control processes are spawned here, so without this the
+    # supervisor's own lines lost their duplicate timestamp and every control's kept it.
+    if stderr is None and "JOURNAL_STREAM" in os.environ:
+        env["JOURNAL_STREAM"] = os.environ["JOURNAL_STREAM"]
     executable = _resolve_executable(argv[0], env.get("PATH"))
     try:
         return subprocess.Popen(
