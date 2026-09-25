@@ -43,6 +43,7 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import logging
+import time
 import threading
 
 
@@ -242,6 +243,29 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
 
     @register_tool(
         server,
+        title="Get Control Loop State",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    )
+    async def get_control_state(name: str) -> dict:  # noqa: DOC101,DOC103,DOC108,DOC201
+        """Report what a running control has worked out: its PID's integral, and what each
+        device was last commanded to and when.
+
+        `get_control` gives the document - what it was told to do. This gives what it has
+        since learned, which device output alone cannot show. Read it before concluding a
+        demand is misbehaving: an output falling while the input is still far from target is
+        usually the integral, which is invisible from outside.
+
+        `matches_document` is false once the control has been edited, when that memory stops
+        meaning anything. `held_by_minimum` names devices still inside their
+        `min_transition_seconds`, so they are being commanded what they already have.
+
+        Fails where there is no such control, naming it. Reads stored files and changes
+        nothing. See `get_control` for the document and `list_controls` for what is running.
+        """
+        return await anyio.to_thread.run_sync(_control_state_result, name, settings_file, supervisor)
+
+    @register_tool(
+        server,
         title="Get Control Loop",
         annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
     )
@@ -256,7 +280,9 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
         An unknown name, or one the store will not accept as a filename, is an error naming
         the control asked for. So is a document that is present but will not parse - which
         `list_controls` reports as `readable: false` rather than failing, so list first if
-        you are not sure the name exists. Reads a stored file and changes nothing.
+        you are not sure the name exists. This is what the control was told to do; for what it
+        has since worked out - its integral, and what each device was last set to - use
+        `get_control_state`. Reads a stored file and changes nothing.
         """
         return await anyio.to_thread.run_sync(_get_control_result, name, settings_file)
 
@@ -420,6 +446,84 @@ def _usable_sources(settings):
         if getattr(handler, "MCP_ACTUATES_DEVICES", False):
             actuating.append(name)
     return {"readable_as_inputs": readable, "can_switch_devices": actuating}
+
+
+def _control_state_result(name, settings_file=None, supervisor=None):
+    """Assemble what a running control currently knows, off the event loop.
+
+    **Read from the file the control writes rather than asked of the control itself.** The
+    PID lives in a child process and the MCP server does not, so the alternative would be
+    inventing a channel between them - and the child already writes this down every cycle so
+    that a restart does not lose it. The state is therefore at most one cycle old, which is
+    the same freshness anything else here reports.
+
+    Args:
+        name (str): the control to describe
+        settings_file (str or None): the settings path the process was started with
+        supervisor (Supervisor or None): the running supervisor, where there is one
+
+    Returns:
+        dict: the tool's result
+
+    Raises:
+        ToolParamError: there is no such control
+    """
+    from toinflux.controller import Controller
+    from toinflux.transitions import TransitionLog
+
+    try:
+        document = load_control(name, settings_file)
+    except ConfigError as exc:
+        raise ToolParamError(f"control {name!r} cannot be read: {exc}") from exc
+    log = TransitionLog(name, settings_file)
+    now = time.time()
+    entry: dict = {"control": name, **_supervision_of(name, _supervision_by_name(supervisor))}
+
+    fingerprint = None
+    if not validate_control(name, document):
+        fingerprint = Controller(document).fingerprint
+    stored = log.loop
+    if stored.get("integral") is not None:
+        entry["loop"] = {
+            "integral": stored["integral"],
+            "recorded_at": stored.get("at"),
+            "age_seconds": _age(stored.get("at"), now),
+            # The question a reader actually has: would a restart keep this, or start over?
+            "matches_document": fingerprint is not None and stored.get("fingerprint") == fingerprint,
+        }
+    else:
+        entry["loop"] = None
+
+    minimum_for = Controller(document).min_transition_for if fingerprint is not None else None
+    devices = tuple(document.get("devices") or {})
+    entry["devices"] = {
+        device: {
+            "state": record.get("state"),
+            "changed_at": record.get("at"),
+            "age_seconds": _age(record.get("at"), now),
+            # A safe state overrides min_transition_seconds in both directions, so a device
+            # marked this way is free to move whatever its clock says.
+            "forced": bool(record.get("forced")),
+        }
+        for device, record in sorted(log.entries.items())
+    }
+    entry["held_by_minimum"] = sorted(log.frozen(minimum_for, devices, now=now)) if minimum_for is not None else []
+    return entry
+
+
+def _age(at, now):
+    """Return how long ago something was recorded, or None where it was not.
+
+    Args:
+        at (float or None): epoch seconds it happened
+        now (float): epoch seconds now
+
+    Returns:
+        float or None: seconds, never negative, or None where there is no moment
+    """
+    if not isinstance(at, (int, float)):
+        return None
+    return round(max(0.0, now - float(at)), 1)
 
 
 def _control_schema_result(settings, settings_file=None, supervisor=None):

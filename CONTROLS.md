@@ -566,6 +566,19 @@ remembered. Failing either, the control starts afresh - which is simply what it 
 The file is written whenever a device actually changes, and once per cycle for the loop
 half. Deleting it costs nothing but the memory; the control rebuilds both.
 
+The same memory survives a **momentary** failure within one run. A cycle that cannot read its
+input falls to the safe state and stops actuating, and the loop is held; resuming keeps the
+integral where the pause was short, and starts afresh where it was long. That distinction is
+the difference between a single flaky reading, which must not cost the control what it knew,
+and the end of an active period, after which last night's integral says nothing about this
+evening.
+
+`get_control_state` over MCP reports all of it - the integral, its age, whether it still
+matches the document, what each device was last commanded to, and which devices are currently
+held by their `min_transition_seconds`. That is the tool to reach for when an output moves
+against its input, because the integral is the usual explanation and is invisible from the
+device side.
+
 What is checked, and when
 -------------------------
 
@@ -584,9 +597,10 @@ capability a stage asks for. Those need the far end, and they fail that control 
 Reading them over MCP
 ---------------------
 
-With `controls.enabled` and the MCP server both on, three read-only tools appear:
+With `controls.enabled` and the MCP server both on, four read-only tools appear:
 `list_controls` (names, enabled, devices, cycle length, and whether each process is running),
-`get_control` (one document as stored), and `get_control_schema` (this format). They are not
+`get_control` (one document as stored), `get_control_state` (what a running control has since
+worked out), and `get_control_schema` (this format). They are not
 behind any write flag: a control document holds no secrets, and being able to ask what is
 being controlled and whether it is running should not require granting the ability to change
 it.

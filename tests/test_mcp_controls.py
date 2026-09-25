@@ -22,6 +22,7 @@ from toinflux.exceptions import ConfigError
 from toinflux.exceptions import ToolParamError
 from toinflux.mcp_controls import (
     _control_schema_result,
+    _control_state_result,
     _delete_control_result,
     _get_control_result,
     _list_controls_result,
@@ -247,15 +248,28 @@ class TestRegistration:
         assert self._tools(settings) == set()
 
     def test_every_read_tool_is_registered_when_controls_are_on(self):
-        assert self._tools({"controls": {"enabled": True}}) == {"list_controls", "get_control", "get_control_schema"}
+        assert self._tools({"controls": {"enabled": True}}) == {
+            "list_controls",
+            "get_control",
+            "get_control_state",
+            "get_control_schema",
+        }
 
     def test_reading_is_not_gated_behind_the_write_flag(self):
         """A control document holds no secrets, and gating "what is this install controlling"
         behind the switch that permits changing a heating loop would mean nobody could look
         without also granting that. No write flag is set here and every read tool appears,
         `get_control_schema` included - so an installation where nothing may write controls can
-        still be asked for a document to paste in, or to explain one written by hand."""
-        assert self._tools({"controls": {"enabled": True}}) == {"list_controls", "get_control", "get_control_schema"}
+        still be asked for a document to paste in, or to explain one written by hand.
+
+        `get_control_state` belongs on this side of the line for the same reason: being able
+        to see why a loop is doing what it does must not require permission to change it."""
+        assert self._tools({"controls": {"enabled": True}}) == {
+            "list_controls",
+            "get_control",
+            "get_control_state",
+            "get_control_schema",
+        }
 
 
 class TestTheControlSchema:
@@ -1040,3 +1054,99 @@ class TestAnOmittedInstanceIsNotADifferentActuator:
         result = _save_control_result("spare", explicit, stored.settings_file, _Reloading())
         assert result["enabled"] is False
         assert "conservatory" in result["stored_disabled"]["because"]
+
+
+class TestReportingWhatAControlHasWorkedOut:
+    """The loop's own state, which device output alone cannot show.
+
+    Read from the file the control writes rather than asked of the control: the PID lives in
+    a child process and the MCP server does not, and the child already writes this down every
+    cycle so a restart does not lose it. The persistence and the tool are the same mechanism.
+    """
+
+    @staticmethod
+    def _ran(installation, cycles=3, minimum=1):
+        """Store a lamp control, run it, and return its name.
+
+        Args:
+            installation (Installation): the installation to write into
+            cycles (int): how many cycles to spend
+            minimum (float): its min_transition_seconds
+
+        Returns:
+            str: the control's name
+        """
+        from tests.harness.bridge import bulb
+        from toinflux.control_process import ControlProcess
+        from toinflux.controls import save_control
+
+        installation.bridge.lights["9"] = bulb("office-lamp")
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["parameters"] = {"target": 1000}
+        document["inputs"] = {"lux": {"source": "hue", "field": "L", "max_age": 60}}
+        document["pid"] = {"input": "lux", "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0}
+        document["devices"] = {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "brightness_pct"}}
+        document["output"] = {
+            "cycle_seconds": 60,
+            "min_transition_seconds": minimum,
+            "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 100, "set": {"lamp": 100}}],
+        }
+        save_control("lamp", document, installation.settings_file)
+        control = ControlProcess("lamp", settings_file=installation.settings_file)
+        try:
+            for _ in range(cycles):
+                control.controller.step({"lux": 300.0, "target": 1000}, dt=60)
+                control.transitions.record_loop(control.controller.capture(), control.controller.fingerprint)
+            control._apply({"lamp": 94})
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+        return "lamp"
+
+    def test_it_reports_the_integral(self, state_directory, bridge):
+        """The number that explains an output moving against its input, and the one thing
+        nothing else advertised here can show."""
+        name = self._ran(state_directory)
+        result = _control_state_result(name, state_directory.settings_file)
+        assert result["loop"]["integral"] > 0
+        assert result["loop"]["age_seconds"] is not None
+
+    def test_it_says_whether_the_memory_still_matches_the_document(self, state_directory, bridge):
+        from toinflux.controls import load_control, save_control
+
+        name = self._ran(state_directory)
+        assert _control_state_result(name, state_directory.settings_file)["loop"]["matches_document"] is True
+        document = load_control(name, state_directory.settings_file)
+        document["pid"]["kp"] = 0.2
+        save_control(name, document, state_directory.settings_file)
+        assert _control_state_result(name, state_directory.settings_file)["loop"]["matches_document"] is False
+
+    def test_it_reports_what_each_device_was_last_set_to(self, state_directory, bridge):
+        name = self._ran(state_directory)
+        lamp = _control_state_result(name, state_directory.settings_file)["devices"]["lamp"]
+        assert lamp["state"] is not None
+        assert lamp["age_seconds"] is not None
+        assert lamp["forced"] is True, "the guard's exit command is a safe state"
+
+    def test_it_names_devices_held_by_their_minimum(self, state_directory, bridge):
+        """Which is the other thing that makes a control look like it is ignoring its input."""
+        name = self._ran(state_directory, minimum=3600)
+        result = _control_state_result(name, state_directory.settings_file)
+        assert result["held_by_minimum"] == [], "a forced move is exempt in both directions"
+        from toinflux.transitions import TransitionLog
+
+        log = TransitionLog(name, state_directory.settings_file)
+        log.record({"lamp": 55})
+        assert _control_state_result(name, state_directory.settings_file)["held_by_minimum"] == ["lamp"]
+
+    def test_a_control_that_has_never_run_reports_no_loop(self, state_directory):
+        state_directory.write_control(conservatory())
+        result = _control_state_result("conservatory", state_directory.settings_file)
+        assert result["loop"] is None
+        assert result["devices"] == {}
+
+    def test_a_name_that_does_not_exist_is_refused(self, state_directory):
+        with pytest.raises(ToolParamError, match="nosuchcontrol"):
+            _control_state_result("nosuchcontrol", state_directory.settings_file)

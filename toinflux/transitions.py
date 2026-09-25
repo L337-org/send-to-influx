@@ -217,6 +217,20 @@ class TransitionLog:
             "pid": loop if isinstance(loop, dict) else {},
         }
 
+    @property
+    def loop(self):
+        """Return the loop's stored memory as written, without judging it.
+
+        :meth:`loop_state` answers "may this be resumed from", which is the question the
+        control asks. This answers "what is written down", which is the question somebody
+        diagnosing it asks - including when the answer is that it no longer matches the
+        document, because that is the finding rather than a reason to withhold it.
+
+        Returns:
+            dict: the stored state, empty where there is none
+        """
+        return dict(self._pid)
+
     def loop_state(self, fingerprint, max_age, now=None):
         """Return the PID state worth resuming from, or None to start afresh.
 

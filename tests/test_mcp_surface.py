@@ -75,7 +75,11 @@ SIBLINGS = {
     # device doing now": a control describes what *should* happen, and a caller asked
     # whether the heating is on wants the device rather than the loop.
     "list_controls": {"get_control", "get_current_state"},
-    "get_control": {"list_controls", "get_current_state"},
+    "get_control": {"list_controls", "get_current_state", "get_control_state"},
+    # The pair this one is confused with is `get_control`, which returns what the control was
+    # told to do where this returns what it has since worked out - and `list_controls`, which
+    # says whether it is running at all.
+    "get_control_state": {"get_control", "list_controls"},
     # A write tool's confusable neighbours are the other ways to change the same control.
     # The narrow one is named from the broad one deliberately: rewriting a whole document
     # to switch a control off is how a misremembered stage ladder reaches the heaters.
@@ -92,6 +96,10 @@ SIBLINGS = {
 # stale-reference check below flags any other underscored token, so a genuinely new key
 # lands here and a renamed tool lands as a failure.
 NON_TOOL_IDENTIFIERS = {
+    # Keys in `get_control_state`'s own result rather than tools.
+    "matches_document",
+    "held_by_minimum",
+    "min_transition_seconds",
     "as_of",
     # Keys in save_control's result, not tools.
     "device_plan",
@@ -163,11 +171,19 @@ WRITE_EFFECT_PHRASES = {
 # WRITE_EFFECT_PHRASES records, and names its confusable neighbours. `save_control` gained
 # the round-trip instruction - read with `get_control`, change the key, send it back - which
 # is the mitigation for a whole-document tool and was worth the bytes on its own.
-MAX_TOOL_BYTES = 18_900
+# **Raised from 18,900 for `get_control_state`**, which is the decision this number exists to
+# force. It earns its bytes: a control's integral is the one thing that explains an output
+# moving against its input, and nothing else advertised here can show it - the alternative on
+# a real install was inferring the loop's internals from device output, which produced three
+# plausible hypotheses and no answer. Two thirds of the rise is the tool itself; the rest is
+# `get_control` naming it back, which the discrimination guard requires and is right to: the
+# two are precisely the pair a caller would otherwise confuse, one holding what the control
+# was told and the other what it has since learned.
+MAX_TOOL_BYTES = 19_900
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 21_200
+MAX_TOTAL_BYTES = 22_100
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],

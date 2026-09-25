@@ -15,7 +15,7 @@ import math
 import pytest
 
 from toinflux.controls import DEFAULT_CYCLE_SECONDS
-from toinflux.controller import Controller, first_order_plant, simulate
+from toinflux.controller import RESUMABLE_HOLD_SECONDS, Controller, first_order_plant, simulate
 from toinflux.exceptions import ConfigError
 from toinflux.rules import RuleEvaluationError
 
@@ -425,3 +425,90 @@ class TestHoldTakesNoLastOutput:
         from toinflux.controller import Controller
 
         assert "last_output" in inspect.signature(Controller.resume).parameters
+
+
+class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
+    """A cycle that cannot read its input calls `hold` through the fail-safe, and the next
+    healthy cycle used to call `resume` - which resets simple-pid and zeroes the integral.
+
+    Measured on a real install: a control holding a lamp at full output dropped to 64% on a
+    single flaky read, with the error unchanged and large. The loop then spent minutes
+    earning back what it already knew, and the drop looked from outside like a hidden
+    anti-windup mechanism rather than lost state.
+    """
+
+    @staticmethod
+    def _settled(clock):
+        """Return a controller with an integral already built.
+
+        Args:
+            clock (list): a one-element list holding the current time
+
+        Returns:
+            Controller: settled against a steady error
+        """
+        controller = Controller(
+            {
+                "parameters": {"target": 1000},
+                "inputs": {"lux": {"source": "hue", "field": "L"}},
+                "pid": {"input": "lux", "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0},
+                "output": {
+                    "cycle_seconds": 60,
+                    "min_transition_seconds": 15,
+                    "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 100, "set": {"lamp": 100}}],
+                },
+                "devices": {"lamp": {"source": "hue", "device": "L", "parameter": "brightness_pct"}},
+            },
+            time_fn=lambda: clock[0],
+        )
+        for _ in range(4):
+            clock[0] += 60
+            controller.step({"lux": 300.0, "target": 1000}, dt=60)
+        return controller
+
+    def test_a_one_cycle_fail_safe_keeps_the_integral(self):
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.pid._integral
+        assert before > 0, "nothing was learned, so this proves nothing"
+        controller.hold()
+        clock[0] += 60
+        controller.resume()
+        assert controller.pid._integral == pytest.approx(before)
+
+    def test_and_the_output_does_not_drop(self):
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.step({"lux": 300.0, "target": 1000}, dt=60)[0].stage.states["lamp"]
+        controller.hold()
+        clock[0] += 60
+        controller.resume()
+        after = controller.step({"lux": 300.0, "target": 1000}, dt=60)[0].stage.states["lamp"]
+        assert after == pytest.approx(before), f"output fell from {before} to {after} on an unchanged input"
+
+    def test_a_long_hold_still_starts_afresh(self):
+        """An active period lasts eighteen hours, and what the room was doing last night says
+        nothing about this evening."""
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.hold()
+        clock[0] += RESUMABLE_HOLD_SECONDS + 1
+        controller.resume()
+        assert controller.pid._integral == 0
+
+    def test_an_explicit_last_output_still_wins(self):
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.hold()
+        clock[0] += 60
+        controller.resume(last_output=12.0)
+        assert controller.pid._integral == pytest.approx(12.0)
+
+    def test_resuming_without_a_hold_changes_nothing(self):
+        """The cycle calls `resume` unconditionally, so it must be a no-op while already
+        running - which is what makes the ordinary path free."""
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.pid._integral
+        controller.resume()
+        assert controller.pid._integral == pytest.approx(before)

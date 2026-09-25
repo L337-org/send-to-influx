@@ -18,6 +18,7 @@ import json
 import logging
 
 import math
+import time
 
 from simple_pid import PID
 
@@ -26,6 +27,12 @@ from toinflux.general import render_values
 from toinflux.controls import DEFAULT_CYCLE_SECONDS, parameter_devices, rule_names
 from toinflux.rules import RuleEvaluationError, parse_rule
 from toinflux.staging import build_ladder, cap_ladder, plan_window, reachable_ladder
+
+#: How long a hold may last and still be resumed from. A fail-safe lasts one cycle and a
+#: gated-off control lasts until its window reopens, which is the distinction that matters: a
+#: blip must not cost the loop what it learned, and last night's integral must not be handed
+#: to this evening. Generous against the first and far short of the second.
+RESUMABLE_HOLD_SECONDS = 1800.0
 
 
 class Controller:
@@ -41,8 +48,9 @@ class Controller:
         Args:
             document (dict): the control document, already structurally validated by the
                 store and with its rules known to parse
-            time_fn (callable or None): the clock simple-pid measures intervals with,
-                injectable so a two-hour hold is a test rather than a wait
+            time_fn (callable or None): the clock simple-pid measures intervals with, and
+                which this measures a hold against, injectable so a two-hour hold is a test
+                rather than a wait
 
         Raises:
             ConfigError: where a rule does not parse, or the document names no stages
@@ -60,6 +68,12 @@ class Controller:
         # Worked out once: which devices are set to a value rather than switched. The planner
         # needs it every cycle and the answer cannot change without a new document.
         self.driven = parameter_devices(self.devices)
+        # What the loop knew when it was last held, so a momentary fail-safe does not cost it.
+        # Monotonic, and the same clock simple-pid is given where a test supplies one: this
+        # measures a gap inside one process, where a wall clock could step and a restart is
+        # somebody else's problem - `TransitionLog` covers that, in epoch seconds, on disk.
+        self._clock = time_fn or time.monotonic
+        self._held: "dict | None" = None
         names = rule_names(document)
         self._setpoint_rule = _rule(document.get("pid", {}).get("setpoint"), names, "pid.setpoint")
         self._input_rule = _rule(document.get("pid", {}).get("input"), names, "pid.input")
@@ -267,28 +281,56 @@ class Controller:
         discarded it. A caller that passed a demand expecting the next ``resume`` to pick up
         from it would have got an unannounced actuation level instead, with nothing logged.
         The value belongs to :meth:`resume`, which is where the library reads it.
+
+        **What the loop knew is remembered as it goes.** `resume` decides whether to give it
+        back, and cannot do so if nothing kept it: `set_auto_mode(False)` leaves the integral
+        in place but `set_auto_mode(True)` resets it, so by the time anybody wants it, it has
+        gone.
         """
+        self._held = {"integral": getattr(self.pid, "_integral", 0.0), "at": self._clock()}
         self.pid.set_auto_mode(False)
 
     def resume(self, last_output=None) -> None:
-        """Start controlling again.
+        """Start controlling again, keeping what was learned if the pause was brief.
 
-        simple-pid's ``set_auto_mode(True, last_output=...)`` back-computes the integral so
-        the first demand after resuming matches ``last_output``. **No caller passes one**, so
-        in practice the integral restarts at zero and the loop rebuilds it over a few cycles,
-        which is the same cost a restart already carries. The parameter is kept because the
-        continuity it buys is a real option, not because anything takes it today - see the
-        note on the design record before wiring it up, since it changes what a heater does at
-        the start of every active period.
+        simple-pid's ``set_auto_mode(True)`` resets the controller, so resuming used to start
+        the integral at zero however short the gap. That is right for an active period, where
+        eighteen hours have passed and what the room was doing last night says nothing about
+        this evening. It is wrong for the case that actually happens: one cycle that could not
+        read its input calls ``hold`` through the fail-safe, and the next healthy cycle
+        undid everything the loop had learned. A control holding a lamp at full output dropped
+        to 64% on a single flaky read, with the error unchanged.
+
+        So the gap decides, the same way it decides whether a restart may resume - see
+        `RESUMABLE_HOLD_SECONDS`. Brief means carry on; long means the world has moved and the
+        loop should look at it rather than at what it remembered.
 
         Idempotent while already automatic: ``set_auto_mode`` only resets when the mode
         actually changes, which is what lets the cycle call this unconditionally.
 
         Args:
-            last_output (float or None): the demand to resume from, or None to restart the
-                integral at zero
+            last_output (float or None): the demand to resume from, overriding what was held.
+                None means use what was held, or zero where the hold was too long ago
         """
+        if last_output is None:
+            last_output = self._held_integral()
         self.pid.set_auto_mode(True, last_output=last_output)
+        self._held = None
+
+    def _held_integral(self):
+        """Return the integral worth carrying across a brief hold, or None.
+
+        Returns:
+            float or None: what to resume the I-term from, or None to start it at zero
+        """
+        held = self._held
+        if not held:
+            return None
+        elapsed = self._clock() - held["at"]
+        if not 0 <= elapsed <= RESUMABLE_HOLD_SECONDS:
+            return None
+        integral = held["integral"]
+        return float(integral) if isinstance(integral, (int, float)) and math.isfinite(integral) else None
 
 
 def _finite(value, where):
