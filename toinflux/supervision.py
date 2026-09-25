@@ -910,7 +910,7 @@ class Supervisor:
         """
         for document in self._documents_for(name):
             try:
-                commands = commands_for(document.get("safe_state", "unenergised"), tuple(document.get("devices") or {}))
+                commands = commands_for(document.get("safe_state", "unenergised"), document.get("devices") or {})
                 if commands is None:
                     # leave_unchanged, which is an answer rather than an omission.
                     continue

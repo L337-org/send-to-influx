@@ -755,3 +755,60 @@ class TestWhatRunControlAssertsBeforeItsFirstCycle:
         supervising the devices, which is what a safe state is for."""
         first, last = self._first_and_last(state_directory, "energised", self.NEVER)
         assert (first, last) == (False, True)
+
+
+class TestCommandingADeviceSetToAValue:
+    """The value travels on the parameter's own keyword, not on `on`."""
+
+    @staticmethod
+    def _document(parameter="brightness_pct"):
+        """Return a control owning one driven device.
+
+        Args:
+            parameter (str): the parameter it is driven by
+
+        Returns:
+            dict: the control document
+        """
+        from tests.harness.installation import conservatory
+
+        document = conservatory(name="lamp")
+        document["devices"] = {"lamp": {"source": "hue", "device": "far", "parameter": parameter}}
+        return document
+
+    def test_a_value_reaches_the_far_end_on_its_own_keyword(self, installation, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            "toinflux.philipshue.Hue.mcp_set_device_state",
+            lambda self, device, **kwargs: seen.append((device, kwargs)),
+        )
+        command_devices("lamp", self._document(), {"lamp": 40}, installation.settings_file)
+        assert seen == [("far", {"brightness_pct": 40})]
+
+    def test_zero_is_an_explicit_off_rather_than_the_dimmest_setting(self, installation, monkeypatch):
+        """Which is what makes `unenergised` mean the same thing to both kinds of device."""
+        seen = []
+        monkeypatch.setattr(
+            "toinflux.philipshue.Hue.mcp_set_device_state",
+            lambda self, device, **kwargs: seen.append((device, kwargs)),
+        )
+        command_devices("lamp", self._document(), {"lamp": 0}, installation.settings_file)
+        assert seen == [("far", {"on": False})]
+
+    def test_a_switched_device_is_unchanged(self, installation, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            "toinflux.philipshue.Hue.mcp_set_device_state",
+            lambda self, device, **kwargs: seen.append((device, kwargs)),
+        )
+        document = self._document()
+        document["devices"]["lamp"].pop("parameter")
+        command_devices("lamp", document, {"lamp": True}, installation.settings_file)
+        assert seen == [("far", {"on": True})]
+
+    def test_the_value_is_what_gets_recorded(self, installation, monkeypatch):
+        from toinflux.transitions import TransitionLog
+
+        monkeypatch.setattr("toinflux.philipshue.Hue.mcp_set_device_state", lambda self, device, **kwargs: None)
+        command_devices("lamp", self._document(), {"lamp": 40}, installation.settings_file)
+        assert TransitionLog("lamp", installation.settings_file).states() == {"lamp": 40}

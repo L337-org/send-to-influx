@@ -208,6 +208,11 @@ class DataHandler:
         MCP_ACTUATES_DEVICES (bool): False - whether this source can switch a named device
             on and off, which is narrower than ``MCP_WRITABLE`` and is what a control's
             devices section requires.
+        MCP_DEVICE_PARAMETERS (tuple): empty - the continuous settings a control may drive on
+            this source's devices, by the keyword ``mcp_set_device_state`` takes for each.
+            Empty means on/off only. Whether a *particular* device has one is a question for
+            the far end and stays there; this is what the source understands at all, which is
+            what ``--check-config`` can answer without touching a bridge.
         MCP_INSTANCE_TAG (str or None): None for a single-target source - the tag naming which
             instance produced a point, where one source has several.
         MCP_LIVE_STATE_COVERS_ALL_INSTANCES (bool): False - whether one live read returns every
@@ -306,6 +311,7 @@ class DataHandler:
     # naming Speedtest as a device source past the check and into an AttributeError.
     # tests/test_repo_hygiene.py fails any source declaring this without the method.
     MCP_ACTUATES_DEVICES = False
+    MCP_DEVICE_PARAMETERS: tuple = ()
     # The tag key that distinguishes *producers* within this source's measurement,
     # or None when the measurement has only one. This is the tag as an **axis** -
     # something to enumerate and scope by - as opposed to MCP_TAG_FILTERS above,

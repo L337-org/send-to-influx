@@ -88,7 +88,7 @@ BUILT_IN_SAFE_STATES = (SAFE_STATE_UNENERGISED, SAFE_STATE_ENERGISED, SAFE_STATE
 # `parameters` is deliberately not here - its keys are the operator's own names - and
 # neither is a stage's `set`, whose keys are checked against the device list instead.
 INPUT_KEYS = frozenset({"source", "field", "instance", "max_age"})
-DEVICE_KEYS = frozenset({"source", "device", "instance", "min_transition_seconds"})
+DEVICE_KEYS = frozenset({"source", "device", "instance", "min_transition_seconds", "parameter"})
 PID_KEYS = frozenset({"input", "setpoint", "kp", "ki", "kd"})
 OUTPUT_KEYS = frozenset({"cycle_seconds", "min_transition_seconds", "max_level", "stages"})
 STAGE_KEYS = frozenset({"level", "set"})
@@ -124,7 +124,11 @@ CONTROL_KEY_HELP = {
     "inputs": "name -> {source, field, instance, max_age}: the readings the rules may use",
     "pid": "the loop itself: input and setpoint rules, and the kp, ki and kd gains",
     "output": "cycle_seconds, min_transition_seconds, an optional max_level rule, and the stage ladder",
-    "devices": "name -> {source, device, instance, min_transition_seconds}: what the control switches",
+    "devices": (
+        "name -> {source, device, instance, min_transition_seconds, parameter}: what the control "
+        "drives. A device with no `parameter` is switched on and off; one that names a parameter "
+        "is set to a value on it, and its stage entries are numbers rather than true/false"
+    ),
     "enable_when": "a rule gating actuation; the control acts only while it evaluates non-zero",
     "safe_state": "what the devices do at startup, on failure and at shutdown",
     "active_period": "{from, to, end_state}: a daily wall-clock window in the control's own timezone",
@@ -248,6 +252,35 @@ CONTROL_EXAMPLES = {
                 "heater_near": {"source": "hue", "device": "Conservatory heater near"},
             },
             "enable_when": "outside < 15",
+            "safe_state": "unenergised",
+        },
+    },
+    "dimming": {
+        "use_when": (
+            "the device is set to a value rather than switched - a dimmable lamp, a variable "
+            "output. Name the parameter on the device and give each rung a number on it; the "
+            "control then holds the value the ladder describes at the demand, instead of "
+            "switching between rungs to average it out over the window"
+        ),
+        "document": {
+            "name": "office_lamp",
+            "enabled": True,
+            "timezone": "Europe/London",
+            "parameters": {"target": 300.0},
+            "inputs": {"brightness": {"source": "hue", "field": "light_level_office", "max_age": 300}},
+            "pid": {"input": "brightness", "setpoint": "target", "kp": 0.6, "ki": 0.01, "kd": 0.0},
+            "output": {
+                "cycle_seconds": 30,
+                # How often the lamp is adjusted, which is what a minimum means for a device
+                # that is set rather than switched. A dimmer chasing every reading is as
+                # unpleasant to sit under as one that never moves.
+                "min_transition_seconds": 30,
+                "stages": [
+                    {"level": 0, "set": {"lamp": 0}},
+                    {"level": 1000, "set": {"lamp": 100}},
+                ],
+            },
+            "devices": {"lamp": {"source": "hue", "device": "Office Lamp", "parameter": "brightness_pct"}},
             "safe_state": "unenergised",
         },
     },
@@ -660,17 +693,40 @@ def _check_stages(document, devices, errors) -> None:
         return
 
     device_names = set(devices)
+    driven = parameter_devices(devices)
     for index, stage in enumerate(stages):
-        _check_one_stage(f"output.stages[{index}]", stage, device_names, errors)
+        _check_one_stage(f"output.stages[{index}]", stage, device_names, driven, errors)
 
 
-def _check_one_stage(where, stage, device_names, errors) -> None:
+def parameter_devices(devices):
+    """Return the devices driven by a continuous parameter rather than switched.
+
+    One place, because four readers need the same answer and disagreeing about which devices
+    are dimmers and which are switches would have a stage validated one way and commanded
+    another.
+
+    Args:
+        devices (dict or None): the devices section
+
+    Returns:
+        dict: device name -> the parameter it is driven by
+    """
+    return {
+        name: spec["parameter"]
+        for name, spec in (devices or {}).items()
+        if isinstance(spec, dict) and isinstance(spec.get("parameter"), str) and spec["parameter"].strip()
+    }
+
+
+def _check_one_stage(where, stage, device_names, driven, errors) -> None:
     """Check a single rung of the ladder.
 
     Args:
         where (str): the stage's position, for the message
         stage (object): the parsed stage
         device_names (set): the devices this control owns
+        driven (dict): device name -> parameter, for the ones set to a value rather than
+            switched, whose rung entries are numbers instead of true/false
         errors (list): appended to with any problems found
     """
     if not isinstance(stage, dict):
@@ -699,11 +755,23 @@ def _check_one_stage(where, stage, device_names, errors) -> None:
     # into an everything-on rung, and it passed --check-config clean. Unquoted `off`/`no`/
     # `false` are YAML booleans and were always right; quoting them silently inverted the
     # meaning. `level` above has been guarded against the same class since it was written.
-    wrong = {name for name, state in assignments.items() if name in device_names and not isinstance(state, bool)}
+    switched = device_names - set(driven)
+    wrong = {name for name, state in assignments.items() if name in switched and not isinstance(state, bool)}
     if wrong:
         errors.append(
             f"{where}.set: must be true or false for {_render_names(wrong)} - "
             f"a quoted 'false' is a string, and every non-empty string switches the device on"
+        )
+    # A driven device takes a value on its parameter instead. The *range* belongs to the far
+    # end - a percentage and a colour temperature have nothing in common - so it is checked
+    # there, where the refusal can name the device and say what it can do.
+    unusable = {
+        name for name, state in assignments.items() if name in driven and not (_is_number(state) and state >= 0)
+    }
+    if unusable:
+        errors.append(
+            f"{where}.set: must be a number for {_render_names(unusable)}, which "
+            f"{'is' if len(unusable) == 1 else 'are'} set to a value rather than switched"
         )
 
 
@@ -727,9 +795,7 @@ def _check_active_period(document, errors) -> None:
         # became an active-period boundary carrying a line break.
         if not isinstance(value, str) or not re.fullmatch(CLOCK_TIME_PATTERN, value):
             errors.append(f"active_period.{field}: is required and must be a 24-hour HH:MM time, got {value!r}")
-    end_state = period.get("end_state", SAFE_STATE_UNENERGISED)
-    if end_state not in BUILT_IN_SAFE_STATES:
-        errors.append(f"active_period.end_state: must be one of {', '.join(BUILT_IN_SAFE_STATES)}, got {end_state!r}")
+    _check_safe_state("active_period.end_state", period.get("end_state", SAFE_STATE_UNENERGISED), errors)
 
 
 def _check_timezone_and_parameters(document, errors) -> None:
@@ -780,9 +846,7 @@ def _check_scalars(name, document, errors) -> None:
 
     _check_timezone_and_parameters(document, errors)
 
-    safe_state = document.get("safe_state", SAFE_STATE_UNENERGISED)
-    if safe_state not in BUILT_IN_SAFE_STATES:
-        errors.append(f"safe_state: must be one of {', '.join(BUILT_IN_SAFE_STATES)}, got {safe_state!r}")
+    _check_safe_state("safe_state", document.get("safe_state", SAFE_STATE_UNENERGISED), errors)
 
 
 def validate_control(name, document, settings=None):
@@ -863,10 +927,7 @@ def validate_control_sources(document, settings=None):
             except ConfigError:
                 errors.append(f"{where}: source {source!r} is not one this build collects from")
                 continue
-            if must_actuate and not getattr(handler, "MCP_ACTUATES_DEVICES", False):
-                errors.append(
-                    f"{where}: source {source!r} cannot switch a device on and off, so a control " f"cannot actuate it"
-                )
+            if must_actuate and _check_actuation(where, entry, source, handler, errors):
                 continue
             # Knowing the class is not knowing the installation. Without this, a control
             # naming `hue` on a machine whose settings have no `hue` block passed
@@ -878,6 +939,58 @@ def validate_control_sources(document, settings=None):
             if unusable:
                 errors.append(f"{where}: {unusable}")
     return errors
+
+
+def _check_actuation(where, entry, source, handler, errors):
+    """Check a devices entry against what its source can actually do.
+
+    Args:
+        where (str): the entry's position, for the message
+        entry (dict): the device's declaration
+        source (str): the source it names
+        handler (type): the source's class
+        errors (list): appended to with any problems found
+
+    Returns:
+        bool: True where the source cannot actuate at all, so nothing further applies
+    """
+    _check_device_parameter(where, entry, source, handler, errors)
+    if not getattr(handler, "MCP_ACTUATES_DEVICES", False):
+        errors.append(f"{where}: source {source!r} cannot switch a device on and off, so a control cannot actuate it")
+        return True
+    return False
+
+
+def _check_device_parameter(where, entry, source, handler, errors) -> None:
+    """Refuse a device parameter the source does not understand.
+
+    Whether a *particular* lamp is dimmable is a question for the bridge, asked at the moment
+    of use, where the refusal can name the device. Whether the source drives brightness at all
+    is a fact about the code, so it is answered here - the same split as the rest of this
+    function, and it is the half `--check-config` can answer without touching anything.
+
+    Args:
+        where (str): the entry's position, for the message
+        entry (dict): the device's declaration
+        source (str): the source it names
+        handler (type): the source's class
+        errors (list): appended to with any problems found
+    """
+    if "parameter" not in entry:
+        return
+    parameter = entry["parameter"]
+    drivable = getattr(handler, "MCP_DEVICE_PARAMETERS", ())
+    if not isinstance(parameter, str) or not parameter.strip():
+        errors.append(
+            f"{where}: parameter must be a name where it is given, got {parameter!r} - "
+            f"omit it entirely for a device that is only switched on and off"
+        )
+        return
+    if parameter not in drivable:
+        errors.append(
+            f"{where}: source {source!r} cannot drive {parameter!r} - it drives "
+            f"{_render_names(drivable) if drivable else 'nothing but on and off'}"
+        )
 
 
 def validate_control_rules(document):
@@ -1101,6 +1214,27 @@ def enabled_owner_of(actuators, documents, excluding=None):
                 if actuators_may_be_one(ours, theirs):
                     return name, ours
     return None
+
+
+def _check_safe_state(where, value, errors) -> None:
+    """Refuse a safe or end state that is neither a named state nor a usable value.
+
+    A number is permitted because a device driven by a parameter has more than two states to
+    be left in: 40 for a lamp is 40%, and for a switched device in the same control it means
+    on above zero. Negative and non-finite are refused here rather than at the far end, where
+    the message would be about a bridge rather than about the document.
+
+    Args:
+        where (str): the setting's position, for the message
+        value (object): what the document holds
+        errors (list): appended to with any problems found
+    """
+    if _is_number(value):
+        if value < 0:
+            errors.append(f"{where}: a value must be at least zero, got {value!r}")
+        return
+    if value not in BUILT_IN_SAFE_STATES:
+        errors.append(f"{where}: must be one of {', '.join(BUILT_IN_SAFE_STATES)}, or a value to set, got {value!r}")
 
 
 def _check_no_name_is_both_an_input_and_a_parameter(document, errors) -> None:

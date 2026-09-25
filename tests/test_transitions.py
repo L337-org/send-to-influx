@@ -714,3 +714,102 @@ class TestADeviceNameCannotForgeALogLine:
             message = record.getMessage()
             assert "\n" not in message, f"a device name reached the log as {message.count(chr(10)) + 1} lines"
         assert "\\n" in commanding[0].getMessage(), "the newline should survive as an escape rather than vanish"
+
+
+class TestAdjustingADrivenDevice:
+    """`min_transition_seconds` for a device that is adjusted rather than switched means how
+    often the adjustment is made. The same log answers it, but only once it holds the value
+    commanded rather than a flag."""
+
+    def test_a_dimmer_moving_between_two_on_values_is_a_move(self, state_directory):
+        """Under a boolean comparison both 40 and 5 were simply "on", so nothing was timed and
+        the minimum meant nothing at all for the one kind of device whose job is to change by
+        degrees."""
+        log, now = _log(state_directory)
+        log.record({"lamp": 40})
+        now[0] += 10
+        log.record({"lamp": 5})
+        assert log.elapsed("lamp") == 0
+
+    def test_and_the_same_value_again_is_not(self, state_directory):
+        log, now = _log(state_directory)
+        log.record({"lamp": 40})
+        now[0] += 10
+        log.record({"lamp": 40})
+        assert log.elapsed("lamp") == 10
+
+    def test_the_value_survives_a_restart_rather_than_collapsing_to_a_flag(self, state_directory):
+        first, now = _log(state_directory)
+        first.record({"lamp": 40})
+        second, _ = _log(state_directory, now=now)
+        assert second.states() == {"lamp": 40}
+
+    def test_a_dimmer_inside_its_minimum_is_held(self, state_directory):
+        log, now = _log(state_directory)
+        log.record({"lamp": 40})
+        now[0] += 10
+        assert log.frozen(lambda _device: 60, ("lamp",)) == frozenset({"lamp"})
+
+
+class TestAHeldDimmerKeepsTheValueItHas:
+    """The two kinds of device are held still by different means, because "do not change"
+    means different things to them. A switched one is kept where it is by planning the window
+    only from the rungs that leave it there; a driven one has no rung to be kept on, so its
+    minimum is honoured by commanding the value it already has.
+    """
+
+    @staticmethod
+    def _control(installation):
+        """Store a lamp control and return a running process for it.
+
+        Args:
+            installation (Installation): the installation to write into
+
+        Returns:
+            ControlProcess: built from the stored document
+        """
+        from tests.harness.installation import conservatory
+        from toinflux.control_process import ControlProcess
+        from toinflux.controls import save_control
+
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["devices"] = {"lamp": {"source": "hue", "device": "far", "parameter": "brightness_pct"}}
+        document["output"] = dict(
+            document["output"],
+            cycle_seconds=1,
+            min_transition_seconds=600,
+            stages=[{"level": 0, "set": {"lamp": 0}}, {"level": 1500, "set": {"lamp": 100}}],
+        )
+        document["output"].pop("max_level", None)
+        save_control("lamp", document, installation.settings_file)
+        return ControlProcess("lamp", settings_file=installation.settings_file)
+
+    def test_it_is_commanded_its_last_value_rather_than_the_new_one(self, state_directory, bridge):
+        control = self._control(state_directory)
+        try:
+            control.transitions.record({"lamp": 35})
+            held = control.transitions.frozen(control.controller.min_transition_for, ("lamp",))
+            assert held == frozenset({"lamp"}), "a 600s minimum did not hold a lamp moved a moment ago"
+            plan = control._hold(
+                tuple(
+                    type(dwell)(stage=dwell.stage, seconds=dwell.seconds)
+                    for dwell in control.controller.step({"inside": 5.0, "target": 20.0, "dew": 1.0}, dt=1)
+                ),
+                held & set(control.controller.driven),
+            )
+            assert {dwell.stage.states["lamp"] for dwell in plan} == {35}
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+
+    def test_and_moves_freely_once_its_minimum_has_passed(self, state_directory, bridge):
+        control = self._control(state_directory)
+        try:
+            control.transitions.record({"lamp": 35}, now=0.0)
+            held = control.transitions.frozen(control.controller.min_transition_for, ("lamp",), now=1000.0)
+            assert held == frozenset()
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()

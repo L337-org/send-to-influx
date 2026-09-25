@@ -21,7 +21,7 @@ from simple_pid import PID
 
 from toinflux.exceptions import ConfigError
 from toinflux.general import render_values
-from toinflux.controls import DEFAULT_CYCLE_SECONDS, rule_names
+from toinflux.controls import DEFAULT_CYCLE_SECONDS, parameter_devices, rule_names
 from toinflux.rules import RuleEvaluationError, parse_rule
 from toinflux.staging import build_ladder, cap_ladder, plan_window, reachable_ladder
 
@@ -55,6 +55,9 @@ class Controller:
         # will help", so it died permanently on a document it had just been told was fine.
         self.cycle_seconds = output.get("cycle_seconds", DEFAULT_CYCLE_SECONDS)
         self._default_transition = output.get("min_transition_seconds", 0)
+        # Worked out once: which devices are set to a value rather than switched. The planner
+        # needs it every cycle and the answer cannot change without a new document.
+        self.driven = parameter_devices(self.devices)
         names = rule_names(document)
         self._setpoint_rule = _rule(document.get("pid", {}).get("setpoint"), names, "pid.setpoint")
         self._input_rule = _rule(document.get("pid", {}).get("input"), names, "pid.input")
@@ -132,7 +135,7 @@ class Controller:
             # spent capped would be paid back as overshoot the moment it lifted.
             self.pid.output_limits = limits
         demand = self.pid(process_variable, dt=dt)
-        plan = plan_window(ladder, demand, self.cycle_seconds, self.min_transition_for)
+        plan = plan_window(ladder, demand, self.cycle_seconds, self.min_transition_for, self.driven)
         # **What the loop decided, once per cycle, at DEBUG.** Nothing in this subsystem said
         # anything during a healthy cycle: a control holding the wrong temperature produced a
         # temperature curve and no record of what it was thinking, so tuning it meant guessing

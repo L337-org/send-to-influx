@@ -162,10 +162,14 @@ class TransitionLog:
     def states(self):
         """Return what each device was last commanded to.
 
+        The value as commanded, not coerced to a boolean: a switched device holds true or
+        false and a driven one holds a number, and flattening the second into the first would
+        make a lamp at 40% indistinguishable from the same lamp at 5%.
+
         Returns:
             dict: device name to the state it was last set to
         """
-        return {device: bool(entry.get("state")) for device, entry in self.entries.items()}
+        return {device: entry.get("state") for device, entry in self.entries.items()}
 
     def elapsed(self, device, now=None):
         """Return how long since a device last changed, or None where it never has.
@@ -256,7 +260,11 @@ class TransitionLog:
         changed = False
         for device, state in commands.items():
             entry = self.entries.get(device)
-            if entry is not None and bool(entry.get("state")) == bool(state):
+            # Compared as commanded rather than as booleans, so a dimmer moving from 40% to
+            # 5% is a move. Under the old comparison both were true and nothing was timed,
+            # which would have made `min_transition_seconds` mean nothing at all for the one
+            # kind of device whose whole job is to change by degrees.
+            if entry is not None and entry.get("state") == state:
                 # No move, so nothing to time. The mark still has to go when an ordinary
                 # command confirms a state a safe state put the device in, or the exemption
                 # would outlive the safe state that earned it.
@@ -264,7 +272,7 @@ class TransitionLog:
                     del entry["forced"]
                     changed = True
                 continue
-            self.entries[device] = {"state": bool(state), "at": moment}
+            self.entries[device] = {"state": state, "at": moment}
             if forced:
                 self.entries[device]["forced"] = True
             changed = True

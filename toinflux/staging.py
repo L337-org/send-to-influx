@@ -204,6 +204,46 @@ class Dwell:
     seconds: float
 
 
+def interpolated(lower, upper, demand, driven):
+    """Return the value each driven device takes for a demand between two rungs.
+
+    A switched device has no middle setting, which is why the window is time-proportioned:
+    the average over the window comes out at the demand. A driven one *does* have a middle
+    setting, so proportioning it would be flicker rather than control - it takes the value
+    the ladder describes at that demand, and holds it for the whole window.
+
+    So the ladder is a transfer curve for these devices rather than a set of rungs to
+    alternate between, and one control can hold both kinds: each device is driven by the
+    method its own hardware supports, off the same demand.
+
+    Args:
+        lower (Stage): the rung below, or the landing rung where the demand sits on one
+        upper (Stage): the rung above, equal to ``lower`` at either end of the ladder
+        demand (float): the level the controller is asking for
+        driven (dict): device name -> its parameter, for devices set to a value
+
+    Returns:
+        dict: device name -> the value to command, empty where nothing is driven
+    """
+    if not driven:
+        return {}
+    span = upper.level - lower.level
+    # Landing exactly on a rung, or beyond either end: no interpolation to do, and a zero
+    # span would divide by nothing.
+    share = 0.0 if span == 0 else (demand - lower.level) / span
+    values = {}
+    for device in driven:
+        low = lower.states.get(device)
+        high = upper.states.get(device)
+        if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
+            # Reported by the validator, which refuses a rung that omits a device or gives
+            # it the wrong type. Guessing a value here would command a lamp off the strength
+            # of a document already known to be wrong.
+            continue
+        values[device] = low + (high - low) * share
+    return values
+
+
 def reachable_ladder(ladder, frozen, states):
     """Return the rungs a control may move to while some devices must not change.
 
@@ -238,7 +278,22 @@ def reachable_ladder(ladder, frozen, states):
     return available or ladder
 
 
-def plan_window(ladder, demand, cycle_seconds, min_transition_for):
+def _holding(stage, values):
+    """Return a rung with the driven devices set to the values they hold all window.
+
+    Args:
+        stage (Stage): the rung as declared
+        values (dict): device name -> the value to hold
+
+    Returns:
+        Stage: the rung as it should be commanded
+    """
+    if not values:
+        return stage
+    return Stage(level=stage.level, declared=stage.declared, states=MappingProxyType({**stage.states, **values}))
+
+
+def plan_window(ladder, demand, cycle_seconds, min_transition_for, driven=None):
     """Return how a cycle window is split between rungs to average out at a demand.
 
     One dwell where the demand sits on a rung or beyond an end of the ladder; two where it
@@ -261,6 +316,11 @@ def plan_window(ladder, demand, cycle_seconds, min_transition_for):
         demand (float): the level the controller is asking for
         cycle_seconds (float): the window to fill
         min_transition_for (callable): device name -> its minimum transition in seconds
+        driven (dict or None): device name -> its parameter, for devices set to a value
+            rather than switched. Those take the ladder's value *at* the demand and hold it
+            for the whole window, so they neither proportion the window nor constrain how it
+            is split - a dimmer has a middle setting, which is the whole reason it does not
+            need one made out of time.
 
     Returns:
         tuple: Dwell, in the order they should be commanded, lower rung first
@@ -287,34 +347,48 @@ def plan_window(ladder, demand, cycle_seconds, min_transition_for):
         # heaters full on because of arithmetic nobody could see.
         raise RuleEvaluationError(f"a control's demand came out as {demand!r}, which is not a level to hold")
     lower, upper = bracket(ladder, demand)
+    held = interpolated(lower, upper, demand, driven or {})
     if lower is upper:
-        return (Dwell(stage=lower, seconds=float(cycle_seconds)),)
+        return (Dwell(stage=_holding(lower, held), seconds=float(cycle_seconds)),)
     share = (demand - lower.level) / (upper.level - lower.level)
     upper_seconds = float(cycle_seconds) * share
     lower_seconds = float(cycle_seconds) - upper_seconds
-    minimum = _minimum_transition(lower, upper, min_transition_for)
+    minimum = _minimum_transition(lower, upper, min_transition_for, driven or {})
     if lower_seconds < minimum or upper_seconds < minimum:
         nearer = upper if share >= 0.5 else lower
-        return (Dwell(stage=nearer, seconds=float(cycle_seconds)),)
+        return (Dwell(stage=_holding(nearer, held), seconds=float(cycle_seconds)),)
     # Both stretches have length: bracket() collapses an exact landing, so the demand is
     # strictly between these two rungs and the share is strictly between 0 and 1. A zero
     # dwell would be a state change that immediately reverses.
+    at_lower, at_upper = _holding(lower, held), _holding(upper, held)
+    # **Both rungs commanding the same thing is one rung.** It happens whenever every device
+    # that differs between them is driven rather than switched: the driven ones hold one
+    # interpolated value across the window, so splitting it issues the identical command
+    # twice, logs it twice, and buys nothing. A lamp on its own is exactly that case.
+    if dict(at_lower.states) == dict(at_upper.states):
+        return (Dwell(stage=at_lower, seconds=float(cycle_seconds)),)
     return (
-        Dwell(stage=lower, seconds=lower_seconds),
-        Dwell(stage=upper, seconds=upper_seconds),
+        Dwell(stage=at_lower, seconds=lower_seconds),
+        Dwell(stage=at_upper, seconds=upper_seconds),
     )
 
 
-def _minimum_transition(lower, upper, min_transition_for):
+def _minimum_transition(lower, upper, min_transition_for, driven):
     """Return the longest minimum transition among the devices changing between two rungs.
+
+    Driven devices are excluded: they hold one interpolated value across both dwells, so
+    nothing about them changes when the window is split, and letting their minimum constrain
+    the split would stop a dimmer's own rate limit from doing what it is for while also
+    preventing a switched device beside it from proportioning.
 
     Args:
         lower (Stage): the rung below
         upper (Stage): the rung above
         min_transition_for (callable): device name -> its minimum transition in seconds
+        driven (dict): device name -> parameter, for devices set to a value
 
     Returns:
         float: seconds, zero where no device changes
     """
-    changing = [name for name, state in upper.states.items() if lower.states.get(name) != state]
+    changing = [name for name, state in upper.states.items() if name not in driven and lower.states.get(name) != state]
     return max((float(min_transition_for(name)) for name in changing), default=0.0)

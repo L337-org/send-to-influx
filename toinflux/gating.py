@@ -31,6 +31,7 @@ import math
 from dataclasses import dataclass
 
 from toinflux.controls import (
+    parameter_devices,
     BUILT_IN_SAFE_STATES,
     SAFE_STATE_ENERGISED,
     SAFE_STATE_LEAVE_UNCHANGED,
@@ -234,6 +235,32 @@ class Gate:
         return self.period.end_state if self.period is not None else self.safe_state
 
 
+def _full(device, parameter):
+    """Return what ``energised`` means for a device driven by ``parameter``.
+
+    Full scale, which is only a thing a percentage has. A colour temperature has no "all of
+    it" - 100 kelvin is not a bright light, it is a nonsense - so rather than send something
+    plausible-looking this refuses and says to give the value outright. The percentage case is
+    the one the option was asked for, and the other is reachable by writing the number.
+
+    Args:
+        device (str): the control's name for it, for the message
+        parameter (str): the parameter it is driven by
+
+    Returns:
+        float: the value meaning fully on
+
+    Raises:
+        ConfigError: where the parameter has no full scale
+    """
+    if parameter.endswith("_pct"):
+        return 100
+    raise ConfigError(
+        f"{ENERGISED!r} has no meaning for device {device!r}, which is driven by {parameter!r} "
+        f"rather than a percentage - give the value to set instead"
+    )
+
+
 def _resolve(bindings):
     """Return the bindings, calling for them where the caller deferred the cost.
 
@@ -279,6 +306,11 @@ def _holds(rule, bindings):
 def commands_for(state, devices):
     """Return what to command each device to reach a safe or end state.
 
+    **The devices section, not a list of names**, because what a state means depends on how
+    each device is driven: `unenergised` is False for a switch and 0 for a dimmer, and a
+    number is that value for a dimmer and "on above zero" for a switch. A caller holding only
+    names cannot tell them apart.
+
     ``unenergised`` and ``energised`` name every device explicitly rather than meaning
     "stage 0" or "the top stage". A control whose lowest stage was mis-declared - or which
     has no zero stage at all - would otherwise energise something while trying to make
@@ -293,23 +325,38 @@ def commands_for(state, devices):
     right by accident: this says "do not touch these devices", which is also what the
     startup assertion must not override.
 
+    A number is a state too, in the driven device's own units - 40 for a lamp is 40% - and
+    for a switched device in the same control it means on above zero and off at zero.
+
     Args:
-        state (str): one of the built-in safe states
-        devices (iterable): the device names the control owns
+        state (str or float): one of the built-in safe states, or a value to set
+        devices (dict or iterable): the control's devices section; a bare iterable of names
+            is read as every device being switched
 
     Returns:
         dict or None: device -> the state to command, or None to touch nothing
 
     Raises:
-        ConfigError: where the state is not one of the built-in names
+        ConfigError: where the state is not one of the built-in names or a usable value
     """
     if state == LEAVE_UNCHANGED:
         return None
+    driven = parameter_devices(devices) if isinstance(devices, dict) else {}
+    names = tuple(devices)
+    if isinstance(state, (int, float)) and not isinstance(state, bool):
+        if not math.isfinite(state) or state < 0:
+            raise ConfigError(f"a safe state given as a value must be a finite number of at least zero, got {state!r}")
+        return {name: state if name in driven else state > 0 for name in names}
     if state not in (UNENERGISED, ENERGISED):
         raise ConfigError(
-            f"{state!r} is not a safe state this knows: expected one of {render_values(BUILT_IN_SAFE_STATES)}"
+            f"{state!r} is not a safe state this knows: expected one of "
+            f"{render_values(BUILT_IN_SAFE_STATES)}, or a value to set"
         )
-    return {name: state == ENERGISED for name in devices}
+    if state == UNENERGISED:
+        # Zero reaches the far end as an explicit "off" rather than a dimmest setting, so
+        # unenergised means the same thing to both kinds of device.
+        return {name: 0 if name in driven else False for name in names}
+    return {name: _full(name, driven[name]) if name in driven else True for name in names}
 
 
 class DeviceGuard:
@@ -345,7 +392,9 @@ class DeviceGuard:
         """
         self.name = name
         self.safe_state = safe_state
-        self.devices = tuple(devices)
+        # Kept as the section rather than a list of names: `commands_for` needs to know which
+        # devices are driven by a parameter, and names alone cannot say.
+        self.devices = devices if isinstance(devices, dict) else tuple(devices)
         self._command = command
         # Computed now rather than at exit: an unknown state should stop the control
         # starting, not surface as a failure on the one path that cannot do anything

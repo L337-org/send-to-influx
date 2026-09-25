@@ -64,7 +64,7 @@ The document
 | Key | Required | What it is |
 | --- | --- | --- |
 | `active_period` | no | {from, to, end_state}: a daily wall-clock window in the control's own timezone |
-| `devices` | yes | name -> {source, device, instance, min_transition_seconds}: what the control switches |
+| `devices` | yes | name -> {source, device, instance, min_transition_seconds, parameter}: what the control drives |
 | `enable_when` | no | a rule gating actuation; the control acts only while it evaluates non-zero |
 | `enabled` | no | true or false; false keeps the document and runs no process for it at all |
 | `inputs` | yes | name -> {source, field, instance, max_age}: the readings the rules may use |
@@ -173,6 +173,13 @@ server rebooted, and the wrong one for a heater.
 All three apply to `active_period.end_state` as well, so a control can hold a room at
 temperature overnight and leave its pump running when the window closes.
 
+**A number is a state too**, for controls with driven devices: `safe_state: 40` leaves a lamp
+at 40%, and any switched device in the same control on, since a value above zero means on for
+something that has only two of them. Zero means off for both. `unenergised` is 0 and false,
+`energised` is 100 and true - and `energised` is refused for a device driven by something
+without a full scale, such as a colour temperature, where 100 would be a nonsense rather than
+a bright light; give the value outright instead.
+
 **A control that starts outside its active period starts in its `end_state`, not its
 `safe_state`.** The two answer different questions - `safe_state` is "something is wrong, or
 nothing is known yet", `end_state` is "the control is deliberately not acting" - and a
@@ -233,6 +240,40 @@ window at 1500 and 35% at 750.
   mechanism. The next ordinary command restores the normal rule.
 * `max_level` caps the **ladder**, not the demand. Capping the demand still proportions
   between rungs above the cap; capping the ladder does not.
+
+Switched devices and driven ones
+--------------------------------
+
+A device with no `parameter` is switched on and off, and its stage entries are `true` or
+`false`. A device that names one is **set to a value**, and its stage entries are numbers on
+that parameter's own scale:
+
+```yaml
+devices:
+  lamp: {source: hue, device: Office Lamp, parameter: brightness_pct}
+output:
+  stages:
+  - {level: 0, set: {lamp: 0}}
+  - {level: 1000, set: {lamp: 100}}
+```
+
+The reason the two behave differently is that a heater has no middle setting and a dimmer
+does. A switched device is **time-proportioned**: the window is split between two rungs so
+that it averages out at the demand. A driven device takes the value the ladder describes *at*
+the demand and holds it for the whole window, because proportioning a dimmer would be flicker
+rather than control. So the ladder is a set of rungs for one and a transfer curve for the
+other, and one control can hold both, each driven by the method its own hardware supports.
+
+`min_transition_seconds` means the same thing in both cases once you read it as "how often
+this device may change": for a switch that is how often it may flip, and for a dimmer how
+often it is adjusted. A driven device inside its minimum is commanded the value it already
+has, and it never constrains how the window is split, because its value is the same in both
+halves.
+
+Which parameters exist is a property of the source. Hue drives `brightness_pct` and
+`color_temp_k`; `--check-config` refuses a parameter the source does not know, and whether a
+*particular* lamp is dimmable is checked against the bridge when the control first commands
+it, where the error can name the device.
 
 Worked examples
 ---------------
@@ -369,6 +410,48 @@ devices:
     source: hue
     device: Conservatory heater near
 enable_when: outside < 15
+safe_state: unenergised
+```
+
+### Dimming
+
+A device set to a value rather than switched. The lamp holds the brightness the ladder
+describes at the demand, adjusted at most every 30 seconds. Worth knowing before tuning one:
+a lamp driven by a sensor that can see the lamp is a feedback loop, so the sensor wants to be
+reading the ambient you care about rather than the lamp itself.
+
+```yaml
+name: office_lamp
+enabled: true
+timezone: Europe/London
+parameters:
+  target: 300.0
+inputs:
+  brightness:
+    source: hue
+    field: light_level_office
+    max_age: 300
+pid:
+  input: brightness
+  setpoint: target
+  kp: 0.6
+  ki: 0.01
+  kd: 0.0
+output:
+  cycle_seconds: 30
+  min_transition_seconds: 30
+  stages:
+  - level: 0
+    set:
+      lamp: 0
+  - level: 1000
+    set:
+      lamp: 100
+devices:
+  lamp:
+    source: hue
+    device: Office Lamp
+    parameter: brightness_pct
 safe_state: unenergised
 ```
 

@@ -680,3 +680,66 @@ class TestAControlThatStartsOutsideItsWindow:
     def test_a_naive_moment_is_refused_rather_than_guessed_at(self):
         with pytest.raises(ConfigError):
             self._gate().starting_state(datetime.datetime(2026, 9, 25, 12, 0))
+
+
+class TestSafeStatesForADeviceSetToAValue:
+    """What a state means depends on how the device is driven, which is why `commands_for`
+    takes the devices section rather than a list of names."""
+
+    MIXED = {
+        "lamp": {"source": "hue", "device": "Office Lamp", "parameter": "brightness_pct"},
+        "heater": {"source": "hue", "device": "Heater"},
+    }
+
+    @pytest.mark.parametrize(
+        "state, expected",
+        [
+            pytest.param("unenergised", {"lamp": 0, "heater": False}, id="unenergised"),
+            pytest.param("energised", {"lamp": 100, "heater": True}, id="energised-is-full-scale"),
+            pytest.param(40, {"lamp": 40, "heater": True}, id="a-value-is-on-above-zero-for-a-switch"),
+            pytest.param(0, {"lamp": 0, "heater": False}, id="zero-is-off-for-both"),
+        ],
+    )
+    def test_each_device_gets_what_the_state_means_for_it(self, state, expected):
+        assert commands_for(state, self.MIXED) == expected
+
+    def test_leave_unchanged_still_touches_nothing(self):
+        assert commands_for("leave_unchanged", self.MIXED) is None
+
+    def test_energised_is_refused_where_there_is_no_full_scale(self):
+        """100 kelvin is not a bright light, it is a nonsense. Rather than send something
+        plausible-looking, this says to give the value outright."""
+        warm = {"lamp": {"source": "hue", "device": "L", "parameter": "color_temp_k"}}
+        with pytest.raises(ConfigError, match="no meaning"):
+            commands_for("energised", warm)
+
+    def test_but_a_value_works_for_it(self):
+        warm = {"lamp": {"source": "hue", "device": "L", "parameter": "color_temp_k"}}
+        assert commands_for(3000, warm) == {"lamp": 3000}
+
+    @pytest.mark.parametrize("bad", [-1, float("nan"), float("inf")])
+    def test_a_value_that_is_not_a_setting_is_refused(self, bad):
+        with pytest.raises(ConfigError):
+            commands_for(bad, self.MIXED)
+
+    def test_a_bare_list_of_names_still_works_as_all_switched(self):
+        """Nothing in the product passes one any more, but the reading has to be the safe one
+        rather than silently treating every device as a dimmer."""
+        assert commands_for("energised", ("a", "b")) == {"a": True, "b": True}
+
+    def test_a_document_may_declare_a_value_as_its_safe_state(self):
+        document = conservatory()
+        key = sorted(document["devices"])[0]
+        document["devices"][key]["parameter"] = "brightness_pct"
+        document["output"]["stages"] = [
+            dict(stage, set={**stage["set"], key: 0 if stage["level"] == 0 else 100})
+            for stage in document["output"]["stages"]
+        ]
+        document["safe_state"] = 40
+        assert validate_control("conservatory", document) == []
+
+    @pytest.mark.parametrize("bad", [-5, "dim"])
+    def test_and_one_that_is_neither_a_name_nor_a_value_is_refused(self, bad):
+        document = conservatory()
+        document["safe_state"] = bad
+        assert any("safe_state" in error for error in validate_control("conservatory", document))

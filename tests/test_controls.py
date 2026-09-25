@@ -1201,3 +1201,82 @@ class TestANameDeclaredAsBothAnInputAndAParameter:
         document["parameters"] = "not a mapping"
         errors = [error for error in validate_control("conservatory", document) if "both declare" in error]
         assert errors == []
+
+
+class TestADeviceDrivenByAParameter:
+    """A device that names a parameter is set to a value rather than switched. Whether a
+    *particular* lamp is dimmable is a question for the bridge, asked where the refusal can
+    name the device; whether the source drives brightness at all is a fact about the code and
+    is answered by `--check-config`."""
+
+    @staticmethod
+    def _driving(parameter, low=0, high=100):
+        """Return a control whose first device is driven by `parameter`.
+
+        Args:
+            parameter (object): what to put in the device's parameter key
+            low (object): its value on the bottom rung
+            high (object): its value on the top rung
+
+        Returns:
+            tuple: (the document, the device's key)
+        """
+        document = a_valid_control()
+        key = sorted(document["devices"])[0]
+        document["devices"][key]["parameter"] = parameter
+        rungs = sorted({stage["level"] for stage in document["output"]["stages"]})
+        document["output"]["stages"] = [
+            dict(stage, set={**stage["set"], key: low if stage["level"] == rungs[0] else high})
+            for stage in document["output"]["stages"]
+        ]
+        return document, key
+
+    def test_a_parameter_the_source_drives_is_accepted(self, state_directory):
+        document, _key = self._driving("brightness_pct")
+        assert validate_control("conservatory", document, state_directory.settings) == []
+
+    def test_one_it_cannot_drive_is_refused_and_says_what_it_can(self, state_directory):
+        document, key = self._driving("fan_speed")
+        errors = validate_control("conservatory", document, state_directory.settings)
+        assert any("cannot drive 'fan_speed'" in error for error in errors)
+        assert any("brightness_pct" in error for error in errors), "it must say what is available"
+
+    @pytest.mark.parametrize("bad", ["", "   ", 7, ["brightness_pct"]])
+    def test_a_parameter_that_is_not_a_name_is_refused(self, bad, state_directory):
+        document, _key = self._driving(bad)
+        errors = validate_control("conservatory", document, state_directory.settings)
+        assert any("parameter" in error for error in errors)
+
+    def test_its_stage_entries_must_be_numbers(self, state_directory):
+        document, key = self._driving("brightness_pct", low=False, high=True)
+        errors = validate_control("conservatory", document, state_directory.settings)
+        assert any("must be a number" in error and key in error for error in errors)
+
+    def test_while_a_switched_device_must_still_be_true_or_false(self, state_directory):
+        document, _key = self._driving("brightness_pct")
+        other = sorted(set(document["devices"]) - {_key})[0]
+        document["output"]["stages"][0]["set"][other] = 50
+        errors = validate_control("conservatory", document, state_directory.settings)
+        assert any("must be true or false" in error and other in error for error in errors)
+
+    def test_a_negative_value_is_refused(self, state_directory):
+        document, key = self._driving("brightness_pct", low=-10)
+        errors = validate_control("conservatory", document, state_directory.settings)
+        assert any("must be a number" in error and key in error for error in errors)
+
+    def test_the_parameter_key_is_permitted_on_a_device(self):
+        """It has to be in DEVICE_KEYS or the unknown-key check refuses it before anything
+        else gets a look."""
+        from toinflux.controls import DEVICE_KEYS
+
+        assert "parameter" in DEVICE_KEYS
+
+    def test_parameter_devices_reports_only_the_driven_ones(self):
+        from toinflux.controls import parameter_devices
+
+        devices = {
+            "lamp": {"source": "hue", "device": "L", "parameter": "brightness_pct"},
+            "heater": {"source": "hue", "device": "H"},
+            "broken": {"source": "hue", "device": "B", "parameter": "  "},
+        }
+        assert parameter_devices(devices) == {"lamp": "brightness_pct"}

@@ -455,6 +455,10 @@ class Hue(DataHandler):
         MCP_WRITABLE (bool): True - lights and plugs can be actuated, opt-in per install.
         MCP_ACTUATES_DEVICES (bool): True - a named light or plug can be switched, which is
             what a control's devices section needs and is not implied by MCP_WRITABLE.
+        MCP_DEVICE_PARAMETERS (tuple): brightness and colour temperature - the continuous
+            settings a control may drive on a Hue device, by the keyword
+            ``mcp_set_device_state`` takes for each. Whether a particular lamp has either is
+            checked against the bridge at the moment of use.
         MCP_INSTANCE_TAG (str): the tag naming which bridge a point came from.
         HUE_BRI_MIN (int): the lowest brightness the bridge accepts that is still on.
         HUE_BRI_MAX (int): the highest brightness the bridge accepts.
@@ -481,6 +485,10 @@ class Hue(DataHandler):
     # operator sets hue.mcp_read_write: true - see DataHandler.mcp_write_enabled.
     MCP_WRITABLE = True
     MCP_ACTUATES_DEVICES = True
+    # Independent capabilities per light, checked against the bridge at the moment of use -
+    # a control naming one a particular lamp lacks is refused there, naming the device. This
+    # is only the set the source understands at all.
+    MCP_DEVICE_PARAMETERS = ("brightness_pct", "color_temp_k")
     # Every point carries host=<the bridge it came from>, which with more than one bridge
     # is what separates them: field names are unprefixed, so two bridges with a light of
     # the same name write the same field key under different host tags. Naming the axis

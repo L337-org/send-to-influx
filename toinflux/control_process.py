@@ -160,7 +160,11 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
         # The control's own key travels with the bridge-side name, because it is the one an
         # operator can act on: a fault with this declaration is fixed by editing the entry
         # they wrote, not the device name the far end knows it by.
-        targets.setdefault((spec["source"], spec.get("instance")), []).append((device_key, spec["device"], state))
+        # The parameter travels with the target: the commanding runs in its own function so a
+        # partial failure can still be recorded, and that function has no view of the document.
+        targets.setdefault((spec["source"], spec.get("instance")), []).append(
+            (device_key, spec["device"], state, spec.get("parameter"))
+        )
     try:
         _command_each(targets, commanded, settings_file)
     finally:
@@ -210,14 +214,25 @@ def _command_each(targets, commanded, settings_file) -> None:
             # here: actuating is a property of the source, so every instance of it
             # answers the same way, and naming one would point at the wrong thing.
             raise ConfigError(
-                f"control device {render_values(sorted(key for key, _device, _state in devices))} "
+                f"control device {render_values(sorted(key for key, _device, _state, _parameter in devices))} "
                 f"names source {source!r}, which cannot switch a device on and off. Name a "
                 f"source that can, or remove the device from this control"
             )
         with source_handler(source, settings_file=settings_file, instance=instance) as handler:
-            for key, device, state in devices:
+            for key, device, state, parameter in devices:
+                # A device that names a parameter is *set* rather than switched, so the value
+                # travels on that keyword. The handler turns a light on implicitly when it is
+                # given a brightness, and a zero is an explicit "off" rather than a dimmest
+                # setting, which is what makes `unenergised` mean the same thing for both
+                # kinds of device.
+                if parameter and state:
+                    setting = {parameter: state}
+                elif parameter:
+                    setting = {"on": False}
+                else:
+                    setting = {"on": bool(state)}
                 try:
-                    handler.mcp_set_device_state(device, on=bool(state))
+                    handler.mcp_set_device_state(device, **setting)
                 except ToolParamError as exc:
                     # **A stored document is not a caller mistake.** `mcp_set_device_state`
                     # raises this for a device it cannot resolve, which is right when a model
@@ -232,7 +247,9 @@ def _command_each(targets, commanded, settings_file) -> None:
                     raise ConfigError(
                         f"control device {key!r} cannot be commanded: {exc}",
                     ) from exc
-                commanded[key] = bool(state)
+                # As commanded, not coerced: a dimmer's 40 must be recorded as 40, or the
+                # log cannot tell it from the same lamp at 5 and its minimum means nothing.
+                commanded[key] = state
 
 
 class ControlProcess:
@@ -282,7 +299,7 @@ class ControlProcess:
         self.guard = DeviceGuard(
             name,
             self.document.get("safe_state", "unenergised"),
-            tuple(self.document.get("devices") or {}),
+            self.document.get("devices") or {},
             self._apply_safe,
         )
 
@@ -375,7 +392,7 @@ class ControlProcess:
                 # demand built from a window the actuators were deliberately idle through.
                 self.controller.hold()
                 if decision.apply:
-                    self._apply_safe(commands_for(decision.apply, tuple(self.document.get("devices") or {})))
+                    self._apply_safe(commands_for(decision.apply, self.document.get("devices") or {}))
                 # Only now is the edge spent. If the command above raised, this is not
                 # reached, the gate still believes it is acting, and the next cycle delivers
                 # the same closing edge again - which is the retry.
@@ -424,7 +441,17 @@ class ControlProcess:
         # rather than built and then contradicted. A device still inside its minimum keeps
         # the state it is in, and the demand is met as closely as the rungs that remain allow.
         frozen = self.transitions.frozen(self.controller.min_transition_for, tuple(self.document.get("devices") or {}))
-        demand = self.controller.step(bindings, dt, frozen=frozen, states=self.transitions.states())
+        # The two kinds of device are held still by different means, because "do not change"
+        # means different things to them. A switched one is kept where it is by planning the
+        # window only from the rungs that leave it there. A driven one has no rung to be kept
+        # on - it holds a number - so its minimum is honoured by commanding the value it
+        # already has, which is what `min_transition_seconds` means for a device that is
+        # adjusted rather than switched: how often the adjustment is made.
+        driven = self.controller.driven
+        demand = self.controller.step(
+            bindings, dt, frozen=frozenset(frozen - set(driven)), states=self.transitions.states()
+        )
+        demand = self._hold(demand, frozen & set(driven))
         for dwell in demand:
             # Per rung rather than per cycle, and the states in full: "level 750" does not
             # say which heater that turned on, and the question being asked of this log is
@@ -444,6 +471,38 @@ class ControlProcess:
             )
             self._apply(dict(dwell.stage.states))
             sleep(dwell.seconds)
+
+    def _hold(self, plan, held):
+        """Return the plan with each held device pinned to the value it already has.
+
+        Args:
+            plan (tuple): Dwell, as planned
+            held (set): devices whose minimum has not elapsed, and which are driven
+
+        Returns:
+            tuple: Dwell, with those devices unchanged from their last command
+        """
+        if not held:
+            return plan
+        from types import MappingProxyType
+
+        from toinflux.staging import Dwell, Stage
+
+        known = self.transitions.states()
+        pinned = {device: known[device] for device in held if device in known}
+        if not pinned:
+            return plan
+        return tuple(
+            Dwell(
+                stage=Stage(
+                    level=dwell.stage.level,
+                    declared=dwell.stage.declared,
+                    states=MappingProxyType({**dwell.stage.states, **pinned}),
+                ),
+                seconds=dwell.seconds,
+            )
+            for dwell in plan
+        )
 
     def _fail_safe(self, reason) -> None:
         """Put the devices somewhere safe after a cycle that could not be completed.
@@ -467,7 +526,7 @@ class ControlProcess:
         )
         self.controller.hold()
         try:
-            self._apply_safe(commands_for(self.guard.safe_state, tuple(self.document.get("devices") or {})))
+            self._apply_safe(commands_for(self.guard.safe_state, self.document.get("devices") or {}))
         except (SourceConnectionError, ConfigError) as exc:
             # The one place a broad-ish catch is right: the cycle has already failed, and a
             # device that cannot be reached to be made safe is exactly what the supervisor's
