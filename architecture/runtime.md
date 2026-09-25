@@ -81,13 +81,18 @@ After each cycle `maybe_send_heartbeat()` writes a `collector_status,source=<nam
   source, including the abstract `DataHandler` and `MyEnergi` bases.
 - `flatten_dict()` - used by Speedtest to flatten nested JSON.
 - `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` -
-  timestamped stderr logging plus an optional `RotatingFileHandler`. Raises `ConfigError` rather
+  stderr logging plus an optional `RotatingFileHandler`. Raises `ConfigError` rather
   than a raw `OSError` when `logfile` cannot be opened.
 
 Call it through `_configure_logging_or_exit()` in `main()`, after settings load and after
 `--check-config` has short-circuited. That catches the `ConfigError`, logs it and exits 1; the
 stderr handler is attached by then, so it reaches the journal as a formatted line rather than a
-traceback. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`.
+traceback. Log messages use the format `YYYY-MM-DD HH:MM:SS LEVEL message`, except on the stderr
+handler when `$JOURNAL_STREAM` is set - systemd sets it for a unit whose output goes to the
+journal, which stamps every line itself, as does the rsyslog rule copying it to a file. There the
+format is `LEVEL message`. Not a tty check: stderr redirected to a file by hand has nothing else
+stamping it, which is the case a tty check would get backwards. The `RotatingFileHandler` always
+keeps the timestamp, for the same reason.
 
 **Put diagnostics on stderr and the program's data on stdout.** Every log level,
 `--check-config`'s `Configuration error:` and the credential CLI's errors go to stderr;

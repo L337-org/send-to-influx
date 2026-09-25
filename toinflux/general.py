@@ -112,6 +112,16 @@ def configure_logging(
         ConfigError: the logfile path cannot be opened for writing
     """
     fmt = IndentedFormatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    # systemd sets JOURNAL_STREAM for a unit whose stdout and stderr go to the journal, and
+    # both the journal and an rsyslog rule copying it to a file stamp every line themselves.
+    # Emitting ours as well put two timestamps on each line of an already long one:
+    #
+    #   Sep 25 15:53:57 galahad send-to-influx[2309344]: 2026-09-25 15:53:57 ERROR    ...
+    #
+    # Deliberately not a tty check, which would get the common case backwards: output
+    # redirected to a file by hand has nothing else stamping it, and is exactly where the
+    # timestamp must stay. A file handler below always keeps it, for the same reason.
+    stderr_fmt = IndentedFormatter("%(levelname)-8s %(message)s") if os.environ.get("JOURNAL_STREAM") else fmt
     root = logging.getLogger()
 
     resolved_level = getattr(logging, str(loglevel).upper(), None)
@@ -136,7 +146,7 @@ def configure_logging(
     # neither), and the rsyslog rule matches on programname rather than stream, so
     # journalctl and /var/log/send-to-influx.log are unaffected.
     stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setFormatter(fmt)
+    stderr_handler.setFormatter(stderr_fmt)
     stderr_handler._send_to_influx_handler = True
     root.addHandler(stderr_handler)
 

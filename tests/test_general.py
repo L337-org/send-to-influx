@@ -1,6 +1,7 @@
 """Unit tests for toinflux.general (load_settings, get_class)."""
 
 import logging
+from logging.handlers import RotatingFileHandler
 import io
 import os
 import tempfile
@@ -1223,6 +1224,33 @@ class TestControlsBlockValidation:
         package. The two switches are checked because they are silently ignorable."""
         sample_settings["controls"] = {"enabled": True, "something_later": 3}
         validate_settings(sample_settings)
+
+
+class TestWhoStampsTheTimestamp:
+    """Under systemd the journal stamps every line, and an rsyslog rule copying it to a file
+    stamps it again, so ours was the second timestamp on an already long line."""
+
+    def test_under_systemd_the_stderr_handler_leaves_the_timestamp_to_the_journal(self, tmp_path, monkeypatch):
+        """The journal and the rsyslog rule copying it to a file both stamp every line, so
+        ours was the second timestamp on an already long one.  The file handler keeps its
+        own, because nothing else is stamping that."""
+        monkeypatch.setenv("JOURNAL_STREAM", "8:123456")
+        configure_logging(logfile=str(tmp_path / "out.log"))
+        installed = [h for h in logging.getLogger().handlers if getattr(h, "_send_to_influx_handler", False)]
+        streams = [h for h in installed if not isinstance(h, RotatingFileHandler)]
+        files = [h for h in installed if isinstance(h, RotatingFileHandler)]
+        assert streams and files, [type(h).__name__ for h in installed]
+        assert all("asctime" not in h.formatter._fmt for h in streams), [h.formatter._fmt for h in streams]
+        assert all("asctime" in h.formatter._fmt for h in files), [h.formatter._fmt for h in files]
+
+    def test_run_by_hand_the_timestamp_stays(self, monkeypatch):
+        """Deliberately not a tty check: output redirected to a file from a shell has nothing
+        else stamping it, and is exactly the case a tty check would strip it from."""
+        monkeypatch.delenv("JOURNAL_STREAM", raising=False)
+        configure_logging()
+        installed = [h for h in logging.getLogger().handlers if getattr(h, "_send_to_influx_handler", False)]
+        assert installed
+        assert all("asctime" in h.formatter._fmt for h in installed), [h.formatter._fmt for h in installed]
 
 
 class TestRepeatingProblem:
