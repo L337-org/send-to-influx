@@ -408,8 +408,6 @@ class ControlProcess:
             elif decision.edge == "opened":
                 self.controller.resume()
                 logging.info("Control %r resumed", self.name)
-            # Said only where something was being reported, so an ordinary cycle is silent.
-            self._problems.cleared("cycle", "Control %r completed a cycle again", self.name)
             if decision.actuating:
                 # **Let go of any hold before stepping.** `_fail_safe` holds the controller so
                 # a failed cycle does not integrate an error the loop never acted on, and
@@ -423,6 +421,15 @@ class ControlProcess:
                 self._spend_window(dt, sleep)
             else:
                 sleep(self.cycle_seconds)
+            # **After the window, not before it.** The gate resolves this control's inputs
+            # only where `enable_when` needs them, so a control without one arrives here
+            # having read nothing at all: the inputs are gathered inside `_spend_window`, and
+            # a stale or unreachable one fails there. Saying it beforehand announced
+            # "completed a cycle again" four seconds before that same cycle failed, and
+            # cleared the reporter on the way, so every failing cycle of an outage logged its
+            # ERROR afresh instead of once.
+            # Said only where something was being reported, so an ordinary cycle is silent.
+            self._problems.cleared("cycle", "Control %r completed a cycle again", self.name)
             return decision
         except (RuleEvaluationError, SourceConnectionError) as exc:
             # This cycle, not this control. The far end may be back next time, the

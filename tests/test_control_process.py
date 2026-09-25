@@ -163,6 +163,52 @@ class TestAFailedCycleIsNotAFailedControl:
         assert "could not reach its devices" in caplog.text
 
 
+class TestSayingItRecovered:
+    """The recovery line is the only thing that explains a gap in the journal, so it has to
+    arrive when the cycle really did complete and not merely when it was attempted."""
+
+    def _fail_once(self, control, bridge, influx):
+        """Run one cycle that cannot be completed.
+
+        Args:
+            control (ControlProcess): the control to cycle
+            bridge (StubBridge): the bridge to strand
+            influx (StubInflux): the database holding the stale point
+        """
+        influx.age_reading("conservatory_temperature", 86400)
+        with faults.frozen(influx), faults.unreachable(bridge):
+            assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+
+    def test_a_failing_cycle_does_not_claim_it_completed(self, control, bridge, influx, caplog):
+        """It said so four seconds before the same cycle failed, on a real control during a
+        bridge outage: the inputs are read inside the window, so a cycle that has reached the
+        window has not yet done the part that fails.
+
+        **The second consecutive failure, not the first.** The recovery line is silent where
+        nothing was being reported, so the first failure has nothing to wrongly clear and a
+        one-cycle outage shows nothing at all. It takes two to see it, which is what an outage
+        actually looks like.
+        """
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        self._fail_once(control, bridge, influx)
+        caplog.set_level(logging.INFO)
+        caplog.clear()
+        self._fail_once(control, bridge, influx)
+        assert "could not complete a cycle" in caplog.text
+        assert "completed a cycle again" not in caplog.text
+
+    def test_a_cycle_that_really_completed_says_so(self, control, bridge, influx, caplog):
+        """The other half: the line still has to appear, or the fix would be indistinguishable
+        from deleting it."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        self._fail_once(control, bridge, influx)
+        caplog.set_level(logging.INFO)
+        caplog.clear()
+        influx.write_reading("conservatory_temperature", 16.0)
+        assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is not None
+        assert "completed a cycle again" in caplog.text
+
+
 class TestGathering:
     def test_a_reading_past_its_max_age_is_a_cycle_failure_not_a_config_fault(self, installation, influx, bridge):
         """RuleEvaluationError, so the fail-safe covers the cycle and the control is still
