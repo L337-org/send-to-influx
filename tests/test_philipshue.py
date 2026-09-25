@@ -449,9 +449,13 @@ class TestHueTokenRedaction:
         # Asserted by equality rather than substring: this pins both halves of the
         # contract at once - the token is gone, and every other byte (host, port,
         # underlying cause) survives, so the failure is still diagnosable.
+        #
+        # The exception's repr rather than its str, so that external text cannot put a
+        # newline into a message that is now the only report of the failure. It names the
+        # type as well, which the log line this replaced never did.
         assert str(excinfo.value) == (
-            "HTTPSConnectionPool(host='bridge-under-test', port=443): Max retries "
-            "exceeded with url: /api/<redacted> (Caused by ConnectTimeoutError())"
+            "ConnectionError(\"HTTPSConnectionPool(host='bridge-under-test', port=443): Max retries "
+            'exceeded with url: /api/<redacted> (Caused by ConnectTimeoutError())")'
         )
 
     def test_unparseable_response_redacts_the_token(self, sample_settings):

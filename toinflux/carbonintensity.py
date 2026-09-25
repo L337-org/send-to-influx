@@ -75,7 +75,7 @@ class CarbonIntensity(DataHandler):
         except requests.exceptions.RequestException as e:
             # Raised, not logged as well: every caller reports a failed read itself, and at
             # the level its own situation deserves. See the note in philipshue.py.
-            raise SourceConnectionError(str(e)) from e
+            raise SourceConnectionError(repr(e)) from e
         return response.json()
 
     def get_data(self):

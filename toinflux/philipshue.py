@@ -858,7 +858,7 @@ class Hue(DataHandler):
             # handler below - otherwise a parse failure would be misreported as a
             # transport "connection" error. (Guards both the collector read path
             # and the MCP write tools' device discovery, which share this method.)
-            raise SourceConnectionError(self._redact(f"Hue Bridge returned an unparseable response: {e}")) from e
+            raise SourceConnectionError(self._redact(f"Hue Bridge returned an unparseable response: {e!r}")) from e
         except requests.exceptions.RequestException as e:
             # **Raised, not logged as well.** Every caller of this handler reports a failed
             # read itself, and at the level its own situation deserves: the collector worker
@@ -867,7 +867,7 @@ class Hue(DataHandler):
             # an ERROR in front of each of them, saying the same words at a severity none of
             # them agreed with - during a five-minute bridge outage, one control produced two
             # ERRORs a cycle from this line alone.  Everything this said is in the exception.
-            raise SourceConnectionError(self._redact(str(e))) from e
+            raise SourceConnectionError(self._redact(repr(e))) from e
         # A successful GET returns a dict (sensors/lights); a list only ever comes
         # back on error. Guard the indexing: an empty list, or a list whose first
         # item isn't the documented {"error": {...}} shape, is unexpected and must
@@ -1372,10 +1372,10 @@ class Hue(DataHandler):
             # a transport error. (raise_for_status()'s HTTPError is a
             # RequestException but not a ValueError, so it still falls through.)
             raise SourceConnectionError(
-                self._redact(f"Hue Bridge returned an unparseable response to a write: {e}")
+                self._redact(f"Hue Bridge returned an unparseable response to a write: {e!r}")
             ) from e
         except requests.exceptions.RequestException as e:
-            raise SourceConnectionError(self._redact(str(e))) from e
+            raise SourceConnectionError(self._redact(repr(e))) from e
         # The CLIP API always answers a state PUT with a JSON *list* of per-key
         # success/error items. A non-list body is unexpected and must fail cleanly
         # rather than being read as success (an empty error list) by the scan below.

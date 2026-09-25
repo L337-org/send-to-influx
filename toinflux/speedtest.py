@@ -131,7 +131,7 @@ class Speedtest(DataHandler):
             # get the results
             st_data = st.results.dict()
         except speedtest.SpeedtestException as e:
-            raise SourceConnectionError(str(e)) from e
+            raise SourceConnectionError(repr(e)) from e
         if not isinstance(st_data, dict):
             raise SourceConnectionError("invalid results")
 
