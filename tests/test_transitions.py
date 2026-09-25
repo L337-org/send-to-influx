@@ -768,6 +768,19 @@ class TestReadingTheFile:
         log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
         assert log.states() == {"pid": True, "heater": False}
 
+    def test_a_flat_log_with_devices_called_pid_and_devices_survives_too(self, state_directory):
+        """Requiring both keys is still not enough: a log holding devices named *both* would
+        have its two entries read as the sections and every device in the file lost. What
+        separates them is the shape - a section's values are entries, an entry's values are a
+        state and a moment."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"pid": {"state": True, "at": 1000.0}, "devices": {"state": False, "at": 1000.0}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states() == {"pid": True, "devices": False}
+        assert log.loop == {}
+
     def test_a_parameter_change_is_a_move_even_at_the_same_number(self, state_directory):
         """The no-move test compared only the value, so a device moved between parameters at
         the same number kept the old parameter for ever - and `_hold` then refused the record

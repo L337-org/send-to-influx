@@ -229,6 +229,8 @@ def _within_scale(control, device, parameter, state):
         # range would say so once per cycle for ever. Copilot caught the bridge's copy of this
         # and not ours, which is the same fault in the same shape one file away.
         _SCALE_PROBLEMS.report(
+            # The control as well as the device, because a device key is only unique within
+            # the document that declares it.
             (control, device),
             logging.WARNING,
             "Control %r asked for %r on device %r, which %r tops out at %g, so it was set to %g instead",

@@ -213,11 +213,22 @@ class TransitionLog:
         """
         if not isinstance(stored, dict):
             return {"devices": {}, "pid": {}}
-        # **Both keys, not either.** The writer always emits both, so a file carrying only one
-        # is not the new shape - while an older flat log may legitimately hold a device *named*
-        # `pid` or `devices`, and reading that as a section header dropped every other device's
-        # entry on the one upgrade that had to be seamless.
-        if "devices" not in stored or "pid" not in stored:
+        # **The shape, not just the keys.** The writer always emits both, so a file carrying
+        # only one is not the new format - but requiring both is still not enough, because an
+        # older flat log may hold devices named *both* `pid` and `devices`, and reading those
+        # two entries as the sections loses every device in the file. What separates them is
+        # what the devices half contains: a section is a mapping of device to entry, so its
+        # values are mappings, while a device's own entry holds a state and a moment. Checked
+        # rather than versioned, because the files that need reading are the ones already on
+        # disk, written before any version number existed.
+        section = stored.get("devices")
+        looks_new = (
+            "devices" in stored
+            and "pid" in stored
+            and isinstance(section, dict)
+            and all(isinstance(entry, dict) for entry in section.values())
+        )
+        if not looks_new:
             return {"devices": stored, "pid": {}}
         devices = stored.get("devices")
         loop = stored.get("pid")

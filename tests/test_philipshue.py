@@ -155,6 +155,26 @@ class TestHue:
                         hue.get_data_from_hue_bridge()
         assert caplog.records == [], [record.getMessage() for record in caplog.records]
 
+    def test_a_clamped_colour_is_said_once_per_bridge_not_once_per_name(self, sample_settings, caplog):
+        """An installation may run several bridges, and two of them commonly carry the same
+        light names - so a key of the name alone reports one bulb and silently swallows the
+        other. It must also not say it once a cycle: a control commands its driven devices
+        every cycle whether or not the value changed."""
+        from toinflux.philipshue import _CLAMP_PROBLEMS
+
+        # Module level and shared, so a previous test's key would decide this one's outcome.
+        _CLAMP_PROBLEMS._seen.clear()
+        caps = {"color_temp": True, "ct_range": (153, 500)}
+        with patch("toinflux.influx.load_settings", return_value=sample_settings):
+            first, second = Hue(source="hue"), Hue(source="hue")
+        first.instance, second.instance = "bridge-one", "bridge-two"
+        with caplog.at_level(logging.WARNING):
+            first._color_temp_state("Office Lamp", caps, 1000)
+            second._color_temp_state("Office Lamp", caps, 1000)
+            first._color_temp_state("Office Lamp", caps, 1000)
+        said = [record for record in caplog.records if record.levelno == logging.WARNING]
+        assert len(said) == 2, [record.getMessage() for record in said]
+
     def test_hue_device_name_to_name_uses_mapping_when_present(self, sample_settings):
         """hue_device_name_to_name uses sensors mapping when in settings."""
         settings = {**sample_settings}

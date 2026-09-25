@@ -1271,7 +1271,12 @@ class Hue(DataHandler):
             # which is the flood this class exists to prevent. Keyed per device, so two bulbs
             # out of range are two problems.
             _CLAMP_PROBLEMS.report(
-                (name, "color_temp_k"),
+                # The bridge as well as the light: an installation may run several, and two
+                # of them commonly carry the same light names, so keying on the name alone
+                # would report one bulb and silently swallow the other. `self.instance` is
+                # None for the first configured bridge, which is still a distinct key from an
+                # explicit host - that over-reports at worst, which is the safe direction.
+                (self.instance, name, "color_temp_k"),
                 logging.WARNING,
                 "Device %r cannot reach %g K, so it was set to %g K instead",
                 name,
