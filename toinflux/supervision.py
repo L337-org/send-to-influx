@@ -57,6 +57,7 @@ from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import commands_for
 from toinflux.general import load_settings
 from toinflux.process import TimeoutExpired, spawn
+from toinflux.transitions import forget_control
 
 #: How long one control's safe-state command may take, for sizing a shutdown wait. It is a
 #: request to a bridge rather than a signal to a process, so it is bounded by that source's
@@ -718,6 +719,15 @@ class Supervisor:
             self.make_safe(name)
         with self._children_lock:
             del self.children[name]
+        # **After the child has gone, not when the document did.** `delete_control` removes
+        # the transition log too, but a control asserts its safe state on the way out and
+        # that assertion records a transition - so the log a delete removed was written
+        # straight back by the process it was deleting, and a control later taking the name
+        # would read what a different one left. Removing it here works because `_stop` has
+        # already reaped the child by this point, so there is nothing left to write again.
+        # The call in `delete_control` stays: it covers a document removed while nothing is
+        # supervising it, which never reaches here at all.
+        forget_control(name, self.settings_file)
         logging.info("Control %r has been deleted, so it is no longer supervised", name)
         self._record("dropped", name, "its document has been deleted")
 

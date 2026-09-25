@@ -25,6 +25,7 @@ from tests.harness import census, faults, invariants
 from tests.harness.bridge import plug
 from tests.harness.installation import conservatory
 from toinflux.exceptions import ConfigError
+from toinflux.transitions import transition_path
 from toinflux.supervision import (
     KILL_GRACE_SECONDS,
     SAFE_STATE_GRACE_SECONDS,
@@ -357,12 +358,26 @@ class TestADocumentThatChanged:
         assert supervisor.children["study"].running
 
     def test_a_deleted_document_stops_the_control_and_forgets_it(self, supervisor, state_directory, bridge):
+        """Forgets it *including its transition log*, which the name always claimed and the
+        assertions did not check.
+
+        A control asserts its safe state on the way out and that assertion records a
+        transition, so a log removed when the document went was written straight back by the
+        process being deleted - found on a real installation, where the file outlived the
+        control by hours.  A later control taking the name reads it and holds devices frozen
+        on the strength of what a different control did.
+        """
         supervisor.start_all()
         _wait_for(supervisor, "beat", "conservatory")
+        log = transition_path("conservatory", state_directory.settings_file)
+        # Guarded, because a control that never recorded anything would make the assertion
+        # below pass without the fix and without the bug.
+        assert os.path.exists(log), "the control recorded no transition, so this proves nothing"
         os.remove(os.path.join(state_directory.state_dir, "controls", "conservatory.yaml"))
         supervisor.request_reload("conservatory")
         _wait_for(supervisor, "dropped", "conservatory")
         assert "conservatory" not in supervisor.children
+        assert not os.path.exists(log), "the deleted control's transition log outlived it"
         _wait_for(supervisor, "beat", "porch")
 
     def test_a_deleted_document_still_makes_its_devices_safe(self, supervisor, state_directory, bridge):
