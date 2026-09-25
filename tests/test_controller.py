@@ -525,6 +525,49 @@ class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
         controller.resume()
         assert controller.pid._integral == pytest.approx(before)
 
+    def test_a_restored_loop_starts_held_so_the_release_decides(self):
+        """A restart that lands while the control is not acting is held by nothing, and
+        simple-pid only resets on a real manual-to-automatic change - so `resume` at the next
+        opening did nothing and the restored integral was used hours later unchecked.
+
+        Reached through `enable_when` rather than the clock, which is the second way in after
+        the active period, and the reason the hold is no longer conditional on either.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.resume_from({"integral": 90.0}, age=0.0)
+        assert controller.pid.auto_mode is False, "a restored loop was left running"
+        clock[0] += 6 * 3600
+        controller.resume()
+        assert controller.pid._integral == 0
+
+    def test_a_restored_loop_is_dated_from_when_it_was_written(self):
+        """`loop_state` hands back state up to RESUMABLE_CYCLES cycles old, which outlasts
+        RESUMABLE_HOLD_SECONDS once the cycle passes six minutes. Without backdating, a
+        restart bought a fresh lease on an integral a running process would have dropped."""
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.resume_from({"integral": 90.0}, age=RESUMABLE_HOLD_SECONDS + 1)
+        controller.resume()
+        assert controller.pid._integral == 0, "a restart bought more leniency than staying up would"
+
+    def test_an_unusable_age_spends_the_whole_lease(self):
+        """A clock that went backwards must not buy extra time."""
+        controller = self._settled([0.0])
+        controller.resume_from({"integral": 90.0}, age=float("nan"))
+        controller.resume()
+        assert controller.pid._integral == 0
+
+    def test_stepping_while_held_says_so(self):
+        """simple-pid answers with its last output while manual, which is None where it has
+        never produced one - and that reached `plan_window` as a demand it could not place,
+        so the complaint arrived from staging and named the rungs."""
+        controller = self._settled([0.0])
+        controller.hold()
+        controller.pid._last_output = None
+        with pytest.raises(ConfigError, match="held"):
+            controller.step({"lux": 300.0, "target": 1000}, dt=60)
+
     def test_an_explicit_last_output_still_wins(self):
         clock = [0.0]
         controller = self._settled(clock)

@@ -151,6 +151,17 @@ class Controller:
             # spent capped would be paid back as overshoot the moment it lifted.
             self.pid.output_limits = limits
         demand = self.pid(process_variable, dt=dt)
+        if demand is None:
+            # Held, and stepped anyway. simple-pid answers with its last output while manual,
+            # which is None where it has never produced one - and that reaches `plan_window`
+            # as a demand it cannot place on a ladder, so the complaint arrived from staging
+            # and named the rungs. It is a caller fault rather than a data one: `resume_from`
+            # restores into a hold and the cycle releases it before stepping, so anything
+            # reaching here has skipped that.
+            raise ConfigError(
+                "the controller was stepped while it was held, so it has no demand to give - "
+                "call resume() before step() after a hold or a resume_from()"
+            )
         plan = plan_window(ladder, demand, self.cycle_seconds, self.min_transition_for, self.driven)
         # **What the loop decided, once per cycle, at DEBUG.** Nothing in this subsystem said
         # anything during a healthy cycle: a control holding the wrong temperature produced a
@@ -238,7 +249,7 @@ class Controller:
                 state[name.lstrip("_")] = float(value)
         return state
 
-    def resume_from(self, state) -> None:
+    def resume_from(self, state, age=0.0) -> None:
         """Put back a memory this loop saved before it was restarted.
 
         The integral is clamped to the output limits on the way in, because the ladder it was
@@ -249,8 +260,29 @@ class Controller:
         timestamp from a previous one would make the first interval either enormous or
         negative depending on which way the clock had moved.
 
+        **Restored into a hold, not into a running loop**, and dated from when the state was
+        written rather than from now. Two things follow from that, both of them faults this
+        had:
+
+        A restart that lands while the control is not acting - outside its window, or with
+        `enable_when` false - is never held by anything, and simple-pid only resets on a real
+        manual-to-automatic change, so `resume` at the next opening did nothing and this
+        integral was used hours later with no age check at all.
+
+        And the age it is then judged against has already been running. `loop_state` will hand
+        back state up to `RESUMABLE_CYCLES` cycles old, which is longer than
+        `RESUMABLE_HOLD_SECONDS` once the cycle passes six minutes - so a restart could carry
+        an integral that a process running the whole time would have dropped. Backdating the
+        hold by the age closes that: a restart buys no more leniency than staying up would.
+
+        The age is passed in rather than read from the state, because the two clocks are not
+        the same one and must not be compared. The log is written with epoch time, so that it
+        survives a restart at all; a hold is measured with a monotonic clock, so that it is
+        not confused by one. Only the elapsed seconds carry across.
+
         Args:
             state (dict): what :meth:`capture` produced
+            age (float): how long ago it was written, in seconds
         """
         integral = state.get("integral")
         if not isinstance(integral, (int, float)) or not math.isfinite(integral):
@@ -265,6 +297,12 @@ class Controller:
             value = state.get(name)
             if isinstance(value, (int, float)) and math.isfinite(value):
                 setattr(self.pid, f"_{name}", float(value))
+        if not isinstance(age, (int, float)) or not math.isfinite(age) or age < 0:
+            # An unusable age means an unusable lease, and the safe reading of that is that it
+            # has all been spent: a clock that went backwards must not buy extra time.
+            age = RESUMABLE_HOLD_SECONDS + 1
+        self._held = {"integral": float(integral), "at": self._clock() - age}
+        self.pid.set_auto_mode(False)
 
     def hold(self) -> None:
         """Stop the integral accumulating while the control is not actuating.

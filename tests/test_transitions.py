@@ -791,7 +791,9 @@ class TestAHeldDimmerKeepsTheValueItHas:
     def test_it_is_commanded_its_last_value_rather_than_the_new_one(self, state_directory, bridge):
         control = self._control(state_directory)
         try:
-            control.transitions.record({"lamp": 35})
+            # With the parameter, as `command_devices` records it: the state and the scale it
+            # is on are only meaningful together.
+            control.transitions.record({"lamp": 35}, parameters={"lamp": "brightness_pct"})
             held = control.transitions.frozen(control.controller.min_transition_for, ("lamp",))
             assert held == frozenset({"lamp"}), "a 600s minimum did not hold a lamp moved a moment ago"
             plan = control._hold(
@@ -997,6 +999,9 @@ class TestWhatTheControllerKeepsAndPutsBack:
         first_cold = cold.step({"inside": 19.5, "target": 20.0}, dt=60)
         resumed = self._controller(**tuning)
         resumed.resume_from(warm.capture())
+        # `resume_from` restores into a hold, so the loop is released before it is stepped -
+        # which is what the cycle does, and what decides whether the memory is still current.
+        resumed.resume()
         first_resumed = resumed.step({"inside": 19.5, "target": 20.0}, dt=60)
         cold_level = sum(d.stage.level * d.seconds for d in first_cold)
         warm_level = sum(d.stage.level * d.seconds for d in first_resumed)

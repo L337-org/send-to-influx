@@ -280,18 +280,27 @@ class TestRestartingOutsideTheWindow:
 
     def test_a_restart_inside_it_carries_straight_on(self, state_directory, bridge, influx):
         """The other side: the ordinary restart must stay free, or this would have traded one
-        fault for a loop that always starts from nothing."""
+        fault for a loop that always starts from nothing.
+
+        Asserted on the integral after a cycle rather than on the mode at construction. Every
+        restored loop is held now, whichever side of the window it lands on; what differs is
+        whether the next cycle releases it, and that is the thing worth pinning.
+        """
         state_directory.write_control(conservatory())
         started = ControlProcess("conservatory", settings_file=state_directory.settings_file)
         try:
             started.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            learned = started.controller.pid._integral
+            assert learned != 0, "nothing was learned, so this proves nothing"
         finally:
             started.guard.close()
             started.close()
 
         restarted = self._restart(state_directory, NIGHT)
         try:
-            assert restarted.controller.pid.auto_mode is True
+            restarted.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            assert restarted.controller.pid.auto_mode is True, "an acting cycle did not release the loop"
+            assert restarted.controller.pid._integral != 0, "the ordinary restart started from nothing"
         finally:
             restarted.guard.close()
             restarted.close()
@@ -995,6 +1004,9 @@ class TestAControlResumesItsLoopOnStart:
             list: the brightness commanded each cycle
         """
         seen = []
+        # As the cycle does: a restored loop comes back held, and stepping it before it is
+        # released is a caller fault the controller now names.
+        control.controller.resume()
         for _ in range(cycles):
             plan = control.controller.step({"lux": 300.0, "target": 1000}, dt=60)
             seen.append(plan[0].stage.states["lamp"])
@@ -1069,6 +1081,89 @@ class TestAStateLeftOverFromAnOlderDocument:
     `command_devices` turns that into the ConfigError that stops a control for good. A
     control halted by its own history with a perfectly valid document, and no retry fixes it.
     """
+
+    @staticmethod
+    def _store_driven(installation, parameter, top):
+        """Write a lamp control driven by one parameter.
+
+        Args:
+            installation (Installation): the state directory to write into
+            parameter (str): the device parameter
+            top (float): what the top rung sets it to
+
+        Returns:
+            dict: the stored document
+        """
+        from toinflux.controls import save_control
+
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["parameters"] = {"target": 1000}
+        document["inputs"] = {"lux": {"source": "hue", "field": "L", "max_age": 60}}
+        document["pid"] = {"input": "lux", "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0}
+        document["devices"] = {"lamp": {"source": "hue", "device": "office-lamp", "parameter": parameter}}
+        document["output"] = {
+            "cycle_seconds": 60,
+            "min_transition_seconds": 600,
+            "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 100, "set": {"lamp": top}}],
+        }
+        save_control("lamp", document, installation.settings_file)
+        return document
+
+    def test_a_number_from_a_different_parameter_is_not_pinned_either(self, state_directory, bridge, influx):
+        """The same fault with a number instead of a boolean, and the worse of the two.
+
+        A device moved from `color_temp_k` to `brightness_pct` leaves 2700 in the log, which
+        arrives as a brightness and is refused. Going the other way leaves 80, which is a
+        legal colour temperature, gets clamped, and is silently wrong - so the test cannot be
+        "is it a number" but "is it on the scale this device is on now".
+        """
+        from tests.harness.bridge import bulb
+        from toinflux.transitions import TransitionLog
+
+        bridge.lights["9"] = bulb("office-lamp")
+        self._store_driven(state_directory, "brightness_pct", 100)
+        # What the previous, colour-temperature, version of this document left behind.
+        TransitionLog("lamp", state_directory.settings_file).record(
+            {"lamp": 2700}, forced=False, parameters={"lamp": "color_temp_k"}
+        )
+
+        control = ControlProcess("lamp", settings_file=state_directory.settings_file)
+        try:
+            influx.write_reading("L", 300.0)
+            control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            control.guard.close()
+            control.close()
+        commanded = [command.state for command in bridge.commanded("office-lamp")]
+        assert commanded, "the lamp was never commanded at all, so this proves nothing"
+        assert all("bri" in state for state in commanded), commanded
+
+    def test_a_value_on_the_same_parameter_is_still_pinned(self, state_directory, bridge, influx):
+        """The other side: the minimum must still hold a device that has not changed shape, or
+        this would have turned `min_transition_seconds` off for every driven device."""
+        from tests.harness.bridge import bulb
+        from toinflux.transitions import TransitionLog
+
+        bridge.lights["9"] = bulb("office-lamp")
+        self._store_driven(state_directory, "brightness_pct", 100)
+        log = TransitionLog("lamp", state_directory.settings_file)
+        log.record({"lamp": 35}, forced=False, parameters={"lamp": "brightness_pct"})
+
+        control = ControlProcess("lamp", settings_file=state_directory.settings_file)
+        try:
+            held = control.transitions.frozen(control.controller.min_transition_for, ("lamp",))
+            assert held == frozenset({"lamp"}), "a 600s minimum did not hold a lamp moved a moment ago"
+            control.controller.resume()
+            plan = control._hold(
+                control.controller.step({"lux": 300.0, "target": 1000}, dt=60),
+                held & set(control.controller.driven),
+            )
+        finally:
+            control.guard.close()
+            control.close()
+        assert {dwell.stage.states["lamp"] for dwell in plan} == {35}
 
     def test_a_boolean_is_not_pinned_onto_a_device_that_now_takes_a_value(self, state_directory, bridge, influx):
         from tests.harness.bridge import bulb

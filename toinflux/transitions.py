@@ -268,6 +268,28 @@ class TransitionLog:
             return None
         return state
 
+    def loop_age(self, now=None):
+        """Return how long ago the loop state was written, or None where there is none.
+
+        Separate from :meth:`loop_state` because the controller needs the age in seconds and
+        must not read the timestamp itself: this log is written with epoch time so that it
+        survives a restart, while a hold is measured with a monotonic clock so that it is not
+        confused by one. Handing over the elapsed seconds is the only safe traffic between
+        the two.
+
+        Args:
+            now (float or None): epoch seconds; read from the clock when None
+
+        Returns:
+            float or None: seconds since it was written, never negative, or None
+        """
+        at = (self._pid or {}).get("at")
+        if not isinstance(at, (int, float)):
+            return None
+        # Clamped, matching `elapsed`: a clock that moved backwards makes a negative age,
+        # which would otherwise read as state from the future.
+        return max(0.0, float(self._clock() if now is None else now) - float(at))
+
     def record_loop(self, state, fingerprint, now=None) -> None:
         """Note the loop's own memory, so a restart does not rebuild it from nothing.
 
@@ -294,6 +316,18 @@ class TransitionLog:
             dict: device name to the state it was last set to
         """
         return {device: entry.get("state") for device, entry in self.entries.items()}
+
+    def parameters(self):
+        """Return the parameter each device was driven by when it was last commanded.
+
+        None for a device that was switched, and None for one recorded before this was kept -
+        which reads the same way and is handled the same way, because "not the parameter it is
+        driven by now" is the only question anybody asks of it.
+
+        Returns:
+            dict: device name to its parameter, or None
+        """
+        return {device: entry.get("parameter") for device, entry in self.entries.items()}
 
     def elapsed(self, device, now=None):
         """Return how long since a device last changed, or None where it never has.
@@ -366,7 +400,7 @@ class TransitionLog:
                 held.add(device)
         return frozenset(held)
 
-    def record(self, commands, now=None, forced=False) -> None:
+    def record(self, commands, now=None, forced=False, parameters=None) -> None:
         """Note the devices whose state this command actually changes.
 
         Only the ones that change: commanding a heater off when it is already off is not a
@@ -379,7 +413,11 @@ class TransitionLog:
             now (float or None): epoch seconds; read from the clock when None
             forced (bool): True where this is a safe state rather than a control decision,
                 which the minimum governs in neither direction - see :meth:`released`
+            parameters (dict or None): device name to the parameter it is driven by, or None
+                for one that is switched. Kept with the state because a number means nothing
+                without the scale it is on - 2700 is a colour temperature, 40 is a percentage
         """
+        parameters = parameters or {}
         moment = float(self._clock() if now is None else now)
         changed = False
         for device, state in commands.items():
@@ -396,7 +434,7 @@ class TransitionLog:
                     del entry["forced"]
                     changed = True
                 continue
-            self.entries[device] = {"state": state, "at": moment}
+            self.entries[device] = {"state": state, "at": moment, "parameter": parameters.get(device)}
             if forced:
                 self.entries[device]["forced"] = True
             changed = True

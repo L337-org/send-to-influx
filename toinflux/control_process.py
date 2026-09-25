@@ -29,10 +29,9 @@ import time
 import requests
 
 from toinflux.controller import Controller
-from toinflux.controls import DEFAULT_CYCLE_SECONDS, load_control, validate_control
+from toinflux.controls import DEFAULT_CYCLE_SECONDS, load_control, parameter_devices, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.gating import DeviceGuard, Gate, commands_for
-from toinflux.schedule import is_inside
 from toinflux.general import RepeatingProblem, load_settings, render_values, source_class
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
@@ -181,7 +180,15 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
         # or the next restart would then switch it again inside its minimum - the one thing
         # this log exists to prevent, arriving exactly when the far end is already misbehaving.
         if commanded:
-            log.record(commanded, forced=forced)
+            # The parameter each device was driven by travels with the state, because the
+            # state only means anything alongside it: 2700 is a colour temperature and 40 is a
+            # percentage, and a log that records the number without the scale invites the next
+            # reader to use one as the other.
+            log.record(
+                commanded,
+                forced=forced,
+                parameters={key: (declared.get(key) or {}).get("parameter") for key in commanded},
+            )
 
 
 def _command_each(targets, commanded, settings_file) -> None:
@@ -421,6 +428,14 @@ class ControlProcess:
                 self.controller.resume()
                 self._spend_window(dt, sleep)
             else:
+                # **Not acting means held, as an invariant rather than as a list of edges.**
+                # The closing edge above holds, and `_fail_safe` holds, and between them they
+                # covered every way a *running* control stops acting - but not a control that
+                # restarted into a cycle where it was already not acting. `enable_when` false
+                # at startup was the second way in, after the active period, and enumerating
+                # them is how there came to be a second. Cheap and idempotent since a repeated
+                # hold no longer restamps its own clock.
+                self.controller.hold()
                 sleep(self.cycle_seconds)
             # **After the window, not before it.** The gate resolves this control's inputs
             # only where `enable_when` needs them, so a control without one arrives here
@@ -512,25 +527,13 @@ class ControlProcess:
         """
         state = self.transitions.loop_state(self.controller.fingerprint, self.cycle_seconds * RESUMABLE_CYCLES)
         if state:
-            self.controller.resume_from(state)
+            self.controller.resume_from(state, age=self.transitions.loop_age() or 0.0)
             logging.info(
                 "Control %r resumed the loop it had built before it stopped, so it does not have to "
                 "earn it again (integral %.3g)",
                 self.name,
                 state.get("integral", 0.0),
             )
-        # **Held where the window is shut, whether or not anything was restored.** Outside its
-        # active period a control never actuates, so nothing calls `resume` until the window
-        # opens - and by then simple-pid is still in automatic, where `set_auto_mode(True)`
-        # does nothing at all. Whatever was restored here would therefore be used hours later
-        # with no age check, which is the case `RESUMABLE_HOLD_SECONDS` exists to catch: a
-        # conservatory reopening at 23:30 would start from where last night left off.
-        #
-        # Holding makes the opening edge a real manual-to-automatic transition, so the age is
-        # judged then rather than assumed. A control with no active period is always inside
-        # it and is not held, which is what keeps the ordinary restart free.
-        if not is_inside(self.gate.period, datetime.datetime.now(datetime.timezone.utc)):
-            self.controller.hold()
 
     def _hold(self, plan, held):
         """Return the plan with each held device pinned to the value it already has.
@@ -549,20 +552,30 @@ class ControlProcess:
         from toinflux.staging import Dwell, Stage
 
         known = self.transitions.states()
-        # **Only a value this device could actually be set to.** The log survives a document
-        # edit - a device plan change is logged, not erased - so a device switched to driven
-        # keeps a `true` or `false` from when it was on/off. Pinning that sent
-        # `brightness_pct=True`, which the Hue handler rightly refuses as a caller mistake,
-        # and `command_devices` turns that into the ConfigError that stops a control for
-        # good. A control halted by its own history, with a document that is perfectly valid.
+        # **Only a value that still means what it meant when it was written.** The log
+        # survives a document edit - a device plan change is logged, not erased - so it can
+        # describe a device in a shape the document no longer uses, and pinning that sends the
+        # far end something it rightly refuses. `command_devices` turns that refusal into the
+        # ConfigError that stops a control for good: halted by its own history, with a
+        # document that is perfectly valid and no retry that helps.
         #
-        # Skipping it simply lets the plan's own value through, which is the right answer:
-        # the minimum protects a device from being moved too often, and it has nothing to say
-        # about a state that no longer means anything on it.
+        # Two ways in, and only the first was closed before. Switched to driven leaves a
+        # `true` behind, which arrives as `brightness_pct=True`. One parameter to another
+        # leaves a number, and 2700 arrives as a brightness or 80 as a colour temperature -
+        # the first refused, the second quietly clamped and wrong, which is worse. So the test
+        # is the parameter rather than the type: the value is only usable if the scale it was
+        # recorded on is the scale the device is on now.
+        #
+        # A log written before the parameter was kept reads as None and so matches nothing
+        # driven, which costs that device its minimum for one command and then corrects itself.
+        was = self.transitions.parameters()
+        now_driven = parameter_devices(self.document.get("devices") or {})
         pinned = {
             device: known[device]
             for device in held
-            if isinstance(known.get(device), (int, float)) and not isinstance(known[device], bool)
+            if was.get(device) == now_driven.get(device)
+            and isinstance(known.get(device), (int, float))
+            and not isinstance(known[device], bool)
         }
         if not pinned:
             return plan
