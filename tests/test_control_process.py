@@ -191,11 +191,34 @@ class TestSayingItRecovered:
         """
         control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
         self._fail_once(control, bridge, influx)
-        caplog.set_level(logging.INFO)
         caplog.clear()
-        self._fail_once(control, bridge, influx)
+        # DEBUG, because the repeated failure is deliberately throttled down to it - the
+        # point here is that the recovery line is absent, and capturing only INFO and above
+        # would assert that by capturing nothing at all.
+        with caplog.at_level(logging.DEBUG):
+            self._fail_once(control, bridge, influx)
         assert "could not complete a cycle" in caplog.text
         assert "completed a cycle again" not in caplog.text
+
+    def test_a_sustained_outage_reports_each_problem_once_and_counts_the_rest(self, control, bridge, influx, caplog):
+        """Every cycle of the outage said everything afresh: the staleness message carries the
+        reading's age, which grows by a cycle every cycle, and the unreachable-bridge message
+        carries an exception whose repr carries the connection object's address.  Neither was
+        ever equal to the one before it, so a five-minute outage logged four ERRORs every
+        thirty seconds instead of one at the start."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(3):
+                self._fail_once(control, bridge, influx)
+        for phrase in ("could not complete a cycle", "could not reach its devices"):
+            levels = [record.levelno for record in caplog.records if phrase in record.getMessage()]
+            assert levels == [logging.ERROR, logging.DEBUG, logging.DEBUG], f"{phrase}: {levels}"
+        caplog.set_level(logging.INFO)
+        caplog.clear()
+        influx.write_reading("conservatory_temperature", 16.0)
+        assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is not None
+        assert "completed a cycle again (after 3 failure(s))" in caplog.text
 
     def test_a_cycle_that_really_completed_says_so(self, control, bridge, influx, caplog):
         """The other half: the line still has to appear, or the fix would be indistinguishable

@@ -1500,7 +1500,7 @@ class RepeatingProblem:
         self._clock = clock
         self._seen: dict = {}
 
-    def report(self, key, level, message, *args) -> None:
+    def report(self, key, level, message, *args, identity=None) -> None:
         """Log a problem, at ``level`` the first time and at DEBUG while it is unchanged.
 
         Args:
@@ -1508,22 +1508,36 @@ class RepeatingProblem:
             level (int): the level to use for a new or changed problem
             message (str): a %-style format string
             *args: its arguments, which also decide whether the problem has changed
+            identity (object or None): what counts as *the same problem*, where the rendered
+                message is not a fair test of that. The full message is still logged; only
+                the comparison changes
         """
-        # The rendered message is the identity, so a failure whose *reason* changes is
-        # reported again at full level: "unreachable" becoming "authentication failed" is
-        # news, and a key alone would have swallowed it.
+        # The rendered message is the identity by default, so a failure whose *reason*
+        # changes is reported again at full level: "unreachable" becoming "authentication
+        # failed" is news, and a key alone would have swallowed it.
+        #
+        # **It is a fair test only where nothing in the message moves on its own**, and a
+        # caller that interpolates an exception or a measurement usually breaks that without
+        # meaning to. Two did: a staleness message carries the reading's age, which grows by
+        # a cycle every cycle, and a urllib3 error's repr carries the object's address, which
+        # is different on every attempt. Each rendered a string no previous one could equal,
+        # so nothing was ever a repeat and a five-minute Hue outage logged an ERROR every
+        # thirty seconds - the exact flood this class exists to stop, defeated silently and
+        # with every test still passing. Those callers pass an identity naming the fault
+        # rather than the numbers describing it.
         rendered = message % args if args else message
+        same = rendered if identity is None else identity
         now = self._clock()
         seen = self._seen.get(key)
-        if seen is not None and seen[0] == rendered and now - seen[1] < self._repeat_after:
-            self._seen[key] = (rendered, seen[1], seen[2] + 1)
+        if seen is not None and seen[0] == same and now - seen[1] < self._repeat_after:
+            self._seen[key] = (same, seen[1], seen[2] + 1)
             logging.debug("%s (still, %s times)", rendered, seen[2] + 1)
             return
-        if seen is not None and seen[0] == rendered:
+        if seen is not None and seen[0] == same:
             logging.log(level, "%s (still, after %s more)", rendered, seen[2])
         else:
             logging.log(level, "%s", rendered)
-        self._seen[key] = (rendered, now, 1)
+        self._seen[key] = (same, now, 1)
 
     def cleared(self, key, message, *args) -> None:
         """Note that a problem has stopped, where one was being reported.

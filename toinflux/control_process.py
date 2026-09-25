@@ -571,6 +571,13 @@ class ControlProcess:
             "Control %r could not complete a cycle, going to its safe state: %r",
             self.name,
             reason,
+            # The exception's type, not its text: a staleness message carries the reading's
+            # age, which is a cycle bigger every cycle, so the rendered line was never equal
+            # to the one before it and the throttle above never engaged. The full reason is
+            # still logged, and still in every DEBUG repeat; what this decides is only
+            # whether the fault is the same one. A failure that changes *kind* - a rule that
+            # cannot be evaluated becoming a source that cannot be reached - is still news.
+            identity=type(reason).__name__,
         )
         self.controller.hold()
         try:
@@ -579,7 +586,27 @@ class ControlProcess:
             # The one place a broad-ish catch is right: the cycle has already failed, and a
             # device that cannot be reached to be made safe is exactly what the supervisor's
             # own safe-state pass exists for.
-            logging.error("Control %r could not reach its devices to make them safe: %r", self.name, exc)
+            #
+            # Through the reporter, and keyed apart from the cycle failure above: where the
+            # devices are on the far end of whatever just broke - a Hue bridge is both the
+            # sensor and the actuator - this fails every cycle for as long as the cycle does,
+            # and it used to go straight to logging.error and say so every time. Its own key
+            # because the two are different problems: sharing one would make each cycle look
+            # like a changed fault to the other and report both afresh.
+            self._problems.report(
+                "safe",
+                logging.ERROR,
+                "Control %r could not reach its devices to make them safe: %r",
+                self.name,
+                exc,
+                identity=type(exc).__name__,
+            )
+        else:
+            # Only where a safe-state command was actually attempted and got through, which
+            # is the only evidence this key's problem has passed. Said here rather than on
+            # any completed cycle because a control outside its active period commands
+            # nothing, and clearing it there would claim a reachability nothing had tested.
+            self._problems.cleared("safe", "Control %r reached its devices to make them safe again", self.name)
 
     def close(self) -> None:
         """Release what this process opened."""

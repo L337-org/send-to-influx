@@ -1276,6 +1276,28 @@ class TestRepeatingProblem:
         assert [record.levelno for record in caplog.records] == [logging.ERROR, logging.ERROR]
         assert "still" in caplog.records[1].getMessage()
 
+    def test_an_identity_decides_what_counts_as_the_same_problem(self, caplog):
+        """A message carrying something that moves on its own - a reading's age, the address
+        in an exception's repr - renders differently every time, so nothing is ever a repeat
+        and the throttle is defeated while every test still passes."""
+        problem, now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            for age in (31, 71, 111):
+                problem.report("cycle", logging.ERROR, "the reading is %ss old", age, identity="stale")
+                now[0] += 1
+        levels = [record.levelno for record in caplog.records]
+        assert levels == [logging.ERROR, logging.DEBUG, logging.DEBUG], levels
+        assert "111s old" in caplog.records[-1].getMessage(), "the throttled repeat lost the detail"
+
+    def test_an_identity_that_changes_is_still_news(self, caplog):
+        """The default behaviour has to survive being made explicit, or a fault that turned
+        into a different fault would be hidden by the thing that stops it repeating."""
+        problem, _now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            problem.report("cycle", logging.ERROR, "the reading is 31s old", identity="stale")
+            problem.report("cycle", logging.ERROR, "the bridge is unreachable", identity="unreachable")
+        assert [record.levelno for record in caplog.records] == [logging.ERROR, logging.ERROR]
+
     def test_two_problems_do_not_hide_each_other(self, caplog):
         problem, _now = self._reporter()
         with caplog.at_level(logging.DEBUG):
