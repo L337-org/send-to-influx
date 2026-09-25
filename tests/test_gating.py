@@ -23,6 +23,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from tests.harness.installation import conservatory
+
+# Imported rather than restated: it derives the transition days from the zone database
+# instead of naming a date, so a copy here would stop being a daylight-saving scenario
+# the year the rules move, and would do it quietly.
+from tests.test_schedule import _transitions
 from toinflux.controls import validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import DeviceGuard, Gate, commands_for
@@ -173,6 +178,76 @@ class TestEdges:
             if decision.edge == "closed":
                 gate.closed()
         assert edges == [("04:40", "closed")], edges
+
+
+class TestTheGateAcrossADaylightSavingChange:
+    """The story asks for a *repeated activation and deactivation* when the clocks go back,
+    and that is a claim about edges rather than about the window predicate.
+
+    `tests/test_schedule.py` proves `is_inside` handles both transitions, measured in real
+    minutes. This is the half that does not follow from it on its own: that the gate reports
+    the open and the close twice over, which is what a control acts on. Every other edge test
+    in this file runs on an ordinary January day.
+    """
+
+    @staticmethod
+    def _edges(window, day, hours=3):
+        """Walk a night in UTC a minute at a time and return the edges the gate reported.
+
+        UTC, because the point is elapsed time rather than what the clock read: an hour that
+        happens twice cannot be seen by walking local time-of-day.
+
+        Args:
+            window (dict): the active period to give the control
+            day (datetime.date): the UTC day to walk
+            hours (int): how many hours from midnight UTC to cover
+
+        Returns:
+            list: ``(HH:MM UTC, edge)`` for each edge, in order
+        """
+        gate = Gate(_document(active_period=window))
+        start = datetime.datetime(day.year, day.month, day.day, tzinfo=datetime.timezone.utc)
+        edges = []
+        for minute in range(hours * 60):
+            moment = start + datetime.timedelta(minutes=minute)
+            decision = gate.decide({"outside": 5.0}, moment)
+            if decision.edge:
+                edges.append((moment.strftime("%H:%M"), decision.edge))
+            # As the loop does: a closing edge is not spent until its command has been
+            # applied, and without this it repeats every cycle and swamps the sequence.
+            if decision.edge == "closed":
+                gate.closed()
+        return edges
+
+    def test_the_clocks_going_back_opens_and_closes_it_twice(self):
+        """01:15 to 01:45 local happens once in BST and once again in GMT, so the control
+        becomes active, inactive, active and inactive again - sixty real minutes of running
+        for a thirty-minute window."""
+        autumn = _transitions(2026, LONDON)[1][0]
+        window = {"from": "01:15", "to": "01:45", "end_state": "unenergised"}
+        assert self._edges(window, autumn) == [
+            ("00:15", "opened"),
+            ("00:45", "closed"),
+            ("01:15", "opened"),
+            ("01:45", "closed"),
+        ]
+
+    def test_an_ordinary_night_opens_and_closes_it_once(self):
+        """The control for the one above: the same window on a day with no transition gives
+        one pair, so the second pair is the clocks going back and not the walk itself."""
+        window = {"from": "01:15", "to": "01:45", "end_state": "unenergised"}
+        assert self._edges(window, datetime.date(2026, 1, 15)) == [
+            ("01:15", "opened"),
+            ("01:45", "closed"),
+        ]
+
+    def test_the_clocks_going_forward_never_opens_it_at_all(self):
+        """The other edge: that local half hour does not occur, so there is nothing to open,
+        and a control that reported an edge here would be acting on an hour that never
+        happened."""
+        spring = _transitions(2026, LONDON)[0][0]
+        window = {"from": "01:15", "to": "01:45", "end_state": "unenergised"}
+        assert self._edges(window, spring) == []
 
 
 class TestWhatStoppingApplies:
