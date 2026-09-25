@@ -293,6 +293,35 @@ Two things make a loop look overgeared when it is not. An input allowed to be mu
 its reading changes by some threshold, as Hue's light sensors do, leaves the loop steering
 blind between reports. Detuning is the wrong answer to both.
 
+### Further reading, and what does not transfer
+
+Wikipedia's [PID controller](https://en.wikipedia.org/wiki/Proportional%E2%80%93integral%E2%80%93derivative_controller)
+article is the best general starting point: its *Loop tuning* section has a table of what
+increasing each of `kp`, `ki` and `kd` does to rise time, overshoot, settling time,
+steady-state error and stability, which is the right mental model for deciding which one to
+reach for. The [Ziegler-Nichols method](https://en.wikipedia.org/wiki/Ziegler%E2%80%93Nichols_method)
+is the classic recipe and worth knowing by name.
+
+Read both for *what each term does*, not for *which values to use here*. Three things do not
+carry across:
+
+* **Classic Ziegler-Nichols aims at quarter-amplitude decay**, which is deliberate
+  oscillation. Its own article says the tuning "yields an aggressive gain and overshoot" and
+  that "some applications wish to instead minimize or eliminate overshoot, and for these this
+  method is inappropriate". A room and a lamp are both of those; if you use it, use the
+  "no overshoot" variants it gives rather than the classic row.
+* **Both methods start by driving the loop into sustained oscillation** to find the ultimate
+  gain. That is a reasonable thing to do on a bench and a poor one in an occupied
+  conservatory, and with a 300-second cycle it takes hours to find.
+* **The literature assumes a continuous actuator and a fast fixed sample interval.** Here the
+  output is a ladder of discrete rungs on a scale you chose, reached by time-proportioning
+  across a window of 30 to 300 seconds, and the input may not refresh every cycle. A `kp`
+  quoted anywhere else is not in the same units as yours until you have divided through by
+  your own top rung.
+
+The method in this section - measure the plant gain, keep `kp` times it well below 1, start
+low - needs none of that and costs one deliberate change to the device.
+
 `ki` then trims the residual offset that proportional action alone always leaves. It is
 applied per second, so a useful starting value is roughly `kp / 3000` for a slow plant like a
 room and more for something small and fast; the output limits follow the ladder, so it cannot

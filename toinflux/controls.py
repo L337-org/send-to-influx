@@ -246,6 +246,10 @@ TUNING_NOTES = [
     "examples. Raise kp for a loop that never arrives, raise ki for one that stops just short",
     "a sensor that reports only when its reading changes leaves the loop steering blind between "
     "reports, which looks like too much gain and is usually met by detuning",
+    "general PID references - Ziegler-Nichols, the usual manual method - are for understanding "
+    "what each term does, not for values to use here: they aim at quarter-amplitude decay, which "
+    "is deliberate oscillation, they start by driving the loop into it, and they assume a "
+    "continuous output rather than a ladder on a scale you chose",
 ]
 
 CONTROL_EXAMPLES = {
