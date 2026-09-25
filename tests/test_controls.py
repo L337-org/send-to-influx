@@ -10,6 +10,7 @@ from toinflux.controls import (
     shared_actuator_problems,
     BUILT_IN_SAFE_STATES,
     CONTROL_EXAMPLE,
+    control_warnings,
     CONTROL_EXAMPLES,
     control_dir,
     control_path,
@@ -1340,3 +1341,83 @@ class TestTheExamplesGainsMatchTheirOwnLadders:
         else:
             delivered = sum(dwell.stage.level * dwell.seconds for dwell in plan) / cycle / top
         assert delivered > 0.1, f"{scenario} delivered {delivered:.0%} of full output at half its full-output error"
+
+
+class TestAControlThatActsFasterThanItCanSee:
+    """A warning rather than an error: the control runs, and for a slow plant against a slow
+    input this may be exactly what its operator meant.
+
+    It earns its place because the symptom is misleading. A loop commanding several times on
+    one reading overshoots and swings back, which looks like too much gain, so the usual
+    response is to detune until it stops - buying stability by making the control slow rather
+    than informed. Found on a real install, where a light loop cycling every 60s read a lux
+    value up to 300s old and had already been detuned once to live with it.
+    """
+
+    @staticmethod
+    def _document(max_age, cycle=60, feedback="lux"):
+        """Return a control whose PID input has the given max_age.
+
+        Args:
+            max_age (float): the feedback input's max_age
+            cycle (float): the cycle window
+            feedback (str): which input the PID reads
+
+        Returns:
+            dict: the control document
+        """
+        return {
+            "pid": {"input": feedback, "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0},
+            "parameters": {"target": 1000},
+            "inputs": {
+                "lux": {"source": "hue", "field": "L", "max_age": max_age},
+                "outside": {"source": "openmeteo", "field": "temperature_2m", "max_age": 3600},
+            },
+            "output": {"cycle_seconds": cycle, "stages": [{"level": 0, "set": {"lamp": 0}}]},
+            "devices": {"lamp": {"source": "hue", "device": "L"}},
+        }
+
+    @pytest.mark.parametrize("max_age", [120, 300, 1800])
+    def test_it_warns_where_the_feedback_outlives_the_window(self, max_age):
+        warnings = control_warnings(self._document(max_age), {})
+        assert warnings and "inputs.lux" in warnings[0]
+        assert "max_age" in warnings[0], "it must say which setting to change"
+
+    @pytest.mark.parametrize("max_age", [60, 90, 30])
+    def test_and_stays_quiet_where_it_does_not(self, max_age):
+        """A few seconds over the window is a rounding difference, not a problem. A warning
+        that fires on those is the noise that teaches people to skim warnings."""
+        assert control_warnings(self._document(max_age), {}) == []
+
+    def test_it_says_how_many_times_it_would_command_blind(self):
+        """The number is the argument: "five times before seeing the first" is actionable in
+        a way that "max_age is large" is not."""
+        assert "5 times" in control_warnings(self._document(300), {})[0]
+
+    def test_only_the_feedback_input_is_judged(self):
+        """An outdoor temperature or a dew point is an observation, not feedback, and is
+        legitimately hours old. Warning about those would be noise."""
+        document = self._document(60, feedback="lux")
+        assert document["inputs"]["outside"]["max_age"] == 3600
+        assert control_warnings(document, {}) == []
+
+    def test_a_document_with_no_pid_input_says_nothing(self):
+        document = self._document(300)
+        document["pid"].pop("input")
+        assert control_warnings(document, {}) == []
+
+    def test_an_unusable_max_age_is_left_to_validation(self):
+        """Reported precisely there; a second complaint here would name one fault twice."""
+        document = self._document("soon")
+        assert control_warnings(document, {}) == []
+
+    def test_validate_stored_controls_returns_it(self, state_directory):
+        """Whether --check-config actually prints it is a separate question, asked in
+        tests/test_sendtoinflux.py - a warning that is computed and never printed is the same
+        as no warning, and naming this test after that would have hidden it."""
+        document = a_valid_control()
+        document["output"]["cycle_seconds"] = 60
+        document["inputs"][document["pid"]["input"]]["max_age"] = 900
+        state_directory.write_control(document, name="conservatory")
+        notes = validate_stored_controls(state_directory.settings_file, state_directory.settings)
+        assert notes and "conservatory" in notes[0]

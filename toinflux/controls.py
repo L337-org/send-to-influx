@@ -40,6 +40,12 @@ DEFAULT_CYCLE_SECONDS = 900.0
 
 CONTROL_SUFFIX = ".yaml"
 
+#: How much staler than its own cycle a control's feedback may be before it is worth saying
+#: so. Two, because at that point the loop is certain to command twice on one reading rather
+#: than merely able to; one would fire on a control whose max_age is a few seconds over its
+#: window, which is a rounding difference rather than a problem.
+STALE_FEEDBACK_MULTIPLE = 2
+
 # A control's name is also its filename, and an MCP client can choose it. Anything
 # outside this set is refused rather than sanitised: silently rewriting a name would
 # make the control the caller asked for and the control that exists two different
@@ -1227,6 +1233,70 @@ def enabled_owner_of(actuators, documents, excluding=None):
     return None
 
 
+def control_warnings(document, settings=None):
+    """Return what is worth saying about a valid control, without refusing it.
+
+    Separate from validation because none of this makes a document wrong. A control that
+    reads staler data than its own cycle still runs, still holds a target, and may well be
+    exactly what its operator meant - a heater against an outdoor temperature that changes by
+    the hour has no use for a fresher reading. It is only the *feedback* variable where the
+    combination bites, and even then it is a judgement rather than a fault.
+
+    Args:
+        document (dict): a control document already known to be valid
+        settings (dict or None): the parsed settings, for a source's own bounds
+
+    Returns:
+        list: human-readable warnings, empty where there is nothing to say
+    """
+    warnings = []
+    _warn_about_stale_feedback(document, settings, warnings)
+    return warnings
+
+
+def _warn_about_stale_feedback(document, settings, warnings) -> None:
+    """Warn where the loop acts faster than its own input can refresh.
+
+    **A loop cannot react to what it cannot yet see.** Where the PID's input may be older
+    than the window, the control acts, acts again, and acts a third time on one reading -
+    each time on evidence that predates its own last command - then discovers it overshot and
+    drives as hard the other way. The symptom is an oscillation that looks like too much gain,
+    so the usual response is to detune until it stops, which buys stability by making the
+    control slow instead of making it informed.
+
+    Only the PID's own input. Every other input is an observation rather than feedback: an
+    outdoor temperature, a dew point or a grid carbon figure is legitimately hours old, and
+    warning about those would be noise that teaches people to skim warnings.
+
+    Args:
+        document (dict): the control document
+        settings (dict or None): the parsed settings, for the source's own max_age default
+        warnings (list): appended to with anything worth saying
+    """
+    from toinflux.inputs import input_max_age
+
+    feedback = (document.get("pid") or {}).get("input")
+    spec = ((document.get("inputs") or {}).get(feedback)) if isinstance(feedback, str) else None
+    if not isinstance(spec, dict):
+        return
+    cycle = (document.get("output") or {}).get("cycle_seconds", DEFAULT_CYCLE_SECONDS)
+    if not (_is_number(cycle) and cycle > 0):
+        return
+    try:
+        limit = input_max_age(spec, settings or {})
+    except ConfigError:
+        # Reported precisely by validation; a second complaint here would name one fault twice.
+        return
+    if limit < cycle * STALE_FEEDBACK_MULTIPLE:
+        return
+    warnings.append(
+        f"inputs.{feedback}: may be up to {limit:.0f}s old while the loop acts every {cycle:.0f}s, "
+        f"so it can command {limit / cycle:.0f} times before seeing the effect of the first. That "
+        f"reads as too much gain and is usually met by detuning. Lower its max_age towards "
+        f"output.cycle_seconds, or lengthen the cycle to match the data"
+    )
+
+
 def _check_safe_state(where, value, errors) -> None:
     """Refuse a safe or end state that is neither a named state nor a usable value.
 
@@ -1358,7 +1428,7 @@ def _check_one_key_per_actuator(document, devices, errors) -> None:
                 )
 
 
-def validate_stored_controls(settings_file=None, settings=None) -> None:
+def validate_stored_controls(settings_file=None, settings=None):
     """Check every stored control, reporting all of their problems at once.
 
     Args:
@@ -1366,10 +1436,17 @@ def validate_stored_controls(settings_file=None, settings=None) -> None:
         settings (dict or None): the parsed settings, so each control's sources can be
             checked against this installation as well as against the build
 
+    Returns:
+        list: warnings about controls that are valid but worth a second look, empty where
+        there is nothing to say. Returned rather than logged, because this runs before
+        logging is configured on the --check-config path and the caller knows where its
+        output goes
+
     Raises:
         ConfigError: one or more stored controls is unreadable or structurally wrong
     """
-    problems = []
+    problems: list = []
+    warnings: list = []
     documents = {}
     for name in list_controls(settings_file):
         try:
@@ -1380,6 +1457,9 @@ def validate_stored_controls(settings_file=None, settings=None) -> None:
         errors = validate_control(name, document, settings)
         problems.extend(f"control {name!r}: {error}" for error in errors)
         if not errors:
+            # Only for a document that is otherwise sound: a warning about the tuning of a
+            # control that will not start is noise on top of the reason it will not start.
+            warnings.extend(f"control {name!r}: {note}" for note in control_warnings(document, settings))
             # Only documents that are usable on their own. A broken one has already said so,
             # and reading actuators out of it would add a second complaint about the same
             # fault - or invent one, since its devices section may be the thing that is wrong.
@@ -1387,6 +1467,7 @@ def validate_stored_controls(settings_file=None, settings=None) -> None:
     problems.extend(shared_actuator_problems(documents))
     if problems:
         raise ConfigError("\n  ".join(["control configuration is invalid:"] + problems))
+    return warnings
 
 
 def shared_actuator_problems(documents):
