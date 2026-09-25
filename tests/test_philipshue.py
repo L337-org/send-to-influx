@@ -458,6 +458,22 @@ class TestHueTokenRedaction:
             'exceeded with url: /api/<redacted> (Caused by ConnectTimeoutError())")'
         )
 
+    def test_an_error_list_redacts_the_token_and_cannot_forge_a_line(self, sample_settings):
+        """The bridge writes this description, and since the duplicate log went it is the only
+        report of it - so it has to survive the same two tests as every other Hue error."""
+        hue = self._hue(sample_settings)
+        mock_response = MagicMock()
+        mock_response.json.return_value = [
+            {"error": {"description": f"denied for /api/{self.TOKEN}\nERROR forged line"}}
+        ]
+        with patch.object(hue.session, "get", return_value=mock_response):
+            with pytest.raises(SourceConnectionError) as excinfo:
+                hue.get_data_from_hue_bridge()
+        message = str(excinfo.value)
+        assert self.TOKEN not in message, message
+        assert "<redacted>" in message, message
+        assert "\n" not in message, "a newline from the bridge reached the message unquoted"
+
     def test_unparseable_response_redacts_the_token(self, sample_settings):
         """The JSON-decode path is redacted too, not just the transport one."""
         hue = self._hue(sample_settings)

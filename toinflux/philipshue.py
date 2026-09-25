@@ -882,7 +882,12 @@ class Hue(DataHandler):
                 description = error.get("description", str(error))
             else:
                 description = f"unexpected list response: {hue_data!r:.200}"
-            raise SourceConnectionError(description)
+            # Quoted and redacted, like every other error this handler raises. The bridge
+            # wrote this text, and since the duplicate log went this raise is the only report
+            # of it - so a newline in a description would have put a line of the bridge's
+            # choosing into whatever the caller logs, and the redaction that the rest of the
+            # module applies was missing here alone.
+            raise SourceConnectionError(self._redact(f"Hue Bridge reported an error: {description!r:.300}"))
         # A successful GET is a dict (sensors/lights). A non-dict, non-list body - a
         # JSON scalar/null, e.g. from a misconfigured proxy - is unexpected; fail
         # cleanly here rather than returning it for a caller (parse_hue_data /
@@ -1380,7 +1385,9 @@ class Hue(DataHandler):
         # success/error items. A non-list body is unexpected and must fail cleanly
         # rather than being read as success (an empty error list) by the scan below.
         if not isinstance(result, list):
-            raise SourceConnectionError(f"Hue Bridge returned an unexpected response to a write: {result!r:.200}")
+            raise SourceConnectionError(
+                self._redact(f"Hue Bridge returned an unexpected response to a write: {result!r:.200}")
+            )
         # Guard item["error"] being a non-dict (a malformed bridge/proxy response):
         # fall back to its string form rather than crashing on .get(), mirroring the
         # read path's defensive handling in get_data_from_hue_bridge().
@@ -1398,6 +1405,6 @@ class Hue(DataHandler):
             # containing a newline would otherwise write its own line wherever the caller
             # logs this, which is the trick the renderer exists to refuse.
             raise SourceConnectionError(
-                f"Hue Bridge rejected the write to light {light_id!r}: {render_values(errors, '; ')}"
+                self._redact(f"Hue Bridge rejected the write to light {light_id!r}: {render_values(errors, '; ')}")
             )
         return result
