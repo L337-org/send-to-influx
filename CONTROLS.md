@@ -173,6 +173,17 @@ server rebooted, and the wrong one for a heater.
 All three apply to `active_period.end_state` as well, so a control can hold a room at
 temperature overnight and leave its pump running when the window closes.
 
+**A control that starts outside its active period starts in its `end_state`, not its
+`safe_state`.** The two answer different questions - `safe_state` is "something is wrong, or
+nothing is known yet", `end_state` is "the control is deliberately not acting" - and a
+process starting outside its window is the second. Without this a pump with
+`safe_state: energised` and a window of 23:30 to 05:30, restarted at noon, would run all
+afternoon in its failure state and nothing would correct it until the window had opened and
+closed again. `enable_when` does not take part, because answering it needs a sensor read and
+the whole point of the startup assertion is that it happens before anything is read; the
+active period needs only the clock. On the way out the `safe_state` applies whatever the
+clock says, because a process that is ending leaves nothing supervising the devices.
+
 An active period is a wall-clock window in the control's own timezone, and it follows
 daylight saving the way a wall clock does: a window inside the hour the clocks skip does not
 happen that day, and one inside the hour they repeat happens twice.

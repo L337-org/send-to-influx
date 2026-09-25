@@ -504,7 +504,11 @@ def run_control(name, settings_file=None, heartbeat=None, cycles=None, sleep=tim
     """
     control = ControlProcess(name, settings_file=settings_file)
     try:
-        control.guard.assert_safe_state()
+        # The gate picks it, because only the gate knows whether this control is inside its
+        # active period - and a control starting outside its window belongs in its end state
+        # rather than its safe state. Clock only: nothing is read from a sensor before the
+        # devices are in a known condition.
+        control.guard.assert_starting_state(control.gate.starting_state(datetime.datetime.now(datetime.timezone.utc)))
         logging.info("Control %r started, cycling every %.0fs", name, control.cycle_seconds)
         completed = 0
         while cycles is None or completed < cycles:

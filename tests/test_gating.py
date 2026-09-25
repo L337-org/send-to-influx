@@ -246,7 +246,7 @@ def _guard_script(record, *, handle_term=False, assert_only=False):
 
         guard = DeviceGuard("conservatory", "unenergised", ["far", "near"], command)
         if {assert_only!r}:
-            guard.assert_safe_state()
+            guard.assert_starting_state()
             sys.exit(0)
         if {handle_term!r}:
             signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -288,14 +288,14 @@ class TestTheStartupAssertion:
         """The half that has to exist. A control that only tidied up on the way out would
         leave the heaters running after any death that skips the exit handler."""
         command, commanded = _recorder()
-        DeviceGuard("conservatory", "unenergised", ["far", "near"], command).assert_safe_state()
+        DeviceGuard("conservatory", "unenergised", ["far", "near"], command).assert_starting_state()
         assert commanded == [{"far": False, "near": False}]
 
     def test_leave_unchanged_commands_nothing_at_all(self):
         """Not an empty mapping through the same path: the device's state is not this
         control's to reset, so nothing is sent."""
         command, commanded = _recorder()
-        DeviceGuard("conservatory", "leave_unchanged", ["far"], command).assert_safe_state()
+        DeviceGuard("conservatory", "leave_unchanged", ["far"], command).assert_starting_state()
         assert commanded == []
 
     def test_leave_unchanged_says_so_at_startup(self, caplog):
@@ -310,7 +310,7 @@ class TestTheStartupAssertion:
         """
         command, _ = _recorder()
         with caplog.at_level(logging.INFO):
-            DeviceGuard("conservatory", "leave_unchanged", ["far"], command).assert_safe_state()
+            DeviceGuard("conservatory", "leave_unchanged", ["far"], command).assert_starting_state()
         assert "leave_unchanged" in caplog.text and "conservatory" in caplog.text
         assert not [
             record for record in caplog.records if record.levelno >= logging.WARNING
@@ -327,7 +327,7 @@ class TestTheStartupAssertion:
 
         guard = DeviceGuard("conservatory", "unenergised", ["far"], refuse)
         with pytest.raises(SourceConnectionError):
-            guard.assert_safe_state()
+            guard.assert_starting_state()
         guard.close()
 
     def test_a_device_name_cannot_write_its_own_log_line(self, caplog):
@@ -337,7 +337,7 @@ class TestTheStartupAssertion:
         command, _ = _recorder()
         guard = DeviceGuard("conservatory", "unenergised", ["far\nWARNING  heating disabled"], command)
         with caplog.at_level(logging.INFO):
-            guard.assert_safe_state()
+            guard.assert_starting_state()
         guard.close()
         assert "\n" not in caplog.records[-1].getMessage()
 
@@ -604,3 +604,79 @@ class TestTheEnergisedSafeState:
         document = conservatory()
         document.pop("safe_state", None)
         assert Gate(document).safe_state == "unenergised"
+
+
+class TestAControlThatStartsOutsideItsWindow:
+    """`safe_state` answers "something is wrong, or nothing is known yet". `end_state`
+    answers "the control is deliberately not acting". A control starting outside its active
+    period is the second, and used to be given the first.
+
+    Invisible while `unenergised` was the only state either could hold - off and off - and
+    consequential the moment `energised` existed: a pump with `safe_state: energised` and a
+    window of 23:30 to 05:30, restarted at noon, ran all afternoon in its failure state
+    during normal scheduled downtime. Nothing corrected it, and correctly so: the gate
+    reports no closing edge, because the control did not *become* inactive, it started that
+    way.
+    """
+
+    NOON = datetime.datetime(2026, 9, 25, 12, 0, tzinfo=datetime.timezone.utc)
+    NIGHT = datetime.datetime(2026, 9, 25, 1, 0, tzinfo=datetime.timezone.utc)
+
+    @staticmethod
+    def _gate(**overrides):
+        """Return a gate over a control with an overnight window.
+
+        Args:
+            **overrides: document keys to set
+
+        Returns:
+            Gate: the gate
+        """
+        document = conservatory()
+        document.pop("enable_when", None)
+        document["safe_state"] = "energised"
+        document["active_period"] = {"from": "23:30", "to": "05:30", "end_state": "unenergised"}
+        document.update(overrides)
+        return Gate(document)
+
+    def test_outside_the_window_it_starts_in_the_end_state(self):
+        assert self._gate().starting_state(self.NOON) == "unenergised"
+
+    def test_inside_the_window_it_starts_in_the_safe_state(self):
+        """About to act, and its devices are in an unknown condition until it does."""
+        assert self._gate().starting_state(self.NIGHT) == "energised"
+
+    def test_with_no_active_period_the_safe_state_is_the_only_answer(self):
+        """There is no "outside the window" for a control that has no window."""
+        assert self._gate(active_period=None).starting_state(self.NOON) == "energised"
+
+    def test_the_guard_commands_whichever_it_is_handed(self):
+        commanded = []
+        guard = DeviceGuard("conservatory", "energised", ["pump"], commanded.append)
+        try:
+            guard.assert_starting_state("unenergised")
+            assert commanded == [{"pump": False}]
+        finally:
+            guard.stop("the test is finished")
+
+    def test_and_defaults_to_its_own_safe_state(self):
+        commanded = []
+        guard = DeviceGuard("conservatory", "energised", ["pump"], commanded.append)
+        try:
+            guard.assert_starting_state()
+            assert commanded == [{"pump": True}]
+        finally:
+            guard.stop("the test is finished")
+
+    def test_the_exit_half_stays_on_the_safe_state(self):
+        """A process that is ending leaves nothing behind to supervise the devices, which is
+        what a safe state is for, whatever the clock says as it goes."""
+        commanded = []
+        guard = DeviceGuard("conservatory", "energised", ["pump"], commanded.append)
+        guard.assert_starting_state("unenergised")
+        guard.stop("the control is stopping")
+        assert commanded == [{"pump": False}, {"pump": True}]
+
+    def test_a_naive_moment_is_refused_rather_than_guessed_at(self):
+        with pytest.raises(ConfigError):
+            self._gate().starting_state(datetime.datetime(2026, 9, 25, 12, 0))

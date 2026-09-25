@@ -182,6 +182,45 @@ class Gate:
             return False, f"enable_when is false: {self._enable_when.source!r}"
         return True, None
 
+    def starting_state(self, moment):
+        """Return the state this control's devices should be in as it starts.
+
+        Normally ``safe_state``: a process that has just started has devices in an unknown
+        condition, and the point of asserting anything at all is to clear whatever a crash
+        or a power cut left behind before reading a single sensor.
+
+        **Except where the control is already outside its active period**, which is a
+        different situation wearing the same clothes. ``safe_state`` answers "something is
+        wrong, or nothing is known yet"; ``end_state`` answers "the control is deliberately
+        not acting", and the operator has declared it for exactly this. A control that starts
+        outside its window is the second.
+
+        It mattered not at all while ``unenergised`` was the only state either could hold -
+        off and off - and it matters immediately now that ``energised`` exists: a pump with
+        ``safe_state: energised`` and a window of 23:30 to 05:25, restarted at noon, ran all
+        afternoon in the failure state during what was normal scheduled downtime, and nothing
+        would have corrected it until the window opened that night and closed the next
+        morning. The gate does not report a closing edge for it either, and correctly so: the
+        control did not *become* inactive, it started that way.
+
+        ``enable_when`` deliberately does not participate. Answering it needs a sensor read,
+        and the whole point of the startup assertion is that it happens before anything is
+        read; the active period needs only the clock, so it costs nothing to get right.
+
+        Args:
+            moment (datetime.datetime): an aware moment, for the active period
+
+        Returns:
+            str: one of the built-in safe states
+
+        Raises:
+            ConfigError: where the moment is naive
+        """
+        require_aware(moment)
+        if self.period is not None and not is_inside(self.period, moment):
+            return self.period.end_state
+        return self.safe_state
+
     def closing_state(self):
         """Return the state the devices take when the control stops acting.
 
@@ -315,15 +354,27 @@ class DeviceGuard:
         self._stopped = False
         atexit.register(self._at_exit)
 
-    def assert_safe_state(self) -> None:
-        """Command the devices into the safe state before the loop runs.
+    def assert_starting_state(self, state=None) -> None:
+        """Command the devices into the state this control starts in, before the loop runs.
+
+        The state is the caller's to choose because only the gate knows whether the control
+        is inside its active period - see :meth:`Gate.starting_state`. The exit half is not
+        parameterised and stays on ``safe_state``: a process that is ending leaves nothing
+        behind to supervise the devices, which is what a safe state is for, whatever the
+        clock happens to say as it goes.
+
+        Args:
+            state (str or None): the state to assert; None means this guard's safe state
 
         Raises:
             Exception: whatever ``command`` raises, unwrapped - a device that is missing
                 and a bridge that is unreachable want different responses, and the caller
                 is the one that can tell them apart.
+            ConfigError: where the state is not one of the built-in names
         """
-        if self._commands is None:
+        chosen = self.safe_state if state is None else state
+        commands = commands_for(chosen, self.devices)
+        if commands is None:
             # INFO, not WARNING. `leave_unchanged` is what the operator asked for, and for
             # the case it exists to serve - a light that should not go out because a server
             # rebooted - there is no safety question at all. The consequence is real and
@@ -332,14 +383,14 @@ class DeviceGuard:
             # lifetime of a correct configuration is the noise that teaches people to skim
             # warnings, and buys a one-time mistake only if they happen to be watching.
             logging.info(
-                "Control %r starts with safe_state %r, so its devices keep whatever state they "
+                "Control %r starts with %r, so its devices keep whatever state they "
                 "were left in, including after a crash or a power cut",
                 self.name,
-                self.safe_state,
+                chosen,
             )
             return
-        logging.info("Control %r asserting %r on %s", self.name, self.safe_state, self._device_list())
-        self._command(self._commands)
+        logging.info("Control %r asserting %r on %s", self.name, chosen, self._device_list())
+        self._command(commands)
 
     def stop(self, reason) -> None:
         """Put the devices in the safe state on the way out, once.

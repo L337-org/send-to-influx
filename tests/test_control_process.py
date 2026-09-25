@@ -23,7 +23,7 @@ import requests
 
 from tests.harness import faults, invariants
 from tests.harness.installation import conservatory
-from toinflux.control_process import ControlProcess, command_devices, gather, heartbeat_writer
+from toinflux.control_process import ControlProcess, command_devices, gather, heartbeat_writer, run_control
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.rules import RuleEvaluationError, parse_rule
 
@@ -670,3 +670,88 @@ class TestANonFiniteReadingIsRefusedWhereItHasAName:
         and the next point written may be fine. The loop catches this one and fails safe."""
         with pytest.raises(RuleEvaluationError):
             self._gathering(float("nan"), installation, monkeypatch)
+
+
+class TestWhatRunControlAssertsBeforeItsFirstCycle:
+    """Driving `run_control` itself, which nothing did - every test of it patched it out.
+
+    That gap is why this matters: `Gate.starting_state` can be entirely correct and simply
+    never be called, and the whole suite stays green. Removing the call from `run_control`
+    was caught by no test until this one.
+    """
+
+    @staticmethod
+    def _store(installation, safe_state, period):
+        """Write a single-heater control and return its name.
+
+        Args:
+            installation (Installation): the installation to write into
+            safe_state (str): the control's safe_state
+            period (dict or None): its active_period, or None for no window
+
+        Returns:
+            str: the control's name
+        """
+        from tests.harness.installation import conservatory
+
+        document = conservatory(name="pump")
+        document.pop("enable_when", None)
+        document["safe_state"] = safe_state
+        if period is None:
+            document.pop("active_period", None)
+        else:
+            document["active_period"] = period
+        document["devices"] = {"pump": {"source": "hue", "device": "far"}}
+        document["output"] = dict(
+            document["output"],
+            cycle_seconds=1,
+            min_transition_seconds=1,
+            stages=[{"level": 0, "set": {"pump": False}}, {"level": 1500, "set": {"pump": True}}],
+        )
+        document["output"].pop("max_level", None)
+        installation.write_control(document, name="pump")
+        return "pump"
+
+    def _first_and_last(self, state_directory, safe_state, period):
+        """Run a control for no cycles and return what it commanded, first and last.
+
+        Args:
+            state_directory (Installation): the installation
+            safe_state (str): the control's safe_state
+            period (dict or None): its active_period
+
+        Returns:
+            tuple: (the first commanded on-state, the last)
+        """
+        name = self._store(state_directory, safe_state, period)
+        state_directory.bridge.clear()
+        run_control(name, settings_file=state_directory.settings_file, cycles=0, sleep=lambda _seconds: None)
+        commands = state_directory.bridge.commanded("far")
+        assert commands, "the control commanded nothing at all"
+        return commands[0].state.get("on"), commands[-1].state.get("on")
+
+    # A window that is closed for all but six hours of the night, so "now" is outside it
+    # whenever this suite runs in daylight - and inside it whenever it does not, which is why
+    # the test below picks its own window rather than trusting the clock.
+    ALL_DAY = {"from": "00:00", "to": "23:59", "end_state": "unenergised"}
+    NEVER = {"from": "23:58", "to": "23:59", "end_state": "unenergised"}
+
+    def test_outside_its_window_it_starts_in_the_end_state(self, state_directory, bridge):
+        """The defect: a pump with `safe_state: energised` restarted outside its window used
+        to run in its failure state through normal scheduled downtime."""
+        first, _last = self._first_and_last(state_directory, "energised", self.NEVER)
+        assert first is False, "it started in its safe state rather than its end state"
+
+    def test_inside_its_window_it_starts_in_the_safe_state(self, state_directory, bridge):
+        first, _last = self._first_and_last(state_directory, "energised", self.ALL_DAY)
+        assert first is True, "it started in its end state while inside its window"
+
+    def test_with_no_window_the_safe_state_is_the_only_answer(self, state_directory, bridge):
+        first, _last = self._first_and_last(state_directory, "energised", None)
+        assert first is True
+
+    def test_and_the_exit_half_still_applies_the_safe_state(self, state_directory, bridge):
+        """Whatever the clock said on the way in. A process that is ending leaves nothing
+        supervising the devices, which is what a safe state is for."""
+        first, last = self._first_and_last(state_directory, "energised", self.NEVER)
+        assert (first, last) == (False, True)
