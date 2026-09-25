@@ -1329,6 +1329,36 @@ def _warn_about_stale_feedback(document, settings, warnings) -> None:
     )
 
 
+def safe_state_problem(where, value):
+    """Return why a safe or end state is unusable, or None where it is fine.
+
+    **One predicate because there were three, and they disagreed.** The validator learned to
+    accept a number when driven devices arrived; `Gate` and `parse_active_period` did not,
+    so a document naming `safe_state: 40` passed `--check-config` and every MCP tool, and
+    then refused to start - with the code that handles the number sitting downstream, correct
+    and unreachable.  A rule stated once cannot drift from itself.
+
+    A number is permitted because a device driven by a parameter has more than two states to
+    be left in: 40 for a lamp is 40%, and for a switched device in the same control it means
+    on above zero. Negative and non-finite are refused here rather than at the far end, where
+    the message would be about a bridge rather than about the document.
+
+    Args:
+        where (str): the setting's position, for the message
+        value (object): what the document holds
+
+    Returns:
+        str or None: the problem, phrased for whoever reads it, or None
+    """
+    if _is_number(value):
+        if value < 0:
+            return f"{where}: a value must be at least zero, got {value!r}"
+        return None
+    if value not in BUILT_IN_SAFE_STATES:
+        return f"{where}: must be one of {', '.join(BUILT_IN_SAFE_STATES)}, or a value to set, got {value!r}"
+    return None
+
+
 def _check_safe_state(where, value, errors) -> None:
     """Refuse a safe or end state that is neither a named state nor a usable value.
 
@@ -1342,12 +1372,9 @@ def _check_safe_state(where, value, errors) -> None:
         value (object): what the document holds
         errors (list): appended to with any problems found
     """
-    if _is_number(value):
-        if value < 0:
-            errors.append(f"{where}: a value must be at least zero, got {value!r}")
-        return
-    if value not in BUILT_IN_SAFE_STATES:
-        errors.append(f"{where}: must be one of {', '.join(BUILT_IN_SAFE_STATES)}, or a value to set, got {value!r}")
+    problem = safe_state_problem(where, value)
+    if problem:
+        errors.append(problem)
 
 
 def _check_no_name_is_both_an_input_and_a_parameter(document, errors) -> None:

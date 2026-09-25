@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from toinflux.controls import (
     parameter_devices,
     BUILT_IN_SAFE_STATES,
+    safe_state_problem,
     SAFE_STATE_ENERGISED,
     SAFE_STATE_LEAVE_UNCHANGED,
     SAFE_STATE_UNENERGISED,
@@ -92,10 +93,12 @@ class Gate:
             raise ConfigError(f"enabled must be true or false, got {self.enabled!r}")
         self.period = parse_active_period(document)
         self.safe_state = document.get("safe_state", UNENERGISED)
-        if self.safe_state not in BUILT_IN_SAFE_STATES:
-            raise ConfigError(
-                f"safe_state must be one of {render_values(BUILT_IN_SAFE_STATES)}, got {self.safe_state!r}"
-            )
+        # The validator's own rule, not a second copy of it: a number is a state a driven
+        # device can be left in, and this used to refuse one that `validate_control` had
+        # just accepted.
+        problem = safe_state_problem("safe_state", self.safe_state)
+        if problem:
+            raise ConfigError(problem)
         names = rule_names(document)
         text = document.get("enable_when")
         self._enable_when = None if text is None else parse_rule(str(text), allowed_names=names)

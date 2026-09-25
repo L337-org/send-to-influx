@@ -32,6 +32,7 @@ from toinflux.controls import validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import DeviceGuard, Gate, commands_for
 from toinflux.rules import RuleEvaluationError
+from toinflux.schedule import parse_active_period
 
 LONDON = ZoneInfo("Europe/London")
 NIGHT = datetime.datetime(2026, 1, 15, 2, 0, tzinfo=LONDON)
@@ -248,6 +249,59 @@ class TestTheGateAcrossADaylightSavingChange:
         spring = _transitions(2026, LONDON)[0][0]
         window = {"from": "01:15", "to": "01:45", "end_state": "unenergised"}
         assert self._edges(window, spring) == []
+
+
+class TestANumericSafeState:
+    """A driven device has more than two states to be left in, so a percentage is a safe
+    state like any other.
+
+    The validator learned that and the two runtime checks did not, so a document naming one
+    passed `--check-config` and every MCP tool and then refused to start, with the code that
+    handles the number sitting downstream correct and unreachable. Nothing built a `Gate`
+    with one, which is how a whole feature could be accepted everywhere and work nowhere.
+    """
+
+    @pytest.mark.parametrize("value", [0, 40, 100, 2700])
+    def test_the_gate_accepts_what_the_validator_accepted(self, value):
+        gate = Gate(_document(safe_state=value))
+        assert gate.safe_state == value
+
+    @pytest.mark.parametrize("value", [0, 40, 100])
+    def test_a_period_accepts_one_as_its_end_state(self, value):
+        period = parse_active_period(_document(active_period={"from": "23:35", "to": "05:25", "end_state": value}))
+        assert period.end_state == value
+
+    def test_it_reaches_the_devices_as_the_value_to_set(self):
+        """The half that already worked, pinned here because it is what the rest is for."""
+        devices = {"lamp": {"source": "hue", "device": "Office Lamp", "parameter": "brightness_pct"}}
+        assert commands_for(40, devices) == {"lamp": 40}
+
+    @pytest.mark.parametrize(
+        "value", [40, 0, 100, -1, "unenergised", "energised", "leave_unchanged", "wrong", None, True, "40"]
+    )
+    def test_validation_and_the_runtime_agree_about_every_value(self, value):
+        """The guard for the class of fault rather than the instance of it.
+
+        Three copies of one rule, and the bug was that they disagreed: whether a document is
+        accepted must not depend on which of them looked at it. Checked both ways round, so
+        a runtime that quietly grew *laxer* than the validator would fail here too.
+        """
+        # A complete document, not this file's minimal one: `validate_control` checks the
+        # whole thing, so a stub would be refused for reasons that have nothing to do with
+        # the value under test and the comparison would hold vacuously.
+        document = conservatory(safe_state=value, active_period={"from": "23:35", "to": "05:25", "end_state": value})
+        accepted_by_validation = validate_control(document["name"], document, None) == []
+        try:
+            Gate(document)
+            parse_active_period(document)
+            accepted_at_runtime = True
+        except ConfigError:
+            accepted_at_runtime = False
+        assert accepted_by_validation == accepted_at_runtime, (
+            f"{value!r} is "
+            f"{'accepted' if accepted_by_validation else 'refused'} by validation and "
+            f"{'accepted' if accepted_at_runtime else 'refused'} at runtime"
+        )
 
 
 class TestWhatStoppingApplies:

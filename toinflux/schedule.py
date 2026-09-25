@@ -30,9 +30,8 @@ import re
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from toinflux.controls import BUILT_IN_SAFE_STATES, CLOCK_TIME_PATTERN, SAFE_STATE_UNENERGISED
+from toinflux.controls import CLOCK_TIME_PATTERN, SAFE_STATE_UNENERGISED, safe_state_problem
 from toinflux.exceptions import ConfigError
-from toinflux.general import render_values
 
 
 @dataclass(frozen=True)
@@ -88,10 +87,11 @@ def parse_active_period(document):
             f"that starts when it ends is either always open or never open, so say which"
         )
     end_state = period.get("end_state", SAFE_STATE_UNENERGISED)
-    if end_state not in BUILT_IN_SAFE_STATES:
-        raise ConfigError(
-            f"active_period.end_state must be one of {render_values(BUILT_IN_SAFE_STATES)}, got {end_state!r}"
-        )
+    # Shared with the validator and with Gate, for the reason in `safe_state_problem`: a
+    # document naming a percentage here validated cleanly and then would not start.
+    problem = safe_state_problem("active_period.end_state", end_state)
+    if problem:
+        raise ConfigError(problem)
     return ActivePeriod(start=start, end=end, end_state=end_state, zone=control_zone(document))
 
 
