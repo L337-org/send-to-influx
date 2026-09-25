@@ -1202,6 +1202,23 @@ class TestEveryShippedExample:
         assert CONTROL_EXAMPLES[scenario]["use_when"].strip()
 
     @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
+    def test_it_says_what_its_gains_assume(self, scenario):
+        """The examples are copied wholesale, numbers and all, and a gain is the one field that
+        cannot be right in the abstract - it depends on how far the device moves the reading,
+        which is a property of the room.
+
+        Every example did explain itself, in a Python comment beside the document. The payload
+        ships the documents as data, so none of that reached the client that copies them: it
+        saw `kp: 5.0` and no reason to change it.
+        """
+        tuning = CONTROL_EXAMPLES[scenario]["tuning"]
+        # A floor rather than a shape: it must be about the gain and long enough to say
+        # something, without this test dictating how the sentence is phrased. Pinning the exact
+        # rendering of kp was the first attempt and it failed on 500.0 against "500" - a test
+        # about formatting rather than about whether the example explains itself.
+        assert "kp" in tuning and len(tuning.strip()) > 80, tuning
+
+    @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
     def test_it_can_actually_be_stored_and_read_back(self, scenario, state_directory):
         """Validation is not storage: a name the store refuses would make an example that
         validates and cannot be written under the name it carries."""

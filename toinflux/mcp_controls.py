@@ -49,6 +49,7 @@ import threading
 
 from toinflux.controls import (
     CONTROL_EXAMPLES,
+    TUNING_NOTES,
     actuators_owned,
     enabled_owner_of,
     CONTROL_KEY_HELP,
@@ -569,6 +570,10 @@ def _control_schema_result(settings, settings_file=None, supervisor=None):
             ],
         },
         "safe_states": list(BUILT_IN_SAFE_STATES),
+        # Beside the examples, because the examples are what get copied: the numbers in them
+        # are the one part of a control document that cannot be right in the abstract, and
+        # every word explaining that used to live in comments this payload does not carry.
+        "tuning": TUNING_NOTES,
         "sources": _usable_sources(settings),
         "examples": CONTROL_EXAMPLES,
         "writing": _writing_availability(settings, settings_file, supervisor),

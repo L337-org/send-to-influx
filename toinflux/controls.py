@@ -223,11 +223,42 @@ CONTROL_EXAMPLE = {
 #:
 #: Every one is validated by CI, because an example nothing exercises is a document that
 #: stops working the first time the format moves.
+#: How to arrive at gains, published with the schema rather than left in comments here.
+#:
+#: **The examples are copied, so what they do not say is what goes wrong.** A client composing
+#: a control takes the shape *and the numbers* from whichever example fits, and a gain is the
+#: one field in a control document that cannot be right in the abstract: it depends on how far
+#: the device moves the reading, which is a property of the room. Every example says which
+#: error it was tuned for; none of that reasoning reached the client, because it lived in
+#: Python comments and the payload ships the documents as data.
+TUNING_NOTES = [
+    "a gain is not portable: kp is output per unit of error, and the right value depends on how "
+    "far your device moves your reading, which no example can know",
+    "kp = the top rung divided by the error you want full output at, so a ladder of 0-1500 with "
+    "full output wanted at 3 degrees gives kp 500. Change a ladder and you must change kp with it",
+    "measure the plant gain before choosing: set the device to one value, wait for the reading to "
+    "settle, set it to another, and divide the change in reading by the change in output",
+    "keep kp times the plant gain well below 1. At 1 the loop answers each error with a correction "
+    "that recreates it inverted and swings harder every cycle - measured at 1.04 on a real lamp, "
+    "which diverged within a quarter of an hour",
+    "too low is visible and harmless, too high is neither: start below your estimate and raise it",
+    "ki is what closes the last of the error, and it is slow by design - roughly kp/100 in these "
+    "examples. Raise kp for a loop that never arrives, raise ki for one that stops just short",
+    "a sensor that reports only when its reading changes leaves the loop steering blind between "
+    "reports, which looks like too much gain and is usually met by detuning",
+]
+
 CONTROL_EXAMPLES = {
     "normal": {
         "use_when": (
             "the usual case: devices that can be switched as often as the loop likes, and one "
             "transition minimum covering all of them"
+        ),
+        "tuning": (
+            "kp 500 against a ladder topping out at 1500 means full output at 3 degrees below "
+            "setpoint. That suits a conservatory whose two heaters lift it a few degrees; a "
+            "smaller room, a bigger heater or better insulation all want a smaller number. Work "
+            "out your own before copying this one - see `tuning` in the schema"
         ),
         "document": CONTROL_EXAMPLE,
     },
@@ -237,6 +268,12 @@ CONTROL_EXAMPLES = {
             "across the room from it, or a larger load - so it should be left alone while the "
             "nearer one trims. Give that device its own longer minimum: it binds only at the rungs "
             "where that device actually changes, so the nearer one still moves at its own rate"
+        ),
+        "tuning": (
+            "kp 500 against a ladder topping out at 1500 means full output at 3 degrees below "
+            "setpoint, chosen for that conservatory rather than for yours. The staging decides "
+            "which device moves when, not how hard the loop pushes, so tune the gain exactly as "
+            "you would without it - see `tuning` in the schema"
         ),
         "document": {
             "name": "conservatory_staged",
@@ -280,6 +317,15 @@ CONTROL_EXAMPLES = {
             "control then holds the value the ladder describes at the demand, instead of "
             "switching between rungs to average it out over the window"
         ),
+        "tuning": (
+            "kp 5.0 against a ladder topping out at 1000 means full brightness at 200 lux short "
+            "of target, which suits a lamp that moves the reading by about that much at full. "
+            "**Measure yours.** One real room moved 14 to 21 lux per percent of lamp, where this "
+            "same number is twenty-five times too aggressive: the loop answers each error with a "
+            "correction that overshoots it, and swings harder every cycle instead of settling. "
+            "A light sensor reporting only on change makes it worse, because the loop is steering "
+            "blind between reports. See `tuning` in the schema for how to measure it"
+        ),
         "document": {
             "name": "office_lamp",
             "enabled": True,
@@ -305,6 +351,12 @@ CONTROL_EXAMPLES = {
         },
     },
     "fast_adjustment": {
+        "tuning": (
+            "kp 1000 against a ladder topping out at 1000 means full output at 1 degree below "
+            "setpoint, which is aggressive and suits a propagator tray: small, fast to respond, "
+            "and nothing that minds being switched often. On anything with real thermal mass the "
+            "same number would overshoot and hunt"
+        ),
         "use_when": (
             "a small thermal mass and a device with nothing to protect, where the loop should "
             "recompute often and the window should split finely"

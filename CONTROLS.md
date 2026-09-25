@@ -261,8 +261,37 @@ kp = top rung level / the error at which you want full output
 ```
 
 For a ladder topping out at 1500 and full output three degrees below setpoint, `kp` is 500.
-The shipped examples are all set this way, and the comment beside each says which error it
-was chosen for, so scaling one to your own plant is a matter of changing that number.
+The shipped examples are all set this way, and each carries a `tuning` note saying which error
+it was chosen for, so scaling one to your own plant is a matter of changing that number.
+
+### Measure the plant before choosing the error
+
+That leaves the question the division does not answer: *which* error should give full output?
+It is not a preference, it is a property of your installation, and guessing it is how a lamp
+ends up oscillating.
+
+Measure it. Set the device to one value, wait for the reading to settle, set it to another,
+and divide the change in reading by the change in output. That number - the **plant gain** -
+is how far your reading moves per unit the loop commands.
+
+What decides stability is `kp` times the plant gain. **Keep it well below 1.** At 1 the loop
+answers each error with a correction that recreates it inverted, so instead of settling it
+swings harder every cycle. This is not theoretical: a lamp tuned to a loop gain of 1.04
+diverged within a quarter of an hour, having looked perfectly reasonable on paper.
+
+One real room moved 14 to 21 lux per percent of lamp. The shipped `dimming` example asks for
+full brightness 200 lux short of target, which is right for a lamp that changes the reading by
+about that much at full, and twenty-five times too aggressive in that room. Neither number is
+wrong; they describe different rooms.
+
+Start below your estimate and raise it. Too low converges slowly, which you can see and live
+with. Too high is neither.
+
+Two things make a loop look overgeared when it is not. An input allowed to be much older than
+`cycle_seconds` lets the loop command several times before seeing the effect of the first -
+`--check-config` warns about that on the PID's own input. And a sensor that reports only when
+its reading changes by some threshold, as Hue's light sensors do, leaves the loop steering
+blind between reports. Detuning is the wrong answer to both.
 
 `ki` then trims the residual offset that proportional action alone always leaves. It is
 applied per second, so a useful starting value is roughly `kp / 3000` for a slow plant like a
