@@ -195,6 +195,11 @@ An active period is a wall-clock window in the control's own timezone, and it fo
 daylight saving the way a wall clock does: a window inside the hour the clocks skip does not
 happen that day, and one inside the hour they repeat happens twice.
 
+**Quote the times.** YAML reads a colon-separated value with no leading zero as sexagesimal,
+so an unquoted `23:35` is the number 1415 while `05:25` survives as the string it looks like.
+Both are refused, and the error says so, but the rule is not one anyone should have to carry -
+so quote every boundary and the question never arises.
+
 A disabled control has no process. That is not the same as a running one held back by its
 gate: a control asserts its safe state before its first cycle, so a disabled document that
 was started would command its devices off - and `save_control` deliberately stores a document
@@ -374,7 +379,7 @@ enable_when: outside < 15
 safe_state: unenergised
 active_period:
   from: '23:35'
-  to: 05:25
+  to: '05:25'
   end_state: unenergised
 ```
 

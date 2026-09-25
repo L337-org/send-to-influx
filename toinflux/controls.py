@@ -811,8 +811,36 @@ def _check_active_period(document, errors) -> None:
         # fullmatch: `$` matches before a trailing newline, so "23:35\n" passed this and
         # became an active-period boundary carrying a line break.
         if not isinstance(value, str) or not re.fullmatch(CLOCK_TIME_PATTERN, value):
-            errors.append(f"active_period.{field}: is required and must be a 24-hour HH:MM time, got {value!r}")
+            errors.append(
+                f"active_period.{field}: is required and must be a 24-hour HH:MM time, got {value!r}"
+                + (_unquoted_time_hint(value) if isinstance(value, int) and not isinstance(value, bool) else "")
+            )
     _check_safe_state("active_period.end_state", period.get("end_state", SAFE_STATE_UNENERGISED), errors)
+
+
+def _unquoted_time_hint(value):
+    """Return the explanation for a time that YAML turned into a number, or nothing.
+
+    **An unquoted `23:35` is the integer 1415.** YAML 1.1 reads a colon-separated number as
+    sexagesimal, so an hour with no leading zero becomes minutes-since-midnight while
+    `05:25` survives as the string it looks like - which is why the shipped examples appear
+    to quote inconsistently and why a hand-edited document can fail on one boundary and not
+    the other. Without this, the error reads "got 1415" against a document that plainly says
+    23:35, and the reader has to know the trap to see it.
+
+    Args:
+        value (int): what the document holds
+
+    Returns:
+        str: a sentence naming the cause, empty where the number is not a plausible time
+    """
+    hours, minutes = divmod(value, 60)
+    if not 0 <= value < 24 * 60 or minutes > 59:
+        return ""
+    return (
+        f". An unquoted {hours:02d}:{minutes:02d} is read by YAML as the number {value}, "
+        f"because a colon-separated value with no leading zero is sexagesimal - quote it"
+    )
 
 
 def _check_timezone_and_parameters(document, errors) -> None:

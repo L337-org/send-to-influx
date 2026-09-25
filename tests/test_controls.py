@@ -4,6 +4,9 @@ import copy
 import os
 import stat as stat_module
 import pytest
+import pathlib
+import re
+
 import yaml
 from toinflux.controls import (
     actuators_may_be_one,
@@ -1421,3 +1424,51 @@ class TestAControlThatActsFasterThanItCanSee:
         state_directory.write_control(document, name="conservatory")
         notes = validate_stored_controls(state_directory.settings_file, state_directory.settings)
         assert notes and "conservatory" in notes[0]
+
+
+class TestAnUnquotedClockTime:
+    """YAML 1.1 reads a colon-separated value with no leading zero as sexagesimal, so an
+    unquoted `23:35` is the integer 1415 while `05:25` survives as a string.
+
+    Both are refused, and always were. What this adds is the reason: "got 1415" against a
+    document that plainly says 23:35 is a message the reader can only decode by already
+    knowing the trap, which is the opposite of what an error is for.
+    """
+
+    @pytest.mark.parametrize(
+        "text, number, shown",
+        [
+            pytest.param("23:35", 1415, "23:35", id="the-shipped-example"),
+            pytest.param("9:00", 540, "09:00", id="single-digit-hour"),
+            pytest.param("17:00", 1020, "17:00", id="afternoon"),
+        ],
+    )
+    def test_the_error_names_the_cause(self, text, number, shown):
+        document = a_valid_control()
+        document["active_period"] = yaml.safe_load(f"from: {text}\nto: '05:25'\nend_state: unenergised")
+        assert document["active_period"]["from"] == number, "YAML did not mangle it; the premise is wrong"
+        errors = [e for e in validate_control("conservatory", document) if "active_period.from" in e]
+        assert errors and "sexagesimal" in errors[0]
+        assert shown in errors[0], "it must show the time the author meant, not only the number"
+
+    def test_a_leading_zero_survives_and_is_accepted(self):
+        """Which is exactly why the shipped examples look inconsistently quoted."""
+        assert yaml.safe_load("t: 05:25")["t"] == "05:25"
+        document = a_valid_control()
+        document["active_period"] = yaml.safe_load("from: '23:35'\nto: 05:25\nend_state: unenergised")
+        assert [e for e in validate_control("conservatory", document) if "active_period" in e] == []
+
+    def test_a_number_that_is_not_a_plausible_time_gets_no_hint(self):
+        """1500 is 25:00, which nobody wrote by accident. Explaining sexagesimal there would
+        be a guess dressed as a diagnosis."""
+        document = a_valid_control()
+        document["active_period"] = {"from": 1500, "to": "05:25", "end_state": "unenergised"}
+        errors = [e for e in validate_control("conservatory", document) if "active_period.from" in e]
+        assert errors and "sexagesimal" not in errors[0]
+
+    def test_the_documented_examples_quote_every_boundary(self):
+        """They are what gets copied, and copying the asymmetry is how somebody writes an
+        unquoted 23:30 and gets a number."""
+        reference = (pathlib.Path(__file__).resolve().parent.parent / "CONTROLS.md").read_text(encoding="utf-8")
+        bare = re.findall(r"(?m)^\s*(?:from|to): (?!')(\d{1,2}:\d{2})\s*$", reference)
+        assert not bare, f"unquoted clock times in the reference: {bare}"
