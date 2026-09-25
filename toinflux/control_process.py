@@ -32,6 +32,7 @@ from toinflux.controller import Controller
 from toinflux.controls import DEFAULT_CYCLE_SECONDS, load_control, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.gating import DeviceGuard, Gate, commands_for
+from toinflux.schedule import is_inside
 from toinflux.general import RepeatingProblem, load_settings, render_values, source_class
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
@@ -510,15 +511,26 @@ class ControlProcess:
         behaviour, so the worse outcome of the two is the one that is already normal.
         """
         state = self.transitions.loop_state(self.controller.fingerprint, self.cycle_seconds * RESUMABLE_CYCLES)
-        if not state:
-            return
-        self.controller.resume_from(state)
-        logging.info(
-            "Control %r resumed the loop it had built before it stopped, so it does not have to "
-            "earn it again (integral %.3g)",
-            self.name,
-            state.get("integral", 0.0),
-        )
+        if state:
+            self.controller.resume_from(state)
+            logging.info(
+                "Control %r resumed the loop it had built before it stopped, so it does not have to "
+                "earn it again (integral %.3g)",
+                self.name,
+                state.get("integral", 0.0),
+            )
+        # **Held where the window is shut, whether or not anything was restored.** Outside its
+        # active period a control never actuates, so nothing calls `resume` until the window
+        # opens - and by then simple-pid is still in automatic, where `set_auto_mode(True)`
+        # does nothing at all. Whatever was restored here would therefore be used hours later
+        # with no age check, which is the case `RESUMABLE_HOLD_SECONDS` exists to catch: a
+        # conservatory reopening at 23:30 would start from where last night left off.
+        #
+        # Holding makes the opening edge a real manual-to-automatic transition, so the age is
+        # judged then rather than assumed. A control with no active period is always inside
+        # it and is not held, which is what keeps the ordinary restart free.
+        if not is_inside(self.gate.period, datetime.datetime.now(datetime.timezone.utc)):
+            self.controller.hold()
 
     def _hold(self, plan, held):
         """Return the plan with each held device pinned to the value it already has.
@@ -537,7 +549,21 @@ class ControlProcess:
         from toinflux.staging import Dwell, Stage
 
         known = self.transitions.states()
-        pinned = {device: known[device] for device in held if device in known}
+        # **Only a value this device could actually be set to.** The log survives a document
+        # edit - a device plan change is logged, not erased - so a device switched to driven
+        # keeps a `true` or `false` from when it was on/off. Pinning that sent
+        # `brightness_pct=True`, which the Hue handler rightly refuses as a caller mistake,
+        # and `command_devices` turns that into the ConfigError that stops a control for
+        # good. A control halted by its own history, with a document that is perfectly valid.
+        #
+        # Skipping it simply lets the plan's own value through, which is the right answer:
+        # the minimum protects a device from being moved too often, and it has nothing to say
+        # about a state that no longer means anything on it.
+        pinned = {
+            device: known[device]
+            for device in held
+            if isinstance(known.get(device), (int, float)) and not isinstance(known[device], bool)
+        }
         if not pinned:
             return plan
         return tuple(

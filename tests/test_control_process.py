@@ -11,6 +11,7 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import datetime
+import unittest.mock
 import logging
 import os
 import selectors
@@ -230,6 +231,70 @@ class TestSayingItRecovered:
         influx.write_reading("conservatory_temperature", 16.0)
         assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is not None
         assert "completed a cycle again" in caplog.text
+
+
+class TestRestartingOutsideTheWindow:
+    """A restart outside the active period must not carry an integral into the next opening.
+
+    simple-pid's `set_auto_mode(True)` resets only on an actual manual-to-automatic change.
+    After a restart the loop is already automatic and, outside its window, nothing ever holds
+    it - so `resume` at the opening edge did nothing and whatever was restored at startup was
+    used hours later with no age check at all. The conservatory reopening at 23:30 would have
+    started from where the previous night left off, which is the case the age limit exists
+    for.
+    """
+
+    def _restart(self, installation, moment):
+        """Build a control process as a restart would, at a given moment.
+
+        Args:
+            installation (Installation): the state directory to build against
+            moment (datetime.datetime): when the restart happens
+
+        Returns:
+            ControlProcess: the new process
+        """
+        with unittest.mock.patch("toinflux.control_process.datetime") as clock:
+            clock.datetime.now.return_value = moment
+            clock.timezone = datetime.timezone
+            return ControlProcess("conservatory", settings_file=installation.settings_file)
+
+    def test_a_restart_outside_it_holds_so_the_opening_decides(self, state_directory, bridge, influx):
+        """Held, rather than left running, so the age is judged when the window opens rather
+        than assumed to be fine."""
+        state_directory.write_control(conservatory())
+        started = ControlProcess("conservatory", settings_file=state_directory.settings_file)
+        try:
+            started.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            assert started.controller.pid._integral != 0, "nothing was learned, so this proves nothing"
+        finally:
+            started.guard.close()
+            started.close()
+
+        restarted = self._restart(state_directory, DAY)
+        try:
+            assert restarted.controller.pid.auto_mode is False, "a restart outside the window left the loop running"
+        finally:
+            restarted.guard.close()
+            restarted.close()
+
+    def test_a_restart_inside_it_carries_straight_on(self, state_directory, bridge, influx):
+        """The other side: the ordinary restart must stay free, or this would have traded one
+        fault for a loop that always starts from nothing."""
+        state_directory.write_control(conservatory())
+        started = ControlProcess("conservatory", settings_file=state_directory.settings_file)
+        try:
+            started.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            started.guard.close()
+            started.close()
+
+        restarted = self._restart(state_directory, NIGHT)
+        try:
+            assert restarted.controller.pid.auto_mode is True
+        finally:
+            restarted.guard.close()
+            restarted.close()
 
 
 class TestGathering:
@@ -992,3 +1057,55 @@ class TestAControlResumesItsLoopOnStart:
         finally:
             control.guard.stop("done")
             control.close()
+
+
+class TestAStateLeftOverFromAnOlderDocument:
+    """The transition log outlives a document edit, so it can describe a device that no
+    longer exists in the shape it records.
+
+    A device changed from on/off to a driven parameter keeps a `true` or `false` in the log.
+    While its minimum has not elapsed the loop pins it to that stored value, which used to
+    send `brightness_pct=True`: the Hue handler refuses it as a caller mistake, and
+    `command_devices` turns that into the ConfigError that stops a control for good. A
+    control halted by its own history with a perfectly valid document, and no retry fixes it.
+    """
+
+    def test_a_boolean_is_not_pinned_onto_a_device_that_now_takes_a_value(self, state_directory, bridge, influx):
+        from tests.harness.bridge import bulb
+        from toinflux.controls import save_control
+        from toinflux.transitions import TransitionLog
+
+        bridge.lights["9"] = bulb("office-lamp")
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["parameters"] = {"target": 1000}
+        document["inputs"] = {"lux": {"source": "hue", "field": "L", "max_age": 60}}
+        document["pid"] = {"input": "lux", "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0}
+        document["devices"] = {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "brightness_pct"}}
+        document["output"] = {
+            "cycle_seconds": 60,
+            "min_transition_seconds": 600,
+            "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 100, "set": {"lamp": 100}}],
+        }
+        save_control("lamp", document, state_directory.settings_file)
+        # What the previous, switched, version of this document left behind. A long minimum so
+        # the device is certainly still inside it, which is when the pinning happens at all.
+        TransitionLog("lamp", state_directory.settings_file).record({"lamp": False}, forced=False)
+
+        control = ControlProcess("lamp", settings_file=state_directory.settings_file)
+        try:
+            influx.write_reading("L", 300.0)
+            control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            control.guard.close()
+            control.close()
+        # The cycle completing at all is half the claim: under the fault it raised ConfigError
+        # out of `cycle`, which catches only a failed read.
+        commanded = [command.state for command in bridge.commanded("office-lamp")]
+        assert commanded, "the lamp was never commanded at all, so this proves nothing"
+        # `bri`, the brightness the plan asked for. Asserted rather than the absence of a
+        # boolean, because the CLIP wire format carries `on` alongside `bri` and that one is
+        # a boolean by rights - the first version of this test read the protocol and called
+        # it the bug.
+        assert all("bri" in state for state in commanded), commanded
