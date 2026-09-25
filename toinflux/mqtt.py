@@ -190,8 +190,7 @@ class MqttDataHandler(DataHandler):
                     break
                 remaining = deadline - time.monotonic()
         except (OSError, ValueError) as e:
-            logging.error("Error connecting to MQTT broker %s:%s - %s", host, port, e)
-            raise SourceConnectionError(str(e)) from e
+            raise SourceConnectionError(f"Error connecting to MQTT broker {host}:{port} - {e}") from e
         finally:
             client.disconnect()
         self._raise_for_failed_connection(host, port, timeout, failures, connected)
@@ -255,8 +254,7 @@ class MqttDataHandler(DataHandler):
         try:
             client.connect(host, port)
         except (OSError, ValueError) as e:
-            logging.error("Error connecting to MQTT broker %s:%s - %s", host, port, e)
-            raise SourceConnectionError(str(e)) from e
+            raise SourceConnectionError(f"Error connecting to MQTT broker {host}:{port} - {e}") from e
         # loop_start() is inside the try so that if it fails (e.g. thread creation under
         # resource pressure) the finally still disconnects the socket connect() just
         # opened, rather than leaking it. loop_stop() is a no-op when no loop is running,
@@ -589,5 +587,4 @@ class MqttDataHandler(DataHandler):
             error = f"MQTT broker {host}:{port} did not complete the MQTT handshake within {timeout}s"
         else:
             return
-        logging.error(error)
         raise SourceConnectionError(error)

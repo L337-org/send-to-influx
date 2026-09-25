@@ -2276,3 +2276,66 @@ def test_every_product_module_is_findable_from_the_contributor_docs():
         "these modules are not findable from the contributor documentation, which "
         f"CONTRIBUTING.md's own checklist requires: {missing}"
     )
+
+
+#: Where logging a failure and then raising it is correct rather than a double report, with
+#: the reason, because the general rule below would otherwise have to be weakened for all of
+#: them.  `load_settings` and `validate_settings` run before `configure_logging` and their
+#: ConfigError is caught in `main()` by a bare `sys.exit(1)` that reports nothing: the log
+#: line is the only account a misconfigured service ever gives of why it stopped.  Fixing
+#: that means moving the report to the caller, which is a change to startup control flow
+#: rather than to a collector.
+LOG_THEN_RAISE_ALLOWED = {"general.py"}
+
+
+def _log_then_raise_sites():
+    """Every place a module logs a failure and then raises in the next breath.
+
+    Matched on statement adjacency rather than by regular expression: the pair is a log call
+    followed immediately by a `raise` in the same block, and a comment, a blank line or a
+    reformat between them must not hide it.
+
+    Returns:
+        list: ``(module, line)`` for each site, module first so the result sorts readably
+    """
+    sites = []
+    for path in sorted((REPO_ROOT / "toinflux").glob("*.py")):
+        if path.name in LOG_THEN_RAISE_ALLOWED:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            # A list of statements, not any attribute called "body": a lambda's body is an
+            # expression and an if-expression's is too, and both would be walked into here.
+            blocks = [
+                attr
+                for name in ("body", "orelse", "finalbody")
+                for attr in [getattr(node, name, None)]
+                if isinstance(attr, list) and all(isinstance(item, ast.stmt) for item in attr)
+            ]
+            for block in blocks:
+                for first, second in zip(block, block[1:]):
+                    if not isinstance(second, ast.Raise) or not isinstance(first, ast.Expr):
+                        continue
+                    call = ast.unparse(first.value)
+                    if call.startswith("logging.error(") or call.startswith("logging.critical("):
+                        sites.append((path.name, first.lineno))
+    return sorted(set(sites))
+
+
+def test_no_handler_logs_a_failure_and_then_raises_it():
+    """A failure is reported once, where it is handled rather than where it is detected.
+
+    Every source handler used to do both: an ERROR naming the failure, then a raise carrying
+    the same text.  The caller then reported it again at the level its own situation deserved
+    - the collector worker warns and backs off, a control's input read warns and falls back
+    to its stored value, an MCP tool hands the message to the client - so each of those
+    arrived behind an ERROR that disagreed with it.  During a five-minute Hue outage one
+    control produced four ERRORs a cycle, half of them from the handler.
+
+    Written as a test rather than a note because the pattern was in eight modules at once,
+    and the next handler will be written by copying one of them.
+    """
+    sites = _log_then_raise_sites()
+    assert sites == [], (
+        "these log a failure and then raise it, which reports it twice - raise it and let the "
+        f"caller, which knows how bad it is, do the reporting: {sites}"
+    )

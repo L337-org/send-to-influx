@@ -1040,10 +1040,8 @@ def _get(session, url, kwargs, description):
         # RequestException handler so a parse failure isn't misreported as a
         # transport read failure. raise_for_status()'s HTTPError is a
         # RequestException but not a ValueError, so it still classifies as transport.
-        logging.error("InfluxDB read returned non-JSON (%s): %r", description, exc)
-        raise SourceConnectionError(f"InfluxDB read returned an unparseable response ({description})") from exc
+        raise SourceConnectionError(f"InfluxDB read returned an unparseable response ({description}): {exc!r}") from exc
     except requests.exceptions.RequestException as exc:
-        logging.error("InfluxDB read failed (%s): %r", description, exc)
         raise SourceConnectionError(f"InfluxDB read failed ({description}): {exc!r}") from exc
 
 

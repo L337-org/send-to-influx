@@ -4,7 +4,6 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
-import logging
 import datetime
 from dataclasses import dataclass
 import requests
@@ -477,23 +476,21 @@ class MyEnergi(DataHandler):
         try:
             response = self.session.get(url, auth=auth, timeout=self.settings["myenergi"].get("timeout", 5))
         except requests.exceptions.RequestException as e:
-            logging.error("Error connecting to MyEnergi API - %s", e)
+            # Raised, not logged as well: every caller reports a failed read itself, and at
+            # the level its own situation deserves. See the note in philipshue.py.
             raise SourceConnectionError(str(e)) from e
 
         if response.status_code == 200:
             pass
         elif response.status_code == 401:
-            logging.error("Login unsuccessful. Please check username, password or URL.")
             raise SourceConnectionError("Login unsuccessful. Please check username, password or URL.")
         else:
-            logging.error("Login unsuccessful. Return code: %s", response.status_code)
             raise SourceConnectionError(f"Login unsuccessful. Return code: {response.status_code}")
 
         try:
             return response.json()
         except requests.exceptions.JSONDecodeError as e:
-            logging.error("Error parsing MyEnergi API response - %s", e)
-            raise SourceConnectionError(str(e)) from e
+            raise SourceConnectionError(f"Error parsing the MyEnergi API response - {e}") from e
 
     def _parse_device_data(self, device_key, url_key):
         """Fetch data for a MyEnergi device and filter it to configured fields if set.
@@ -561,7 +558,6 @@ class MyEnergi(DataHandler):
             if str(device.get("sno")) == serial:
                 return device
         if not devices:
-            logging.error("MyEnergi returned no %s devices for this account", device_key)
             raise SourceConnectionError(
                 f"MyEnergi returned no {device_key} devices for this account - check that a "
                 f"{device_key} is provisioned, or remove {device_key} from the configured sources"
@@ -569,12 +565,6 @@ class MyEnergi(DataHandler):
         # Name what the account does have: the difference between a message the operator
         # can act on and one that only says no.
         found = ", ".join(sorted(str(device.get("sno")) for device in devices)) or "(none reported a serial)"
-        logging.critical(
-            "No %s on this MyEnergi account has serial %s; the account reports: %s",
-            device_key,
-            serial,
-            found,
-        )
         raise ConfigError(
             f"no {device_key} on this MyEnergi account has serial {serial!r}; "
             f"the account reports these {device_key} serials: {found}"
