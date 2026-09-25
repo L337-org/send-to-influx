@@ -1,5 +1,6 @@
 """Unit tests for toinflux.philipshue (Hue)."""
 
+import logging
 from unittest.mock import MagicMock, patch
 import pytest
 import requests
@@ -133,6 +134,26 @@ class TestHue:
             with patch.object(hue.session, "get", return_value=mock_response):
                 with pytest.raises(SourceConnectionError, match="unparseable response"):
                     hue.get_data_from_hue_bridge()
+
+    def test_a_failed_read_raises_without_also_logging_it(self, sample_settings, caplog):
+        """The handler reports a failure by raising, and by raising only.
+
+        Every caller logs it themselves, at the level their own situation deserves: the
+        collector worker warns and backs off, a control's input read warns and falls back to
+        the stored value, an MCP tool hands the message to the client.  Logging here as well
+        put an ERROR in front of each of them saying the same words at a severity none of
+        them agreed with, and during a bridge outage one control produced two of them per
+        cycle from this path alone.
+        """
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            hue = Hue(source="hue")
+            failure = requests.exceptions.ConnectTimeout("connection timed out")
+            with patch.object(hue.session, "get", side_effect=failure):
+                with caplog.at_level(logging.DEBUG):
+                    with pytest.raises(SourceConnectionError, match="connection timed out"):
+                        hue.get_data_from_hue_bridge()
+        assert caplog.records == [], [record.getMessage() for record in caplog.records]
 
     def test_hue_device_name_to_name_uses_mapping_when_present(self, sample_settings):
         """hue_device_name_to_name uses sensors mapping when in settings."""
@@ -384,8 +405,14 @@ class TestHueTokenRedaction:
         with patch("toinflux.influx.load_settings", return_value=settings):
             return Hue(source="hue")
 
-    def test_connection_error_redacts_the_token_from_log_and_exception(self, sample_settings, caplog):
-        """A connection failure must not put the token in the log or the error."""
+    def test_connection_error_redacts_the_token_from_the_exception(self, sample_settings, caplog):
+        """A connection failure must not put the token in the error, nor in a log line.
+
+        It used to have to survive redaction twice, here and in a log line this raise sat
+        next to.  The log line is gone, so the strongest thing to say about the log is that
+        nothing reached it at all; the exception is now the only report and carries the
+        whole contract.
+        """
         hue = self._hue(sample_settings)
         # The shape requests actually produces - the URL, and therefore the token,
         # is inside the message (verified against requests, not assumed).
@@ -398,8 +425,7 @@ class TestHueTokenRedaction:
                 with pytest.raises(SourceConnectionError) as excinfo:
                     hue.get_data_from_hue_bridge()
 
-        assert self.TOKEN not in caplog.text
-        assert "<redacted>" in caplog.text
+        assert caplog.records == [], [record.getMessage() for record in caplog.records]
         # Asserted by equality rather than substring: this pins both halves of the
         # contract at once - the token is gone, and every other byte (host, port,
         # underlying cause) survives, so the failure is still diagnosable.

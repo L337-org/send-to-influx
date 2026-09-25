@@ -851,10 +851,15 @@ class Hue(DataHandler):
             # handler below - otherwise a parse failure would be misreported as a
             # transport "connection" error. (Guards both the collector read path
             # and the MCP write tools' device discovery, which share this method.)
-            logging.error("Hue Bridge returned an unparseable response - %s", self._redact(str(e)))
             raise SourceConnectionError(self._redact(f"Hue Bridge returned an unparseable response: {e}")) from e
         except requests.exceptions.RequestException as e:
-            logging.error("Error connecting to Hue Bridge - %s", self._redact(str(e)))
+            # **Raised, not logged as well.** Every caller of this handler reports a failed
+            # read itself, and at the level its own situation deserves: the collector worker
+            # warns and backs off, a control's input read warns and falls back to the stored
+            # value, and an MCP tool hands the message to the client.  Logging here too put
+            # an ERROR in front of each of them, saying the same words at a severity none of
+            # them agreed with - during a five-minute bridge outage, one control produced two
+            # ERRORs a cycle from this line alone.  Everything this said is in the exception.
             raise SourceConnectionError(self._redact(str(e))) from e
         # A successful GET returns a dict (sensors/lights); a list only ever comes
         # back on error. Guard the indexing: an empty list, or a list whose first
@@ -870,14 +875,12 @@ class Hue(DataHandler):
                 description = error.get("description", str(error))
             else:
                 description = f"unexpected list response: {hue_data!r:.200}"
-            logging.error("Error connecting to Hue Bridge - %s", description)
             raise SourceConnectionError(description)
         # A successful GET is a dict (sensors/lights). A non-dict, non-list body - a
         # JSON scalar/null, e.g. from a misconfigured proxy - is unexpected; fail
         # cleanly here rather than returning it for a caller (parse_hue_data /
         # _fetch_lights) to crash on with a TypeError/AttributeError.
         if not isinstance(hue_data, dict):
-            logging.error("Hue Bridge returned an unexpected response type - %.200r", hue_data)
             raise SourceConnectionError(f"Hue Bridge returned an unexpected response type: {hue_data!r:.200}")
         return hue_data
 
@@ -1336,17 +1339,16 @@ class Hue(DataHandler):
             # the RequestException handler so a parse failure isn't misreported as
             # a transport error. (raise_for_status()'s HTTPError is a
             # RequestException but not a ValueError, so it still falls through.)
-            logging.error("Hue Bridge returned an unparseable response to a write - %s", self._redact(str(e)))
-            raise SourceConnectionError(self._redact(f"Hue Bridge returned an unparseable response: {e}")) from e
+            raise SourceConnectionError(
+                self._redact(f"Hue Bridge returned an unparseable response to a write: {e}")
+            ) from e
         except requests.exceptions.RequestException as e:
-            logging.error("Error writing to Hue Bridge - %s", self._redact(str(e)))
             raise SourceConnectionError(self._redact(str(e))) from e
         # The CLIP API always answers a state PUT with a JSON *list* of per-key
         # success/error items. A non-list body is unexpected and must fail cleanly
         # rather than being read as success (an empty error list) by the scan below.
         if not isinstance(result, list):
-            logging.error("Hue Bridge returned an unexpected response shape to a write - %.200r", result)
-            raise SourceConnectionError(f"Hue Bridge returned an unexpected response: {result!r:.200}")
+            raise SourceConnectionError(f"Hue Bridge returned an unexpected response to a write: {result!r:.200}")
         # Guard item["error"] being a non-dict (a malformed bridge/proxy response):
         # fall back to its string form rather than crashing on .get(), mirroring the
         # read path's defensive handling in get_data_from_hue_bridge().
@@ -1360,9 +1362,10 @@ class Hue(DataHandler):
             if isinstance(item, dict) and "error" in item
         ]
         if errors:
-            # The bridge wrote these strings, so they go through the renderer for the
-            # same reason the raise below does: one containing a newline would otherwise
-            # write its own line into the journal.
-            logging.error("Hue Bridge rejected a write to light %s - %s", light_id, render_values(errors, "; "))
-            raise SourceConnectionError(f"Hue Bridge rejected the write: {render_values(errors, '; ')}")
+            # The bridge wrote these strings, so they go through the renderer: one
+            # containing a newline would otherwise write its own line wherever the caller
+            # logs this, which is the trick the renderer exists to refuse.
+            raise SourceConnectionError(
+                f"Hue Bridge rejected the write to light {light_id!r}: {render_values(errors, '; ')}"
+            )
         return result
