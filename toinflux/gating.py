@@ -30,7 +30,12 @@ import logging
 import math
 from dataclasses import dataclass
 
-from toinflux.controls import BUILT_IN_SAFE_STATES, SAFE_STATE_LEAVE_UNCHANGED, SAFE_STATE_UNENERGISED
+from toinflux.controls import (
+    BUILT_IN_SAFE_STATES,
+    SAFE_STATE_ENERGISED,
+    SAFE_STATE_LEAVE_UNCHANGED,
+    SAFE_STATE_UNENERGISED,
+)
 from toinflux.exceptions import ConfigError
 from toinflux.general import render_values
 from toinflux.controls import rule_names
@@ -39,6 +44,7 @@ from toinflux.schedule import is_inside, parse_active_period, require_aware
 
 #: What a falling edge or a failure does to the devices, when the answer is not "nothing".
 UNENERGISED = SAFE_STATE_UNENERGISED
+ENERGISED = SAFE_STATE_ENERGISED
 LEAVE_UNCHANGED = SAFE_STATE_LEAVE_UNCHANGED
 
 
@@ -234,10 +240,14 @@ def _holds(rule, bindings):
 def commands_for(state, devices):
     """Return what to command each device to reach a safe or end state.
 
-    ``unenergised`` names every device explicitly rather than meaning "stage 0". A control
-    whose lowest stage was mis-declared - or which has no zero stage at all - would
-    otherwise energise something while trying to make itself safe, and the failure would be
-    invisible until the day it mattered.
+    ``unenergised`` and ``energised`` name every device explicitly rather than meaning
+    "stage 0" or "the top stage". A control whose lowest stage was mis-declared - or which
+    has no zero stage at all - would otherwise energise something while trying to make
+    itself safe, and the failure would be invisible until the day it mattered.
+
+    ``energised`` exists because the device is not necessarily a heater: for a pump whose
+    stopping lets a boiler overheat, or a valve held open by power, off is the dangerous
+    state. It stays opt-in, and ``unenergised`` stays the default.
 
     ``leave_unchanged`` returns None rather than an empty mapping. Those are different
     instructions, and a caller that treated an empty mapping as "nothing to do" would be
@@ -256,11 +266,11 @@ def commands_for(state, devices):
     """
     if state == LEAVE_UNCHANGED:
         return None
-    if state != UNENERGISED:
+    if state not in (UNENERGISED, ENERGISED):
         raise ConfigError(
             f"{state!r} is not a safe state this knows: expected one of {render_values(BUILT_IN_SAFE_STATES)}"
         )
-    return {name: False for name in devices}
+    return {name: state == ENERGISED for name in devices}
 
 
 class DeviceGuard:

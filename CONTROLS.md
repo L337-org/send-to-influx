@@ -72,7 +72,7 @@ The document
 | `output` | yes | cycle_seconds, min_transition_seconds, an optional max_level rule, and the stage ladder |
 | `parameters` | no | constants the rules may read, such as a target temperature, adjustable at runtime |
 | `pid` | yes | the loop itself: input and setpoint rules, and the kp, ki and kd gains |
-| `safe_state` | no | what the devices do at startup, on failure and at shutdown |
+| `safe_state` | no | unenergised, energised or leave_unchanged: what the devices do at startup, on failure and at shutdown |
 | `timezone` | no | an IANA zone name for the active period; absent means this machine's local time |
 
 A key the store does not permit is refused rather than ignored, in the nested sections as
@@ -149,17 +149,29 @@ are separate because they answer different questions:
 | `active_period.end_state` | when the control's daily window closes |
 | `enable_when` | a rule gating actuation while everything else is running |
 
-The safe states are `unenergised` and `leave_unchanged`.
+The safe states are `unenergised`, `energised` and `leave_unchanged`.
 
 `unenergised` is the default and switches every device the control owns off **by name**,
 rather than meaning "the lowest stage" - so it does not depend on a zero stage having been
 declared correctly.
+
+`energised` is its mirror and switches them all on, named the same way. It is there because
+the device is not necessarily a heater: for a circulation pump whose stopping lets a boiler
+overheat, a valve held open by power, frost protection, or an extractor that must not stop,
+off is the dangerous state and on is the safe one. **The consequence to weigh is that the
+device then keeps drawing power with nothing supervising it** - the control is not running,
+which is why its safe state applied - so it holds until somebody or something else
+intervenes. That is the right trade for a pump and the wrong one for a heater, which is why
+`unenergised` remains the default and this is opt-in.
 
 `leave_unchanged` is the opt-out and means exactly that: the devices keep whatever state they
 were in. **It also removes the startup assertion**, which is what would otherwise clear the
 mess a crash left, so after a SIGKILL or a power cut the device stays where it was and
 nothing will correct it. The right trade for a light you do not want going out because a
 server rebooted, and the wrong one for a heater.
+
+All three apply to `active_period.end_state` as well, so a control can hold a room at
+temperature overnight and leave its pump running when the window closes.
 
 An active period is a wall-clock window in the control's own timezone, and it follows
 daylight saving the way a wall clock does: a window inside the hour the clocks skip does not

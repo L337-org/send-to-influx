@@ -47,20 +47,34 @@ CONTROL_SUFFIX = ".yaml"
 # Lowercase because the store must behave the same on a case-insensitive filesystem.
 CONTROL_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,62}$"
 
-# The two settings a control may leave its devices in when it stops actuating.
-# `unenergised` commands every device in the control's own device list off directly,
-# rather than meaning "the lowest stage" - that way it does not depend on the operator
-# having declared a zero stage correctly. `leave_unchanged` is the absence of a safe
-# state rather than a safe state, and is opt-in precisely so it is never reached by
-# omission.
 # What an active period's boundary looks like. Shared with toinflux.schedule, which parses
 # the same strings: strptime("%H:%M") accepts "9:00" and "9:0", so a parser left to itself
 # would be laxer than the validator and a document could pass one and not the other.
 CLOCK_TIME_PATTERN = r"([01]\d|2[0-3]):[0-5]\d"
 
+# What a control may leave its devices in when it stops actuating - at startup, on failure,
+# on the way out, and at the end of an active period.
+#
+# `unenergised` and `energised` both name every device in the control's own device list
+# directly, rather than meaning "the lowest stage" or "the highest" - that way neither
+# depends on the operator having declared their ladder correctly, and a mis-declared stage
+# cannot make a control energise something while trying to make itself safe.
+#
+# **`energised` is here because the device is not necessarily a heater.** A circulation pump
+# whose stopping lets a boiler overheat, a valve held open by power, frost protection, an
+# extractor that must not stop: for those, off is the dangerous state and the safe one is on.
+# Refusing the option would not have made any of them safer, only unexpressible. It stays
+# opt-in and `unenergised` stays the default, because a device failing to energised keeps
+# drawing power with nothing supervising it and that has to be chosen knowingly.
+#
+# `leave_unchanged` is the absence of a safe state rather than a safe state, and is opt-in
+# for the same reason: it must never be reached by omission.
 SAFE_STATE_UNENERGISED = "unenergised"
+SAFE_STATE_ENERGISED = "energised"
 SAFE_STATE_LEAVE_UNCHANGED = "leave_unchanged"
-BUILT_IN_SAFE_STATES = (SAFE_STATE_UNENERGISED, SAFE_STATE_LEAVE_UNCHANGED)
+#: Deterministic ones first, then the opt-out. The order is what every message and the
+#: schema tool render, so it is the order an operator reads them in.
+BUILT_IN_SAFE_STATES = (SAFE_STATE_UNENERGISED, SAFE_STATE_ENERGISED, SAFE_STATE_LEAVE_UNCHANGED)
 
 # Keys a control document may carry at the top level. Checked as a closed set: a
 # mistyped key that was merely ignored would leave the operator looking at a setting

@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from tests.harness.installation import conservatory
+from toinflux.controls import validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import DeviceGuard, Gate, commands_for
 from toinflux.rules import RuleEvaluationError
@@ -548,3 +549,58 @@ class TestTheNaiveMomentContractHoldsOnEveryPath:
         aware = datetime.datetime(2026, 1, 1, 12, 0, tzinfo=datetime.timezone.utc)
         for overrides in ({"enabled": False}, {}, {"active_period": {"from": "09:00", "to": "17:00"}}):
             assert self._gate(**overrides).decide({}, aware) is not None
+
+
+class TestTheEnergisedSafeState:
+    """The device is not necessarily a heater.
+
+    `unenergised` and `leave_unchanged` were the whole set, which assumed that off is always
+    the harmless direction. For a circulation pump whose stopping lets a boiler overheat, a
+    valve held open by power, or an extractor that must not stop, off is the dangerous state.
+    Refusing the option did not make any of those safer, only unexpressible - and
+    `leave_unchanged` was already permitted, which leaves a device wherever it happened to be
+    and may well be on, so an explicit `energised` is the more predictable of the two.
+    """
+
+    def test_it_commands_every_device_on_by_name(self):
+        assert commands_for("energised", ("pump", "valve")) == {"pump": True, "valve": True}
+
+    def test_by_name_rather_than_by_the_top_stage(self):
+        """Same reason `unenergised` does not mean "stage 0": a mis-declared ladder must not
+        be able to leave a device in the wrong state while the control makes itself safe."""
+        assert commands_for("energised", ()) == {}
+
+    def test_unenergised_is_unchanged(self):
+        assert commands_for("unenergised", ("pump", "valve")) == {"pump": False, "valve": False}
+
+    def test_leave_unchanged_is_still_none_rather_than_empty(self):
+        assert commands_for("leave_unchanged", ("pump",)) is None
+
+    def test_a_document_may_declare_it(self):
+        document = conservatory()
+        document["safe_state"] = "energised"
+        assert validate_control("conservatory", document) == []
+
+    def test_and_may_use_it_as_an_end_state(self):
+        """A control can hold a room overnight and leave its pump running at the boundary."""
+        document = conservatory()
+        document["active_period"] = {"from": "23:35", "to": "05:25", "end_state": "energised"}
+        assert validate_control("conservatory", document) == []
+
+    def test_the_gate_reports_it_on_a_closing_edge(self):
+        document = conservatory()
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["safe_state"] = "energised"
+        assert Gate(document).closing_state() == "energised"
+
+    def test_something_that_is_not_a_safe_state_is_still_refused(self):
+        with pytest.raises(ConfigError, match="not a safe state"):
+            commands_for("on", ("pump",))
+
+    def test_the_default_is_still_off(self):
+        """Opt-in, because a device failing to energised keeps drawing power with nothing
+        supervising it."""
+        document = conservatory()
+        document.pop("safe_state", None)
+        assert Gate(document).safe_state == "unenergised"
