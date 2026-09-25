@@ -298,6 +298,20 @@ class TestStructuralValidation:
         errors = validate_control("conservatory", document)
         assert any("color_temp_k" in error for error in errors), errors
 
+    def test_a_percentage_past_its_own_top_is_refused(self):
+        """The bound a name settles: `brightness_pct` runs 0 to 100 wherever it is
+        implemented, so 150 is a typo that can be caught while the caller can still fix it."""
+        document = self._driven_by("brightness_pct", 100) | {"safe_state": 150}
+        errors = validate_control("conservatory", document)
+        assert any("tops out" in error and "lamp" in error for error in errors), errors
+
+    def test_a_colour_temperature_is_left_to_the_bulb(self):
+        """The other half of the split, and the reason it is not just a number check: a
+        colour temperature's range is a property of the bulb, so validation cannot know it and
+        the far end clamps instead."""
+        document = self._driven_by("color_temp_k", 6500) | {"safe_state": 2700}
+        assert validate_control("conservatory", document) == []
+
     def test_a_value_that_is_wrong_twice_over_is_only_reported_once(self):
         """The runtime is asked only about states already known to be usable, or a negative
         number would be named once as out of range and again as something no device can be

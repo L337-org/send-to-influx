@@ -1111,6 +1111,35 @@ class TestAStateLeftOverFromAnOlderDocument:
         save_control("lamp", document, installation.settings_file)
         return document
 
+    def test_a_value_past_its_parameter_s_scale_is_clamped_and_said(self, state_directory, bridge, influx, caplog):
+        """Validation refuses a percentage past 100 while the caller is still listening. This
+        is the path where one arrives anyway, and at that moment the choice is a light at its
+        brightest or a control that stops for good.
+
+        WARNING, because the device did something and it was not quite what was asked.
+        """
+        from tests.harness.bridge import bulb
+
+        bridge.lights["9"] = bulb("office-lamp")
+        document = self._store_driven(state_directory, "brightness_pct", 100)
+        with caplog.at_level(logging.WARNING):
+            command_devices("lamp", document, {"lamp": 150}, state_directory.settings_file)
+        commanded = bridge.commanded("office-lamp")
+        assert commanded, "nothing was commanded"
+        # 254 is the bridge's own full scale, which is what 100 percent maps onto.
+        assert commanded[-1].state["bri"] == 254, commanded[-1].state
+        assert "tops out" in caplog.text and "150" in caplog.text, caplog.text
+
+    def test_a_value_within_the_scale_is_left_alone(self, state_directory, bridge, influx, caplog):
+        """The other side, or the clamp could be rewriting every command it sees."""
+        from tests.harness.bridge import bulb
+
+        bridge.lights["9"] = bulb("office-lamp")
+        document = self._store_driven(state_directory, "brightness_pct", 100)
+        with caplog.at_level(logging.WARNING):
+            command_devices("lamp", document, {"lamp": 40}, state_directory.settings_file)
+        assert "tops out" not in caplog.text, caplog.text
+
     def test_a_number_from_a_different_parameter_is_not_pinned_either(self, state_directory, bridge, influx):
         """The same fault with a number instead of a boolean, and the worse of the two.
 

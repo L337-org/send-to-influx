@@ -1251,7 +1251,20 @@ class Hue(DataHandler):
         if not isinstance(color_temp_k, (int, float)) or isinstance(color_temp_k, bool) or color_temp_k <= 0:
             raise ToolParamError(f"color_temp_k must be a positive number in kelvin (got {color_temp_k!r})")
         lo, hi = caps["ct_range"]
-        return {"ct": max(lo, min(self._kelvin_to_mirek(color_temp_k), hi))}
+        mirek = self._kelvin_to_mirek(color_temp_k)
+        clamped = max(lo, min(mirek, hi))
+        if clamped != mirek:
+            # Said rather than done quietly. This has always clamped, which is the right
+            # answer for a bound only the bulb knows - but a caller asking for 1000 K and
+            # getting 2200 with nothing said has no way to learn that the light cannot go
+            # that warm, and a control document carrying the value would be wrong for ever.
+            logging.warning(
+                "Device %r cannot reach %g K, so it was set to %g K instead",
+                name,
+                color_temp_k,
+                self._mirek_to_kelvin(clamped),
+            )
+        return {"ct": clamped}
 
     def _color_state(self, name, caps, color):
         """Validate a colour request and return ``{"xy": [...]}``.

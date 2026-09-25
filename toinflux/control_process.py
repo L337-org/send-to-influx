@@ -31,7 +31,7 @@ import requests
 from toinflux.controller import Controller
 from toinflux.controls import DEFAULT_CYCLE_SECONDS, load_control, parameter_devices, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
-from toinflux.gating import DeviceGuard, Gate, commands_for
+from toinflux.gating import DeviceGuard, Gate, commands_for, static_full_scale
 from toinflux.general import RepeatingProblem, load_settings, render_values, source_class
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
@@ -168,6 +168,7 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
         # they wrote, not the device name the far end knows it by.
         # The parameter travels with the target: the commanding runs in its own function so a
         # partial failure can still be recorded, and that function has no view of the document.
+        state = _within_scale(name, device_key, spec.get("parameter"), state)
         targets.setdefault((spec["source"], spec.get("instance")), []).append(
             (device_key, spec["device"], state, spec.get("parameter"))
         )
@@ -189,6 +190,46 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
                 forced=forced,
                 parameters={key: (declared.get(key) or {}).get("parameter") for key in commanded},
             )
+
+
+def _within_scale(control, device, parameter, state):
+    """Return a value the device can take, clamping it to a bound a name settles.
+
+    **Coping rather than refusing, because there is nobody to tell.** Validation catches a
+    percentage past 100 while the caller is still listening; this is the path where one
+    arrives anyway - out of a transition log written under a different document, or through
+    a route added later - and at that moment the alternatives are a light at its brightest or
+    a control that stops for good. `mcp_set_device_state` rightly refuses the same value when
+    a *model* asks for it, because there the caller can pick another.
+
+    Said at WARNING, which is what the level is for: the device did something, and it was not
+    quite what the document asked. The colour-temperature path has always clamped to the
+    bulb's own range; it says so now too.
+
+    Args:
+        control (str): the control's name, for the message
+        device (str): the control's key for the device, because that is what gets edited
+        parameter (str or None): what the device is driven by, or None if switched
+        state (object): the value about to be commanded
+
+    Returns:
+        object: the value to command, clamped where it was out of range
+    """
+    full = static_full_scale(parameter)
+    if full is None or isinstance(state, bool) or not isinstance(state, (int, float)):
+        return state
+    clamped = max(0, min(state, full))
+    if clamped != state:
+        logging.warning(
+            "Control %r asked for %r on device %r, which %r tops out at %g, so it was set to %g instead",
+            control,
+            state,
+            device,
+            parameter,
+            full,
+            clamped,
+        )
+    return clamped
 
 
 def _command_each(targets, commanded, settings_file) -> None:

@@ -1445,7 +1445,7 @@ def _check_state_reaches_the_devices(where, value, document, errors) -> None:
         errors (list): appended to with any problems found
     """
     # Imported here because gating imports this module, and at module level that is circular.
-    from toinflux.gating import commands_for
+    from toinflux.gating import commands_for, static_full_scale
 
     devices = document.get("devices")
     if not isinstance(devices, dict) or not devices:
@@ -1455,6 +1455,24 @@ def _check_state_reaches_the_devices(where, value, document, errors) -> None:
         commands_for(value, devices)
     except ConfigError as exc:
         errors.append(f"{where}: {exc}")
+        return
+    if not _is_number(value):
+        return
+    # **Only the bound a name settles.** A percentage runs 0 to 100 wherever it is
+    # implemented, so 150 is a typo that can be refused here, while the caller is still
+    # listening and can fix it. A colour temperature's range belongs to the bulb and is left
+    # to the far end, which clamps it - there is nobody to tell at the moment a safe state is
+    # asserted, and a control that will not start is a worse answer than a light at its
+    # brightest.
+    for device, entry in devices.items():
+        if not isinstance(entry, dict):
+            continue
+        full = static_full_scale(entry.get("parameter"))
+        if full is not None and value > full:
+            errors.append(
+                f"{where}: {value!r} is past the {full:g} that {entry['parameter']!r} tops out at, "
+                f"for device {device!r}"
+            )
 
 
 def _check_safe_state(where, value, errors) -> None:

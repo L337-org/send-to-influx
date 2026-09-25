@@ -238,6 +238,27 @@ class Gate:
         return self.period.end_state if self.period is not None else self.safe_state
 
 
+def static_full_scale(parameter):
+    """Return what "all of it" is for a parameter, where that is knowable without asking.
+
+    A percentage is bounded by its own name: `brightness_pct` runs 0 to 100 wherever it is
+    implemented, and nothing has to be reachable to know it. A colour temperature is not -
+    its range is a property of the bulb - so this answers None and the bound stays where it
+    belongs, at the far end.
+
+    The same split the device checks already make: whether a source drives brightness at all
+    is a fact about the code, while whether a particular lamp is dimmable is a question for
+    the bridge.
+
+    Args:
+        parameter (str or None): the parameter a device is driven by, or None if switched
+
+    Returns:
+        float or None: the top of the range, or None where only the device knows
+    """
+    return 100 if isinstance(parameter, str) and parameter.endswith("_pct") else None
+
+
 def _full(device, parameter):
     """Return what ``energised`` means for a device driven by ``parameter``.
 
@@ -256,8 +277,9 @@ def _full(device, parameter):
     Raises:
         ConfigError: where the parameter has no full scale
     """
-    if parameter.endswith("_pct"):
-        return 100
+    full = static_full_scale(parameter)
+    if full is not None:
+        return full
     raise ConfigError(
         f"{ENERGISED!r} has no meaning for device {device!r}, which is driven by {parameter!r} "
         f"rather than a percentage - give the value to set instead"
