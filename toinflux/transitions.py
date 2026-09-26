@@ -131,21 +131,20 @@ def _usable_identity(value):
     return tuple(pairs)
 
 
-def _holds_an_entry(section):
-    """Say whether a mapping is one device's own record rather than a section of them.
+def _holds_device_records(section):
+    """Say whether a mapping holds device records rather than being one itself.
 
     Args:
-        section (dict): the value stored under one of the two reserved keys
+        section (object): the value stored under one of the two reserved keys
 
     Returns:
-        bool: True where it looks like a single device's record
+        bool: True where at least one value is a record
     """
-    # A record carries a moment and a state; a section carries device names, and its values
-    # are records. Asked of the two keys a record has rather than of the values the mapping
-    # holds, so no single malformed entry can decide it either way. Both halves are needed: a
-    # record whose `at` was truncated away still has a `state` that is not a mapping, and a
-    # section containing a device called `state` still has a mapping there.
-    return usable_number(section.get("at")) or not isinstance(section.get("state", {}), dict)
+    # `any`, not `all` and not a named key. A section's values are records, a record's values
+    # are a state and a moment - so one well-formed entry anywhere in it settles what the
+    # mapping is, and no individual entry can unsettle it. Every earlier version of this asked
+    # a question that one corrupt entry could answer on its own, which is the whole defect.
+    return isinstance(section, dict) and any(isinstance(entry, dict) for entry in section.values())
 
 
 def _usable_entries(devices):
@@ -314,29 +313,28 @@ class TransitionLog:
         # `devices` entry has a usable `at`, while in the new format an `at` under `devices`
         # could only be a device of that name, and would hold a mapping rather than a number.
         #
-        # **Two questions, so no single entry decides it.** This once required *all* the
-        # section's values to be mappings, which let one malformed device entry reclassify the
-        # whole file as a flat log and lose its good siblings. Asking instead whether that one
-        # key held a moment just moved the same fault: a flat log whose `devices` entry had
-        # lost its `at` was then read as the new shape, and *its* siblings went instead.
+        # **The newer shape is the default; flatness has to be proved.** Three attempts here
+        # all failed the same way, by asking a question one corrupt entry could answer: first
+        # whether *every* value under `devices` was a mapping, then whether that key held a
+        # moment, then whether it held a non-mapping `state`. The last two read a device's own
+        # record whenever a device happened to be called `at` or `state`, so corrupting that
+        # one device threw away every other device in the file and the loop's memory with it.
         #
-        # So the writer's own shape answers it first. It emits these two keys and nothing else,
-        # so any third key at the top level is a device, which makes the file flat - and that is
-        # the case where siblings exist to be lost. Only a file holding exactly the two names
-        # is still ambiguous, and there the `devices` value settles it: a section of records or
-        # one record itself. Neither test reads more than the file's outermost shape.
+        # Only the writer produces these files, and it emits exactly `devices` and `pid`, so a
+        # third key at the top level is a device name and proves the file flat. That leaves one
+        # ambiguous shape: a flat log whose only two devices are called `devices` and `pid`.
+        # Two independent signals have to agree before it is read that way - the value under
+        # `pid` carrying a `state`, which loop state never has, and the value under `devices`
+        # containing no record at all. A single malformed entry moves neither, because the
+        # second is an `any` over the whole mapping rather than a question about one key.
         #
         # Checked rather than versioned, because the files that need reading are the ones
         # already on disk, written before any version number existed.
         section = stored.get("devices")
         loop = stored.get("pid")
+        flat_pair = isinstance(loop, dict) and "state" in loop and not _holds_device_records(section)
         looks_new = (
-            "devices" in stored
-            and "pid" in stored
-            and not (stored.keys() - {"devices", "pid"})
-            and isinstance(section, dict)
-            and isinstance(loop, dict)
-            and not _holds_an_entry(section)
+            "devices" in stored and "pid" in stored and not (stored.keys() - {"devices", "pid"}) and not flat_pair
         )
         if not looks_new:
             return {"devices": stored, "pid": {}}

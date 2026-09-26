@@ -835,10 +835,10 @@ class TestReadingTheFile:
     def test_a_flat_log_of_only_the_two_reserved_names_survives_a_malformed_entry(self, state_directory):
         """The same flat log with no third device to prove it flat, so the shape has to answer.
 
-        Here there are no siblings to lose, but the two entries are themselves the devices and
-        must still come back.  A record that has lost its `at` still has a `state` that is not a
-        mapping, which a section of records never has - so the entry is recognisable without
-        depending on the half of it that went missing.
+        The two entries are themselves the devices and must still come back - an earlier version
+        of this docstring said there were no siblings to lose, which was wrong, because each of
+        the two is the other's sibling.  What settles it is that the value under `pid` carries a
+        `state`, which loop state never does, while the value under `devices` holds no record.
         """
         path = transition_path("conservatory", state_directory.settings_file)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -864,6 +864,62 @@ class TestReadingTheFile:
             json.dump(stored, handle)
         return TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 2000.0)
 
+    def test_a_corrupt_device_named_state_does_not_reclassify_the_file(self, state_directory):
+        """Telling a record from a section by its `state` read a device's record by accident.
+
+        Nothing reserves the name `state` for a device, so a current-format file may hold one -
+        and when that single entry was corrupt, the test for "a `state` that is not a mapping"
+        answered yes about the section itself.  The file was then read as a flat log: every
+        other device lost its moment and could move immediately, and the loop's integral was
+        replaced by a fresh zero on the next write.  One corrupt entry, every entry destroyed.
+        """
+        log = self._stored(
+            state_directory,
+            {
+                "devices": {"state": None, "heater": {"state": True, "at": 1000.0}},
+                "pid": {"integral": 3.5, "at": 1000.0, "fingerprint": "abc"},
+            },
+        )
+        assert log.states().get("heater") is True, "a real device was lost to a corrupt namesake"
+        assert log.elapsed("heater", 2000.0) == 1000.0, "the surviving device lost its moment"
+        assert log.loop.get("integral") == 3.5, "the loop's memory went with it"
+
+    def test_a_corrupt_device_named_at_does_not_reclassify_the_file(self, state_directory):
+        """The other half of the same mistake, reached through the other reserved word.
+
+        A device called `at` whose record was replaced by a number made `usable_number` answer
+        yes about the section, with the same total loss.  Both halves read one device's record
+        whenever a device happened to carry one of those two names.
+        """
+        log = self._stored(
+            state_directory,
+            {
+                "devices": {"at": 123, "heater": {"state": True, "at": 1000.0}},
+                "pid": {"integral": 3.5, "at": 1000.0, "fingerprint": "abc"},
+            },
+        )
+        assert log.states().get("heater") is True, "a real device was lost to a corrupt namesake"
+        assert log.loop.get("integral") == 3.5, "the loop's memory went with it"
+
+    def test_a_corrupt_section_does_not_take_the_other_one_with_it(self, state_directory):
+        """Requiring both halves to be mappings let either one destroy the other.
+
+        The two halves are independent: a `pid` that cannot be read says nothing about the
+        devices, and vice versa.  Insisting on both before reading the file as the current shape
+        meant one unreadable half sent the whole file down the flat path, where the good half
+        came back as a pseudo-device instead of as itself.  Each is now salvaged on its own.
+        """
+        devices_kept = self._stored(
+            state_directory, {"devices": {"heater": {"state": True, "at": 1000.0}}, "pid": None}
+        )
+        assert devices_kept.states().get("heater") is True, "an unreadable loop lost the devices"
+
+        loop_kept = self._stored(
+            state_directory, {"devices": None, "pid": {"integral": 3.5, "at": 1000.0, "fingerprint": "abc"}}
+        )
+        assert loop_kept.loop.get("integral") == 3.5, "an unreadable device section lost the loop"
+        assert "pid" not in loop_kept.states(), "the loop's memory came back as a device"
+
     def test_a_device_read_from_a_flat_log_still_keeps_its_minimum(self, state_directory):
         """Upgrading in place stopped honouring any minimum at all, which is the one thing the
         flat reader exists to prevent.
@@ -879,6 +935,25 @@ class TestReadingTheFile:
         identities = {"heater": device_identity({"source": "hue", "device": "Heater"})}
         held = log.frozen(lambda _d: 900.0, ["heater"], now=1010.0, identities=identities)
         assert held == frozenset({"heater"}), "an upgraded file lost every device's minimum"
+
+    def test_one_corrupt_entry_cannot_reclassify_a_file_whose_loop_is_corrupt_too(self, state_directory):
+        """The invariant itself: no single entry may decide what the whole file is.
+
+        Asking whether *every* value under `devices` is a record gives the wrong answer as soon
+        as one of them is not, and the only thing hiding that is the second signal disagreeing.
+        Corrupt the loop section as well - give it a `state`, so it reads as a device record -
+        and the two signals agree on the wrong answer: the file is taken for a flat log and the
+        one good device in it is thrown away.  Asked as `any`, a single well-formed entry is
+        enough to settle what the mapping is, and no entry can unsettle it.
+        """
+        log = self._stored(
+            state_directory,
+            {
+                "devices": {"lamp": "corrupt", "heater": {"state": True, "at": 1000.0}},
+                "pid": {"state": 1, "integral": 3.5},
+            },
+        )
+        assert log.states().get("heater") is True, "one corrupt entry decided the fate of them all"
 
     def test_a_parameter_change_is_a_move_even_at_the_same_number(self, state_directory):
         """The no-move test compared only the value, so a device moved between parameters at
