@@ -1275,6 +1275,34 @@ class TestWhatTheControllerKeepsAndPutsBack:
         document["output"]["a_knob_invented_after_this_test"] = 7
         assert Controller(document).fingerprint != before, "an unknown setting was silently ignored"
 
+    @pytest.mark.parametrize("named", ["max_age", "min_transition_seconds"])
+    def test_a_name_that_matches_an_excluded_setting_is_still_counted(self, named, state_directory):
+        """The exclusions are positions in the format, not words.
+
+        Stripping every key so called, wherever it appeared, also stripped a device or a
+        parameter the operator had *named* `max_age` - removing that binding or that value
+        from the digest entirely, which is the opposite of what the exclusion is for. A
+        control's own names share a namespace with nothing.
+        """
+        from toinflux.controller import Controller
+
+        def built(value):
+            return Controller(
+                {
+                    "parameters": {named: value, "target": 20.0},
+                    "inputs": {"inside": {"source": "hue", "field": "t"}},
+                    "pid": {"input": "inside", "setpoint": "target", "kp": 10.0, "ki": 1.0, "kd": 0.0},
+                    "output": {
+                        "cycle_seconds": 60,
+                        "min_transition_seconds": 1,
+                        "stages": [{"level": 0, "set": {"a": False}}, {"level": 100, "set": {"a": True}}],
+                    },
+                    "devices": {"a": {"source": "hue", "device": "A"}},
+                }
+            ).fingerprint
+
+        assert built(1) != built(2), f"a parameter named {named!r} was dropped from the digest"
+
     def test_and_not_the_things_it_does_not(self, state_directory):
         """Discarding a hard-won integral because a gate rule changed would throw away the
         settling time this exists to save."""

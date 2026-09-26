@@ -805,6 +805,24 @@ def device_identity(spec):
     return tuple(sorted((key, str(value)) for key, value in spec.items() if key not in _DEVICE_IRRELEVANT))
 
 
+def holdable_value(state):
+    """Whether a recorded state is one a driven device could be pinned to.
+
+    A driven device holds a number, so a boolean or a non-finite value is a record of
+    something that never happened - a leftover from when the device was switched, or a file
+    somebody edited. Shared rather than restated: `_hold` decides whether to pin and
+    `get_control_state` reports what is held, and when those two asked the question
+    separately they gave different answers.
+
+    Args:
+        state (object): the value as it was recorded
+
+    Returns:
+        bool: True where it can be commanded again
+    """
+    return isinstance(state, (int, float)) and not isinstance(state, bool) and math.isfinite(state)
+
+
 def parameter_devices(devices):
     """Return the devices driven by a continuous parameter rather than switched.
 

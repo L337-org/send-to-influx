@@ -9,6 +9,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import json
 import logging
 import os
 
@@ -19,6 +20,7 @@ from mcp.server.mcpserver import MCPServer
 
 from tests.harness.installation import conservatory, record_command
 from toinflux.controls import load_control
+from toinflux.transitions import TransitionLog, transition_path
 from toinflux.exceptions import ConfigError
 from toinflux.exceptions import ToolParamError
 from toinflux.mcp_controls import (
@@ -1194,6 +1196,39 @@ class TestReportingWhatAControlHasWorkedOut:
         result = _control_state_result("broken", state_directory.settings_file)
         assert result["control"] == "broken"
         assert result["held_by_minimum"] == []
+
+    def test_a_state_a_driven_device_cannot_take_is_not_reported_as_held(self, state_directory, bridge):
+        """`_hold` requires an identity *and* a value it could pin. Checking only the identity
+        advertised a restraint the next cycle would not honour - the same two-places-one-
+        question fault the identity itself had, half fixed."""
+        name = self._ran(state_directory, minimum=3600)
+        log = TransitionLog(name, state_directory.settings_file)
+        document = load_control(name, state_directory.settings_file)
+        # A boolean, as the device would have left behind when it was switched rather than
+        # driven. The identity matches; the value is not one a dimmer can be set to.
+        record_command(log, document, {"lamp": True})
+        result = _control_state_result(name, state_directory.settings_file)
+        assert result["held_by_minimum"] == [], "a value the loop will not pin was reported as held"
+
+    @pytest.mark.parametrize("at", [float("nan"), float("inf"), True], ids=["nan", "inf", "bool"])
+    def test_a_loop_moment_that_is_not_one_is_not_given_an_age(self, at, state_directory, bridge):
+        """Quieter than a crash, and worse. Fed raw to `_age`, a nan or an infinity comes back
+        as **0.0** - so the tool tells a reader the loop state was recorded just now, when in
+        fact it cannot be measured at all. A bool reports the epoch's second as an age.
+
+        A list or a string was already refused, so the reported mechanism was not the one that
+        bites; these three are.
+        """
+        name = self._ran(state_directory, minimum=3600)
+        path = transition_path(name, state_directory.settings_file)
+        with open(path, encoding="utf-8") as handle:
+            stored = json.load(handle)
+        stored["pid"] = {"integral": 5.0, "fingerprint": "zzz", "at": at}
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(stored, handle)
+        result = _control_state_result(name, state_directory.settings_file)
+        assert result["loop"] is not None, "the loop half was dropped entirely"
+        assert result["loop"]["age_seconds"] is None, "an unusable moment was given an age"
 
     def test_a_control_that_has_never_run_reports_no_loop(self, state_directory):
         state_directory.write_control(conservatory())

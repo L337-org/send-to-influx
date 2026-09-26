@@ -58,6 +58,8 @@ from toinflux.controls import (
     REQUIRED_CONTROL_KEYS,
     control_dir,
     device_identity,
+    holdable_value,
+    parameter_devices,
     control_writes_enabled,
     controls_enabled,
     load_control,
@@ -489,7 +491,10 @@ def _control_state_result(name, settings_file=None, supervisor=None):
         entry["loop"] = {
             "integral": stored["integral"],
             "recorded_at": stored.get("at"),
-            "age_seconds": _age(stored.get("at"), now),
+            # Through the log's own reader, which refuses a moment it cannot measure against.
+            # Fed raw, a hand-edited `pid.at` holding a list raised TypeError here and turned
+            # a documented result into an internal error.
+            "age_seconds": log.loop_age(now=now),
             # The question a reader actually has: would a restart keep this, or start over?
             "matches_document": fingerprint is not None and stored.get("fingerprint") == fingerprint,
         }
@@ -533,10 +538,30 @@ def _control_state_result(name, settings_file=None, supervisor=None):
     # The same single comparison `_hold` makes, so this cannot report a restraint the next
     # cycle will not honour. It used to be two checks kept in step by hand, which is how they
     # came to disagree.
+    driven = parameter_devices(declared)
     entry["held_by_minimum"] = sorted(
-        device for device in held if recorded.get(device) == device_identity(declared.get(device))
+        device
+        for device in held
+        if recorded.get(device) == device_identity(declared.get(device))
+        # And, for a driven device, a value it could actually be pinned to. `_hold` requires
+        # both; checking only the identity advertised a restraint the next cycle would not
+        # honour, which is the same two-places-one-question fault the identity itself had.
+        and (device not in driven or holdable_value(record_of(log, device)))
     )
     return entry
+
+
+def record_of(log, device):
+    """Return what a device was last commanded to, or None where nothing was.
+
+    Args:
+        log (TransitionLog): the control's log
+        device (str): the device name
+
+    Returns:
+        object: the recorded state
+    """
+    return (log.entries.get(device) or {}).get("state")
 
 
 def _age(at, now):

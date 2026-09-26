@@ -44,11 +44,16 @@ RESUMABLE_HOLD_SECONDS = 1800.0
 #: none of which changes the units or the range of an error accumulated while it was acting.
 _LOOP_IRRELEVANT_KEYS = frozenset({"name", "enabled", "timezone", "enable_when", "safe_state", "active_period"})
 
-#: The same, for keys that appear inside sections. `max_age` decides how fresh a reading must
+#: The same, at the positions the format puts them. `max_age` decides how fresh a reading must
 #: be rather than what it measures, and a transition minimum is a promise about wear rather
-#: than about scale. Both are edited in ordinary tuning, and discarding a hard-won integral for
+#: than about scale; both are edited in ordinary tuning, and discarding a hard-won integral for
 #: either would be the over-reaction this digest is deliberately narrow to avoid.
-_LOOP_IRRELEVANT_SETTINGS = frozenset({"max_age", "min_transition_seconds"})
+#:
+#: **By position, not by name.** Stripping every key so called, wherever it appeared, also
+#: stripped a device or a parameter the operator had *named* `max_age` - removing that
+#: binding or that value from the digest entirely, which is the opposite of what the exclusion
+#: is for. A control's own names share a namespace with nothing.
+_LOOP_IRRELEVANT_AT = (("inputs", "max_age"), ("devices", "min_transition_seconds"))
 
 
 def _loop_material(document):
@@ -60,15 +65,18 @@ def _loop_material(document):
     Returns:
         dict: the same document without the parts that do not bear on the memory
     """
-
-    def pruned(value):
-        if isinstance(value, dict):
-            return {k: pruned(v) for k, v in value.items() if k not in _LOOP_IRRELEVANT_SETTINGS}
-        if isinstance(value, list):
-            return [pruned(item) for item in value]
-        return value
-
-    return {key: pruned(value) for key, value in document.items() if key not in _LOOP_IRRELEVANT_KEYS}
+    material = {key: value for key, value in document.items() if key not in _LOOP_IRRELEVANT_KEYS}
+    for section, setting in _LOOP_IRRELEVANT_AT:
+        entries = material.get(section)
+        if isinstance(entries, dict):
+            material[section] = {
+                name: {k: v for k, v in entry.items() if k != setting} if isinstance(entry, dict) else entry
+                for name, entry in entries.items()
+            }
+    output = material.get("output")
+    if isinstance(output, dict):
+        material["output"] = {k: v for k, v in output.items() if k != "min_transition_seconds"}
+    return material
 
 
 class Controller:

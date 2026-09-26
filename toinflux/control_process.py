@@ -29,7 +29,13 @@ import time
 import requests
 
 from toinflux.controller import Controller
-from toinflux.controls import DEFAULT_CYCLE_SECONDS, device_identity, load_control, validate_control
+from toinflux.controls import (
+    DEFAULT_CYCLE_SECONDS,
+    device_identity,
+    holdable_value,
+    load_control,
+    validate_control,
+)
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.gating import DeviceGuard, Gate, commands_for, static_full_scale
 from toinflux.general import RepeatingProblem, load_settings, render_external, render_values, source_class
@@ -633,9 +639,7 @@ class ControlProcess:
             # One comparison: is this value still about the thing it was recorded against?
             # A changed scale, a different bulb, another bridge - all of them say no, and so
             # will anything added to a device declaration later.
-            if recorded.get(device) == device_identity(declared.get(device))
-            and isinstance(known.get(device), (int, float))
-            and not isinstance(known[device], bool)
+            if recorded.get(device) == device_identity(declared.get(device)) and holdable_value(known.get(device))
         }
         if not pinned:
             return plan
