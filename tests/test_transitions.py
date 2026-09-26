@@ -1230,6 +1230,35 @@ class TestReadingTheFile:
         assert log.states().get("heater") is True, f"a stray {key!r} at the top destroyed the file"
         assert log.loop_state("fp", 10_000) is not None, f"a stray {key!r} at the top lost the loop"
 
+    @pytest.mark.parametrize(
+        "stored", [[], ["heater"], "heater", 5, None], ids=["list", "names", "string", "number", "null"]
+    )
+    def test_a_file_that_is_not_a_mapping_at_all_reads_as_empty(self, state_directory, stored):
+        """Valid JSON that is not an object at all, which every reading has to survive.
+
+        The two readings are both about mappings, so a file holding a list or a bare value has
+        no reading: it is an unusable cache and the control starts from nothing, which is the
+        one outcome this module says to prefer over guessing.  Reached by a truncated hand edit
+        or a file replaced wholesale, and it must not raise on the way past.
+        """
+        log = self._stored(state_directory, stored)
+        assert log.states() == {}, "something was read out of a file that is not a mapping"
+        assert log.loop == {}, "a loop was read out of a file that is not a mapping"
+
+    @pytest.mark.parametrize(
+        "pair", [[1, "x"], ["x", 1], [None, None], [["a"], ["b"]]], ids=["key", "value", "both", "nested"]
+    )
+    def test_an_identity_pair_that_is_not_two_strings_is_refused(self, state_directory, pair):
+        """An identity is pairs of strings, and anything else is normalised away rather than
+        trusted - the entry keeps its moment, so the device keeps its minimum, and loses only
+        the scale it cannot prove."""
+        log = self._stored(
+            state_directory,
+            {"devices": {"lamp": {"state": 40, "at": 1000.0, "for": [pair]}}, "pid": {}},
+        )
+        assert log.identities() == {"lamp": None}, "a pair that is not two strings was kept"
+        assert log.elapsed("lamp", 2000.0) == 1000.0, "the entry lost its moment with its identity"
+
     def test_a_file_neither_reading_can_salvage_is_read_as_the_current_shape(self, state_directory):
         """Where both readings recover nothing the file is genuinely ambiguous, and the tie goes
         to the shape the writer actually produces - an empty current-format file is ordinary and

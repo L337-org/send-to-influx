@@ -578,6 +578,16 @@ class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
         assert controller.pid._integral == 0.0, "the held value itself did not survive"
         assert controller.pid._last_input == pytest.approx(before), "a held zero was read as nothing held"
 
+    @pytest.mark.parametrize("integral", [float("nan"), float("inf"), None, "x"], ids=["nan", "inf", "none", "string"])
+    def test_a_loop_with_nothing_worth_keeping_captures_nothing(self, integral):
+        """`capture` promises plain numbers a file can hold, so a loop whose integral is not one
+        hands back nothing rather than writing it out - a nan reaching the file would come back
+        as a resumable state and return nan for every cycle after."""
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.pid._integral = integral
+        assert controller.capture() == {}, "an unusable integral was written down as loop state"
+
     def test_an_explicit_demand_does_not_buy_a_stale_reading(self):
         """The gate asks the hold, not the argument, and the two part company here.
 
