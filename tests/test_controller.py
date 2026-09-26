@@ -519,6 +519,38 @@ class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
         after = controller.step({"lux": 300.0, "target": 1000}, dt=60)[0].stage.states["lamp"]
         assert after == pytest.approx(before), f"output fell from {before} to {after} on an unchanged input"
 
+    def test_a_brief_hold_also_keeps_what_the_derivative_measures_from(self):
+        """The integral survived a brief hold but the derivative's own memory did not.
+
+        `capture` saves the last input and `resume_from` puts it back, both documented as making
+        the derivative term continuous across a restart - but simple-pid's manual-to-automatic
+        switch calls `reset`, which clears `_last_input`, so the restored value was wiped a
+        moment later and the D term always began again from nothing.  It changes no shipped
+        control, every one of which runs kd at zero, and it makes the promise true for the first
+        one that does not.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.pid._last_input
+        assert before is not None, "nothing was measured, so this proves nothing"
+        controller.hold()
+        clock[0] += 60
+        controller.resume()
+        assert controller.pid._last_input == pytest.approx(before), "the derivative restarted from nothing"
+
+    def test_a_long_hold_drops_it_with_the_integral(self):
+        """The other half: a stale reading must not be differentiated against.
+
+        A hold long enough to drop the integral has made the last input just as stale, and
+        carrying it would answer the first cycle back with a step the plant never made.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.hold()
+        clock[0] += RESUMABLE_HOLD_SECONDS + 60
+        controller.resume()
+        assert controller.pid._last_input is None, "a reading from before the gap was carried over"
+
     def test_a_long_hold_still_starts_afresh(self):
         """An active period lasts eighteen hours, and what the room was doing last night says
         nothing about this evening."""

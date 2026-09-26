@@ -429,7 +429,21 @@ class Controller:
         """
         if last_output is None:
             last_output = self._held_integral()
+        # **The derivative's memory has to be carried by hand across this call.** simple-pid
+        # resets on the manual-to-automatic change, and its `reset` clears `_last_input` - so
+        # the value `capture` saves and `resume_from` puts back was wiped again a moment later
+        # and the D term always restarted from nothing, against a docstring promising it was
+        # continuous. Inert while every shipped example runs kd at zero, and wrong the day one
+        # does not.
+        #
+        # Carried only where the integral is being carried. A hold long enough to drop the
+        # integral has made the last input stale by the same argument, and differentiating
+        # against a reading from before the gap would answer the first cycle back with a kick
+        # the plant never made.
+        carried = getattr(self.pid, "_last_input", None) if last_output is not None else None
         self.pid.set_auto_mode(True, last_output=last_output)
+        if carried is not None:
+            self.pid._last_input = carried
         self._held = None
 
     def _held_integral(self):
