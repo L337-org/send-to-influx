@@ -557,6 +557,16 @@ class ControlProcess:
         # After the step, so what is stored is what the loop actually knows now. Written every
         # cycle: the file is a few hundred bytes and the alternative is a memory that is
         # always one cycle out of date, which is the cycle a restart is most likely to land in.
+        #
+        # **Before the commands, and deliberately.** Writing it after the window instead would
+        # leave a process killed mid-window recording nothing at all, and the window is most of
+        # `cycle_seconds` - so the ordinary case, a kill or a package upgrade partway through,
+        # would lose a whole cycle. What writing first costs is that a failing `_apply` leaves
+        # one cycle of integration stored for a cycle no actuator acted on, and that is bounded
+        # at exactly one: `_fail_safe` calls `hold`, which puts simple-pid in manual, and it
+        # returns the last output without integrating until `resume`. Every later cycle of the
+        # outage therefore stores the same figure rather than a growing one. One cycle of
+        # ki x error x dt is the cheaper of the two losses.
         self.transitions.record_loop(self.controller.capture(), self.controller.fingerprint)
         for dwell in demand:
             # Per rung rather than per cycle, and the states in full: "level 750" does not
