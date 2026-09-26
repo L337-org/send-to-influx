@@ -538,6 +538,26 @@ class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
         controller.resume()
         assert controller.pid._last_input == pytest.approx(before), "the derivative restarted from nothing"
 
+    def test_an_integral_of_exactly_zero_is_still_a_loop_being_continued(self):
+        """Nought is a value the loop holds, not an absence of one.
+
+        Whether the derivative's memory is carried is decided by whether the integral is being
+        carried, and that question is asked as `is not None` rather than for truth.  A loop
+        sitting at zero because it has arrived is being continued exactly as one sitting at
+        five is, so reading the gate as truthiness would throw away the last input in the one
+        case where the loop is doing best.  Nothing distinguishes the two outcomes in any other
+        test, so the boundary is pinned here.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.pid._last_input
+        controller.hold()
+        controller._held["integral"] = 0.0
+        clock[0] += 60
+        controller.resume()
+        assert controller.pid._integral == 0.0, "the held value itself did not survive"
+        assert controller.pid._last_input == pytest.approx(before), "a held zero was read as nothing held"
+
     def test_a_long_hold_drops_it_with_the_integral(self):
         """The other half: a stale reading must not be differentiated against.
 
