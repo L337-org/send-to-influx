@@ -18,6 +18,7 @@ import sys
 import pytest
 
 from tests.harness.bridge import bulb
+from toinflux.controls import device_identity
 from toinflux.exceptions import ConfigError
 from toinflux.staging import build_ladder, plan_window, reachable_ladder
 from tests.harness.installation import record_command
@@ -846,6 +847,38 @@ class TestReadingTheFile:
         log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
         assert log.states().get("pid") is False, "a flat log was read as the new shape"
         assert log.loop == {}, "a device's record was handed back as the loop's memory"
+
+    def _stored(self, state_directory, stored):
+        """Write a cache file verbatim and read it back.
+
+        Args:
+            state_directory: the fixture naming the settings file
+            stored (dict): exactly what the file should contain
+
+        Returns:
+            TransitionLog: the log built from it, at a fixed clock
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(stored, handle)
+        return TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 2000.0)
+
+    def test_a_device_read_from_a_flat_log_still_keeps_its_minimum(self, state_directory):
+        """Upgrading in place stopped honouring any minimum at all, which is the one thing the
+        flat reader exists to prevent.
+
+        Filtering held devices by their recorded identity assumed there was always one to read.
+        The older writer stored none, so every device out of an upgraded file compared as a
+        mismatch and was dropped from the held set: the first cycle after an upgrade was free to
+        switch hardware that was still well inside `min_transition_seconds`.  `device_identity`
+        returns a tuple for any input, so nothing recorded is None and None means unknown rather
+        than different - and an unknown identity is no reason to withdraw a protection.
+        """
+        log = self._stored(state_directory, {"heater": {"state": True, "at": 1000.0}})
+        identities = {"heater": device_identity({"source": "hue", "device": "Heater"})}
+        held = log.frozen(lambda _d: 900.0, ["heater"], now=1010.0, identities=identities)
+        assert held == frozenset({"heater"}), "an upgraded file lost every device's minimum"
 
     def test_a_parameter_change_is_a_move_even_at_the_same_number(self, state_directory):
         """The no-move test compared only the value, so a device moved between parameters at

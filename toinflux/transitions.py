@@ -529,7 +529,8 @@ class TransitionLog:
         recorded = self.identities()
         held = set()
         for device in devices:
-            if identities is not None and recorded.get(device) != identities.get(device):
+            known = recorded.get(device)
+            if identities is not None and known is not None and known != identities.get(device):
                 # **The record is not about this device any more.** A control key is a name in
                 # a document and what it points at can be changed underneath it, so a state
                 # written against the old target says nothing about the new one - not for a
@@ -537,6 +538,14 @@ class TransitionLog:
                 # whose recorded state decides which rungs `reachable_ladder` leaves standing.
                 # Asked here because this is the one place both kinds pass through; it used to
                 # be asked further down, where only driven devices were looked at.
+                #
+                # **A record with nothing recorded against it is unknown, not different.** The
+                # older writer stored no identity at all, so every device read out of an
+                # upgraded file compared as a mismatch and none was ever held: the first cycle
+                # after an upgrade was free to move hardware that was still inside its minimum.
+                # `device_identity` returns a tuple for any input, empty at worst, so None here
+                # means only that nothing was written - which is exactly the file the flat
+                # reader above exists to carry forward.
                 continue
             elapsed = self.elapsed(device, moment)
             if elapsed is None:
