@@ -870,11 +870,6 @@ def _live_reading(handler, source, field, instance, stored, now):
             source,
             field,
             exc,
-            # The type, not the rendered line: a urllib3 transport error's repr carries the
-            # connection object's address, which is different on every attempt, so no two
-            # renderings of the same outage were ever equal and this warned once a cycle per
-            # control for as long as the source was down.
-            identity=type(exc).__name__,
         )
         return _require(stored, source, field, f"the live read failed ({exc!r}) and InfluxDB holds no point for it")
     # The clock is read after the fetch, not before. get_data can take seconds against a

@@ -438,6 +438,39 @@ class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
     """
 
     @staticmethod
+    def _mixed(max_level=None):
+        """Return a controller owning one switched device and one driven by a percentage.
+
+        Args:
+            max_level (str or None): a cap rule, where the test wants one
+
+        Returns:
+            Controller: built from a two-rung ladder moving both devices
+        """
+        output = {
+            "cycle_seconds": 60,
+            "min_transition_seconds": 10,
+            "stages": [
+                {"level": 0, "set": {"lamp": 0, "heater": False}},
+                {"level": 1000, "set": {"lamp": 100, "heater": True}},
+            ],
+        }
+        if max_level:
+            output["max_level"] = max_level
+        return Controller(
+            {
+                "parameters": {"target": 1000},
+                "inputs": {"lux": {"source": "hue", "field": "L"}},
+                "pid": {"input": "lux", "setpoint": "target", "kp": 1.0, "ki": 0.0, "kd": 0.0},
+                "output": output,
+                "devices": {
+                    "lamp": {"source": "hue", "device": "Lamp", "parameter": "brightness_pct"},
+                    "heater": {"source": "hue", "device": "Heater"},
+                },
+            }
+        )
+
+    @staticmethod
     def _settled(clock):
         """Return a controller with an integral already built.
 
@@ -567,6 +600,35 @@ class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
         controller.pid._last_output = None
         with pytest.raises(ConfigError, match="held"):
             controller.step({"lux": 300.0, "target": 1000}, dt=60)
+
+    def test_a_frozen_switched_device_does_not_move_a_driven_one(self):
+        """Freezing says which rungs may be *switched to*. It says nothing about the number a
+        driven device should hold, because that device is not the one being protected.
+
+        Interpolating on the censored ladder let one device's transition minimum drag another
+        to an end of its range: a heater frozen off pinned the lamp to 0 and frozen on pinned
+        it to 100, when at half demand it belongs at half brightness either way.
+        """
+        controller = self._mixed()
+        for state in (False, True):
+            plan = controller.step(
+                {"lux": 500.0, "target": 1000},
+                dt=60,
+                frozen=frozenset({"heater"}),
+                states={"heater": state, "lamp": 50},
+            )
+            lamps = {dwell.stage.states["lamp"] for dwell in plan}
+            assert lamps == {50.0}, f"heater frozen {state}: lamp at {lamps}"
+            # The heater is still protected: only the rung it is already on was commanded.
+            assert {dwell.stage.states["heater"] for dwell in plan} == {state}
+
+    def test_a_cap_does_still_bound_a_driven_device(self):
+        """The other side, and the reason this is not simply "ignore the narrowed ladder": a
+        cap is a standing instruction about how hard the control may drive, so it bounds the
+        driven value where a freeze does not."""
+        controller = self._mixed(max_level="0")
+        plan = controller.step({"lux": 500.0, "target": 1000}, dt=60)
+        assert {dwell.stage.states["lamp"] for dwell in plan} == {0.0}
 
     def test_an_explicit_last_output_still_wins(self):
         clock = [0.0]

@@ -1138,8 +1138,33 @@ class TestReportingWhatAControlHasWorkedOut:
         from toinflux.transitions import TransitionLog
 
         log = TransitionLog(name, state_directory.settings_file)
-        log.record({"lamp": 55})
+        # With the parameter, as `command_devices` records it: a value whose scale no longer
+        # matches the document is not one the loop will hold, so it is not reported as held.
+        log.record({"lamp": 55}, parameters={"lamp": "brightness_pct"})
         assert _control_state_result(name, state_directory.settings_file)["held_by_minimum"] == ["lamp"]
+
+    def test_a_device_recorded_on_another_scale_is_not_reported_as_held(self, state_directory, bridge):
+        """`_hold` refuses to pin a value whose parameter is not the one the document drives
+        the device by now, so the next cycle will move it whatever its timer says. Reporting
+        it as held would describe a restraint that is not going to happen."""
+        name = self._ran(state_directory, minimum=3600)
+        from toinflux.transitions import TransitionLog
+
+        log = TransitionLog(name, state_directory.settings_file)
+        log.record({"lamp": 2700}, parameters={"lamp": "color_temp_k"})
+        result = _control_state_result(name, state_directory.settings_file)
+        assert result["held_by_minimum"] == []
+        assert result["devices"]["lamp"]["parameter"] == "color_temp_k", "the scale was not reported"
+
+    def test_it_reports_the_scale_a_state_is_on(self, state_directory, bridge):
+        """A driven device's 40 is forty percent or forty kelvin depending on this, and a
+        client reading the state has no other way to tell."""
+        name = self._ran(state_directory, minimum=3600)
+        from toinflux.transitions import TransitionLog
+
+        TransitionLog(name, state_directory.settings_file).record({"lamp": 55}, parameters={"lamp": "brightness_pct"})
+        lamp = _control_state_result(name, state_directory.settings_file)["devices"]["lamp"]
+        assert lamp == {**lamp, "state": 55, "parameter": "brightness_pct"}
 
     def test_a_control_that_has_never_run_reports_no_loop(self, state_directory):
         state_directory.write_control(conservatory())

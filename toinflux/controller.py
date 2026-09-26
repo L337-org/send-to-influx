@@ -143,6 +143,10 @@ class Controller:
         # a frozen device is a wait of a window or two, and narrowing the limits for it would
         # have the PID forget the demand it is part way through building and pay it back as
         # overshoot the moment the device came free.
+        # Kept before the freeze narrows it: `plan_window` picks rungs from the reachable
+        # ladder and reads a driven device's value off this one, because a frozen device
+        # constrains what may be switched rather than what another device should hold.
+        curve = ladder
         ladder = reachable_ladder(ladder, frozen, states or {})
         self.pid.setpoint = setpoint
         if limits is not None:
@@ -162,7 +166,7 @@ class Controller:
                 "the controller was stepped while it was held, so it has no demand to give - "
                 "call resume() before step() after a hold or a resume_from()"
             )
-        plan = plan_window(ladder, demand, self.cycle_seconds, self.min_transition_for, self.driven)
+        plan = plan_window(ladder, demand, self.cycle_seconds, self.min_transition_for, self.driven, curve=curve)
         # **What the loop decided, once per cycle, at DEBUG.** Nothing in this subsystem said
         # anything during a healthy cycle: a control holding the wrong temperature produced a
         # temperature curve and no record of what it was thinking, so tuning it meant guessing
@@ -202,10 +206,17 @@ class Controller:
     def fingerprint(self):
         """Return what this controller's memory is only meaningful against.
 
-        The gains, the ladder and the window. An integral is in the output's units and is
-        bounded by the ladder's range, so the same number means one thing under one tuning and
-        something else under another - and the commonest restart a control sees is the one the
-        supervisor performs because its document was edited.
+        The gains, the ladder, the window, what each device is driven by, and the cap. An
+        integral is in the output's units and is bounded by the ladder's range, so the same
+        number means one thing under one tuning and something else under another - and the
+        commonest restart a control sees is the one the supervisor performs because its
+        document was edited.
+
+        **The parameters and the cap belong here for the same reason the ladder does**, and
+        were missing. A device moved from `brightness_pct` to `color_temp_k` keeps its rung
+        numbers while every one of them comes to mean something else, and a changed
+        `max_level` changes the range the integral is clamped into - both left this digest
+        identical, so a loop earned against one scale was handed back for another.
 
         Deliberately not the whole document: a changed `enable_when`, safe state or input
         max_age does not make the accumulated error wrong, and discarding it for those would
@@ -221,6 +232,8 @@ class Controller:
                 "kd": self.pid.Kd,
                 "cycle": self.cycle_seconds,
                 "ladder": [(stage.level, sorted(stage.states.items())) for stage in self.ladder],
+                "driven": sorted(self.driven.items()),
+                "max_level": self._max_level_rule.source if self._max_level_rule is not None else None,
             },
             sort_keys=True,
             default=str,

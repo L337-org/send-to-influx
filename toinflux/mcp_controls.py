@@ -57,6 +57,7 @@ from toinflux.controls import (
     BUILT_IN_SAFE_STATES,
     REQUIRED_CONTROL_KEYS,
     control_dir,
+    parameter_devices,
     control_writes_enabled,
     controls_enabled,
     load_control,
@@ -475,7 +476,7 @@ def _control_state_result(name, settings_file=None, supervisor=None):
     try:
         document = load_control(name, settings_file)
     except ConfigError as exc:
-        raise ToolParamError(f"control {name!r} cannot be read: {exc}") from exc
+        raise ToolParamError(f"control {name!r} cannot be read: {exc!r}") from exc
     log = TransitionLog(name, settings_file)
     now = time.time()
     entry: dict = {"control": name, **_supervision_of(name, _supervision_by_name(supervisor))}
@@ -496,10 +497,18 @@ def _control_state_result(name, settings_file=None, supervisor=None):
         entry["loop"] = None
 
     minimum_for = Controller(document).min_transition_for if fingerprint is not None else None
-    devices = tuple(document.get("devices") or {})
+    declared = document.get("devices") or {}
+    devices = tuple(declared)
+    driven = parameter_devices(declared)
+    recorded = log.parameters()
     entry["devices"] = {
         device: {
             "state": record.get("state"),
+            # **The scale the state is on, because the number means nothing without it.** A
+            # driven device's 40 is forty percent or forty kelvin depending on this, and a
+            # client reading the state has no other way to tell. None for a switched device,
+            # and None for one recorded before this was kept.
+            "parameter": recorded.get(device),
             "changed_at": record.get("at"),
             "age_seconds": _age(record.get("at"), now),
             # A safe state overrides min_transition_seconds in both directions, so a device
@@ -508,7 +517,15 @@ def _control_state_result(name, settings_file=None, supervisor=None):
         }
         for device, record in sorted(log.entries.items())
     }
-    entry["held_by_minimum"] = sorted(log.frozen(minimum_for, devices, now=now)) if minimum_for is not None else []
+    # **The same test the loop applies, not just the clock.** `_hold` refuses to pin a device
+    # whose recorded parameter is not the one the document now drives it by, because the value
+    # is on a scale that no longer means anything - so after such an edit the next cycle will
+    # move that device whatever its timer says. Reporting it as held would describe a restraint
+    # that is not going to happen.
+    held = log.frozen(minimum_for, devices, now=now) if minimum_for is not None else set()
+    entry["held_by_minimum"] = sorted(
+        device for device in held if device not in driven or recorded.get(device) == driven.get(device)
+    )
     return entry
 
 

@@ -293,7 +293,7 @@ def _holding(stage, values):
     return Stage(level=stage.level, declared=stage.declared, states=MappingProxyType({**stage.states, **values}))
 
 
-def plan_window(ladder, demand, cycle_seconds, min_transition_for, driven=None):
+def plan_window(ladder, demand, cycle_seconds, min_transition_for, driven=None, curve=None):
     """Return how a cycle window is split between rungs to average out at a demand.
 
     One dwell where the demand sits on a rung or beyond an end of the ladder; two where it
@@ -321,6 +321,8 @@ def plan_window(ladder, demand, cycle_seconds, min_transition_for, driven=None):
             for the whole window, so they neither proportion the window nor constrain how it
             is split - a dimmer has a middle setting, which is the whole reason it does not
             need one made out of time.
+        curve (tuple or None): the ladder a driven device's value is read off, before any
+            freeze narrowed it. The ladder itself when None
 
     Returns:
         tuple: Dwell, in the order they should be commanded, lower rung first
@@ -347,7 +349,17 @@ def plan_window(ladder, demand, cycle_seconds, min_transition_for, driven=None):
         # heaters full on because of arithmetic nobody could see.
         raise RuleEvaluationError(f"a control's demand came out as {demand!r}, which is not a level to hold")
     lower, upper = bracket(ladder, demand)
-    held = interpolated(lower, upper, demand, driven or {})
+    # **The driven value comes off the whole curve, not the reachable part of it.** Freezing a
+    # device says which rungs may be *switched to*; it says nothing about the number a driven
+    # device should hold, because that device is not the one being protected. Interpolating on
+    # the censored ladder let one device's transition minimum drag another to an end of its
+    # range - a heater frozen off pinned the lamp to 0 and frozen on pinned it to 100, when at
+    # half demand it should have been at half brightness either way.
+    #
+    # A cap is different and is already folded into `curve` by the caller: that is a standing
+    # instruction about how hard the control may drive, so it does bound the driven value.
+    lower_curve, upper_curve = bracket(curve, demand) if curve else (lower, upper)
+    held = interpolated(lower_curve, upper_curve, demand, driven or {})
     if lower is upper:
         return (Dwell(stage=_holding(lower, held), seconds=float(cycle_seconds)),)
     share = (demand - lower.level) / (upper.level - lower.level)

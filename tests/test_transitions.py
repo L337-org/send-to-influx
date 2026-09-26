@@ -1102,6 +1102,40 @@ class TestWhatTheControllerKeepsAndPutsBack:
         assert self._controller(kp=999.0).fingerprint != base
         assert self._controller(ki=999.0).fingerprint != base
 
+    def test_the_fingerprint_follows_the_scale_and_the_cap_too(self, state_directory):
+        """Both were missing, and both change what the integral means rather than merely how
+        the control behaves.
+
+        A device moved from `brightness_pct` to `color_temp_k` keeps its rung numbers while
+        every one of them comes to mean something else, and a changed `max_level` changes the
+        range the integral is clamped into. Either left the digest identical, so a loop earned
+        against one scale was handed straight back for another.
+        """
+        from toinflux.controller import Controller
+
+        def built(parameter="brightness_pct", cap=None):
+            output = {
+                "cycle_seconds": 60,
+                "min_transition_seconds": 1,
+                "stages": [{"level": 0, "set": {"a": 0}}, {"level": 100, "set": {"a": 100}}],
+            }
+            if cap:
+                output["max_level"] = cap
+            return Controller(
+                {
+                    "parameters": {"target": 20.0},
+                    "inputs": {"inside": {"source": "hue", "field": "t"}},
+                    "pid": {"input": "inside", "setpoint": "target", "kp": 10.0, "ki": 1.0, "kd": 0.0},
+                    "output": output,
+                    "devices": {"a": {"source": "hue", "device": "A", "parameter": parameter}},
+                }
+            ).fingerprint
+
+        base = built()
+        assert built() == base, "the same document did not agree with itself"
+        assert built(parameter="color_temp_k") != base, "the scale changed and the loop was kept"
+        assert built(cap="50") != base, "the cap changed and the loop was kept"
+
     def test_and_not_the_things_it_does_not(self, state_directory):
         """Discarding a hard-won integral because a gate rule changed would throw away the
         settling time this exists to save."""

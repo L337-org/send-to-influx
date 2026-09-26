@@ -10,6 +10,7 @@ import ipaddress
 import logging
 import math
 import os
+import re
 import stat
 import sys
 import time
@@ -1478,6 +1479,32 @@ def load_settings(settings_file=None):
         raise ConfigError(f"Error in {settings_path} - {e}") from e
 
 
+#: What varies between two reports of one unchanged fault: a measurement that grows with time,
+#: and the address in an object's repr. Both are detail rather than identity, and both were
+#: enough to defeat the throttle entirely - a staleness message counting up in seconds, and a
+#: urllib3 error carrying `0x7f...` from a fresh connection object each attempt.
+_VOLATILE = re.compile(r"0x[0-9a-fA-F]+|\d+(?:\.\d+)?")
+
+
+def _without_volatile_detail(rendered):
+    """Return a message with the parts that move on their own replaced.
+
+    **Numbers, rather than the exception's type.** An earlier fix used the type name as the
+    identity, which throttled the flood and broke the promise this class makes: every
+    `RuleEvaluationError` for one control became the same problem, so a cycle failing for a
+    new reason stayed silent for up to an hour. Normalising the digits keeps "the reading is
+    stale" and "the reading is not a number" apart while collapsing "31s old" into "71s old",
+    which is the distinction actually wanted.
+
+    Args:
+        rendered (str): the message as it will be logged
+
+    Returns:
+        str: the same message with numbers and object addresses flattened
+    """
+    return _VOLATILE.sub("#", rendered)
+
+
 class RepeatingProblem:
     """Report a failure that recurs every cycle without saying it every cycle.
 
@@ -1536,7 +1563,7 @@ class RepeatingProblem:
         # with every test still passing. Those callers pass an identity naming the fault
         # rather than the numbers describing it.
         rendered = message % args if args else message
-        same = rendered if identity is None else identity
+        same = _without_volatile_detail(rendered) if identity is None else identity
         now = self._clock()
         seen = self._seen.get(key)
         if seen is not None and seen[0] == same and now - seen[1] < self._repeat_after:

@@ -215,7 +215,8 @@ class Gate:
             moment (datetime.datetime): an aware moment, for the active period
 
         Returns:
-            str: one of the built-in safe states
+            str or float: one of the built-in safe states, or the value to set - a driven
+            device may be left at a number, so this is not always a name
 
         Raises:
             ConfigError: where the moment is naive

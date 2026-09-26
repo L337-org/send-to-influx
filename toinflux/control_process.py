@@ -663,13 +663,6 @@ class ControlProcess:
             "Control %r could not complete a cycle, going to its safe state: %r",
             self.name,
             reason,
-            # The exception's type, not its text: a staleness message carries the reading's
-            # age, which is a cycle bigger every cycle, so the rendered line was never equal
-            # to the one before it and the throttle above never engaged. The full reason is
-            # still logged, and still in every DEBUG repeat; what this decides is only
-            # whether the fault is the same one. A failure that changes *kind* - a rule that
-            # cannot be evaluated becoming a source that cannot be reached - is still news.
-            identity=type(reason).__name__,
         )
         self.controller.hold()
         try:
@@ -691,7 +684,6 @@ class ControlProcess:
                 "Control %r could not reach its devices to make them safe: %r",
                 self.name,
                 exc,
-                identity=type(exc).__name__,
             )
         else:
             # Only where a safe-state command was actually attempted and got through, which
