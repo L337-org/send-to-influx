@@ -782,6 +782,31 @@ class TestReadingTheFile:
         assert log.states() == {"pid": True, "devices": False}
         assert log.loop == {}
 
+    def test_one_bad_device_entry_does_not_turn_the_file_back_into_a_flat_log(self, state_directory):
+        """Deciding the format from the whole devices section meant one corrupt entry lost the
+        rest of the file.
+
+        The test read as "every value here is a mapping", which a new-format file with a single
+        hand-edited or truncated device entry fails.  The file was then taken for the older flat
+        shape, so `devices` and `pid` came back as two top-level pseudo-devices and the good
+        sibling entry and the loop's memory went with them - the memory being the one thing the
+        file exists to carry.  `_usable_entries` was already dropping bad entries one at a time,
+        so the whole-set test destroyed strictly more than the per-item one it sat in front of.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "devices": {"lamp": "corrupt", "heater": {"state": True, "at": 1000.0}},
+                    "pid": {"integral": 5.0, "fingerprint": "abc", "at": 1000.0},
+                },
+                handle,
+            )
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states() == {"heater": True}, "the good entry went the way of the bad one"
+        assert log.loop.get("integral") == 5.0, "the loop's memory was read as a device and lost"
+
     def test_a_parameter_change_is_a_move_even_at_the_same_number(self, state_directory):
         """The no-move test compared only the value, so a device moved between parameters at
         the same number kept the old parameter for ever - and `_hold` then refused the record

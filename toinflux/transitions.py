@@ -293,16 +293,26 @@ class TransitionLog:
         # only one is not the new format - but requiring both is still not enough, because an
         # older flat log may hold devices named *both* `pid` and `devices`, and reading those
         # two entries as the sections loses every device in the file. What separates them is
-        # what the devices half contains: a section is a mapping of device to entry, so its
-        # values are mappings, while a device's own entry holds a state and a moment. Checked
-        # rather than versioned, because the files that need reading are the ones already on
-        # disk, written before any version number existed.
+        # that a device's own entry carries a moment and a section does not: in a flat log the
+        # `devices` entry has a usable `at`, while in the new format an `at` under `devices`
+        # could only be a device of that name, and would hold a mapping rather than a number.
+        #
+        # **Asked of that one key, not of every entry.** This used to require *all* the
+        # section's values to be mappings, which let a single malformed device entry
+        # reclassify the whole file as a flat log - the good siblings and the loop state were
+        # then handed back as top-level pseudo-devices and lost, though `_usable_entries`
+        # already drops bad entries one at a time. A test written over the whole set behaves
+        # exactly like a per-item one right up until the set has a bad element, which is the
+        # moment it was there for.
+        #
+        # Checked rather than versioned, because the files that need reading are the ones
+        # already on disk, written before any version number existed.
         section = stored.get("devices")
         looks_new = (
             "devices" in stored
             and "pid" in stored
             and isinstance(section, dict)
-            and all(isinstance(entry, dict) for entry in section.values())
+            and not usable_number(section.get("at"))
         )
         if not looks_new:
             return {"devices": stored, "pid": {}}
