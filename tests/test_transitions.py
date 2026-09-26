@@ -807,6 +807,46 @@ class TestReadingTheFile:
         assert log.states() == {"heater": True}, "the good entry went the way of the bad one"
         assert log.loop.get("integral") == 5.0, "the loop's memory was read as a device and lost"
 
+    def test_a_flat_log_whose_devices_entry_lost_its_moment_is_still_flat(self, state_directory):
+        """Fixing the whole-set test by asking one key held a moment just moved the fault.
+
+        A flat log may hold a device named `devices`, and that entry may be the malformed one -
+        truncated, or hand-edited down to nothing.  Asking whether it carried a usable `at` then
+        answered no, so the file was read as the new two-section shape and every *other* device
+        in it was dropped as section metadata: the same loss as before, reached from the other
+        side.  The writer emits these two keys and nothing else, so a third top-level key is a
+        device and proves the file flat, whatever shape the entry under `devices` is in.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "devices": {"state": True},
+                    "pid": {"state": False, "at": 1000.0},
+                    "heater": {"state": True, "at": 1000.0},
+                },
+                handle,
+            )
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states().get("heater") is True, "a real device was read as section metadata and lost"
+
+    def test_a_flat_log_of_only_the_two_reserved_names_survives_a_malformed_entry(self, state_directory):
+        """The same flat log with no third device to prove it flat, so the shape has to answer.
+
+        Here there are no siblings to lose, but the two entries are themselves the devices and
+        must still come back.  A record that has lost its `at` still has a `state` that is not a
+        mapping, which a section of records never has - so the entry is recognisable without
+        depending on the half of it that went missing.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {"state": True}, "pid": {"state": False, "at": 1000.0}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states().get("pid") is False, "a flat log was read as the new shape"
+        assert log.loop == {}, "a device's record was handed back as the loop's memory"
+
     def test_a_parameter_change_is_a_move_even_at_the_same_number(self, state_directory):
         """The no-move test compared only the value, so a device moved between parameters at
         the same number kept the old parameter for ever - and `_hold` then refused the record

@@ -131,6 +131,23 @@ def _usable_identity(value):
     return tuple(pairs)
 
 
+def _holds_an_entry(section):
+    """Say whether a mapping is one device's own record rather than a section of them.
+
+    Args:
+        section (dict): the value stored under one of the two reserved keys
+
+    Returns:
+        bool: True where it looks like a single device's record
+    """
+    # A record carries a moment and a state; a section carries device names, and its values
+    # are records. Asked of the two keys a record has rather than of the values the mapping
+    # holds, so no single malformed entry can decide it either way. Both halves are needed: a
+    # record whose `at` was truncated away still has a `state` that is not a mapping, and a
+    # section containing a device called `state` still has a mapping there.
+    return usable_number(section.get("at")) or not isinstance(section.get("state", {}), dict)
+
+
 def _usable_entries(devices):
     """Return only the device entries that carry a moment, which is what makes them useful.
 
@@ -297,22 +314,29 @@ class TransitionLog:
         # `devices` entry has a usable `at`, while in the new format an `at` under `devices`
         # could only be a device of that name, and would hold a mapping rather than a number.
         #
-        # **Asked of that one key, not of every entry.** This used to require *all* the
-        # section's values to be mappings, which let a single malformed device entry
-        # reclassify the whole file as a flat log - the good siblings and the loop state were
-        # then handed back as top-level pseudo-devices and lost, though `_usable_entries`
-        # already drops bad entries one at a time. A test written over the whole set behaves
-        # exactly like a per-item one right up until the set has a bad element, which is the
-        # moment it was there for.
+        # **Two questions, so no single entry decides it.** This once required *all* the
+        # section's values to be mappings, which let one malformed device entry reclassify the
+        # whole file as a flat log and lose its good siblings. Asking instead whether that one
+        # key held a moment just moved the same fault: a flat log whose `devices` entry had
+        # lost its `at` was then read as the new shape, and *its* siblings went instead.
+        #
+        # So the writer's own shape answers it first. It emits these two keys and nothing else,
+        # so any third key at the top level is a device, which makes the file flat - and that is
+        # the case where siblings exist to be lost. Only a file holding exactly the two names
+        # is still ambiguous, and there the `devices` value settles it: a section of records or
+        # one record itself. Neither test reads more than the file's outermost shape.
         #
         # Checked rather than versioned, because the files that need reading are the ones
         # already on disk, written before any version number existed.
         section = stored.get("devices")
+        loop = stored.get("pid")
         looks_new = (
             "devices" in stored
             and "pid" in stored
+            and not (stored.keys() - {"devices", "pid"})
             and isinstance(section, dict)
-            and not usable_number(section.get("at"))
+            and isinstance(loop, dict)
+            and not _holds_an_entry(section)
         )
         if not looks_new:
             return {"devices": stored, "pid": {}}
