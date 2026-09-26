@@ -1210,6 +1210,26 @@ class TestReadingTheFile:
         )
         assert log.states().get("pid") is True, "a good device was read as the loop's memory"
 
+    @pytest.mark.parametrize("key", ["state", "at", "fingerprint", "for", "integral"])
+    def test_one_stray_key_at_the_top_does_not_destroy_the_file(self, state_directory, key):
+        """Treating any third top-level key as proof of a flat log made one stray key fatal.
+
+        The reasoning was sound as far as it went - the writer emits these two names and nothing
+        else, so a third is a device name - but it decided the reading outright, and the reading
+        it forced recovered nothing: the sections became one unusable pseudo-device each, so the
+        real devices and the loop's memory went together for the sake of a key nobody reads.
+        Scoring settles the same question by what each reading would actually recover, which is
+        why the rule turned out to be doing no work except harm.
+        """
+        stored = {
+            "devices": {"heater": {"state": True, "at": 1000.0}},
+            "pid": {"integral": 3.5, "at": 1000.0, "fingerprint": "fp"},
+            key: True,
+        }
+        log = self._stored(state_directory, stored)
+        assert log.states().get("heater") is True, f"a stray {key!r} at the top destroyed the file"
+        assert log.loop_state("fp", 10_000) is not None, f"a stray {key!r} at the top lost the loop"
+
     def test_a_file_neither_reading_can_salvage_is_read_as_the_current_shape(self, state_directory):
         """Where both readings recover nothing the file is genuinely ambiguous, and the tie goes
         to the shape the writer actually produces - an empty current-format file is ordinary and

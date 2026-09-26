@@ -341,13 +341,16 @@ class TransitionLog:
         # one direction or the other. The fault was never the field chosen; it was choosing one
         # at all, in a file whose whole premise is that any part of it may be unreadable.
         #
-        # So nothing is asked about the contents. A third top-level key is still decisive, since
-        # the writer emits these two and nothing else, and it is the case where a flat log has
-        # ordinary device names. For the one genuinely ambiguous shape - a file holding just the
-        # two reserved names, which may be the current format or a flat log of two devices that
-        # happen to be called that - both readings are tried and the one that recovers more
-        # usable records wins. A tie goes to the current format, because that is what the writer
-        # produces and the ambiguity only arises at all where neither reading recovers anything.
+        # So nothing is asked about the contents, and nothing is asked about the key names
+        # either. There was a rule here that a third top-level key proved the file flat, on the
+        # grounds that the writer emits only these two - true, but it made one stray key enough
+        # to destroy a whole file, because the reading it forced then recovered almost nothing.
+        # Scoring already answers that case and every case the rule was there for: a flat log's
+        # keys are device names holding records, which the flat reading counts and the other
+        # cannot, whatever those names happen to be.
+        #
+        # Both readings are tried and the one that recovers more records wins. A tie goes to the
+        # current format, which is what the writer produces.
         #
         # A corruption can move either reading's score, in either direction - a `state`
         # appearing in loop state makes the flat reading count it as a record, and that is
@@ -358,8 +361,7 @@ class TransitionLog:
         #
         # Checked rather than versioned, because the files that need reading are the ones
         # already on disk, written before any version number existed.
-        reserved = bool(stored) and not (stored.keys() - {"devices", "pid"})
-        looks_new = reserved and _recovered(stored, {}) <= _recovered(stored.get("devices"), stored.get("pid"))
+        looks_new = _recovered(stored, {}) <= _recovered(stored.get("devices"), stored.get("pid"))
         if not looks_new:
             return {"devices": stored, "pid": {}}
         devices = stored.get("devices")
