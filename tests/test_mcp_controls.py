@@ -1210,6 +1210,16 @@ class TestReportingWhatAControlHasWorkedOut:
         result = _control_state_result(name, state_directory.settings_file)
         assert result["held_by_minimum"] == [], "a value the loop will not pin was reported as held"
 
+    @pytest.mark.parametrize("at", [float("nan"), float("inf"), True, 10**1000], ids=["nan", "inf", "bool", "huge"])
+    def test_a_device_moment_that_is_not_one_is_not_given_an_age(self, at, state_directory, bridge):
+        """`_age` is the shared reader and had its own looser rule, so it could hand back an
+        age for a moment the loader would have refused - 0.0 for a nan, the epoch's second for
+        a bool. It uses `is_moment` now, which is also the only thing that survives an integer
+        too large to convert."""
+        from toinflux.mcp_controls import _age
+
+        assert _age(at, 1_000_000.0) is None
+
     @pytest.mark.parametrize("at", [float("nan"), float("inf"), True], ids=["nan", "inf", "bool"])
     def test_a_loop_moment_that_is_not_one_is_not_given_an_age(self, at, state_directory, bridge):
         """Quieter than a crash, and worse. Fed raw to `_age`, a nan or an infinity comes back

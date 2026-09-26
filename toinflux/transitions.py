@@ -72,7 +72,7 @@ TRANSITION_DIR_NAME = "transitions"
 #: definition shorter than the minimum wherever this code decides anything at all.
 
 
-def _is_moment(value):
+def is_moment(value):
     """Whether a stored timestamp is one this module can measure an age against.
 
     **Finite, and not a bool.** `isinstance(x, (int, float))` admits both, and a hand-edited
@@ -88,7 +88,16 @@ def _is_moment(value):
     Returns:
         bool: True where it can be used as a moment
     """
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        # An arbitrarily large JSON integer - `10**1000` is a legal literal, and this file is
+        # one somebody can edit. `isfinite` and `float` both raise on it rather than answering,
+        # so the guard that exists to keep a corrupt cache recoverable would itself have been
+        # the thing that stopped the control starting.
+        return False
 
 
 def _usable_identity(value):
@@ -134,7 +143,7 @@ def _usable_entries(devices):
     """
     usable = {}
     for device, entry in devices.items():
-        if not (isinstance(device, str) and isinstance(entry, dict) and _is_moment(entry.get("at"))):
+        if not (isinstance(device, str) and isinstance(entry, dict) and is_moment(entry.get("at"))):
             continue
         identity = _usable_identity(entry.get("for"))
         if identity != entry.get("for"):
@@ -344,7 +353,7 @@ class TransitionLog:
         if not state or state.get("fingerprint") != fingerprint:
             return None
         at = state.get("at")
-        if not _is_moment(at):
+        if not is_moment(at):
             return None
         moment = self._clock() if now is None else now
         # Clamped like every other age here: a wall clock that stepped backwards must not
@@ -369,7 +378,7 @@ class TransitionLog:
             float or None: seconds since it was written, never negative, or None
         """
         at = (self._pid or {}).get("at")
-        if not _is_moment(at):
+        if not is_moment(at):
             return None
         # Clamped, matching `elapsed`: a clock that moved backwards makes a negative age,
         # which would otherwise read as state from the future.
@@ -453,7 +462,7 @@ class TransitionLog:
         """
         return bool((self.entries.get(device) or {}).get("forced"))
 
-    def frozen(self, min_transition_for, devices, now=None):
+    def frozen(self, min_transition_for, devices, now=None, identities=None):
         """Return the devices that may not change state yet.
 
         A device is free once its minimum has actually elapsed, and not a moment before.
@@ -465,13 +474,26 @@ class TransitionLog:
             min_transition_for (callable): device name -> its minimum in seconds
             devices (iterable): the control's device names
             now (float or None): epoch seconds; read from the clock when None
+            identities (dict or None): device name to what it is now, from
+                `controls.device_identity`. A device whose record was written against
+                something else is not held, because the state being protected is not its own
 
         Returns:
             frozenset: the device names that must keep the state they are in
         """
         moment = self._clock() if now is None else now
+        recorded = self.identities()
         held = set()
         for device in devices:
+            if identities is not None and recorded.get(device) != identities.get(device):
+                # **The record is not about this device any more.** A control key is a name in
+                # a document and what it points at can be changed underneath it, so a state
+                # written against the old target says nothing about the new one - not for a
+                # driven device, whose value would be pinned, and not for a switched one,
+                # whose recorded state decides which rungs `reachable_ladder` leaves standing.
+                # Asked here because this is the one place both kinds pass through; it used to
+                # be asked further down, where only driven devices were looked at.
+                continue
             elapsed = self.elapsed(device, moment)
             if elapsed is None:
                 # Never commanded, so there is nothing it is too soon after.

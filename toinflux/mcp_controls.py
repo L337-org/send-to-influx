@@ -509,7 +509,6 @@ def _control_state_result(name, settings_file=None, supervisor=None):
     declared = document.get("devices")
     declared = declared if isinstance(declared, dict) else {}
     devices = tuple(declared)
-    recorded = log.identities()
     entry["devices"] = {
         device: {
             "state": record.get("state"),
@@ -534,19 +533,26 @@ def _control_state_result(name, settings_file=None, supervisor=None):
     # is on a scale that no longer means anything - so after such an edit the next cycle will
     # move that device whatever its timer says. Reporting it as held would describe a restraint
     # that is not going to happen.
-    held = log.frozen(minimum_for, devices, now=now) if minimum_for is not None else set()
-    # The same single comparison `_hold` makes, so this cannot report a restraint the next
-    # cycle will not honour. It used to be two checks kept in step by hand, which is how they
+    # The same call the loop makes, identities and all, so this cannot report a restraint the
+    # next cycle will not honour. It used to ask the question separately, which is how the two
     # came to disagree.
+    held = (
+        log.frozen(
+            minimum_for,
+            devices,
+            now=now,
+            identities={name: device_identity(spec) for name, spec in declared.items()},
+        )
+        if minimum_for is not None
+        else set()
+    )
     driven = parameter_devices(declared)
     entry["held_by_minimum"] = sorted(
+        # And, for a driven device, a value it could actually be pinned to - the other half of
+        # what `_hold` requires of it.
         device
         for device in held
-        if recorded.get(device) == device_identity(declared.get(device))
-        # And, for a driven device, a value it could actually be pinned to. `_hold` requires
-        # both; checking only the identity advertised a restraint the next cycle would not
-        # honour, which is the same two-places-one-question fault the identity itself had.
-        and (device not in driven or holdable_value(record_of(log, device)))
+        if device not in driven or holdable_value(record_of(log, device))
     )
     return entry
 
@@ -568,13 +574,15 @@ def _age(at, now):
     """Return how long ago something was recorded, or None where it was not.
 
     Args:
-        at (float or None): epoch seconds it happened
+        at (float or None): epoch seconds it happened, or anything a hand-edited cache held
         now (float): epoch seconds now
 
     Returns:
         float or None: seconds, never negative, or None where there is no moment
     """
-    if not isinstance(at, (int, float)):
+    from toinflux.transitions import is_moment
+
+    if not is_moment(at):
         return None
     return round(max(0.0, now - float(at)), 1)
 

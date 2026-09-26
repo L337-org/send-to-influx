@@ -883,6 +883,41 @@ class TestReadingTheFile:
         assert log.loop_state("abc", 3600.0) is None
         assert log.loop_age() is None
 
+    def test_a_switched_device_repointed_elsewhere_is_not_frozen(self, state_directory):
+        """The identity used to be checked only where driven devices are pinned, so a switched
+        one stayed in `frozen` and `reachable_ladder` kept the rungs that leave it where the
+        *old* target was - pinning the new switch to a state it never received until the
+        minimum expired. Asked here now, where both kinds pass through.
+        """
+        from toinflux.controls import device_identity
+
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        was = {"source": "hue", "device": "old-plug"}
+        now_points_at = {"source": "hue", "device": "new-plug"}
+        log.record({"heater": True}, identities={"heater": device_identity(was)})
+        minimum = lambda device: 600.0  # noqa: E731 - one line, used twice below
+
+        assert log.frozen(minimum, ("heater",)) == frozenset({"heater"}), "the clock alone should hold it"
+        assert (
+            log.frozen(minimum, ("heater",), identities={"heater": device_identity(now_points_at)}) == frozenset()
+        ), "a state recorded against another switch held the new one"
+        assert log.frozen(minimum, ("heater",), identities={"heater": device_identity(was)}) == frozenset(
+            {"heater"}
+        ), "an unchanged device stopped being held"
+
+    @pytest.mark.parametrize("at", [10**1000, -(10**1000)], ids=["huge", "hugely-negative"])
+    def test_an_integer_too_large_to_convert_is_refused_not_raised(self, at, state_directory):
+        """`math.isfinite` and `float` both raise OverflowError on an arbitrarily large JSON
+        integer, and `10**1000` is a legal literal in a file somebody can edit. The guard that
+        exists to keep a corrupt cache recoverable would have been the thing that stopped the
+        control starting."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write('{"devices": {"lamp": {"state": 40, "at": %d}}, "pid": {}}' % at)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states() == {}, "an unconvertible moment was kept"
+
     def test_both_halves_come_from_one_read(self, state_directory, monkeypatch):
         """They were read through separate opens, and `_read_loop` claimed in its own docstring
         that they could not disagree about which version of the file they came from. The

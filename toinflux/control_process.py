@@ -533,7 +533,16 @@ class ControlProcess:
         # Asked before the step, so the plan is built from what this window may actually do
         # rather than built and then contradicted. A device still inside its minimum keeps
         # the state it is in, and the demand is met as closely as the rungs that remain allow.
-        frozen = self.transitions.frozen(self.controller.min_transition_for, tuple(self.document.get("devices") or {}))
+        declared_now = self.document.get("devices") or {}
+        frozen = self.transitions.frozen(
+            self.controller.min_transition_for,
+            tuple(declared_now),
+            # Both kinds of device are filtered here rather than only the driven ones further
+            # down: a switched device's recorded state decides which rungs `reachable_ladder`
+            # leaves standing, so a record written against another switch pins the new one to
+            # a state it never had.
+            identities={name: device_identity(spec) for name, spec in declared_now.items()},
+        )
         # The two kinds of device are held still by different means, because "do not change"
         # means different things to them. A switched one is kept where it is by planning the
         # window only from the rungs that leave it there. A driven one has no rung to be kept
@@ -631,16 +640,11 @@ class ControlProcess:
         #
         # A log written before the parameter was kept reads as None and so matches nothing
         # driven, which costs that device its minimum for one command and then corrects itself.
-        declared = self.document.get("devices") or {}
-        recorded = self.transitions.identities()
-        pinned = {
-            device: known[device]
-            for device in held
-            # One comparison: is this value still about the thing it was recorded against?
-            # A changed scale, a different bulb, another bridge - all of them say no, and so
-            # will anything added to a device declaration later.
-            if recorded.get(device) == device_identity(declared.get(device)) and holdable_value(known.get(device))
-        }
+        # The identity is settled upstream, where `frozen` is decided, so that switched and
+        # driven devices are judged by the same rule. What is left to check here is the value
+        # itself: a driven device holds a number, and a boolean left over from when it was
+        # switched is a record of something that never happened.
+        pinned = {device: known[device] for device in held if holdable_value(known.get(device))}
         if not pinned:
             return plan
         return tuple(

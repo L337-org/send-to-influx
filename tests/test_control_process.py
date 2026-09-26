@@ -24,6 +24,7 @@ import requests
 
 from tests.harness import faults, invariants
 from tests.harness.installation import conservatory, record_command
+from toinflux.controls import device_identity
 from toinflux.control_process import ControlProcess, command_devices, gather, heartbeat_writer, run_control
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.rules import RuleEvaluationError, parse_rule
@@ -1189,17 +1190,19 @@ class TestAStateLeftOverFromAnOlderDocument:
         )
         control = ControlProcess("lamp", settings_file=state_directory.settings_file)
         try:
-            held = control.transitions.frozen(control.controller.min_transition_for, ("lamp",))
-            assert held == frozenset({"lamp"}), "a 600s minimum did not hold a lamp moved a moment ago"
-            control.controller.resume()
-            plan = control._hold(
-                control.controller.step({"lux": 300.0, "target": 1000}, dt=60),
-                held & set(control.controller.driven),
+            # The same call `_spend_window` makes, identities and all: the question moved
+            # there so that switched and driven devices are judged by one rule, and asking it
+            # without them is asking a question the loop no longer asks.
+            declared = control.document["devices"]
+            held = control.transitions.frozen(
+                control.controller.min_transition_for,
+                ("lamp",),
+                identities={name: device_identity(spec) for name, spec in declared.items()},
             )
         finally:
             control.guard.close()
             control.close()
-        assert {dwell.stage.states["lamp"] for dwell in plan} != {35}, "a value from another bulb was pinned"
+        assert held == frozenset(), "a state recorded against another bulb still held the new one"
 
     def test_a_value_on_the_same_parameter_is_still_pinned(self, state_directory, bridge, influx):
         """The other side: the minimum must still hold a device that has not changed shape, or
