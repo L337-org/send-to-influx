@@ -35,6 +35,42 @@ from toinflux.staging import build_ladder, cap_ladder, plan_window, reachable_la
 RESUMABLE_HOLD_SECONDS = 1800.0
 
 
+#: What a control document says that does *not* change what the loop's memory means. The
+#: fingerprint is everything else, so a key added to the format is covered without anybody
+#: remembering to add it - which is the mistake this list exists to stop repeating.
+#:
+#: `name` and `enabled` are bookkeeping. `timezone` and `active_period` say when a control
+#: acts, `enable_when` says whether, and `safe_state` says what happens when it does not -
+#: none of which changes the units or the range of an error accumulated while it was acting.
+_LOOP_IRRELEVANT_KEYS = frozenset({"name", "enabled", "timezone", "enable_when", "safe_state", "active_period"})
+
+#: The same, for keys that appear inside sections. `max_age` decides how fresh a reading must
+#: be rather than what it measures, and a transition minimum is a promise about wear rather
+#: than about scale. Both are edited in ordinary tuning, and discarding a hard-won integral for
+#: either would be the over-reaction this digest is deliberately narrow to avoid.
+_LOOP_IRRELEVANT_SETTINGS = frozenset({"max_age", "min_transition_seconds"})
+
+
+def _loop_material(document):
+    """Return the document reduced to what the loop's memory is meaningful against.
+
+    Args:
+        document (dict): the control document
+
+    Returns:
+        dict: the same document without the parts that do not bear on the memory
+    """
+
+    def pruned(value):
+        if isinstance(value, dict):
+            return {k: pruned(v) for k, v in value.items() if k not in _LOOP_IRRELEVANT_SETTINGS}
+        if isinstance(value, list):
+            return [pruned(item) for item in value]
+        return value
+
+    return {key: pruned(value) for key, value in document.items() if key not in _LOOP_IRRELEVANT_KEYS}
+
+
 class Controller:
     """The PID and ladder for one control, stepped once per cycle window.
 
@@ -58,22 +94,9 @@ class Controller:
         output = document.get("output") or {}
         self.ladder = build_ladder(output.get("stages") or [])
         self.devices = document.get("devices") or {}
-        # What each input name actually reads, kept for the fingerprint: the source, field and
-        # instance, and deliberately not `max_age`. See `fingerprint` for why the distinction
-        # matters.
-        # The adjustable values the rules read. `pid.setpoint` naming `target` is unchanged
-        # text when `target` itself moves from 1000 to 800, and the integral is the
-        # accumulated error *against* that number - so a setpoint edit, which is the single
-        # commonest change anybody makes to a control, restored a memory earned for a target
-        # that no longer exists.
-        self._settings = tuple(sorted((document.get("parameters") or {}).items(), key=lambda pair: str(pair[0])))
-        self._signals = tuple(
-            sorted(
-                (name, spec.get("source"), spec.get("field"), spec.get("instance"))
-                for name, spec in (document.get("inputs") or {}).items()
-                if isinstance(spec, dict)
-            )
-        )
+        # Kept whole for the fingerprint, which is the document less a named few rather than a
+        # list of whatever somebody remembered mattered. See `fingerprint`.
+        self._document = document
         # The same default as `ControlProcess.cycle_seconds` and `stall_seconds`, because
         # `cycle_seconds` is optional and three readers must not disagree about what an
         # omitted one means. Left as None here, a document that passed --check-config raised
@@ -222,6 +245,18 @@ class Controller:
     def fingerprint(self):
         """Return what this controller's memory is only meaningful against.
 
+        **Everything the document says, less a named few.** This used to list what mattered,
+        and that list was wrong eight times: the ladder's scale, then the cap, then the input
+        and setpoint rules, then what those inputs read, then the adjustable parameters, then
+        which actuator each device is. Each was found by somebody noticing one more thing an
+        integral is measured against, which is not a process that ends.
+
+        Inverted, the failure mode inverts with it. Forgetting to exclude something costs a
+        control its settling time after a harmless edit, which is visible and recoverable.
+        Forgetting to include something commands hardware from a memory that is no longer
+        about it, which is neither. `_LOOP_IRRELEVANT` is the whole of what is left out, and
+        each entry says why.
+
         The gains, the ladder, the window, what each device is driven by, and the cap. An
         integral is in the output's units and is bounded by the ladder's range, so the same
         number means one thing under one tuning and something else under another - and the
@@ -249,41 +284,7 @@ class Controller:
         Returns:
             str: a short digest, stable across processes and Python versions
         """
-        material = json.dumps(
-            {
-                "kp": self.pid.Kp,
-                "ki": self.pid.Ki,
-                "kd": self.pid.Kd,
-                "cycle": self.cycle_seconds,
-                "ladder": [(stage.level, sorted(stage.states.items())) for stage in self.ladder],
-                # Which signal the loop reads and what it chases: `last_input` and
-                # `last_error` are measurements of *this* input, so pointing `pid.input` at
-                # another sensor makes the whole memory describe something else - and with a
-                # derivative term it is used directly.
-                "input": self._input_rule.source,
-                "setpoint": self._setpoint_rule.source,
-                # And what those names resolve to. `pid.input` naming `inside` says nothing
-                # if `inside` is repointed at another sensor: the rule text is identical and
-                # every number the loop remembers now describes something else. The source,
-                # field and instance only - `max_age` changes how fresh a reading must be, not
-                # what it measures, and discarding a hard-won integral for it would be the
-                # over-reaction this digest is deliberately narrow to avoid.
-                "signals": self._signals,
-                "parameters": self._settings,
-                # The whole binding, not just the parameter. Two lamps take the same
-                # `brightness_pct` ladder and are different plants: swap one for the other, or
-                # the same lamp for its twin on another bridge, and an integral learned from
-                # the first commands the second from history that was never about it.
-                "actuators": sorted(
-                    (name, spec.get("source"), spec.get("instance"), spec.get("device"), spec.get("parameter"))
-                    for name, spec in self.devices.items()
-                    if isinstance(spec, dict)
-                ),
-                "max_level": self._max_level_rule.source if self._max_level_rule is not None else None,
-            },
-            sort_keys=True,
-            default=str,
-        )
+        material = json.dumps(_loop_material(self._document), sort_keys=True, default=str)
         # sha256 rather than hash(): the built-in is salted per process, so a fingerprint
         # written by one control would never match the one that read it back.
         return hashlib.sha256(material.encode()).hexdigest()[:16]

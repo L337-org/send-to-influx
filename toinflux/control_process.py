@@ -29,7 +29,7 @@ import time
 import requests
 
 from toinflux.controller import Controller
-from toinflux.controls import DEFAULT_CYCLE_SECONDS, load_control, parameter_devices, validate_control
+from toinflux.controls import DEFAULT_CYCLE_SECONDS, device_identity, load_control, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.gating import DeviceGuard, Gate, commands_for, static_full_scale
 from toinflux.general import RepeatingProblem, load_settings, render_external, render_values, source_class
@@ -188,28 +188,16 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
             log.record(
                 commanded,
                 forced=forced,
-                parameters={key: (declared.get(key) or {}).get("parameter") for key in commanded},
-                # And which actuator it went to. A control key is a name in this document;
-                # repointing it at another bulb, or the same bulb on another bridge, leaves a
-                # state the new actuator has never been given.
-                targets={key: _actuator(declared.get(key) or {}) for key in commanded},
+                # One identity rather than a field per thing that makes the value meaningful.
+                # That list grew twice under review - the scale, then the actuator - and
+                # `device_identity` is now whatever the declaration says, so it cannot grow
+                # again without being covered.
+                identities={key: device_identity(declared.get(key)) for key in commanded},
             )
 
 
 #: Keyed per control and device, because two devices out of range are two problems.
 _SCALE_PROBLEMS = RepeatingProblem()
-
-
-def _actuator(spec):
-    """Return what a device declaration points at, as a comparable identity.
-
-    Args:
-        spec (dict): the device's declaration
-
-    Returns:
-        tuple: ``(source, instance, device)``
-    """
-    return (spec.get("source"), spec.get("instance"), spec.get("device"))
 
 
 def _within_scale(control, device, parameter, state):
@@ -638,17 +626,14 @@ class ControlProcess:
         # A log written before the parameter was kept reads as None and so matches nothing
         # driven, which costs that device its minimum for one command and then corrects itself.
         declared = self.document.get("devices") or {}
-        was, sent_to = self.transitions.parameters(), self.transitions.targets()
-        now_driven = parameter_devices(declared)
+        recorded = self.transitions.identities()
         pinned = {
             device: known[device]
             for device in held
-            if was.get(device) == now_driven.get(device)
-            # And the same actuator. A key repointed at another bulb has a state that bulb
-            # has never been given, so pinning it would command a value out of nowhere - and
-            # under `leave_unchanged` it would suppress the new actuator's first command
-            # entirely.
-            and sent_to.get(device) == _actuator(declared.get(device) or {})
+            # One comparison: is this value still about the thing it was recorded against?
+            # A changed scale, a different bulb, another bridge - all of them say no, and so
+            # will anything added to a device declaration later.
+            if recorded.get(device) == device_identity(declared.get(device))
             and isinstance(known.get(device), (int, float))
             and not isinstance(known[device], bool)
         }

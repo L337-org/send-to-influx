@@ -23,7 +23,7 @@ import pytest
 import requests
 
 from tests.harness import faults, invariants
-from tests.harness.installation import conservatory
+from tests.harness.installation import conservatory, record_command
 from toinflux.control_process import ControlProcess, command_devices, gather, heartbeat_writer, run_control
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.rules import RuleEvaluationError, parse_rule
@@ -1154,8 +1154,10 @@ class TestAStateLeftOverFromAnOlderDocument:
         bridge.lights["9"] = bulb("office-lamp")
         self._store_driven(state_directory, "brightness_pct", 100)
         # What the previous, colour-temperature, version of this document left behind.
-        TransitionLog("lamp", state_directory.settings_file).record(
-            {"lamp": 2700}, forced=False, parameters={"lamp": "color_temp_k"}
+        record_command(
+            TransitionLog("lamp", state_directory.settings_file),
+            {"devices": {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "color_temp_k"}}},
+            {"lamp": 2700},
         )
 
         control = ControlProcess("lamp", settings_file=state_directory.settings_file)
@@ -1180,11 +1182,10 @@ class TestAStateLeftOverFromAnOlderDocument:
         bridge.lights["9"] = bulb("office-lamp")
         self._store_driven(state_directory, "brightness_pct", 100)
         # The same key, the same scale, a different bulb.
-        TransitionLog("lamp", state_directory.settings_file).record(
+        record_command(
+            TransitionLog("lamp", state_directory.settings_file),
+            {"devices": {"lamp": {"source": "hue", "device": "a-different-lamp", "parameter": "brightness_pct"}}},
             {"lamp": 35},
-            forced=False,
-            parameters={"lamp": "brightness_pct"},
-            targets={"lamp": ("hue", None, "a-different-lamp")},
         )
         control = ControlProcess("lamp", settings_file=state_directory.settings_file)
         try:
@@ -1207,14 +1208,9 @@ class TestAStateLeftOverFromAnOlderDocument:
         from toinflux.transitions import TransitionLog
 
         bridge.lights["9"] = bulb("office-lamp")
-        self._store_driven(state_directory, "brightness_pct", 100)
+        document = self._store_driven(state_directory, "brightness_pct", 100)
         log = TransitionLog("lamp", state_directory.settings_file)
-        log.record(
-            {"lamp": 35},
-            forced=False,
-            parameters={"lamp": "brightness_pct"},
-            targets={"lamp": ("hue", None, "office-lamp")},
-        )
+        record_command(log, document, {"lamp": 35})
 
         control = ControlProcess("lamp", settings_file=state_directory.settings_file)
         try:

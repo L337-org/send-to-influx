@@ -775,6 +775,36 @@ def _check_stages(document, devices, errors) -> None:
         _check_one_stage(f"output.stages[{index}]", stage, device_names, driven, errors)
 
 
+#: What a device declaration says that does *not* change the meaning of a state recorded
+#: against it. A transition minimum is a promise about how often the device may move, not
+#: about what the recorded value means, so editing it must not discard the record and with it
+#: the very timing the setting is about.
+_DEVICE_IRRELEVANT = frozenset({"min_transition_seconds"})
+
+
+def device_identity(spec):
+    """Return what a recorded state for this device is only meaningful against.
+
+    **Everything the declaration says, less a named few**, for the reason the loop's own
+    fingerprint is built that way: this started as "the parameter", became "the parameter and
+    the actuator" a review later, and there is no reason to think that list was finished.
+
+    A recorded state is a number or a boolean, and it means something only alongside what it
+    was sent to and how that thing is driven - 40 is a percentage or a colour temperature, and
+    it belongs to one bulb on one bridge rather than to the name in the document that happened
+    to point there.
+
+    Args:
+        spec (dict): the device's declaration, or anything at all
+
+    Returns:
+        tuple: a comparable identity, empty where the declaration is unusable
+    """
+    if not isinstance(spec, dict):
+        return ()
+    return tuple(sorted((key, str(value)) for key, value in spec.items() if key not in _DEVICE_IRRELEVANT))
+
+
 def parameter_devices(devices):
     """Return the devices driven by a continuous parameter rather than switched.
 

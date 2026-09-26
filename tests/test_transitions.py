@@ -20,6 +20,7 @@ import pytest
 from tests.harness.bridge import bulb
 from toinflux.exceptions import ConfigError
 from toinflux.staging import build_ladder, plan_window, reachable_ladder
+from tests.harness.installation import record_command
 from toinflux.transitions import TransitionLog, forget_control, transition_path
 
 
@@ -786,21 +787,31 @@ class TestReadingTheFile:
         the same number kept the old parameter for ever - and `_hold` then refused the record
         as being on a different scale every time, so that device never got its minimum back."""
         log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
-        log.record({"lamp": 2700}, parameters={"lamp": "color_temp_k"})
-        log.record({"lamp": 2700}, parameters={"lamp": "brightness_pct"})
-        assert log.parameters() == {"lamp": "brightness_pct"}, "the stale scale outlived the change"
+        record_command(
+            log, {"devices": {"lamp": {"source": "hue", "device": "lamp", "parameter": "color_temp_k"}}}, {"lamp": 2700}
+        )
+        record_command(
+            log,
+            {"devices": {"lamp": {"source": "hue", "device": "lamp", "parameter": "brightness_pct"}}},
+            {"lamp": 2700},
+        )
+        assert dict(log.identities()["lamp"]).get("parameter") == "brightness_pct", "the stale scale outlived it"
 
     def test_the_same_value_on_the_same_parameter_is_still_not_a_move(self, state_directory):
         """Or the minimum would restart every cycle and mean nothing at all."""
         moment = [1000.0]
         log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: moment[0])
-        log.record({"lamp": 40}, parameters={"lamp": "brightness_pct"})
+        record_command(
+            log, {"devices": {"lamp": {"source": "hue", "device": "lamp", "parameter": "brightness_pct"}}}, {"lamp": 40}
+        )
         moment[0] += 60
-        log.record({"lamp": 40}, parameters={"lamp": "brightness_pct"})
+        record_command(
+            log, {"devices": {"lamp": {"source": "hue", "device": "lamp", "parameter": "brightness_pct"}}}, {"lamp": 40}
+        )
         assert log.elapsed("lamp") == 60, "commanding an unchanged value restarted its clock"
 
     @pytest.mark.parametrize("bad", [1, "hue", {"a": 1}, True], ids=["int", "str", "dict", "bool"])
-    def test_a_corrupt_actuator_is_dropped_without_taking_the_entry_with_it(self, bad, state_directory):
+    def test_a_corrupt_identity_is_dropped_without_taking_the_entry_with_it(self, bad, state_directory):
         """This file is a cache, so an unreadable one costs a transition sooner than asked -
         never a control that will not run. A corrupt `target` came back from `targets()` as a
         TypeError and took `get_control_state` and the next command with it.
@@ -814,9 +825,9 @@ class TestReadingTheFile:
         path = transition_path("conservatory", state_directory.settings_file)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"devices": {"lamp": {"state": 40, "at": 1000.0, "target": bad}}, "pid": {}}, handle)
+            json.dump({"devices": {"lamp": {"state": 40, "at": 1000.0, "for": bad}}, "pid": {}}, handle)
         log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1060.0)
-        assert log.targets() == {"lamp": None}
+        assert log.identities() == {"lamp": None}
         assert log.elapsed("lamp") == 60.0, "the moment was thrown away with the actuator"
         assert log.states() == {"lamp": 40}
 
@@ -882,13 +893,9 @@ class TestAHeldDimmerKeepsTheValueItHas:
     def test_it_is_commanded_its_last_value_rather_than_the_new_one(self, state_directory, bridge):
         control = self._control(state_directory)
         try:
-            # With the parameter, as `command_devices` records it: the state and the scale it
-            # is on are only meaningful together.
-            control.transitions.record(
-                {"lamp": 35},
-                parameters={"lamp": "brightness_pct"},
-                targets={"lamp": ("hue", None, "far")},
-            )
+            # Through the harness helper, which builds the identity from the document the
+            # way `command_devices` does.
+            record_command(control.transitions, control.document, {"lamp": 35})
             held = control.transitions.frozen(control.controller.min_transition_for, ("lamp",))
             assert held == frozenset({"lamp"}), "a 600s minimum did not hold a lamp moved a moment ago"
             plan = control._hold(
@@ -1189,6 +1196,32 @@ class TestWhatTheControllerKeepsAndPutsBack:
         assert built(device="Other") != base, "the actuator changed and the loop was kept"
         assert built(instance="bridge2") != base, "the bridge changed and the loop was kept"
         assert built(source="mqtt") != base, "the source changed and the loop was kept"
+
+    def test_a_field_nobody_foresaw_discards_the_loop_by_default(self, state_directory):
+        """The point of the whole inversion, and the only assertion here that could not have
+        been written before it.
+
+        This digest listed what mattered and the list was wrong eight times over: the ladder's
+        scale, the cap, the input and setpoint rules, what those inputs read, the adjustable
+        parameters, the actuator. It is now the document less a named few, so a key added to
+        the format is covered without anybody remembering to add it.
+        """
+        from toinflux.controller import Controller
+
+        document = {
+            "parameters": {"target": 20.0},
+            "inputs": {"inside": {"source": "hue", "field": "t"}},
+            "pid": {"input": "inside", "setpoint": "target", "kp": 10.0, "ki": 1.0, "kd": 0.0},
+            "output": {
+                "cycle_seconds": 60,
+                "min_transition_seconds": 1,
+                "stages": [{"level": 0, "set": {"a": False}}, {"level": 100, "set": {"a": True}}],
+            },
+            "devices": {"a": {"source": "hue", "device": "A"}},
+        }
+        before = Controller(document).fingerprint
+        document["output"]["a_knob_invented_after_this_test"] = 7
+        assert Controller(document).fingerprint != before, "an unknown setting was silently ignored"
 
     def test_and_not_the_things_it_does_not(self, state_directory):
         """Discarding a hard-won integral because a gate rule changed would throw away the

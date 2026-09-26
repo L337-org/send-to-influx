@@ -57,7 +57,7 @@ from toinflux.controls import (
     BUILT_IN_SAFE_STATES,
     REQUIRED_CONTROL_KEYS,
     control_dir,
-    parameter_devices,
+    device_identity,
     control_writes_enabled,
     controls_enabled,
     load_control,
@@ -504,16 +504,18 @@ def _control_state_result(name, settings_file=None, supervisor=None):
     declared = document.get("devices")
     declared = declared if isinstance(declared, dict) else {}
     devices = tuple(declared)
-    driven = parameter_devices(declared)
-    recorded = log.parameters()
+    recorded = log.identities()
     entry["devices"] = {
         device: {
             "state": record.get("state"),
             # **The scale the state is on, because the number means nothing without it.** A
             # driven device's 40 is forty percent or forty kelvin depending on this, and a
-            # client reading the state has no other way to tell. None for a switched device,
-            # and None for one recorded before this was kept.
-            "parameter": recorded.get(device),
+            # client reading the state has no other way to tell.
+            #
+            # The scale it was *recorded* against, not the document's current one: after an
+            # edit those differ, and it is the recorded value a client is trying to read.
+            # Taken from the identity, which is the declaration as it stood at the time.
+            "parameter": dict(record.get("for") or ()).get("parameter"),
             "changed_at": record.get("at"),
             "age_seconds": _age(record.get("at"), now),
             # A safe state overrides min_transition_seconds in both directions, so a device
@@ -528,28 +530,13 @@ def _control_state_result(name, settings_file=None, supervisor=None):
     # move that device whatever its timer says. Reporting it as held would describe a restraint
     # that is not going to happen.
     held = log.frozen(minimum_for, devices, now=now) if minimum_for is not None else set()
-    sent_to = log.targets()
+    # The same single comparison `_hold` makes, so this cannot report a restraint the next
+    # cycle will not honour. It used to be two checks kept in step by hand, which is how they
+    # came to disagree.
     entry["held_by_minimum"] = sorted(
-        device
-        for device in held
-        if (device not in driven or recorded.get(device) == driven.get(device))
-        # And the same actuator the state was sent to, matching `_hold`: a key repointed at
-        # another bulb will be commanded next cycle whatever its timer says.
-        and sent_to.get(device) == _actuator_of(declared.get(device) or {})
+        device for device in held if recorded.get(device) == device_identity(declared.get(device))
     )
     return entry
-
-
-def _actuator_of(spec):
-    """Return what a device declaration points at, as `command_devices` records it.
-
-    Args:
-        spec (dict): the device's declaration
-
-    Returns:
-        tuple: ``(source, instance, device)``
-    """
-    return (spec.get("source"), spec.get("instance"), spec.get("device"))
 
 
 def _age(at, now):

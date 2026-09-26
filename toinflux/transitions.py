@@ -87,19 +87,24 @@ def _usable_entries(devices):
     for device, entry in devices.items():
         if not (isinstance(device, str) and isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))):
             continue
-        target = entry.get("target")
-        if target is not None and not isinstance(target, (list, tuple)):
-            # **Normalised, not discarded.** A corrupt `target` came back from `targets()` as
-            # a TypeError and took `get_control_state` and the next command with it, which is
-            # the opposite of what this file is for - it is a cache, and an unreadable one
-            # costs a transition sooner than asked rather than a control that will not run.
+        identity = entry.get("for")
+        if identity is not None and not isinstance(identity, (list, tuple)):
+            # **Normalised, not discarded.** A corrupt identity came back from `identities()`
+            # as a TypeError and took `get_control_state` and the next command with it, which
+            # is the opposite of what this file is for: it is a cache, and an unreadable one
+            # should cost a transition sooner than asked, never a control that will not run.
             #
             # The entry keeps its moment, so the device is still held for its minimum, and
-            # loses only the actuator it cannot prove: that makes `_hold` decline to pin it,
-            # so the device gets a fresh command. Dropping the whole entry would have thrown
-            # away the timestamp too, and switched a device sooner than its document promised
-            # - the one direction this module says to err away from.
-            entry = {**entry, "target": None}
+            # loses only the identity it cannot prove - which makes `_hold` decline to reuse
+            # the value, so the device gets a fresh command. Dropping the whole entry would
+            # have thrown the moment away too and switched a device sooner than its document
+            # promised, which is the one direction this module says to err away from.
+            entry = {**entry, "for": None}
+        elif isinstance(identity, list):
+            # JSON has no tuples, so what was written as one reads back as a list. Compared
+            # against a freshly built identity, which is a tuple, so it is restored here
+            # rather than at each of the three places that compare it.
+            entry = {**entry, "for": tuple(tuple(part) if isinstance(part, list) else part for part in identity)}
         usable[device] = entry
     return usable
 
@@ -351,33 +356,16 @@ class TransitionLog:
         """
         return {device: entry.get("state") for device, entry in self.entries.items()}
 
-    def parameters(self):
-        """Return the parameter each device was driven by when it was last commanded.
+    def identities(self):
+        """Return what each device's recorded state is meaningful against.
 
-        None for a device that was switched, and None for one recorded before this was kept -
-        which reads the same way and is handled the same way, because "not the parameter it is
-        driven by now" is the only question anybody asks of it.
-
-        Returns:
-            dict: device name to its parameter, or None
-        """
-        return {device: entry.get("parameter") for device, entry in self.entries.items()}
-
-    def targets(self):
-        """Return the actuator each device's state was last sent to.
-
-        A control key is a name in a document and the thing it points at can be changed
-        underneath it. The recorded state belongs to whatever was there at the time, so a key
-        repointed at another bulb - or the same bulb on another bridge - has a state its new
-        actuator has never been given.
+        None where nothing was recorded, which reads the same way as "not what this device is
+        now" and is handled the same way - the state is not reused.
 
         Returns:
-            dict: device name to its ``(source, instance, device)``, or None where none was
-            recorded
+            dict: device name to its identity, or None
         """
-        return {
-            device: tuple(entry["target"]) if entry.get("target") else None for device, entry in self.entries.items()
-        }
+        return {device: entry.get("for") for device, entry in self.entries.items()}
 
     def elapsed(self, device, now=None):
         """Return how long since a device last changed, or None where it never has.
@@ -450,7 +438,7 @@ class TransitionLog:
                 held.add(device)
         return frozenset(held)
 
-    def record(self, commands, now=None, forced=False, parameters=None, targets=None) -> None:
+    def record(self, commands, now=None, forced=False, identities=None) -> None:
         """Note the devices whose state this command actually changes.
 
         Only the ones that change: commanding a heater off when it is already off is not a
@@ -463,16 +451,12 @@ class TransitionLog:
             now (float or None): epoch seconds; read from the clock when None
             forced (bool): True where this is a safe state rather than a control decision,
                 which the minimum governs in neither direction - see :meth:`released`
-            parameters (dict or None): device name to the parameter it is driven by, or None
-                for one that is switched. Kept with the state because a number means nothing
-                without the scale it is on - 2700 is a colour temperature, 40 is a percentage
-            targets (dict or None): device name to the actuator it was sent to, as a
-                ``(source, instance, device)`` tuple. Kept for the same reason as the
-                parameter: a control key is a name in a document, and the thing it points at
-                can be changed underneath it
+            identities (dict or None): device name to what its state is meaningful against,
+                from `controls.device_identity`. Kept with the state because a number means
+                nothing on its own: 40 is a percentage or a colour temperature, and it belongs
+                to one bulb on one bridge rather than to the name that happened to point there
         """
-        parameters = parameters or {}
-        targets = targets or {}
+        identities = identities or {}
         moment = float(self._clock() if now is None else now)
         changed = False
         for device, state in commands.items():
@@ -481,12 +465,7 @@ class TransitionLog:
             # 5% is a move. Under the old comparison both were true and nothing was timed,
             # which would have made `min_transition_seconds` mean nothing at all for the one
             # kind of device whose whole job is to change by degrees.
-            if (
-                entry is not None
-                and entry.get("state") == state
-                and entry.get("parameter") == parameters.get(device)
-                and tuple(entry.get("target") or ()) == tuple(targets.get(device) or ())
-            ):
+            if entry is not None and entry.get("state") == state and entry.get("for") == identities.get(device):
                 # No move, so nothing to time. The mark still has to go when an ordinary
                 # command confirms a state a safe state put the device in, or the exemption
                 # would outlive the safe state that earned it.
@@ -494,12 +473,7 @@ class TransitionLog:
                     del entry["forced"]
                     changed = True
                 continue
-            self.entries[device] = {
-                "state": state,
-                "at": moment,
-                "parameter": parameters.get(device),
-                "target": list(targets.get(device) or ()) or None,
-            }
+            self.entries[device] = {"state": state, "at": moment, "for": identities.get(device)}
             if forced:
                 self.entries[device]["forced"] = True
             changed = True

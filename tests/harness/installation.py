@@ -53,6 +53,35 @@ CONSERVATORY = {
 }
 
 
+def record_command(log, document, commands, forced=False):
+    """Record a command in a transition log exactly as the control process would.
+
+    **One place, because this has broken three times.** What a record carries alongside the
+    state has grown twice under review - the scale, then the actuator, now one identity - and
+    every test that called `TransitionLog.record` directly broke on each change. They were
+    pinned to a signature rather than to behaviour. Built from the document here, the way
+    `command_devices` builds it, so the next change touches that function and this one.
+
+    Args:
+        log (TransitionLog): the log to write to
+        document (dict): the control document the devices are declared in
+        commands (dict): device name to the state it has just been set to
+        forced (bool): True where this is a safe state rather than a control decision
+
+    Returns:
+        TransitionLog: the same log, so a caller can chain
+    """
+    from toinflux.controls import device_identity
+
+    declared = document.get("devices") or {}
+    log.record(
+        commands,
+        forced=forced,
+        identities={key: device_identity(declared.get(key)) for key in commands},
+    )
+    return log
+
+
 def conservatory(**overrides):
     """Return a copy of the example control, with the top-level keys overridden.
 

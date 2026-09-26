@@ -17,7 +17,8 @@ import pytest
 import yaml
 from mcp.server.mcpserver import MCPServer
 
-from tests.harness.installation import conservatory
+from tests.harness.installation import conservatory, record_command
+from toinflux.controls import load_control
 from toinflux.exceptions import ConfigError
 from toinflux.exceptions import ToolParamError
 from toinflux.mcp_controls import (
@@ -1138,13 +1139,9 @@ class TestReportingWhatAControlHasWorkedOut:
         from toinflux.transitions import TransitionLog
 
         log = TransitionLog(name, state_directory.settings_file)
-        # With the parameter, as `command_devices` records it: a value whose scale no longer
-        # matches the document is not one the loop will hold, so it is not reported as held.
-        log.record(
-            {"lamp": 55},
-            parameters={"lamp": "brightness_pct"},
-            targets={"lamp": ("hue", None, "office-lamp")},
-        )
+        # Through the harness helper, which builds the identity from the document exactly as
+        # `command_devices` does.
+        record_command(log, load_control(name, state_directory.settings_file), {"lamp": 55})
         assert _control_state_result(name, state_directory.settings_file)["held_by_minimum"] == ["lamp"]
 
     def test_a_device_recorded_on_another_scale_is_not_reported_as_held(self, state_directory, bridge):
@@ -1155,7 +1152,11 @@ class TestReportingWhatAControlHasWorkedOut:
         from toinflux.transitions import TransitionLog
 
         log = TransitionLog(name, state_directory.settings_file)
-        log.record({"lamp": 2700}, parameters={"lamp": "color_temp_k"})
+        record_command(
+            log,
+            {"devices": {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "color_temp_k"}}},
+            {"lamp": 2700},
+        )
         result = _control_state_result(name, state_directory.settings_file)
         assert result["held_by_minimum"] == []
         assert result["devices"]["lamp"]["parameter"] == "color_temp_k", "the scale was not reported"
@@ -1166,7 +1167,11 @@ class TestReportingWhatAControlHasWorkedOut:
         name = self._ran(state_directory, minimum=3600)
         from toinflux.transitions import TransitionLog
 
-        TransitionLog(name, state_directory.settings_file).record({"lamp": 55}, parameters={"lamp": "brightness_pct"})
+        record_command(
+            TransitionLog(name, state_directory.settings_file),
+            load_control(name, state_directory.settings_file),
+            {"lamp": 55},
+        )
         lamp = _control_state_result(name, state_directory.settings_file)["devices"]["lamp"]
         assert lamp == {**lamp, "state": 55, "parameter": "brightness_pct"}
 
