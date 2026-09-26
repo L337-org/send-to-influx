@@ -1259,6 +1259,51 @@ class TestReadingTheFile:
         assert log.identities() == {"lamp": None}, "a pair that is not two strings was kept"
         assert log.elapsed("lamp", 2000.0) == 1000.0, "the entry lost its moment with its identity"
 
+    def test_a_record_shaped_corruption_cannot_outvote_a_real_device(self, state_directory):
+        """A corrupted field could manufacture something that looked like a record and win.
+
+        Scoring compared what two readings would recover, so a field corrupted into a mapping
+        that happened to carry a moment counted as a device - and one manufactured record was
+        enough to tie, or to win, and discard the reading holding the real one.  Nothing is
+        compared now: each key is read for what it is, so a corruption costs its own entry and
+        decides nothing about the entries either side of it.
+        """
+        log = self._stored(
+            state_directory,
+            {"heater": {"state": True, "at": 1000.0}, "devices": {"state": True, "at": {"state": None, "at": 1.0}}},
+        )
+        assert log.states().get("heater") is True, "a manufactured record outvoted a real device"
+
+    def test_and_the_same_where_the_manufactured_record_is_complete(self, state_directory):
+        """The mirror, where the corruption carries a state as well, so requiring both halves of
+        a record does not tell it from the real thing either."""
+        log = self._stored(
+            state_directory,
+            {"devices": {"state": True, "at": {"at": 1000.0, "state": True}}, "pid": {"state": True, "at": 1000.0}},
+        )
+        assert log.states().get("pid") is True, "a good device was read as the loop's memory"
+
+    def test_a_flat_record_that_lost_only_its_state_keeps_its_minimum(self, state_directory):
+        """Its moment is what the minimum is measured from, and that is still there.
+
+        Requiring a state before a record would count meant an entry that had lost only its
+        state stopped counting at all, and a file of nothing else was read as the empty current
+        shape - so the device was dropped and could move immediately.  `_usable_entries` asks
+        only for the moment, and what the reader keeps should agree with what it extracts.
+        """
+        log = self._stored(state_directory, {"heater": {"at": 1000.0}})
+        assert log.elapsed("heater", 2000.0) == 1000.0, "a record with a moment lost its minimum"
+
+    def test_a_stray_state_beside_an_integral_is_still_the_loop(self, state_directory):
+        """A fingerprint or an integral is something only the loop writes, so a `state` arriving
+        beside them must not turn the loop's memory into a device and lose the integral."""
+        log = self._stored(
+            state_directory,
+            {"devices": {}, "pid": {"state": 1, "integral": 5.0, "fingerprint": "fp", "at": 1000.0}},
+        )
+        assert log.loop_state("fp", 10_000) is not None, "the loop was read as a device"
+        assert "pid" not in log.states(), "the loop's memory came back as a device"
+
     def test_a_file_neither_reading_can_salvage_is_read_as_the_current_shape(self, state_directory):
         """Where both readings recover nothing the file is genuinely ambiguous, and the tie goes
         to the shape the writer actually produces - an empty current-format file is ordinary and

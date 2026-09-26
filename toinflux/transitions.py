@@ -131,49 +131,33 @@ def _usable_identity(value):
     return tuple(pairs)
 
 
-def _records_in(mapping):
-    """Count the values of a mapping that are a device's record rather than anything else.
+def _looks_like_a_record(value):
+    """Say whether a value is one device's own record.
 
     Args:
-        mapping (object): a candidate device section, or a candidate record
+        value (object): a value found under one of the file's keys
 
     Returns:
-        int: how many of its values carry both halves of a record
+        bool: True where it carries both halves of a record
     """
-    # **A state as well as a moment.** Counting anything with a moment made a section header and
-    # loop state score as devices, and a reading is only worth comparing by what it would really
-    # recover: a phantom named `pid` counted the same as a heater, which cancelled out the point
-    # the loop earns and left the whole decision resting on one field again. Both halves are
-    # what a record is, and neither a section nor loop state has the pair.
-    if not isinstance(mapping, dict):
-        return 0
-    return sum(
-        1
-        for entry in mapping.values()
-        if isinstance(entry, dict) and usable_number(entry.get("at")) and "state" in entry
-    )
+    # Both halves, because this is only ever asked of the two reserved names, where the question
+    # is whether a flat log meant a device by one of them. A section has no moment of its own and
+    # loop state has no state, so requiring the pair is what tells those two from a record - and
+    # asking for the moment alone turned a section holding one corrupt entry, and a loop that had
+    # lost its fingerprint, into devices that were never declared.
+    return isinstance(value, dict) and usable_number(value.get("at")) and "state" in value
 
 
-def _recovered(devices, loop):
-    """Count what a way of reading the file would actually salvage from it.
+def _holds_records(value):
+    """Say whether a value is a section of records rather than a record itself.
 
     Args:
-        devices (object): whatever that reading treats as the device section
-        loop (object): whatever that reading treats as the loop's memory
+        value (object): the value found under the `devices` key
 
     Returns:
-        int: device records found, plus one where the loop's memory is usable too
+        bool: True where at least one of its values is a record
     """
-    found = _records_in(devices)
-    # The fingerprint is what separates loop state from a device's record, both of which are
-    # flat mappings carrying a moment. It is read to score a reading rather than to choose one,
-    # and a loop that has lost it scores a point lower - so with an empty device section as well
-    # the file tips to being read flat. Accepted: `loop_state` refuses a memory with no
-    # fingerprint anyway, so nothing usable goes, and a truncated write cannot reach it because
-    # `record_loop` writes the fingerprint and the moment in the same statement.
-    if isinstance(loop, dict) and usable_number(loop.get("at")) and "fingerprint" in loop:
-        found += 1
-    return found
+    return isinstance(value, dict) and any(_looks_like_a_record(entry) for entry in value.values())
 
 
 def _usable_entries(devices):
@@ -334,42 +318,57 @@ class TransitionLog:
         """
         if not isinstance(stored, dict):
             return {"devices": {}, "pid": {}}
-        # **Read it both ways and keep the reading that saves more.** Four attempts before this
-        # each nominated one field as the discriminator - every value under `devices` being a
-        # mapping, then that key holding a moment, then a `state` that was or was not a mapping -
-        # and every one of them was defeated by corrupting the single field it asked about, in
-        # one direction or the other. The fault was never the field chosen; it was choosing one
-        # at all, in a file whose whole premise is that any part of it may be unreadable.
+        # **Nothing chooses between two readings any more, because that choice was the defect.**
+        # Six versions tried to decide which shape the whole file was - by whether every value
+        # under `devices` was a mapping, by whether a key held a moment, by a `state` that was or
+        # was not a mapping, by a third key at the top, by scoring what each reading would
+        # recover. Every one of them could be flipped by corrupting a single field, because every
+        # one of them had to look inside a value to decide, and a corrupted field can make a
+        # value look like something it is not. The loser of that choice was then discarded whole,
+        # so one bad field cost a file its devices.
         #
-        # So nothing is asked about the contents, and nothing is asked about the key names
-        # either. There was a rule here that a third top-level key proved the file flat, on the
-        # grounds that the writer emits only these two - true, but it made one stray key enough
-        # to destroy a whole file, because the reading it forced then recovered almost nothing.
-        # Scoring already answers that case and every case the rule was there for: a flat log's
-        # keys are device names holding records, which the flat reading counts and the other
-        # cannot, whatever those names happen to be.
+        # There is no choice left to get wrong. Each key is read for what it is, on its own, and
+        # nothing is discarded for the sake of a decision about something else. A key that is
+        # neither of the two reserved names is a device, because only the writer produces these
+        # files and it never writes a third. `pid` is the loop's memory where it carries a
+        # fingerprint, which is what tells loop state from a record and which `record_loop`
+        # always writes; failing that it is a device of that name, which is what a flat log from
+        # before the sections existed would have meant by it. `devices` is a section where it
+        # holds a record, and a device of that name where it is one.
         #
-        # Both readings are tried and the one that recovers more records wins. A tie goes to the
-        # current format, which is what the writer produces.
-        #
-        # A corruption can move either reading's score, in either direction - a `state`
-        # appearing in loop state makes the flat reading count it as a record, and that is
-        # exactly how the sixth fault here worked. What it cannot do is decide the answer by
-        # itself, because both readings are counted the same way and the loser has to be beaten
-        # rather than merely doubted. The rule errs towards keeping data: where the two agree
-        # the file is read the way the writer wrote it.
-        #
-        # Checked rather than versioned, because the files that need reading are the ones
-        # already on disk, written before any version number existed.
-        looks_new = _recovered(stored, {}) <= _recovered(stored.get("devices"), stored.get("pid"))
-        if not looks_new:
-            return {"devices": stored, "pid": {}}
-        devices = stored.get("devices")
-        loop = stored.get("pid")
-        return {
-            "devices": devices if isinstance(devices, dict) else {},
-            "pid": loop if isinstance(loop, dict) else {},
-        }
+        # A corrupted field can still cost its own entry, and can still leave a device named
+        # after whatever the corruption looked like. What it can no longer do is decide anything
+        # about the entries either side of it.
+        devices = {}
+        loop = {}
+        for key, value in stored.items():
+            if key in ("devices", "pid"):
+                if key == "pid" and isinstance(value, dict) and ("fingerprint" in value or "integral" in value):
+                    # Asked before anything else about this key: a fingerprint or an integral is
+                    # something only the loop writes, and a stray `state` arriving beside them -
+                    # hand-edited, or a key added later - must not turn the loop's memory into a
+                    # device nobody declared and lose the integral with it.
+                    loop = value
+                elif key == "devices" and _holds_records(value):
+                    # Asked before anything else about this key, for the same reason: a mapping
+                    # holding even one record is a section, and a section whose devices happen to
+                    # be named `state` and `at` reads as a record itself the moment one of them
+                    # is corrupted to a number. Whole sections were lost that way.
+                    devices.update(value)
+                elif _looks_like_a_record(value):
+                    # A flat log meant a device by this name. Nothing else carries both halves.
+                    devices[key] = value
+                elif key == "devices":
+                    # Whatever it is, it is this file's device section; `_usable_entries` decides
+                    # which of its entries can be used, one at a time.
+                    devices.update(value if isinstance(value, dict) else {})
+                else:
+                    # And this is the loop's memory, handed on exactly as stored. `loop_state`
+                    # judges whether it can be resumed; this is not the place to decide that.
+                    loop = value if isinstance(value, dict) else {}
+            else:
+                devices[key] = value
+        return {"devices": devices, "pid": loop}
 
     @property
     def loop(self):
