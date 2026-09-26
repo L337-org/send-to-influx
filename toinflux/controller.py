@@ -61,6 +61,12 @@ class Controller:
         # What each input name actually reads, kept for the fingerprint: the source, field and
         # instance, and deliberately not `max_age`. See `fingerprint` for why the distinction
         # matters.
+        # The adjustable values the rules read. `pid.setpoint` naming `target` is unchanged
+        # text when `target` itself moves from 1000 to 800, and the integral is the
+        # accumulated error *against* that number - so a setpoint edit, which is the single
+        # commonest change anybody makes to a control, restored a memory earned for a target
+        # that no longer exists.
+        self._settings = tuple(sorted((document.get("parameters") or {}).items(), key=lambda pair: str(pair[0])))
         self._signals = tuple(
             sorted(
                 (name, spec.get("source"), spec.get("field"), spec.get("instance"))
@@ -222,8 +228,13 @@ class Controller:
         commonest restart a control sees is the one the supervisor performs because its
         document was edited.
 
-        **The parameters and the cap belong here for the same reason the ladder does**, and
-        were missing. A device moved from `brightness_pct` to `color_temp_k` keeps its rung
+        **The adjustable parameters belong here too**, and are the easiest to overlook: a
+        setpoint rule reading `target` is unchanged text when `target` moves from 1000 to 800,
+        while the integral it earned is the accumulated error against the old number - and
+        editing a target is the commonest change anybody makes to a control.
+
+        **The device parameters and the cap belong here for the same reason the ladder does**,
+        and were missing. A device moved from `brightness_pct` to `color_temp_k` keeps its rung
         numbers while every one of them comes to mean something else, and a changed
         `max_level` changes the range the integral is clamped into - both left this digest
         identical, so a loop earned against one scale was handed back for another.
@@ -255,6 +266,7 @@ class Controller:
                 # what it measures, and discarding a hard-won integral for it would be the
                 # over-reaction this digest is deliberately narrow to avoid.
                 "signals": self._signals,
+                "parameters": self._settings,
                 "driven": sorted(self.driven.items()),
                 "max_level": self._max_level_rule.source if self._max_level_rule is not None else None,
             },

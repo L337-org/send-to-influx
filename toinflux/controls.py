@@ -26,7 +26,7 @@ import tempfile
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import yaml
 from toinflux.exceptions import ConfigError
-from toinflux.general import resolve_state_dir
+from toinflux.general import render_external, resolve_state_dir
 
 # Where control documents live inside the state directory.
 CONTROL_DIR_NAME = "controls"
@@ -489,7 +489,7 @@ def list_controls(settings_file=None):
         # No controls have ever been created. Not a fault: the subsystem is optional.
         return []
     except OSError as exc:
-        raise ConfigError(f"cannot read the control directory {directory!r}: {exc}") from exc
+        raise ConfigError(f"cannot read the control directory {directory!r}: {render_external(exc)}") from exc
 
     names = []
     for entry in sorted(entries):
@@ -526,9 +526,9 @@ def load_control(name, settings_file=None):
     except FileNotFoundError as exc:
         raise ConfigError(f"no control named {name!r} at {path!r}") from exc
     except OSError as exc:
-        raise ConfigError(f"cannot read control {name!r} from {path!r}: {exc}") from exc
+        raise ConfigError(f"cannot read control {name!r} from {path!r}: {render_external(exc)}") from exc
     except yaml.YAMLError as exc:
-        raise ConfigError(f"control {name!r} at {path!r} is not valid YAML: {exc}") from exc
+        raise ConfigError(f"control {name!r} at {path!r} is not valid YAML: {render_external(exc)}") from exc
 
     if document is None:
         # An empty file. Distinguished from a malformed one because the cause differs:
@@ -564,7 +564,7 @@ def save_control(name, document, settings_file=None) -> None:
         # default would be whatever the umask allows.
         os.chmod(directory, stat.S_IRWXU)
     except OSError as exc:
-        raise ConfigError(f"cannot create the control directory {directory!r}: {exc}") from exc
+        raise ConfigError(f"cannot create the control directory {directory!r}: {render_external(exc)}") from exc
 
     handle = None
     temporary = None
@@ -583,7 +583,7 @@ def save_control(name, document, settings_file=None) -> None:
         os.replace(temporary, path)
         temporary = None
     except (OSError, yaml.YAMLError) as exc:
-        raise ConfigError(f"cannot write control {name!r} to {path!r}: {exc}") from exc
+        raise ConfigError(f"cannot write control {name!r} to {path!r}: {render_external(exc)}") from exc
     finally:
         if handle is not None:
             handle.close()
@@ -614,7 +614,7 @@ def delete_control(name, settings_file=None) -> None:
     except FileNotFoundError as exc:
         raise ConfigError(f"no control named {name!r} at {path!r}") from exc
     except OSError as exc:
-        raise ConfigError(f"cannot delete control {name!r} at {path!r}: {exc}") from exc
+        raise ConfigError(f"cannot delete control {name!r} at {path!r}: {render_external(exc)}") from exc
     # After the document is gone: the log is bookkeeping, and failing to remove it must not
     # leave a control that is half-deleted.
     forget_control(name, settings_file)

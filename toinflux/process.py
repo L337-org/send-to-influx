@@ -27,6 +27,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from toinflux.exceptions import ConfigError, ToInfluxError
+from toinflux.general import render_external
 
 # Environment variables passed through to a child. Everything else is dropped, so a
 # child starts from a known environment rather than whatever the operator, the shell
@@ -472,7 +473,7 @@ def spawn(argv, *, env_extra=None, pass_fds=(), stderr=None):
     except OSError as exc:
         # Permission denied, an unusable interpreter line, a directory where a binary was
         # expected. None of these resolve by waiting, so they are configuration.
-        raise ConfigError(f"could not start {argv[0]!r}: {exc}") from exc
+        raise ConfigError(f"could not start {argv[0]!r}: {render_external(exc)}") from exc
 
 
 def run_command(argv, *, timeout, stdin_bytes=None, env_extra=None, output_limit=MAX_CAPTURED_BYTES):
@@ -524,7 +525,7 @@ def run_command(argv, *, timeout, stdin_bytes=None, env_extra=None, output_limit
     except OSError as exc:
         # Permission denied, an unusable interpreter line, a directory where a binary
         # was expected. None of these resolve by waiting, so they are configuration.
-        raise ConfigError(f"could not start {argv[0]!r}: {exc}") from exc
+        raise ConfigError(f"could not start {argv[0]!r}: {render_external(exc)}") from exc
 
     captures = {"stdout": _Capture(output_limit), "stderr": _Capture(output_limit)}
     with process:

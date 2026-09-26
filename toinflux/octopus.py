@@ -8,6 +8,7 @@ import requests
 from datetime import datetime, timezone
 from toinflux.influx import DataHandler
 from toinflux.exceptions import SourceConnectionError
+from toinflux.general import render_external
 
 OCTOPUS_BASE_URL = "https://api.octopus.energy/v1"
 
@@ -93,7 +94,7 @@ class Octopus(DataHandler):
         except requests.exceptions.RequestException as e:
             # Raised, not logged as well: every caller reports a failed read itself, and at
             # the level its own situation deserves. See the note in philipshue.py.
-            raise SourceConnectionError(repr(e)) from e
+            raise SourceConnectionError(render_external(e)) from e
         return response.json()
 
     @staticmethod

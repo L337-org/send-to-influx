@@ -450,12 +450,12 @@ class TestHueTokenRedaction:
         # contract at once - the token is gone, and every other byte (host, port,
         # underlying cause) survives, so the failure is still diagnosable.
         #
-        # The exception's repr rather than its str, so that external text cannot put a
-        # newline into a message that is now the only report of the failure. It names the
-        # type as well, which the log line this replaced never did.
+        # Through `render_external`, which leaves a single clean line as it is: nothing here
+        # could break a line, so it stays readable. Text carrying a newline comes back quoted
+        # instead, which the error-list test below covers.
         assert str(excinfo.value) == (
-            "ConnectionError(\"HTTPSConnectionPool(host='bridge-under-test', port=443): Max retries "
-            'exceeded with url: /api/<redacted> (Caused by ConnectTimeoutError())")'
+            "HTTPSConnectionPool(host='bridge-under-test', port=443): Max retries "
+            "exceeded with url: /api/<redacted> (Caused by ConnectTimeoutError())"
         )
 
     def test_an_error_list_redacts_the_token_and_cannot_forge_a_line(self, sample_settings):

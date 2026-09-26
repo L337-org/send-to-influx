@@ -9,7 +9,7 @@ import threading
 from socket import gethostname
 import speedtest
 from toinflux.influx import DataHandler, InfluxWriteError, escape_key_or_tag_value
-from toinflux.general import flatten_dict
+from toinflux.general import flatten_dict, render_external
 from toinflux.exceptions import SourceConnectionError, ToolParamError
 
 # speedtest-cli's get_best_server() times each of the 3 latency probes it makes per candidate
@@ -131,7 +131,7 @@ class Speedtest(DataHandler):
             # get the results
             st_data = st.results.dict()
         except speedtest.SpeedtestException as e:
-            raise SourceConnectionError(repr(e)) from e
+            raise SourceConnectionError(render_external(e)) from e
         if not isinstance(st_data, dict):
             raise SourceConnectionError("invalid results")
 

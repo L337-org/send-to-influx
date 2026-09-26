@@ -26,7 +26,7 @@ import urllib3
 import requests
 from dataclasses import dataclass
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToInfluxError, ToolParamError
-from toinflux.general import load_settings
+from toinflux.general import load_settings, render_external
 
 
 class InfluxWriteError(ToInfluxError):
@@ -1040,9 +1040,11 @@ def _get(session, url, kwargs, description):
         # RequestException handler so a parse failure isn't misreported as a
         # transport read failure. raise_for_status()'s HTTPError is a
         # RequestException but not a ValueError, so it still classifies as transport.
-        raise SourceConnectionError(f"InfluxDB read returned an unparseable response ({description}): {exc!r}") from exc
+        raise SourceConnectionError(
+            f"InfluxDB read returned an unparseable response ({description}): {render_external(exc)}"
+        ) from exc
     except requests.exceptions.RequestException as exc:
-        raise SourceConnectionError(f"InfluxDB read failed ({description}): {exc!r}") from exc
+        raise SourceConnectionError(f"InfluxDB read failed ({description}): {render_external(exc)}") from exc
 
 
 @dataclass(frozen=True)

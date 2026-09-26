@@ -1113,7 +1113,7 @@ class TestWhatTheControllerKeepsAndPutsBack:
         """
         from toinflux.controller import Controller
 
-        def built(parameter="brightness_pct", cap=None, field="t", setpoint="target", reads="inside"):
+        def built(parameter="brightness_pct", cap=None, field="t", setpoint="target", reads="inside", target=20.0):
             output = {
                 "cycle_seconds": 60,
                 "min_transition_seconds": 1,
@@ -1123,7 +1123,7 @@ class TestWhatTheControllerKeepsAndPutsBack:
                 output["max_level"] = cap
             return Controller(
                 {
-                    "parameters": {"target": 20.0},
+                    "parameters": {"target": target},
                     "inputs": {
                         "inside": {"source": "hue", "field": field},
                         "other": {"source": "hue", "field": "o"},
@@ -1143,6 +1143,9 @@ class TestWhatTheControllerKeepsAndPutsBack:
         # The same repointing one level down: the rule still says `inside`, but `inside` now
         # reads a different sensor, so every number the loop remembers describes something else.
         assert built(field="o") != base, "an input was repointed at another sensor and the loop was kept"
+        # The commonest edit of all: the setpoint rule still says `target`, and `target` is a
+        # different number. The integral is the accumulated error against the old one.
+        assert built(target=30.0) != base, "the setpoint value changed and the loop was kept"
 
     def test_and_not_the_things_it_does_not(self, state_directory):
         """Discarding a hard-won integral because a gate rule changed would throw away the

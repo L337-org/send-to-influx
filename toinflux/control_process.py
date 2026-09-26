@@ -32,7 +32,7 @@ from toinflux.controller import Controller
 from toinflux.controls import DEFAULT_CYCLE_SECONDS, load_control, parameter_devices, validate_control
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.gating import DeviceGuard, Gate, commands_for, static_full_scale
-from toinflux.general import RepeatingProblem, load_settings, render_values, source_class
+from toinflux.general import RepeatingProblem, load_settings, render_external, render_values, source_class
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
 from toinflux.staging import build_ladder
@@ -312,7 +312,7 @@ def _command_each(targets, commanded, settings_file) -> None:
                     # The control's own key is added because the document is what has to be
                     # edited, and the handler only knows the bridge's name for the device.
                     raise ConfigError(
-                        f"control device {key!r} cannot be commanded: {exc}",
+                        f"control device {key!r} cannot be commanded: {render_external(exc)}",
                     ) from exc
                 # As commanded, not coerced: a dimmer's 40 must be recorded as 40, or the
                 # log cannot tell it from the same lamp at 5 and its minimum means nothing.

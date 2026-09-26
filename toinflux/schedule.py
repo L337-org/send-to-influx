@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from toinflux.controls import CLOCK_TIME_PATTERN, SAFE_STATE_UNENERGISED, safe_state_problem
 from toinflux.exceptions import ConfigError
+from toinflux.general import render_external
 
 
 @dataclass(frozen=True)
@@ -127,7 +128,7 @@ def control_zone(document):
     try:
         return ZoneInfo(str(name))
     except (ZoneInfoNotFoundError, ValueError) as exc:
-        raise ConfigError(f"timezone {name!r} is not a time zone this machine knows: {exc}") from exc
+        raise ConfigError(f"timezone {name!r} is not a time zone this machine knows: {render_external(exc)}") from exc
 
 
 def _clock_time(value, where):

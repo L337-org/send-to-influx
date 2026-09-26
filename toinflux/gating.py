@@ -444,7 +444,9 @@ class DeviceGuard:
         clock happens to say as it goes.
 
         Args:
-            state (str or None): the state to assert; None means this guard's safe state
+            state (str or float or None): the state to assert - a built-in name, or the value
+                to set, since a driven device may be left at a number. None means this
+                guard's own safe state
 
         Raises:
             Exception: whatever ``command`` raises, unwrapped - a device that is missing

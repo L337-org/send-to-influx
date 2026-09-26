@@ -70,7 +70,7 @@ from toinflux.controls import delete_control as remove_stored_control
 from toinflux.controls import list_controls as stored_control_names
 from toinflux.controls import save_control as store_control
 from toinflux.exceptions import ConfigError, ToolParamError
-from toinflux.general import load_settings
+from toinflux.general import load_settings, render_external
 from toinflux.mcp_common import configured_sources, register_tool
 
 # One writer at a time across the control-write tools. Each of them is a read-modify-write -
@@ -476,7 +476,7 @@ def _control_state_result(name, settings_file=None, supervisor=None):
     try:
         document = load_control(name, settings_file)
     except ConfigError as exc:
-        raise ToolParamError(f"control {name!r} cannot be read: {exc!r}") from exc
+        raise ToolParamError(f"control {name!r} cannot be read: {render_external(exc)}") from exc
     log = TransitionLog(name, settings_file)
     now = time.time()
     entry: dict = {"control": name, **_supervision_of(name, _supervision_by_name(supervisor))}

@@ -21,6 +21,7 @@ from toinflux.general import (
     mcp_block_errors,
     mcp_enabled,
     parse_mcp_bind_address,
+    render_external,
     render_values,
     validate_settings,
 )
@@ -1224,6 +1225,42 @@ class TestControlsBlockValidation:
         package. The two switches are checked because they are silently ignorable."""
         sample_settings["controls"] = {"enabled": True, "something_later": 3}
         validate_settings(sample_settings)
+
+
+class TestRenderingSomethingExternal:
+    """The readable form where it is safe, the quoted form where it is not.
+
+    Quoting everything costs readability in the common case, and quoting nothing leaves the
+    injection: a raised message is the only report of a failure once its duplicate log is
+    gone, and the text inside it was chosen by a library, a bridge or a parser.
+    """
+
+    def test_an_ordinary_message_is_left_readable(self):
+        """`repr` on an OSError gives "FileNotFoundError(2, 'No such file...')", which is not
+        what somebody at a terminal wants to read."""
+        assert render_external(OSError(2, "No such file or directory")) == "[Errno 2] No such file or directory"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "bad\nERROR forged entry",
+            "carriage\rreturn",
+            "unicode\u2028separator",
+            "next\u0085line",
+            "vertical\x0btab",
+        ],
+        ids=["newline", "carriage-return", "line-separator", "next-line", "vertical-tab"],
+    )
+    def test_anything_that_could_break_a_line_is_quoted(self, text):
+        """Every one of these is a break to `splitlines`, which is what makes them able to
+        forge an entry in a log or a paragraph in a model's context."""
+        rendered = render_external(ValueError(text))
+        assert "\n" not in rendered and "\r" not in rendered
+        assert rendered.startswith("ValueError("), rendered
+
+    def test_the_detail_survives_being_quoted(self):
+        """Made safe rather than thrown away: the text is still there to read."""
+        assert "forged" in render_external(ValueError("bad\nforged"))
 
 
 class TestWhoStampsTheTimestamp:

@@ -2372,3 +2372,58 @@ def test_the_documented_examples_are_the_shipped_ones():
         "these shipped examples do not appear in CONTROLS.md exactly as they are shipped, so "
         f"the documentation and the MCP client disagree about them: {missing}"
     )
+
+
+def _bare_external_in_a_raise():
+    """Every place a raise interpolates an exception without rendering it safely.
+
+    Matched on the AST rather than by text, so `str(exc)`, `repr(exc)` and an f-string's
+    `{exc}` are all seen, and a reformat cannot hide one.
+
+    Returns:
+        list: ``(module, line)`` for each site
+    """
+    names = {"e", "exc", "error", "err"}
+    found = []
+    for path in sorted((REPO_ROOT / "toinflux").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Raise) or node.exc is None:
+                continue
+            for sub in ast.walk(node.exc):
+                bare_format = (
+                    isinstance(sub, ast.FormattedValue) and isinstance(sub.value, ast.Name) and sub.value.id in names
+                )
+                bare_call = (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Name)
+                    and sub.func.id in {"str", "repr"}
+                    and sub.args
+                    and isinstance(sub.args[0], ast.Name)
+                    and sub.args[0].id in names
+                )
+                if bare_format or bare_call:
+                    found.append((path.name, node.lineno))
+                    break
+    return sorted(set(found))
+
+
+def test_an_exception_reaches_a_message_through_render_external():
+    """A raised message is the only report of a failure once the duplicate log is gone, and
+    the text inside it was written by a library, a bridge or a parser rather than by us.
+
+    One newline in that text puts a line of its choosing into whatever the caller logs, or a
+    paragraph of its choosing into a model's context where the message reaches an MCP client.
+    `render_external` keeps the readable form where it is safe and quotes it where it is not,
+    so nothing has to choose between a message a person can read and one that cannot be
+    forged.
+
+    Written as a check because four review rounds on one branch were all this same rule,
+    found in a new place each time: two handlers fixed without a sweep, then the sweep, then
+    the sites the sweep did not reach.
+    """
+    sites = _bare_external_in_a_raise()
+    assert sites == [], (
+        "these raise a message holding an exception rendered unsafely - pass it through "
+        f"`render_external` so a newline in it cannot forge a line: {sites}"
+    )

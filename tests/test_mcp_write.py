@@ -207,11 +207,10 @@ class TestHueSetLight:
             handler.mcp_set_device_state("2", on=False)
         # Equality, not substring: pins that the token is gone *and* that the rest
         # of the message (status text, host, path) survives for diagnosis.
-        # The exception's repr, so external text cannot put a newline into what is now the
-        # handler's only report. The token is still gone, which is what this test is for.
+        # Through `render_external`, which leaves a single clean line readable. The token is
+        # still gone, which is what this test is for.
         assert str(excinfo.value) == (
-            "HTTPError('503 Server Error: Service Unavailable for url: "
-            "https://hue.local/api/<redacted>/lights/2/state')"
+            "503 Server Error: Service Unavailable for url: https://hue.local/api/<redacted>/lights/2/state"
         )
 
     def test_write_path_brackets_a_bare_ipv6_host(self):
@@ -575,12 +574,7 @@ class TestHueMultiBridgeWrites:
         with patch("toinflux.mcp_write.resolve_handlers", return_value=handlers):
             result = _hue_list_devices_result(self._settings(), None)
         assert [d["bridge"] for d in result["devices"]] == ["downstairs.example.com"]
-        # The error carries the exception's type now as well as its text, because the handler
-        # raises a repr rather than a str. A client reading this field sees one more word and
-        # a little more to go on.
-        assert result["unreachable"] == [
-            {"bridge": "upstairs.example.com", "error": "ConnectionError('upstairs down')"}
-        ]
+        assert result["unreachable"] == [{"bridge": "upstairs.example.com", "error": "upstairs down"}]
 
     def test_an_unreachable_other_bridge_is_an_actionable_refusal_not_a_transport_error(self):
         """One bridge being down must not make every write impossible.

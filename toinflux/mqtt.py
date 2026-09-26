@@ -10,7 +10,7 @@ import threading
 import time
 from paho.mqtt import client as mqtt_client
 from toinflux.influx import DataHandler
-from toinflux.general import mqtt_block_errors
+from toinflux.general import mqtt_block_errors, render_external
 from toinflux.exceptions import ConfigError, SourceConnectionError
 
 # How long each call into paho's network loop blocks waiting for traffic. Small enough
@@ -190,7 +190,9 @@ class MqttDataHandler(DataHandler):
                     break
                 remaining = deadline - time.monotonic()
         except (OSError, ValueError) as e:
-            raise SourceConnectionError(f"Error connecting to MQTT broker {host!r} port {port!r} - {e!r}") from e
+            raise SourceConnectionError(
+                f"Error connecting to MQTT broker {host!r} port {port!r} - {render_external(e)}"
+            ) from e
         finally:
             client.disconnect()
         self._raise_for_failed_connection(host, port, timeout, failures, connected)
@@ -254,7 +256,9 @@ class MqttDataHandler(DataHandler):
         try:
             client.connect(host, port)
         except (OSError, ValueError) as e:
-            raise SourceConnectionError(f"Error connecting to MQTT broker {host!r} port {port!r} - {e!r}") from e
+            raise SourceConnectionError(
+                f"Error connecting to MQTT broker {host!r} port {port!r} - {render_external(e)}"
+            ) from e
         # loop_start() is inside the try so that if it fails (e.g. thread creation under
         # resource pressure) the finally still disconnects the socket connect() just
         # opened, rather than leaking it. loop_stop() is a no-op when no loop is running,

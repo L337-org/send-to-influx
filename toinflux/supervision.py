@@ -55,7 +55,7 @@ from toinflux.controls import (
 )
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import commands_for
-from toinflux.general import load_settings
+from toinflux.general import load_settings, render_external
 from toinflux.process import TimeoutExpired, spawn
 from toinflux.transitions import forget_control
 
@@ -440,7 +440,7 @@ class Supervisor:
             # restart path handles this project's own type: an OSError from here would go
             # straight past it and end the loop, which is one control's exhaustion becoming
             # every control's outage.
-            raise ConfigError(f"could not make a heartbeat pipe for control {name!r}: {exc}") from exc
+            raise ConfigError(f"could not make a heartbeat pipe for control {name!r}: {render_external(exc)}") from exc
         try:
             child.process = spawn(
                 [*self._argv_for(name), "--heartbeat-fd", str(write_fd)],

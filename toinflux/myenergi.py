@@ -10,6 +10,7 @@ import requests
 from requests.auth import HTTPDigestAuth
 from toinflux.influx import DataHandler, escape_key_or_tag_value
 from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.general import render_external
 
 # The device types that share the `myenergi` measurement, each its own source and settings
 # block. Used to check label uniqueness across all three, since a label is the `device` tag
@@ -478,7 +479,7 @@ class MyEnergi(DataHandler):
         except requests.exceptions.RequestException as e:
             # Raised, not logged as well: every caller reports a failed read itself, and at
             # the level its own situation deserves. See the note in philipshue.py.
-            raise SourceConnectionError(repr(e)) from e
+            raise SourceConnectionError(render_external(e)) from e
 
         if response.status_code == 200:
             pass
@@ -490,7 +491,7 @@ class MyEnergi(DataHandler):
         try:
             return response.json()
         except requests.exceptions.JSONDecodeError as e:
-            raise SourceConnectionError(f"Error parsing the MyEnergi API response - {e!r}") from e
+            raise SourceConnectionError(f"Error parsing the MyEnergi API response - {render_external(e)}") from e
 
     def _parse_device_data(self, device_key, url_key):
         """Fetch data for a MyEnergi device and filter it to configured fields if set.

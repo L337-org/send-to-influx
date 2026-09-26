@@ -165,6 +165,39 @@ def configure_logging(
         root.addHandler(file_handler)
 
 
+#: Anything that could end a line or start a new one: the C0 and C1 control ranges, and the
+#: Unicode separators. `splitlines` treats every one of these as a break, which is what makes
+#: them able to forge an entry in a log or a second paragraph in a model's context.
+_CONTROL_TEXT = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def render_external(value):
+    """Render something that came from outside this program, safely but readably.
+
+    **The readable form where it is safe, the quoted form where it is not.** An exception from
+    a library, a bridge or a parser is the most useful thing a message can carry, and
+    `str(exc)` is how a person wants to read it: "[Errno 2] No such file or directory" rather
+    than "FileNotFoundError(2, 'No such file or directory')". But that text is chosen by
+    something other than us, and one newline in it puts a line of its choosing into whatever
+    the caller logs - or a paragraph of its choosing into a model's context, where the message
+    reaches an MCP client.
+
+    Quoting everything costs readability in the common case; quoting nothing leaves the
+    injection. Deciding per value costs neither: the plain text where it is a single clean
+    line, and `repr` the moment it holds anything that could break one.
+
+    This is the sibling of :func:`render_values`, which does the same job for a collection.
+
+    Args:
+        value (object): the external value, usually an exception
+
+    Returns:
+        str: the value as it should appear inside a message
+    """
+    text = str(value)
+    return text if not _CONTROL_TEXT.search(text) else repr(value)
+
+
 def render_values(values, separator=", ", empty="none"):
     """Render a collection into an error message, quoted and safely ordered.
 
@@ -1476,7 +1509,7 @@ def load_settings(settings_file=None):
         raise ConfigError(f"{settings_path} not found") from None
     except yaml.YAMLError as e:
         logging.critical("Error in %s - %s", settings_path, e)
-        raise ConfigError(f"Error in {settings_path} - {e}") from e
+        raise ConfigError(f"Error in {settings_path} - {render_external(e)}") from e
 
 
 #: The two things in a failure message that move while the failure does not: an object's
