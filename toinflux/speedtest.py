@@ -9,7 +9,7 @@ import threading
 from socket import gethostname
 import speedtest
 from toinflux.influx import DataHandler, InfluxWriteError, escape_key_or_tag_value
-from toinflux.general import flatten_dict
+from toinflux.general import flatten_dict, render_external
 from toinflux.exceptions import SourceConnectionError, ToolParamError
 
 # speedtest-cli's get_best_server() times each of the 3 latency probes it makes per candidate
@@ -131,15 +131,12 @@ class Speedtest(DataHandler):
             # get the results
             st_data = st.results.dict()
         except speedtest.SpeedtestException as e:
-            logging.error("Error running Speedtest - %s", e)
-            raise SourceConnectionError(str(e)) from e
+            raise SourceConnectionError(render_external(e)) from e
         if not isinstance(st_data, dict):
-            logging.error("Error running Speedtest - invalid results")
             raise SourceConnectionError("invalid results")
 
         ping = st_data.get("ping")
         if isinstance(ping, (int, float)) and ping >= MAX_PLAUSIBLE_PING_MS:
-            logging.error("Error running Speedtest - implausible ping %s ms (server probes likely failed)", ping)
             raise SourceConnectionError(f"implausible ping {ping} ms (server probes likely failed)")
 
         # flatten the speedtest payload so nested values can be filtered and sent

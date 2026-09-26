@@ -1,5 +1,6 @@
 """Unit tests for toinflux.philipshue (Hue)."""
 
+import logging
 from unittest.mock import MagicMock, patch
 import pytest
 import requests
@@ -133,6 +134,46 @@ class TestHue:
             with patch.object(hue.session, "get", return_value=mock_response):
                 with pytest.raises(SourceConnectionError, match="unparseable response"):
                     hue.get_data_from_hue_bridge()
+
+    def test_a_failed_read_raises_without_also_logging_it(self, sample_settings, caplog):
+        """The handler reports a failure by raising, and by raising only.
+
+        Every caller logs it themselves, at the level their own situation deserves: the
+        collector worker warns and backs off, a control's input read warns and falls back to
+        the stored value, an MCP tool hands the message to the client.  Logging here as well
+        put an ERROR in front of each of them saying the same words at a severity none of
+        them agreed with, and during a bridge outage one control produced two of them per
+        cycle from this path alone.
+        """
+        with patch("toinflux.influx.load_settings") as mock_load_settings:
+            mock_load_settings.return_value = sample_settings
+            hue = Hue(source="hue")
+            failure = requests.exceptions.ConnectTimeout("connection timed out")
+            with patch.object(hue.session, "get", side_effect=failure):
+                with caplog.at_level(logging.DEBUG):
+                    with pytest.raises(SourceConnectionError, match="connection timed out"):
+                        hue.get_data_from_hue_bridge()
+        assert caplog.records == [], [record.getMessage() for record in caplog.records]
+
+    def test_a_clamped_colour_is_said_once_per_bridge_not_once_per_name(self, sample_settings, caplog):
+        """An installation may run several bridges, and two of them commonly carry the same
+        light names - so a key of the name alone reports one bulb and silently swallows the
+        other. It must also not say it once a cycle: a control commands its driven devices
+        every cycle whether or not the value changed."""
+        from toinflux.philipshue import _CLAMP_PROBLEMS
+
+        # Module level and shared, so a previous test's key would decide this one's outcome.
+        _CLAMP_PROBLEMS._seen.clear()
+        caps = {"color_temp": True, "ct_range": (153, 500)}
+        with patch("toinflux.influx.load_settings", return_value=sample_settings):
+            first, second = Hue(source="hue"), Hue(source="hue")
+        first.instance, second.instance = "bridge-one", "bridge-two"
+        with caplog.at_level(logging.WARNING):
+            first._color_temp_state("Office Lamp", caps, 1000)
+            second._color_temp_state("Office Lamp", caps, 1000)
+            first._color_temp_state("Office Lamp", caps, 1000)
+        said = [record for record in caplog.records if record.levelno == logging.WARNING]
+        assert len(said) == 2, [record.getMessage() for record in said]
 
     def test_hue_device_name_to_name_uses_mapping_when_present(self, sample_settings):
         """hue_device_name_to_name uses sensors mapping when in settings."""
@@ -384,8 +425,14 @@ class TestHueTokenRedaction:
         with patch("toinflux.influx.load_settings", return_value=settings):
             return Hue(source="hue")
 
-    def test_connection_error_redacts_the_token_from_log_and_exception(self, sample_settings, caplog):
-        """A connection failure must not put the token in the log or the error."""
+    def test_connection_error_redacts_the_token_from_the_exception(self, sample_settings, caplog):
+        """A connection failure must not put the token in the error, nor in a log line.
+
+        It used to have to survive redaction twice, here and in a log line this raise sat
+        next to.  The log line is gone, so the strongest thing to say about the log is that
+        nothing reached it at all; the exception is now the only report and carries the
+        whole contract.
+        """
         hue = self._hue(sample_settings)
         # The shape requests actually produces - the URL, and therefore the token,
         # is inside the message (verified against requests, not assumed).
@@ -398,15 +445,34 @@ class TestHueTokenRedaction:
                 with pytest.raises(SourceConnectionError) as excinfo:
                     hue.get_data_from_hue_bridge()
 
-        assert self.TOKEN not in caplog.text
-        assert "<redacted>" in caplog.text
+        assert caplog.records == [], [record.getMessage() for record in caplog.records]
         # Asserted by equality rather than substring: this pins both halves of the
         # contract at once - the token is gone, and every other byte (host, port,
         # underlying cause) survives, so the failure is still diagnosable.
+        #
+        # Through `render_external`, which leaves a single clean line as it is: nothing here
+        # could break a line, so it stays readable. Text carrying a newline comes back quoted
+        # instead, which the error-list test below covers.
         assert str(excinfo.value) == (
             "HTTPSConnectionPool(host='bridge-under-test', port=443): Max retries "
             "exceeded with url: /api/<redacted> (Caused by ConnectTimeoutError())"
         )
+
+    def test_an_error_list_redacts_the_token_and_cannot_forge_a_line(self, sample_settings):
+        """The bridge writes this description, and since the duplicate log went it is the only
+        report of it - so it has to survive the same two tests as every other Hue error."""
+        hue = self._hue(sample_settings)
+        mock_response = MagicMock()
+        mock_response.json.return_value = [
+            {"error": {"description": f"denied for /api/{self.TOKEN}\nERROR forged line"}}
+        ]
+        with patch.object(hue.session, "get", return_value=mock_response):
+            with pytest.raises(SourceConnectionError) as excinfo:
+                hue.get_data_from_hue_bridge()
+        message = str(excinfo.value)
+        assert self.TOKEN not in message, message
+        assert "<redacted>" in message, message
+        assert "\n" not in message, "a newline from the bridge reached the message unquoted"
 
     def test_unparseable_response_redacts_the_token(self, sample_settings):
         """The JSON-decode path is redacted too, not just the transport one."""

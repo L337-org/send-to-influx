@@ -13,11 +13,15 @@ __license__ = "MIT"
 import json
 import logging
 import os
+import sys
 
 import pytest
 
+from tests.harness.bridge import bulb
+from toinflux.controls import device_identity
 from toinflux.exceptions import ConfigError
 from toinflux.staging import build_ladder, plan_window, reachable_ladder
+from tests.harness.installation import record_command
 from toinflux.transitions import TransitionLog, forget_control, transition_path
 
 
@@ -714,3 +718,923 @@ class TestADeviceNameCannotForgeALogLine:
             message = record.getMessage()
             assert "\n" not in message, f"a device name reached the log as {message.count(chr(10)) + 1} lines"
         assert "\\n" in commanding[0].getMessage(), "the newline should survive as an escape rather than vanish"
+
+
+class TestAdjustingADrivenDevice:
+    """`min_transition_seconds` for a device that is adjusted rather than switched means how
+    often the adjustment is made. The same log answers it, but only once it holds the value
+    commanded rather than a flag."""
+
+    def test_a_dimmer_moving_between_two_on_values_is_a_move(self, state_directory):
+        """Under a boolean comparison both 40 and 5 were simply "on", so nothing was timed and
+        the minimum meant nothing at all for the one kind of device whose job is to change by
+        degrees."""
+        log, now = _log(state_directory)
+        log.record({"lamp": 40})
+        now[0] += 10
+        log.record({"lamp": 5})
+        assert log.elapsed("lamp") == 0
+
+    def test_and_the_same_value_again_is_not(self, state_directory):
+        log, now = _log(state_directory)
+        log.record({"lamp": 40})
+        now[0] += 10
+        log.record({"lamp": 40})
+        assert log.elapsed("lamp") == 10
+
+    def test_the_value_survives_a_restart_rather_than_collapsing_to_a_flag(self, state_directory):
+        first, now = _log(state_directory)
+        first.record({"lamp": 40})
+        second, _ = _log(state_directory, now=now)
+        assert second.states() == {"lamp": 40}
+
+    def test_a_dimmer_inside_its_minimum_is_held(self, state_directory):
+        log, now = _log(state_directory)
+        log.record({"lamp": 40})
+        now[0] += 10
+        assert log.frozen(lambda _device: 60, ("lamp",)) == frozenset({"lamp"})
+
+
+class TestReadingTheFile:
+    """Two halves of one document, and an older shape that has neither."""
+
+    def test_a_flat_log_with_a_device_called_pid_survives_the_upgrade(self, state_directory):
+        """A device may legitimately be named `pid` or `devices`. Treating either name as a
+        section header read the rest of the file as nothing and dropped every other device's
+        entry, on the one upgrade that had to be seamless. The writer emits both keys, so both
+        are required before a file is read as the newer shape."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"pid": {"state": True, "at": 1000.0}, "heater": {"state": False, "at": 1000.0}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states() == {"pid": True, "heater": False}
+
+    def test_a_flat_log_with_devices_called_pid_and_devices_survives_too(self, state_directory):
+        """Requiring both keys is still not enough: a log holding devices named *both* would
+        have its two entries read as the sections and every device in the file lost. What
+        separates them is the shape - a section's values are entries, an entry's values are a
+        state and a moment."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"pid": {"state": True, "at": 1000.0}, "devices": {"state": False, "at": 1000.0}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states() == {"pid": True, "devices": False}
+        assert log.loop == {}
+
+    def test_one_bad_device_entry_does_not_turn_the_file_back_into_a_flat_log(self, state_directory):
+        """Deciding the format from the whole devices section meant one corrupt entry lost the
+        rest of the file.
+
+        The test read as "every value here is a mapping", which a new-format file with a single
+        hand-edited or truncated device entry fails.  The file was then taken for the older flat
+        shape, so `devices` and `pid` came back as two top-level pseudo-devices and the good
+        sibling entry and the loop's memory went with them - the memory being the one thing the
+        file exists to carry.  `_usable_entries` was already dropping bad entries one at a time,
+        so the whole-set test destroyed strictly more than the per-item one it sat in front of.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "devices": {"lamp": "corrupt", "heater": {"state": True, "at": 1000.0}},
+                    "pid": {"integral": 5.0, "fingerprint": "abc", "at": 1000.0},
+                },
+                handle,
+            )
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states() == {"heater": True}, "the good entry went the way of the bad one"
+        assert log.loop.get("integral") == 5.0, "the loop's memory was read as a device and lost"
+
+    def test_a_flat_log_whose_devices_entry_lost_its_moment_is_still_flat(self, state_directory):
+        """Fixing the whole-set test by asking one key held a moment just moved the fault.
+
+        A flat log may hold a device named `devices`, and that entry may be the malformed one -
+        truncated, or hand-edited down to nothing.  Asking whether it carried a usable `at` then
+        answered no, so the file was read as the new two-section shape and every *other* device
+        in it was dropped as section metadata: the same loss as before, reached from the other
+        side.  The writer emits these two keys and nothing else, so a third top-level key is a
+        device and proves the file flat, whatever shape the entry under `devices` is in.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "devices": {"state": True},
+                    "pid": {"state": False, "at": 1000.0},
+                    "heater": {"state": True, "at": 1000.0},
+                },
+                handle,
+            )
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states().get("heater") is True, "a real device was read as section metadata and lost"
+
+    def test_a_flat_log_of_only_the_two_reserved_names_survives_a_malformed_entry(self, state_directory):
+        """The same flat log with no third device to prove it flat, so the shape has to answer.
+
+        The two entries are themselves the devices and must still come back - an earlier version
+        of this docstring said there were no siblings to lose, which was wrong, because each of
+        the two is the other's sibling.  What settles it is that the value under `pid` carries a
+        `state`, which loop state never does, while the value under `devices` holds no record.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {"state": True}, "pid": {"state": False, "at": 1000.0}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states().get("pid") is False, "a flat log was read as the new shape"
+        assert log.loop == {}, "a device's record was handed back as the loop's memory"
+
+    def _stored(self, state_directory, stored):
+        """Write a cache file verbatim and read it back.
+
+        Args:
+            state_directory: the fixture naming the settings file
+            stored (dict): exactly what the file should contain
+
+        Returns:
+            TransitionLog: the log built from it, at a fixed clock
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(stored, handle)
+        return TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 2000.0)
+
+    def test_a_corrupt_device_named_state_does_not_reclassify_the_file(self, state_directory):
+        """Telling a record from a section by its `state` read a device's record by accident.
+
+        Nothing reserves the name `state` for a device, so a current-format file may hold one -
+        and when that single entry was corrupt, the test for "a `state` that is not a mapping"
+        answered yes about the section itself.  The file was then read as a flat log: every
+        other device lost its moment and could move immediately, and the loop's integral was
+        replaced by a fresh zero on the next write.  One corrupt entry, every entry destroyed.
+        """
+        log = self._stored(
+            state_directory,
+            {
+                "devices": {"state": None, "heater": {"state": True, "at": 1000.0}},
+                "pid": {"integral": 3.5, "at": 1000.0, "fingerprint": "abc"},
+            },
+        )
+        assert log.states().get("heater") is True, "a real device was lost to a corrupt namesake"
+        assert log.elapsed("heater", 2000.0) == 1000.0, "the surviving device lost its moment"
+        assert log.loop.get("integral") == 3.5, "the loop's memory went with it"
+
+    def test_a_corrupt_device_named_at_does_not_reclassify_the_file(self, state_directory):
+        """The other half of the same mistake, reached through the other reserved word.
+
+        A device called `at` whose record was replaced by a number made `usable_number` answer
+        yes about the section, with the same total loss.  Both halves read one device's record
+        whenever a device happened to carry one of those two names.
+        """
+        log = self._stored(
+            state_directory,
+            {
+                "devices": {"at": 123, "heater": {"state": True, "at": 1000.0}},
+                "pid": {"integral": 3.5, "at": 1000.0, "fingerprint": "abc"},
+            },
+        )
+        assert log.states().get("heater") is True, "a real device was lost to a corrupt namesake"
+        assert log.loop.get("integral") == 3.5, "the loop's memory went with it"
+
+    def test_a_corrupt_section_does_not_take_the_other_one_with_it(self, state_directory):
+        """Requiring both halves to be mappings let either one destroy the other.
+
+        The two halves are independent: a `pid` that cannot be read says nothing about the
+        devices, and vice versa.  Insisting on both before reading the file as the current shape
+        meant one unreadable half sent the whole file down the flat path, where the good half
+        came back as a pseudo-device instead of as itself.  Each is now salvaged on its own.
+        """
+        devices_kept = self._stored(
+            state_directory, {"devices": {"heater": {"state": True, "at": 1000.0}}, "pid": None}
+        )
+        assert devices_kept.states().get("heater") is True, "an unreadable loop lost the devices"
+
+        loop_kept = self._stored(
+            state_directory, {"devices": None, "pid": {"integral": 3.5, "at": 1000.0, "fingerprint": "abc"}}
+        )
+        assert loop_kept.loop.get("integral") == 3.5, "an unreadable device section lost the loop"
+        assert "pid" not in loop_kept.states(), "the loop's memory came back as a device"
+
+    def test_a_device_read_from_a_flat_log_still_keeps_its_minimum(self, state_directory):
+        """Upgrading in place stopped honouring any minimum at all, which is the one thing the
+        flat reader exists to prevent.
+
+        Filtering held devices by their recorded identity assumed there was always one to read.
+        The older writer stored none, so every device out of an upgraded file compared as a
+        mismatch and was dropped from the held set: the first cycle after an upgrade was free to
+        switch hardware that was still well inside `min_transition_seconds`.  `device_identity`
+        returns a tuple for any input, so nothing recorded is None and None means unknown rather
+        than different - and an unknown identity is no reason to withdraw a protection.
+        """
+        log = self._stored(state_directory, {"heater": {"state": True, "at": 1000.0}})
+        identities = {"heater": device_identity({"source": "hue", "device": "Heater"})}
+        held = log.frozen(lambda _d: 900.0, ["heater"], now=1010.0, identities=identities)
+        assert held == frozenset({"heater"}), "an upgraded file lost every device's minimum"
+
+    def test_but_an_identity_that_cannot_be_read_still_withdraws_the_hold(self, state_directory):
+        """Nothing recorded and something unreadable both read as None, and they mean opposites.
+
+        `_usable_entries` writes None over an identity it cannot parse, deliberately, so that
+        `_hold` declines to reuse a value whose scale is unproven.  Letting None mean "written
+        before identities existed" gave that case the protection instead: a lamp logged at 2700
+        with a corrupt `for`, redeclared as a percentage, was held at 2700 and then pinned there
+        as a brightness.  The key is absent only where nothing was ever written, so presence is
+        the question and the value is the answer to a different one.
+        """
+        log = self._stored(
+            state_directory,
+            {"devices": {"lamp": {"state": 2700, "at": 1000.0, "for": "corrupt"}}, "pid": {}},
+        )
+        live = {"lamp": device_identity({"source": "hue", "device": "L", "parameter": "brightness_pct"})}
+        held = log.frozen(lambda _d: 900.0, ["lamp"], now=1010.0, identities=live)
+        assert held == frozenset(), "a state on an unprovable scale was held as if it were trusted"
+
+    def test_one_corrupt_entry_cannot_reclassify_a_file_whose_loop_is_corrupt_too(self, state_directory):
+        """The invariant itself: no single entry may decide what the whole file is.
+
+        Asking whether *every* value under `devices` is a record gives the wrong answer as soon
+        as one of them is not, and the only thing hiding that is the second signal disagreeing.
+        Corrupt the loop section as well - give it a `state`, so it reads as a device record -
+        and the two signals agree on the wrong answer: the file is taken for a flat log and the
+        one good device in it is thrown away.  Asked as `any`, a single well-formed entry is
+        enough to settle what the mapping is, and no entry can unsettle it.
+        """
+        log = self._stored(
+            state_directory,
+            {
+                "devices": {"lamp": "corrupt", "heater": {"state": True, "at": 1000.0}},
+                "pid": {"state": 1, "integral": 3.5},
+            },
+        )
+        assert log.states().get("heater") is True, "one corrupt entry decided the fate of them all"
+
+    def test_a_parameter_change_is_a_move_even_at_the_same_number(self, state_directory):
+        """The no-move test compared only the value, so a device moved between parameters at
+        the same number kept the old parameter for ever - and `_hold` then refused the record
+        as being on a different scale every time, so that device never got its minimum back."""
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        record_command(
+            log, {"devices": {"lamp": {"source": "hue", "device": "lamp", "parameter": "color_temp_k"}}}, {"lamp": 2700}
+        )
+        record_command(
+            log,
+            {"devices": {"lamp": {"source": "hue", "device": "lamp", "parameter": "brightness_pct"}}},
+            {"lamp": 2700},
+        )
+        assert dict(log.identities()["lamp"]).get("parameter") == "brightness_pct", "the stale scale outlived it"
+
+    def test_the_same_value_on_the_same_parameter_is_still_not_a_move(self, state_directory):
+        """Or the minimum would restart every cycle and mean nothing at all."""
+        moment = [1000.0]
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: moment[0])
+        record_command(
+            log, {"devices": {"lamp": {"source": "hue", "device": "lamp", "parameter": "brightness_pct"}}}, {"lamp": 40}
+        )
+        moment[0] += 60
+        record_command(
+            log, {"devices": {"lamp": {"source": "hue", "device": "lamp", "parameter": "brightness_pct"}}}, {"lamp": 40}
+        )
+        assert log.elapsed("lamp") == 60, "commanding an unchanged value restarted its clock"
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            1,
+            "hue",
+            {"a": 1},
+            True,
+            [["source", "hue"], "bad"],
+            [["parameter"]],
+            [[1, 2, 3]],
+            # `dict(["ab"])` is `{"a": "b"}`, so a two-character string passes a length check
+            # and turns a corrupt file into a plausible-looking identity rather than a fault.
+            ["ab"],
+        ],
+        ids=["int", "str", "dict", "bool", "ragged", "short-pair", "long-pair", "two-char-string"],
+    )
+    def test_a_corrupt_identity_is_dropped_without_taking_the_entry_with_it(self, bad, state_directory):
+        """This file is a cache, so an unreadable one costs a transition sooner than asked -
+        never a control that will not run. A corrupt `target` came back from `targets()` as a
+        TypeError and took `get_control_state` and the next command with it.
+
+        Normalised rather than discarded: the entry keeps its moment, so the device is still
+        held for its minimum, and loses only the actuator it cannot prove - which makes
+        `_hold` decline to pin it, so the device gets a fresh command. Dropping the entry
+        would have thrown the timestamp away too and switched a device sooner than its
+        document promised.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {"lamp": {"state": 40, "at": 1000.0, "for": bad}}, "pid": {}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1060.0)
+        assert log.identities() == {"lamp": None}
+        # The reader the shape actually has to satisfy: `get_control_state` builds a dict out
+        # of it, and a ragged identity raised there rather than reading as unusable.
+        assert dict(log.identities()["lamp"] or ()) == {}
+        assert log.elapsed("lamp") == 60.0, "the moment was thrown away with the actuator"
+        assert log.states() == {"lamp": 40}
+
+    @pytest.mark.parametrize(
+        "at",
+        [float("inf"), float("-inf"), float("nan"), True],
+        ids=["inf", "-inf", "nan", "bool"],
+    )
+    def test_a_moment_that_is_not_a_moment_takes_its_entry_with_it(self, at, state_directory):
+        """Discarded here, unlike a corrupt identity, because without a usable moment there is
+        nothing left to keep: the entry exists to say *when*.
+
+        An infinite `at` makes `now - at` negative for ever, which the backwards-clock clamp
+        reads as "no time has passed" - so the device looks as though it has just moved, on
+        every cycle, and its transition minimum freezes it permanently. A nan does the same by
+        another route, because every comparison against it is False.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {"lamp": {"state": 40, "at": at}}, "pid": {}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1_000_000.0)
+        assert log.states() == {}, "an unusable moment was kept"
+        assert log.frozen(lambda device: 600.0, ("lamp",)) == set(), "the device was frozen by a bad clock"
+
+    @pytest.mark.parametrize("at", [float("inf"), float("nan"), True], ids=["inf", "nan", "bool"])
+    def test_the_loop_half_refuses_the_same(self, at, state_directory):
+        """The same rule, because the same file holds both and a reader of either can be
+        handed a moment it cannot measure against."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {}, "pid": {"integral": 5.0, "fingerprint": "abc", "at": at}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1_000_000.0)
+        assert log.loop_state("abc", 3600.0) is None
+        assert log.loop_age() is None
+
+    def test_a_switched_device_repointed_elsewhere_is_not_frozen(self, state_directory):
+        """The identity used to be checked only where driven devices are pinned, so a switched
+        one stayed in `frozen` and `reachable_ladder` kept the rungs that leave it where the
+        *old* target was - pinning the new switch to a state it never received until the
+        minimum expired. Asked here now, where both kinds pass through.
+        """
+        from toinflux.controls import device_identity
+
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        was = {"source": "hue", "device": "old-plug"}
+        now_points_at = {"source": "hue", "device": "new-plug"}
+        log.record({"heater": True}, identities={"heater": device_identity(was)})
+        minimum = lambda device: 600.0  # noqa: E731 - one line, used twice below
+
+        assert log.frozen(minimum, ("heater",)) == frozenset({"heater"}), "the clock alone should hold it"
+        assert (
+            log.frozen(minimum, ("heater",), identities={"heater": device_identity(now_points_at)}) == frozenset()
+        ), "a state recorded against another switch held the new one"
+        assert log.frozen(minimum, ("heater",), identities={"heater": device_identity(was)}) == frozenset(
+            {"heater"}
+        ), "an unchanged device stopped being held"
+
+    @pytest.mark.parametrize("at", [10**1000, -(10**1000)], ids=["huge", "hugely-negative"])
+    def test_an_integer_too_large_to_convert_is_refused_not_raised(self, at, state_directory):
+        """`math.isfinite` and `float` both raise OverflowError on an arbitrarily large JSON
+        integer, and `10**1000` is a legal literal in a file somebody can edit. The guard that
+        exists to keep a corrupt cache recoverable would have been the thing that stopped the
+        control starting."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write('{"devices": {"lamp": {"state": 40, "at": %d}}, "pid": {}}' % at)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
+        assert log.states() == {}, "an unconvertible moment was kept"
+
+    @pytest.mark.parametrize(
+        "integral",
+        [True, float("nan"), float("inf"), "lots"],
+        ids=["bool", "nan", "inf", "string"],
+    )
+    def test_a_loop_integral_it_cannot_use_is_not_offered_as_resumable(self, integral, state_directory):
+        """A state returned from this reader is one the caller announces it has resumed.
+
+        `resume_from` refuses a value it cannot use, but the announcement happens either way -
+        so a nan left a control logging that it had put back a memory it had in fact
+        discarded, `true` came back as an integral of 1.0, and a string broke the log line's
+        own formatting. The device half already refuses what it cannot use.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"devices": {}, "pid": {"integral": integral, "fingerprint": "abc", "at": 1000.0}},
+                handle,
+            )
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1100.0)
+        assert log.loop_state("abc", 3600.0) is None
+
+    def test_a_usable_loop_integral_still_resumes(self, state_directory):
+        """The other side, or this would have turned resumption off altogether."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {}, "pid": {"integral": 5.0, "fingerprint": "abc", "at": 1000.0}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1100.0)
+        assert (log.loop_state("abc", 3600.0) or {}).get("integral") == 5.0
+
+    def test_both_halves_come_from_one_read(self, state_directory, monkeypatch):
+        """They were read through separate opens, and `_read_loop` claimed in its own docstring
+        that they could not disagree about which version of the file they came from. The
+        control rewrites this file every cycle, so a reader landing between the two opens could
+        pair one generation's devices with another's loop state."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {"heater": {"state": True, "at": 1.0}}, "pid": {"integral": 5.0}}, handle)
+        opens = []
+        real = open
+
+        def counted(*args, **kwargs):
+            if args and str(args[0]) == path:
+                opens.append(args[0])
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", counted)
+        log = TransitionLog("conservatory", state_directory.settings_file)
+        assert log.states() == {"heater": True}
+        assert log.loop == {"integral": 5.0}
+        assert len(opens) == 1, f"the file was opened {len(opens)} times, so the halves can disagree"
+
+
+class TestAHeldDimmerKeepsTheValueItHas:
+    """The two kinds of device are held still by different means, because "do not change"
+    means different things to them. A switched one is kept where it is by planning the window
+    only from the rungs that leave it there; a driven one has no rung to be kept on, so its
+    minimum is honoured by commanding the value it already has.
+    """
+
+    @staticmethod
+    def _control(installation):
+        """Store a lamp control and return a running process for it.
+
+        Args:
+            installation (Installation): the installation to write into
+
+        Returns:
+            ControlProcess: built from the stored document
+        """
+        from tests.harness.installation import conservatory
+        from toinflux.control_process import ControlProcess
+        from toinflux.controls import save_control
+
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["devices"] = {"lamp": {"source": "hue", "device": "far", "parameter": "brightness_pct"}}
+        document["output"] = dict(
+            document["output"],
+            cycle_seconds=1,
+            min_transition_seconds=600,
+            stages=[{"level": 0, "set": {"lamp": 0}}, {"level": 1500, "set": {"lamp": 100}}],
+        )
+        document["output"].pop("max_level", None)
+        save_control("lamp", document, installation.settings_file)
+        return ControlProcess("lamp", settings_file=installation.settings_file)
+
+    def test_it_is_commanded_its_last_value_rather_than_the_new_one(self, state_directory, bridge):
+        control = self._control(state_directory)
+        try:
+            # Through the harness helper, which builds the identity from the document the
+            # way `command_devices` does.
+            record_command(control.transitions, control.document, {"lamp": 35})
+            held = control.transitions.frozen(control.controller.min_transition_for, ("lamp",))
+            assert held == frozenset({"lamp"}), "a 600s minimum did not hold a lamp moved a moment ago"
+            plan = control._hold(
+                tuple(
+                    type(dwell)(stage=dwell.stage, seconds=dwell.seconds)
+                    for dwell in control.controller.step({"inside": 5.0, "target": 20.0, "dew": 1.0}, dt=1)
+                ),
+                held & set(control.controller.driven),
+            )
+            assert {dwell.stage.states["lamp"] for dwell in plan} == {35}
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+
+    def test_and_moves_freely_once_its_minimum_has_passed(self, state_directory, bridge):
+        control = self._control(state_directory)
+        try:
+            control.transitions.record({"lamp": 35}, now=0.0)
+            held = control.transitions.frozen(control.controller.min_transition_for, ("lamp",), now=1000.0)
+            assert held == frozenset()
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+
+
+class TestADrivenDevicesValueReachesTheLog:
+    """Rendering a number as on/off threw the value away entirely: a lamp at 56% and the same
+    lamp at 5% both logged as "on", which is the one thing the line exists to say."""
+
+    def test_the_value_is_logged_rather_than_a_flag(self, state_directory, bridge, caplog):
+        from toinflux.control_process import ControlProcess
+        from toinflux.controls import save_control
+
+        from tests.harness.installation import conservatory
+
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        # A dimmable bulb rather than the default plug: `far` is on/off only, and the
+        # capability check refuses brightness on it - correctly, and naming the control's own
+        # device key, which is what the runtime half of the parameter validation is for.
+        state_directory.bridge.lights["9"] = bulb("office-lamp")
+        document["devices"] = {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "brightness_pct"}}
+        document["output"] = dict(
+            document["output"],
+            cycle_seconds=1,
+            min_transition_seconds=1,
+            stages=[{"level": 0, "set": {"lamp": 0}}, {"level": 1500, "set": {"lamp": 100}}],
+        )
+        document["output"].pop("max_level", None)
+        save_control("lamp", document, state_directory.settings_file)
+        control = ControlProcess("lamp", settings_file=state_directory.settings_file)
+        try:
+            with caplog.at_level(logging.DEBUG):
+                control.cycle(dt=1, sleep=lambda _seconds: None)
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+        commanding = [r.getMessage() for r in caplog.records if "commanding" in r.getMessage()]
+        assert commanding, "the rung was never logged"
+        assert "=on" not in commanding[0] and "=off" not in commanding[0], commanding[0]
+
+    def test_a_switched_device_still_reads_as_on_or_off(self, state_directory, bridge, caplog):
+        """A boolean is not more readable as 1 and 0."""
+        from toinflux.control_process import ControlProcess
+        from toinflux.controls import save_control
+
+        from tests.harness.installation import conservatory
+
+        document = conservatory(name="switched")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["devices"] = {"heater": {"source": "hue", "device": "far"}}
+        document["output"] = dict(
+            document["output"],
+            cycle_seconds=1,
+            min_transition_seconds=1,
+            stages=[{"level": 0, "set": {"heater": False}}, {"level": 1500, "set": {"heater": True}}],
+        )
+        document["output"].pop("max_level", None)
+        save_control("switched", document, state_directory.settings_file)
+        control = ControlProcess("switched", settings_file=state_directory.settings_file)
+        try:
+            with caplog.at_level(logging.DEBUG):
+                control.cycle(dt=1, sleep=lambda _seconds: None)
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+        commanding = [r.getMessage() for r in caplog.records if "commanding" in r.getMessage()]
+        assert commanding and ("=on" in commanding[0] or "=off" in commanding[0]), commanding
+
+
+class TestResumingTheLoopAfterARestart:
+    """A slow plant spends a long time earning its integral, and a restart threw it away.
+
+    The supervisor restarts a control on every document edit, so that was the ordinary cost
+    of changing a setpoint by one degree: an hour of sitting below target while the loop
+    earned back what it already knew.
+    """
+
+    FINGERPRINT = "abc123"
+
+    def test_what_was_saved_comes_back(self, state_directory):
+        log, now = _log(state_directory)
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.loop_state(self.FINGERPRINT, 300)["integral"] == 42.0
+
+    def test_a_different_document_is_not_resumed(self, state_directory):
+        """An integral is in the output's units, so the same number means one thing under one
+        tuning and something else under another - and an edit is the commonest restart."""
+        log, now = _log(state_directory)
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.loop_state("a-different-document", 300) is None
+
+    def test_a_memory_older_than_its_welcome_is_not_resumed(self, state_directory):
+        log, now = _log(state_directory)
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        now[0] += 301
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.loop_state(self.FINGERPRINT, 300) is None
+
+    def test_and_one_inside_it_is(self, state_directory):
+        log, now = _log(state_directory)
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        now[0] += 299
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.loop_state(self.FINGERPRINT, 300) is not None
+
+    def test_a_clock_that_stepped_backwards_does_not_make_it_fresh(self, state_directory):
+        log, now = _log(state_directory)
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        now[0] -= 3600
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.loop_state(self.FINGERPRINT, 300) is None
+
+    def test_nothing_stored_is_not_an_error(self, state_directory):
+        log, _now = _log(state_directory)
+        assert log.loop_state(self.FINGERPRINT, 300) is None
+
+    def test_the_device_half_still_works_beside_it(self, state_directory):
+        log, now = _log(state_directory)
+        log.record({"heater": True})
+        log.record_loop({"integral": 42.0}, self.FINGERPRINT)
+        reopened, _ = _log(state_directory, now=now)
+        assert reopened.states() == {"heater": True}
+        assert reopened.loop_state(self.FINGERPRINT, 300)["integral"] == 42.0
+
+    def test_a_file_from_before_this_existed_is_still_read(self, state_directory):
+        """An installation upgrading in place has the older flat shape on disk. Refusing it
+        would cost every device one transition sooner than its minimum asks."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"heater": {"state": True, "at": 10.0}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file)
+        assert log.states() == {"heater": True}
+        assert log.loop_state(self.FINGERPRINT, 300) is None
+
+
+class TestWhatTheControllerKeepsAndPutsBack:
+    @staticmethod
+    def _controller(**pid):
+        """Return a controller over a simple ladder.
+
+        Args:
+            **pid: overrides for the pid section
+
+        Returns:
+            Controller: the controller
+        """
+        from toinflux.controller import Controller
+
+        return Controller(
+            {
+                "parameters": {"target": 20.0},
+                "inputs": {"inside": {"source": "hue", "field": "t"}},
+                "pid": dict({"input": "inside", "setpoint": "target", "kp": 10.0, "ki": 1.0, "kd": 0.0}, **pid),
+                "output": {
+                    "cycle_seconds": 60,
+                    "min_transition_seconds": 1,
+                    "stages": [{"level": 0, "set": {"a": False}}, {"level": 100, "set": {"a": True}}],
+                },
+                "devices": {"a": {"source": "hue", "device": "A"}},
+            }
+        )
+
+    def test_the_integral_is_what_is_kept(self, state_directory):
+        controller = self._controller()
+        controller.step({"inside": 18.0, "target": 20.0}, dt=60)
+        assert controller.capture()["integral"] > 0
+
+    def test_putting_it_back_shortens_the_climb(self, state_directory):
+        # A small error and a gentle integral, so neither run saturates at the top rung -
+        # a comparison where both are pinned at full output shows nothing, which is what an
+        # earlier version of this test did.
+        tuning = {"kp": 10.0, "ki": 0.1}
+        warm = self._controller(**tuning)
+        for _ in range(4):
+            warm.step({"inside": 19.5, "target": 20.0}, dt=60)
+        cold = self._controller(**tuning)
+        first_cold = cold.step({"inside": 19.5, "target": 20.0}, dt=60)
+        resumed = self._controller(**tuning)
+        resumed.resume_from(warm.capture())
+        # `resume_from` restores into a hold, so the loop is released before it is stepped -
+        # which is what the cycle does, and what decides whether the memory is still current.
+        resumed.resume()
+        first_resumed = resumed.step({"inside": 19.5, "target": 20.0}, dt=60)
+        cold_level = sum(d.stage.level * d.seconds for d in first_cold)
+        warm_level = sum(d.stage.level * d.seconds for d in first_resumed)
+        assert warm_level > cold_level, "resuming bought nothing"
+
+    def test_an_integral_beyond_the_ladder_is_clamped_on_the_way_in(self, state_directory):
+        """A file is a file. A number that escaped the range would command past the top rung."""
+        controller = self._controller()
+        controller.resume_from({"integral": 10_000_000.0})
+        assert controller.pid._integral <= controller.ladder[-1].level
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), "42", None])
+    def test_something_that_is_not_a_number_is_ignored(self, bad, state_directory):
+        controller = self._controller()
+        before = controller.pid._integral
+        controller.resume_from({"integral": bad})
+        assert controller.pid._integral == before
+
+    def test_the_clock_is_not_restored(self, state_directory):
+        """It belongs to this process. A timestamp from a previous one would make the first
+        interval either enormous or negative depending on which way the clock had moved."""
+        controller = self._controller()
+        assert "last_time" not in controller.capture()
+
+    def test_the_fingerprint_follows_the_things_the_integral_depends_on(self, state_directory):
+        base = self._controller().fingerprint
+        assert self._controller().fingerprint == base
+        assert self._controller(kp=999.0).fingerprint != base
+        assert self._controller(ki=999.0).fingerprint != base
+
+    def test_the_fingerprint_follows_the_scale_and_the_cap_too(self, state_directory):
+        """Both were missing, and both change what the integral means rather than merely how
+        the control behaves.
+
+        A device moved from `brightness_pct` to `color_temp_k` keeps its rung numbers while
+        every one of them comes to mean something else, and a changed `max_level` changes the
+        range the integral is clamped into. Either left the digest identical, so a loop earned
+        against one scale was handed straight back for another.
+        """
+        from toinflux.controller import Controller
+
+        def built(
+            parameter="brightness_pct",
+            cap=None,
+            field="t",
+            setpoint="target",
+            reads="inside",
+            target=20.0,
+            device="A",
+            instance=None,
+            source="hue",
+        ):
+            output = {
+                "cycle_seconds": 60,
+                "min_transition_seconds": 1,
+                "stages": [{"level": 0, "set": {"a": 0}}, {"level": 100, "set": {"a": 100}}],
+            }
+            if cap:
+                output["max_level"] = cap
+            return Controller(
+                {
+                    "parameters": {"target": target},
+                    "inputs": {
+                        "inside": {"source": "hue", "field": field},
+                        "other": {"source": "hue", "field": "o"},
+                    },
+                    "pid": {"input": reads, "setpoint": setpoint, "kp": 10.0, "ki": 1.0, "kd": 0.0},
+                    "output": output,
+                    "devices": {
+                        "a": {"source": source, "instance": instance, "device": device, "parameter": parameter}
+                    },
+                }
+            ).fingerprint
+
+        base = built()
+        assert built() == base, "the same document did not agree with itself"
+        assert built(parameter="color_temp_k") != base, "the scale changed and the loop was kept"
+        assert built(cap="50") != base, "the cap changed and the loop was kept"
+        assert built(reads="other") != base, "pid.input was repointed and the loop was kept"
+        assert built(setpoint="target + 1") != base, "the setpoint changed and the loop was kept"
+        # The same repointing one level down: the rule still says `inside`, but `inside` now
+        # reads a different sensor, so every number the loop remembers describes something else.
+        assert built(field="o") != base, "an input was repointed at another sensor and the loop was kept"
+        # The commonest edit of all: the setpoint rule still says `target`, and `target` is a
+        # different number. The integral is the accumulated error against the old one.
+        assert built(target=30.0) != base, "the setpoint value changed and the loop was kept"
+        # What a device points at, not only what it is driven by. Two lamps take the same
+        # brightness ladder and are different plants, so an integral learned from one would
+        # command the other from history that was never about it.
+        assert built(device="Other") != base, "the actuator changed and the loop was kept"
+        assert built(instance="bridge2") != base, "the bridge changed and the loop was kept"
+        assert built(source="mqtt") != base, "the source changed and the loop was kept"
+
+    def test_a_field_nobody_foresaw_discards_the_loop_by_default(self, state_directory):
+        """The point of the whole inversion, and the only assertion here that could not have
+        been written before it.
+
+        This digest listed what mattered and the list was wrong eight times over: the ladder's
+        scale, the cap, the input and setpoint rules, what those inputs read, the adjustable
+        parameters, the actuator. It is now the document less a named few, so a key added to
+        the format is covered without anybody remembering to add it.
+        """
+        from toinflux.controller import Controller
+
+        document = {
+            "parameters": {"target": 20.0},
+            "inputs": {"inside": {"source": "hue", "field": "t"}},
+            "pid": {"input": "inside", "setpoint": "target", "kp": 10.0, "ki": 1.0, "kd": 0.0},
+            "output": {
+                "cycle_seconds": 60,
+                "min_transition_seconds": 1,
+                "stages": [{"level": 0, "set": {"a": False}}, {"level": 100, "set": {"a": True}}],
+            },
+            "devices": {"a": {"source": "hue", "device": "A"}},
+        }
+        before = Controller(document).fingerprint
+        document["output"]["a_knob_invented_after_this_test"] = 7
+        assert Controller(document).fingerprint != before, "an unknown setting was silently ignored"
+
+    @pytest.mark.parametrize("named", ["max_age", "min_transition_seconds"])
+    def test_a_name_that_matches_an_excluded_setting_is_still_counted(self, named, state_directory):
+        """The exclusions are positions in the format, not words.
+
+        Stripping every key so called, wherever it appeared, also stripped a device or a
+        parameter the operator had *named* `max_age` - removing that binding or that value
+        from the digest entirely, which is the opposite of what the exclusion is for. A
+        control's own names share a namespace with nothing.
+        """
+        from toinflux.controller import Controller
+
+        def built(value):
+            return Controller(
+                {
+                    "parameters": {named: value, "target": 20.0},
+                    "inputs": {"inside": {"source": "hue", "field": "t"}},
+                    "pid": {"input": "inside", "setpoint": "target", "kp": 10.0, "ki": 1.0, "kd": 0.0},
+                    "output": {
+                        "cycle_seconds": 60,
+                        "min_transition_seconds": 1,
+                        "stages": [{"level": 0, "set": {"a": False}}, {"level": 100, "set": {"a": True}}],
+                    },
+                    "devices": {"a": {"source": "hue", "device": "A"}},
+                }
+            ).fingerprint
+
+        assert built(1) != built(2), f"a parameter named {named!r} was dropped from the digest"
+
+    def test_and_not_the_things_it_does_not(self, state_directory):
+        """Discarding a hard-won integral because a gate rule changed would throw away the
+        settling time this exists to save."""
+        from toinflux.controller import Controller
+
+        document = {
+            "parameters": {"target": 20.0},
+            "inputs": {"inside": {"source": "hue", "field": "t"}, "outside": {"source": "hue", "field": "o"}},
+            "pid": {"input": "inside", "setpoint": "target", "kp": 10.0, "ki": 1.0, "kd": 0.0},
+            "output": {
+                "cycle_seconds": 60,
+                "min_transition_seconds": 1,
+                "stages": [{"level": 0, "set": {"a": False}}, {"level": 100, "set": {"a": True}}],
+            },
+            "devices": {"a": {"source": "hue", "device": "A"}},
+        }
+        before = Controller(document).fingerprint
+        document["enable_when"] = "outside < 15"
+        document["safe_state"] = "leave_unchanged"
+        assert Controller(document).fingerprint == before
+
+    def test_it_is_stable_across_processes(self, state_directory):
+        """Built-in hash() is salted per process, so a fingerprint written by one control
+        would never match the one that read it back."""
+        import subprocess
+
+        code = (
+            "import sys; sys.path.insert(0, '.');"
+            "from toinflux.controls import CONTROL_EXAMPLES;"
+            "from toinflux.controller import Controller;"
+            "print(Controller(CONTROL_EXAMPLES['normal']['document']).fingerprint)"
+        )
+        runs = {
+            subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.strip()
+            for _ in range(2)
+        }
+        assert len(runs) == 1, f"the fingerprint changed between processes: {runs}"
+
+
+class TestACycleWritesDownWhatItLearned:
+    """Driving `cycle` rather than calling the store directly.
+
+    Every other test here calls `record_loop` itself, which says nothing about whether the
+    loop ever does - and deleting the call from `_spend_window` passed all of them. Fourth
+    time on this branch that a guard has been correct and unreached.
+    """
+
+    def test_the_loop_state_lands_in_the_file(self, state_directory, bridge):
+        from toinflux.control_process import ControlProcess
+
+        name = TestAMinimumLongerThanTheWindowIsKept._control(state_directory, minimum=1, cycle=1)
+        control = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            control.cycle(dt=1, sleep=lambda _seconds: None)
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+        with open(transition_path(name, state_directory.settings_file), encoding="utf-8") as handle:
+            stored = json.load(handle)
+        assert "pid" in stored, f"a cycle ran and stored no loop state: {sorted(stored)}"
+        assert "integral" in stored["pid"], stored["pid"]
+        assert stored["pid"]["fingerprint"] == control.controller.fingerprint
+
+    def test_and_the_devices_are_still_beside_it(self, state_directory, bridge):
+        """One file, two halves. A change to either must not lose the other."""
+        from toinflux.control_process import ControlProcess
+
+        name = TestAMinimumLongerThanTheWindowIsKept._control(state_directory, minimum=1, cycle=1)
+        control = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            control.cycle(dt=1, sleep=lambda _seconds: None)
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+        with open(transition_path(name, state_directory.settings_file), encoding="utf-8") as handle:
+            stored = json.load(handle)
+        assert stored["devices"], "the device half was lost when the loop half was written"

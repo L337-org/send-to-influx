@@ -12,7 +12,7 @@ import warnings
 from collections import namedtuple
 import urllib3
 import requests
-from toinflux.general import render_values
+from toinflux.general import RepeatingProblem, render_external, render_values
 from toinflux.credentials import CANONICAL_SLOT_SUFFIX_RE, PLACEHOLDER_VALUES, SENTINEL_PREFIX
 from toinflux.influx import DataHandler, escape_key_or_tag_value
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
@@ -443,6 +443,13 @@ HUE_TEMPERATURE_UNITS = {"F": "°F", "K": "K"}
 HUE_DEFAULT_TEMPERATURE_UNIT = "°C"
 
 
+#: A clamped value is a property of the document rather than of the moment, so it recurs every
+#: cycle for as long as the document says so. Module level for the same reason the live-read
+#: reporter is: the handler is rebuilt per worker and the set of keys is bounded by the lights
+#: an installation actually has.
+_CLAMP_PROBLEMS = RepeatingProblem()
+
+
 class Hue(DataHandler):
     """Child class of DataHandler to get data from a Hue Bridge.
 
@@ -455,6 +462,10 @@ class Hue(DataHandler):
         MCP_WRITABLE (bool): True - lights and plugs can be actuated, opt-in per install.
         MCP_ACTUATES_DEVICES (bool): True - a named light or plug can be switched, which is
             what a control's devices section needs and is not implied by MCP_WRITABLE.
+        MCP_DEVICE_PARAMETERS (tuple): brightness and colour temperature - the continuous
+            settings a control may drive on a Hue device, by the keyword
+            ``mcp_set_device_state`` takes for each. Whether a particular lamp has either is
+            checked against the bridge at the moment of use.
         MCP_INSTANCE_TAG (str): the tag naming which bridge a point came from.
         HUE_BRI_MIN (int): the lowest brightness the bridge accepts that is still on.
         HUE_BRI_MAX (int): the highest brightness the bridge accepts.
@@ -481,6 +492,10 @@ class Hue(DataHandler):
     # operator sets hue.mcp_read_write: true - see DataHandler.mcp_write_enabled.
     MCP_WRITABLE = True
     MCP_ACTUATES_DEVICES = True
+    # Independent capabilities per light, checked against the bridge at the moment of use -
+    # a control naming one a particular lamp lacks is refused there, naming the device. This
+    # is only the set the source understands at all.
+    MCP_DEVICE_PARAMETERS = ("brightness_pct", "color_temp_k")
     # Every point carries host=<the bridge it came from>, which with more than one bridge
     # is what separates them: field names are unprefixed, so two bridges with a light of
     # the same name write the same field key under different host tags. Naming the axis
@@ -843,11 +858,18 @@ class Hue(DataHandler):
             # handler below - otherwise a parse failure would be misreported as a
             # transport "connection" error. (Guards both the collector read path
             # and the MCP write tools' device discovery, which share this method.)
-            logging.error("Hue Bridge returned an unparseable response - %s", self._redact(str(e)))
-            raise SourceConnectionError(self._redact(f"Hue Bridge returned an unparseable response: {e}")) from e
+            raise SourceConnectionError(
+                self._redact(f"Hue Bridge returned an unparseable response: {render_external(e)}")
+            ) from e
         except requests.exceptions.RequestException as e:
-            logging.error("Error connecting to Hue Bridge - %s", self._redact(str(e)))
-            raise SourceConnectionError(self._redact(str(e))) from e
+            # **Raised, not logged as well.** Every caller of this handler reports a failed
+            # read itself, and at the level its own situation deserves: the collector worker
+            # warns and backs off, a control's input read warns and falls back to the stored
+            # value, and an MCP tool hands the message to the client.  Logging here too put
+            # an ERROR in front of each of them, saying the same words at a severity none of
+            # them agreed with - during a five-minute bridge outage, one control produced two
+            # ERRORs a cycle from this line alone.  Everything this said is in the exception.
+            raise SourceConnectionError(self._redact(render_external(e))) from e
         # A successful GET returns a dict (sensors/lights); a list only ever comes
         # back on error. Guard the indexing: an empty list, or a list whose first
         # item isn't the documented {"error": {...}} shape, is unexpected and must
@@ -862,15 +884,20 @@ class Hue(DataHandler):
                 description = error.get("description", str(error))
             else:
                 description = f"unexpected list response: {hue_data!r:.200}"
-            logging.error("Error connecting to Hue Bridge - %s", description)
-            raise SourceConnectionError(description)
+            # Quoted and redacted, like every other error this handler raises. The bridge
+            # wrote this text, and since the duplicate log went this raise is the only report
+            # of it - so a newline in a description would have put a line of the bridge's
+            # choosing into whatever the caller logs, and the redaction that the rest of the
+            # module applies was missing here alone.
+            raise SourceConnectionError(self._redact(f"Hue Bridge reported an error: {description!r:.300}"))
         # A successful GET is a dict (sensors/lights). A non-dict, non-list body - a
         # JSON scalar/null, e.g. from a misconfigured proxy - is unexpected; fail
         # cleanly here rather than returning it for a caller (parse_hue_data /
         # _fetch_lights) to crash on with a TypeError/AttributeError.
         if not isinstance(hue_data, dict):
-            logging.error("Hue Bridge returned an unexpected response type - %.200r", hue_data)
-            raise SourceConnectionError(f"Hue Bridge returned an unexpected response type: {hue_data!r:.200}")
+            raise SourceConnectionError(
+                self._redact(f"Hue Bridge returned an unexpected response type: {hue_data!r:.200}")
+            )
         return hue_data
 
     def hue_device_name_to_name(self, device_name):
@@ -1240,7 +1267,32 @@ class Hue(DataHandler):
         if not isinstance(color_temp_k, (int, float)) or isinstance(color_temp_k, bool) or color_temp_k <= 0:
             raise ToolParamError(f"color_temp_k must be a positive number in kelvin (got {color_temp_k!r})")
         lo, hi = caps["ct_range"]
-        return {"ct": max(lo, min(self._kelvin_to_mirek(color_temp_k), hi))}
+        mirek = self._kelvin_to_mirek(color_temp_k)
+        clamped = max(lo, min(mirek, hi))
+        if clamped != mirek:
+            # Said rather than done quietly. This has always clamped, which is the right
+            # answer for a bound only the bulb knows - but a caller asking for 1000 K and
+            # getting 2200 with nothing said has no way to learn that the light cannot go
+            # that warm, and a control document carrying the value would be wrong for ever.
+            # Through the reporter, because a control commands its driven devices every cycle
+            # whether or not the value changed: a document asking for a colour its bulb cannot
+            # reach would otherwise say so once per cycle for as long as the control runs,
+            # which is the flood this class exists to prevent. Keyed per device, so two bulbs
+            # out of range are two problems.
+            _CLAMP_PROBLEMS.report(
+                # The bridge as well as the light: an installation may run several, and two
+                # of them commonly carry the same light names, so keying on the name alone
+                # would report one bulb and silently swallow the other. `self.instance` is
+                # None for the first configured bridge, which is still a distinct key from an
+                # explicit host - that over-reports at worst, which is the safe direction.
+                (self.instance, name, "color_temp_k"),
+                logging.WARNING,
+                "Device %r cannot reach %g K, so it was set to %g K instead",
+                name,
+                color_temp_k,
+                self._mirek_to_kelvin(clamped),
+            )
+        return {"ct": clamped}
 
     def _color_state(self, name, caps, color):
         """Validate a colour request and return ``{"xy": [...]}``.
@@ -1328,17 +1380,18 @@ class Hue(DataHandler):
             # the RequestException handler so a parse failure isn't misreported as
             # a transport error. (raise_for_status()'s HTTPError is a
             # RequestException but not a ValueError, so it still falls through.)
-            logging.error("Hue Bridge returned an unparseable response to a write - %s", self._redact(str(e)))
-            raise SourceConnectionError(self._redact(f"Hue Bridge returned an unparseable response: {e}")) from e
+            raise SourceConnectionError(
+                self._redact(f"Hue Bridge returned an unparseable response to a write: {render_external(e)}")
+            ) from e
         except requests.exceptions.RequestException as e:
-            logging.error("Error writing to Hue Bridge - %s", self._redact(str(e)))
-            raise SourceConnectionError(self._redact(str(e))) from e
+            raise SourceConnectionError(self._redact(render_external(e))) from e
         # The CLIP API always answers a state PUT with a JSON *list* of per-key
         # success/error items. A non-list body is unexpected and must fail cleanly
         # rather than being read as success (an empty error list) by the scan below.
         if not isinstance(result, list):
-            logging.error("Hue Bridge returned an unexpected response shape to a write - %.200r", result)
-            raise SourceConnectionError(f"Hue Bridge returned an unexpected response: {result!r:.200}")
+            raise SourceConnectionError(
+                self._redact(f"Hue Bridge returned an unexpected response to a write: {result!r:.200}")
+            )
         # Guard item["error"] being a non-dict (a malformed bridge/proxy response):
         # fall back to its string form rather than crashing on .get(), mirroring the
         # read path's defensive handling in get_data_from_hue_bridge().
@@ -1352,9 +1405,10 @@ class Hue(DataHandler):
             if isinstance(item, dict) and "error" in item
         ]
         if errors:
-            # The bridge wrote these strings, so they go through the renderer for the
-            # same reason the raise below does: one containing a newline would otherwise
-            # write its own line into the journal.
-            logging.error("Hue Bridge rejected a write to light %s - %s", light_id, render_values(errors, "; "))
-            raise SourceConnectionError(f"Hue Bridge rejected the write: {render_values(errors, '; ')}")
+            # The bridge wrote these strings, so they go through the renderer: one
+            # containing a newline would otherwise write its own line wherever the caller
+            # logs this, which is the trick the renderer exists to refuse.
+            raise SourceConnectionError(
+                self._redact(f"Hue Bridge rejected the write to light {light_id!r}: {render_values(errors, '; ')}")
+            )
         return result

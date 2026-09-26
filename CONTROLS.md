@@ -64,7 +64,7 @@ The document
 | Key | Required | What it is |
 | --- | --- | --- |
 | `active_period` | no | {from, to, end_state}: a daily wall-clock window in the control's own timezone |
-| `devices` | yes | name -> {source, device, instance, min_transition_seconds}: what the control switches |
+| `devices` | yes | name -> {source, device, instance, min_transition_seconds, parameter}: what the control drives |
 | `enable_when` | no | a rule gating actuation; the control acts only while it evaluates non-zero |
 | `enabled` | no | true or false; false keeps the document and runs no process for it at all |
 | `inputs` | yes | name -> {source, field, instance, max_age}: the readings the rules may use |
@@ -72,7 +72,7 @@ The document
 | `output` | yes | cycle_seconds, min_transition_seconds, an optional max_level rule, and the stage ladder |
 | `parameters` | no | constants the rules may read, such as a target temperature, adjustable at runtime |
 | `pid` | yes | the loop itself: input and setpoint rules, and the kp, ki and kd gains |
-| `safe_state` | no | what the devices do at startup, on failure and at shutdown |
+| `safe_state` | no | unenergised, energised or leave_unchanged: what the devices do at startup, on failure and at shutdown |
 | `timezone` | no | an IANA zone name for the active period; absent means this machine's local time |
 
 A key the store does not permit is refused rather than ignored, in the nested sections as
@@ -149,11 +149,20 @@ are separate because they answer different questions:
 | `active_period.end_state` | when the control's daily window closes |
 | `enable_when` | a rule gating actuation while everything else is running |
 
-The safe states are `unenergised` and `leave_unchanged`.
+The safe states are `unenergised`, `energised` and `leave_unchanged`.
 
 `unenergised` is the default and switches every device the control owns off **by name**,
 rather than meaning "the lowest stage" - so it does not depend on a zero stage having been
 declared correctly.
+
+`energised` is its mirror and switches them all on, named the same way. It is there because
+the device is not necessarily a heater: for a circulation pump whose stopping lets a boiler
+overheat, a valve held open by power, frost protection, or an extractor that must not stop,
+off is the dangerous state and on is the safe one. **The consequence to weigh is that the
+device then keeps drawing power with nothing supervising it** - the control is not running,
+which is why its safe state applied - so it holds until somebody or something else
+intervenes. That is the right trade for a pump and the wrong one for a heater, which is why
+`unenergised` remains the default and this is opt-in.
 
 `leave_unchanged` is the opt-out and means exactly that: the devices keep whatever state they
 were in. **It also removes the startup assertion**, which is what would otherwise clear the
@@ -161,9 +170,35 @@ mess a crash left, so after a SIGKILL or a power cut the device stays where it w
 nothing will correct it. The right trade for a light you do not want going out because a
 server rebooted, and the wrong one for a heater.
 
+All three apply to `active_period.end_state` as well, so a control can hold a room at
+temperature overnight and leave its pump running when the window closes.
+
+**A number is a state too**, for controls with driven devices: `safe_state: 40` leaves a lamp
+at 40%, and any switched device in the same control on, since a value above zero means on for
+something that has only two of them. Zero means off for both. `unenergised` is 0 and false,
+`energised` is 100 and true - and `energised` is refused for a device driven by something
+without a full scale, such as a colour temperature, where 100 would be a nonsense rather than
+a bright light; give the value outright instead.
+
+**A control that starts outside its active period starts in its `end_state`, not its
+`safe_state`.** The two answer different questions - `safe_state` is "something is wrong, or
+nothing is known yet", `end_state` is "the control is deliberately not acting" - and a
+process starting outside its window is the second. Without this a pump with
+`safe_state: energised` and a window of 23:30 to 05:30, restarted at noon, would run all
+afternoon in its failure state and nothing would correct it until the window had opened and
+closed again. `enable_when` does not take part, because answering it needs a sensor read and
+the whole point of the startup assertion is that it happens before anything is read; the
+active period needs only the clock. On the way out the `safe_state` applies whatever the
+clock says, because a process that is ending leaves nothing supervising the devices.
+
 An active period is a wall-clock window in the control's own timezone, and it follows
 daylight saving the way a wall clock does: a window inside the hour the clocks skip does not
 happen that day, and one inside the hour they repeat happens twice.
+
+**Quote the times.** YAML reads a colon-separated value with no leading zero as sexagesimal,
+so an unquoted `23:35` is the number 1415 while `05:25` survives as the string it looks like.
+Both are refused, and the error says so, but the rule is not one anyone should have to carry -
+so quote every boundary and the question never arises.
 
 A disabled control has no process. That is not the same as a running one held back by its
 gate: a control asserts its safe state before its first cycle, so a disabled document that
@@ -211,6 +246,122 @@ window at 1500 and 35% at 750.
 * `max_level` caps the **ladder**, not the demand. Capping the demand still proportions
   between rungs above the cap; capping the ladder does not.
 
+Choosing the gains
+------------------
+
+`level` is a scale you choose - watts, percent, anything - and **the PID's gains are in that
+scale per unit of input**. Get this wrong and the loop looks broken rather than mistuned: a
+`kp` three orders of magnitude too small delivers nothing at any realistic error, and the
+integral takes hours to make up the difference, which reads as a control that does not work.
+
+The starting point is one division:
+
+```
+kp = top rung level / the error at which you want full output
+```
+
+For a ladder topping out at 1500 and full output three degrees below setpoint, `kp` is 500.
+The shipped examples are all set this way, and each carries a `tuning` note saying which error
+it was chosen for, so scaling one to your own plant is a matter of changing that number.
+
+### Measure the plant before choosing the error
+
+That leaves the question the division does not answer: *which* error should give full output?
+It is not a preference, it is a property of your installation, and guessing it is how a lamp
+ends up oscillating.
+
+Measure it. Set the device to one value, wait for the reading to settle, set it to another,
+and divide the change in reading by the change in output. That number - the **plant gain** -
+is how far your reading moves per unit the loop commands.
+
+What decides stability is `kp` times the plant gain. **Keep it well below 1.** At 1 the loop
+answers each error with a correction that recreates it inverted, so instead of settling it
+swings harder every cycle. This is not theoretical: a lamp tuned to a loop gain of 1.04
+diverged within a quarter of an hour, having looked perfectly reasonable on paper.
+
+One real room moved 14 to 21 lux per percent of lamp. The shipped `dimming` example asks for
+full brightness 200 lux short of target, which is right for a lamp that changes the reading by
+about that much at full, and twenty-five times too aggressive in that room. Neither number is
+wrong; they describe different rooms.
+
+Start below your estimate and raise it. Too low converges slowly, which you can see and live
+with. Too high is neither.
+
+Two things make a loop look overgeared when it is not. An input allowed to be much older than
+`cycle_seconds` lets the loop command several times before seeing the effect of the first -
+`--check-config` warns about that on the PID's own input. And a sensor that reports only when
+its reading changes by some threshold, as Hue's light sensors do, leaves the loop steering
+blind between reports. Detuning is the wrong answer to both.
+
+### Further reading, and what does not transfer
+
+Wikipedia's [PID controller](https://en.wikipedia.org/wiki/Proportional%E2%80%93integral%E2%80%93derivative_controller)
+article is the best general starting point: its *Loop tuning* section has a table of what
+increasing each of `kp`, `ki` and `kd` does to rise time, overshoot, settling time,
+steady-state error and stability, which is the right mental model for deciding which one to
+reach for. The [Ziegler-Nichols method](https://en.wikipedia.org/wiki/Ziegler%E2%80%93Nichols_method)
+is the classic recipe and worth knowing by name.
+
+Read both for *what each term does*, not for *which values to use here*. Three things do not
+carry across:
+
+* **Classic Ziegler-Nichols aims at quarter-amplitude decay**, which is deliberate
+  oscillation. Its own article says the tuning "yields an aggressive gain and overshoot" and
+  that "some applications wish to instead minimize or eliminate overshoot, and for these this
+  method is inappropriate". A room and a lamp are both of those; if you use it, use the
+  "no overshoot" variants it gives rather than the classic row.
+* **Both methods start by driving the loop into sustained oscillation** to find the ultimate
+  gain. That is a reasonable thing to do on a bench and a poor one in an occupied
+  conservatory, and with a 300-second cycle it takes hours to find.
+* **The literature assumes a continuous actuator and a fast fixed sample interval.** Here the
+  output is a ladder of discrete rungs on a scale you chose, reached by time-proportioning
+  across a window of 30 to 300 seconds, and the input may not refresh every cycle. A `kp`
+  quoted anywhere else is not in the same units as yours until you have divided through by
+  your own top rung.
+
+The method in this section - measure the plant gain, keep `kp` times it well below 1, start
+low - needs none of that and costs one deliberate change to the device.
+
+`ki` then trims the residual offset that proportional action alone always leaves. It is
+applied per second, so a useful starting value is roughly `kp / 3000` for a slow plant like a
+room and more for something small and fast; the output limits follow the ladder, so it cannot
+wind up beyond what the devices can deliver. `kd` is usually best left at zero, because a
+temperature or light reading is noisy and differentiating noise amplifies it.
+
+Switched devices and driven ones
+--------------------------------
+
+A device with no `parameter` is switched on and off, and its stage entries are `true` or
+`false`. A device that names one is **set to a value**, and its stage entries are numbers on
+that parameter's own scale:
+
+```yaml
+devices:
+  lamp: {source: hue, device: Office Lamp, parameter: brightness_pct}
+output:
+  stages:
+  - {level: 0, set: {lamp: 0}}
+  - {level: 1000, set: {lamp: 100}}
+```
+
+The reason the two behave differently is that a heater has no middle setting and a dimmer
+does. A switched device is **time-proportioned**: the window is split between two rungs so
+that it averages out at the demand. A driven device takes the value the ladder describes *at*
+the demand and holds it for the whole window, because proportioning a dimmer would be flicker
+rather than control. So the ladder is a set of rungs for one and a transfer curve for the
+other, and one control can hold both, each driven by the method its own hardware supports.
+
+`min_transition_seconds` means the same thing in both cases once you read it as "how often
+this device may change": for a switch that is how often it may flip, and for a dimmer how
+often it is adjusted. A driven device inside its minimum is commanded the value it already
+has, and it never constrains how the window is split, because its value is the same in both
+halves.
+
+Which parameters exist is a property of the source. Hue drives `brightness_pct` and
+`color_temp_k`; `--check-config` refuses a parameter the source does not know, and whether a
+*particular* lamp is dimmable is checked against the bridge when the control first commands
+it, where the error can name the device.
+
 Worked examples
 ---------------
 
@@ -239,7 +390,7 @@ inputs:
     source: hue
     field: temperature_conservatory
     instance: bridge1
-    max_age: 900
+    max_age: 300
   dew:
     source: openmeteo
     field: dew_point_2m
@@ -255,8 +406,8 @@ inputs:
 pid:
   input: inside
   setpoint: max(target, dew + 5)
-  kp: 12.0
-  ki: 0.02
+  kp: 500.0
+  ki: 0.15
   kd: 0.0
 output:
   cycle_seconds: 300
@@ -286,7 +437,7 @@ enable_when: outside < 15
 safe_state: unenergised
 active_period:
   from: '23:35'
-  to: 05:25
+  to: '05:25'
   end_state: unenergised
 ```
 
@@ -310,7 +461,7 @@ inputs:
   inside:
     source: hue
     field: temperature_conservatory
-    max_age: 900
+    max_age: 300
   outside:
     source: openmeteo
     field: temperature_2m
@@ -318,8 +469,8 @@ inputs:
 pid:
   input: inside
   setpoint: target
-  kp: 12.0
-  ki: 0.02
+  kp: 500.0
+  ki: 0.15
   kd: 0.0
 output:
   cycle_seconds: 300
@@ -349,6 +500,48 @@ enable_when: outside < 15
 safe_state: unenergised
 ```
 
+### Dimming
+
+A device set to a value rather than switched. The lamp holds the brightness the ladder
+describes at the demand, adjusted at most every 30 seconds. Worth knowing before tuning one:
+a lamp driven by a sensor that can see the lamp is a feedback loop, so the sensor wants to be
+reading the ambient you care about rather than the lamp itself.
+
+```yaml
+name: office_lamp
+enabled: true
+timezone: Europe/London
+parameters:
+  target: 300.0
+inputs:
+  brightness:
+    source: hue
+    field: light_level_office
+    max_age: 30
+pid:
+  input: brightness
+  setpoint: target
+  kp: 5.0
+  ki: 0.02
+  kd: 0.0
+output:
+  cycle_seconds: 30
+  min_transition_seconds: 30
+  stages:
+  - level: 0
+    set:
+      lamp: 0
+  - level: 1000
+    set:
+      lamp: 100
+devices:
+  lamp:
+    source: hue
+    device: Office Lamp
+    parameter: brightness_pct
+safe_state: unenergised
+```
+
 ### Fast adjustment
 
 A small thermal mass and a device with nothing to protect. The loop recomputes every
@@ -364,12 +557,12 @@ inputs:
   tray:
     source: hue
     field: temperature_propagator
-    max_age: 300
+    max_age: 60
 pid:
   input: tray
   setpoint: target
-  kp: 40.0
-  ki: 0.1
+  kp: 1000.0
+  ki: 2.0
   kd: 0.0
 output:
   cycle_seconds: 60
@@ -406,6 +599,44 @@ look like it is doing the opposite of what it was told - a demand of 150 command
 for the whole window is correct when the far heater may not switch off yet, and inexplicable
 without it.
 
+What a control remembers
+------------------------
+
+Each control keeps a small file in the state directory - `transitions/<name>.json` - holding
+what it had done when it last ran. Two halves, both there for the same reason: a restart
+should not cost the control what it already knew.
+
+The **device half** records what each device was last commanded to and when, which is what
+makes `min_transition_seconds` survive a restart. Without it, a heater switched off a second
+before a service restart could be switched on again immediately, because the process that
+knew about it had gone.
+
+The **loop half** records the PID's integral. That is the part a slow plant spends a long
+time earning, and rebuilding it from nothing is why a restarted control can sit below target
+for an hour having already learned the answer once. It is put back only when the stored
+memory still describes the present, on two tests: the gains, ladder and cycle must be
+unchanged, because an integral is in the output's units and means something else under a
+different tuning; and it must be recent, within a few cycles, because a machine that has been
+down long enough for the room to change should look at the room rather than at what it
+remembered. Failing either, the control starts afresh - which is simply what it always did.
+`--verbose` says which happened.
+
+The file is written whenever a device actually changes, and once per cycle for the loop
+half. Deleting it costs nothing but the memory; the control rebuilds both.
+
+The same memory survives a **momentary** failure within one run. A cycle that cannot read its
+input falls to the safe state and stops actuating, and the loop is held; resuming keeps the
+integral where the pause was short, and starts afresh where it was long. That distinction is
+the difference between a single flaky reading, which must not cost the control what it knew,
+and the end of an active period, after which last night's integral says nothing about this
+evening.
+
+`get_control_state` over MCP reports all of it - the integral, its age, whether it still
+matches the document, what each device was last commanded to, and which devices are currently
+held by their `min_transition_seconds`. That is the tool to reach for when an output moves
+against its input, because the integral is the usual explanation and is invisible from the
+device side.
+
 What is checked, and when
 -------------------------
 
@@ -424,9 +655,10 @@ capability a stage asks for. Those need the far end, and they fail that control 
 Reading them over MCP
 ---------------------
 
-With `controls.enabled` and the MCP server both on, three read-only tools appear:
+With `controls.enabled` and the MCP server both on, four read-only tools appear:
 `list_controls` (names, enabled, devices, cycle length, and whether each process is running),
-`get_control` (one document as stored), and `get_control_schema` (this format). They are not
+`get_control` (one document as stored), `get_control_state` (what a running control has since
+worked out), and `get_control_schema` (this format). They are not
 behind any write flag: a control document holds no secrets, and being able to ask what is
 being controlled and whether it is running should not require granting the ability to change
 it.

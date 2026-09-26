@@ -29,14 +29,26 @@ import time
 import requests
 
 from toinflux.controller import Controller
-from toinflux.controls import DEFAULT_CYCLE_SECONDS, load_control, validate_control
+from toinflux.controls import (
+    DEFAULT_CYCLE_SECONDS,
+    device_identity,
+    holdable_value,
+    load_control,
+    validate_control,
+)
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
-from toinflux.gating import DeviceGuard, Gate, commands_for
-from toinflux.general import RepeatingProblem, load_settings, render_values, source_class
+from toinflux.gating import DeviceGuard, Gate, commands_for, static_full_scale
+from toinflux.general import RepeatingProblem, load_settings, render_external, render_values, source_class
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
 from toinflux.staging import build_ladder
 from toinflux.transitions import TransitionLog
+
+#: How many cycles old a stored loop memory may be and still describe the present. Five,
+#: because a restart to pick up an edit or a new build takes seconds and this covers it
+#: generously, while a machine that has been down long enough for the room to change looks at
+#: the room instead. Erring short costs only the settling time a restart already costs today.
+RESUMABLE_CYCLES = 5
 
 #: How long a cycle waits when the document names nothing.
 
@@ -160,7 +172,12 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
         # The control's own key travels with the bridge-side name, because it is the one an
         # operator can act on: a fault with this declaration is fixed by editing the entry
         # they wrote, not the device name the far end knows it by.
-        targets.setdefault((spec["source"], spec.get("instance")), []).append((device_key, spec["device"], state))
+        # The parameter travels with the target: the commanding runs in its own function so a
+        # partial failure can still be recorded, and that function has no view of the document.
+        state = _within_scale(name, device_key, spec.get("parameter"), state)
+        targets.setdefault((spec["source"], spec.get("instance")), []).append(
+            (device_key, spec["device"], state, spec.get("parameter"))
+        )
     try:
         _command_each(targets, commanded, settings_file)
     finally:
@@ -170,7 +187,71 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
         # or the next restart would then switch it again inside its minimum - the one thing
         # this log exists to prevent, arriving exactly when the far end is already misbehaving.
         if commanded:
-            log.record(commanded, forced=forced)
+            # The parameter each device was driven by travels with the state, because the
+            # state only means anything alongside it: 2700 is a colour temperature and 40 is a
+            # percentage, and a log that records the number without the scale invites the next
+            # reader to use one as the other.
+            log.record(
+                commanded,
+                forced=forced,
+                # One identity rather than a field per thing that makes the value meaningful.
+                # That list grew twice under review - the scale, then the actuator - and
+                # `device_identity` is now whatever the declaration says, so it cannot grow
+                # again without being covered.
+                identities={key: device_identity(declared.get(key)) for key in commanded},
+            )
+
+
+#: Keyed per control and device, because two devices out of range are two problems.
+_SCALE_PROBLEMS = RepeatingProblem()
+
+
+def _within_scale(control, device, parameter, state):
+    """Return a value the device can take, clamping it to a bound a name settles.
+
+    **Coping rather than refusing, because there is nobody to tell.** Validation catches a
+    percentage past 100 while the caller is still listening; this is the path where one
+    arrives anyway - out of a transition log written under a different document, or through
+    a route added later - and at that moment the alternatives are a light at its brightest or
+    a control that stops for good. `mcp_set_device_state` rightly refuses the same value when
+    a *model* asks for it, because there the caller can pick another.
+
+    Said at WARNING, which is what the level is for: the device did something, and it was not
+    quite what the document asked. The colour-temperature path has always clamped to the
+    bulb's own range; it says so now too.
+
+    Args:
+        control (str): the control's name, for the message
+        device (str): the control's key for the device, because that is what gets edited
+        parameter (str or None): what the device is driven by, or None if switched
+        state (object): the value about to be commanded
+
+    Returns:
+        object: the value to command, clamped where it was out of range
+    """
+    full = static_full_scale(parameter)
+    if full is None or isinstance(state, bool) or not isinstance(state, (int, float)):
+        return state
+    clamped = max(0, min(state, full))
+    if clamped != state:
+        # Through the reporter for the same reason as the bridge's own clamp: a control
+        # commands its driven devices every cycle, so a document asking for a value out of
+        # range would say so once per cycle for ever. Copilot caught the bridge's copy of this
+        # and not ours, which is the same fault in the same shape one file away.
+        _SCALE_PROBLEMS.report(
+            # The control as well as the device, because a device key is only unique within
+            # the document that declares it.
+            (control, device),
+            logging.WARNING,
+            "Control %r asked for %r on device %r, which %r tops out at %g, so it was set to %g instead",
+            control,
+            state,
+            device,
+            parameter,
+            full,
+            clamped,
+        )
+    return clamped
 
 
 def _command_each(targets, commanded, settings_file) -> None:
@@ -210,14 +291,25 @@ def _command_each(targets, commanded, settings_file) -> None:
             # here: actuating is a property of the source, so every instance of it
             # answers the same way, and naming one would point at the wrong thing.
             raise ConfigError(
-                f"control device {render_values(sorted(key for key, _device, _state in devices))} "
+                f"control device {render_values(sorted(key for key, _device, _state, _parameter in devices))} "
                 f"names source {source!r}, which cannot switch a device on and off. Name a "
                 f"source that can, or remove the device from this control"
             )
         with source_handler(source, settings_file=settings_file, instance=instance) as handler:
-            for key, device, state in devices:
+            for key, device, state, parameter in devices:
+                # A device that names a parameter is *set* rather than switched, so the value
+                # travels on that keyword. The handler turns a light on implicitly when it is
+                # given a brightness, and a zero is an explicit "off" rather than a dimmest
+                # setting, which is what makes `unenergised` mean the same thing for both
+                # kinds of device.
+                if parameter and state:
+                    setting = {parameter: state}
+                elif parameter:
+                    setting = {"on": False}
+                else:
+                    setting = {"on": bool(state)}
                 try:
-                    handler.mcp_set_device_state(device, on=bool(state))
+                    handler.mcp_set_device_state(device, **setting)
                 except ToolParamError as exc:
                     # **A stored document is not a caller mistake.** `mcp_set_device_state`
                     # raises this for a device it cannot resolve, which is right when a model
@@ -230,9 +322,11 @@ def _command_each(targets, commanded, settings_file) -> None:
                     # The control's own key is added because the document is what has to be
                     # edited, and the handler only knows the bridge's name for the device.
                     raise ConfigError(
-                        f"control device {key!r} cannot be commanded: {exc}",
+                        f"control device {key!r} cannot be commanded: {render_external(exc)}",
                     ) from exc
-                commanded[key] = bool(state)
+                # As commanded, not coerced: a dimmer's 40 must be recorded as 40, or the
+                # log cannot tell it from the same lamp at 5 and its minimum means nothing.
+                commanded[key] = state
 
 
 class ControlProcess:
@@ -276,13 +370,14 @@ class ControlProcess:
         self.gate = Gate(self.document)
         self.controller = Controller(self.document)
         self.ladder = build_ladder(self.document["output"]["stages"])
+        self._resume_the_loop()
         self._session = session or requests.Session()
         self._owns_session = session is None
         self._bindings = None
         self.guard = DeviceGuard(
             name,
             self.document.get("safe_state", "unenergised"),
-            tuple(self.document.get("devices") or {}),
+            self.document.get("devices") or {},
             self._apply_safe,
         )
 
@@ -375,7 +470,7 @@ class ControlProcess:
                 # demand built from a window the actuators were deliberately idle through.
                 self.controller.hold()
                 if decision.apply:
-                    self._apply_safe(commands_for(decision.apply, tuple(self.document.get("devices") or {})))
+                    self._apply_safe(commands_for(decision.apply, self.document.get("devices") or {}))
                 # Only now is the edge spent. If the command above raised, this is not
                 # reached, the gate still believes it is acting, and the next cycle delivers
                 # the same closing edge again - which is the retry.
@@ -384,8 +479,6 @@ class ControlProcess:
             elif decision.edge == "opened":
                 self.controller.resume()
                 logging.info("Control %r resumed", self.name)
-            # Said only where something was being reported, so an ordinary cycle is silent.
-            self._problems.cleared("cycle", "Control %r completed a cycle again", self.name)
             if decision.actuating:
                 # **Let go of any hold before stepping.** `_fail_safe` holds the controller so
                 # a failed cycle does not integrate an error the loop never acted on, and
@@ -398,7 +491,24 @@ class ControlProcess:
                 self.controller.resume()
                 self._spend_window(dt, sleep)
             else:
+                # **Not acting means held, as an invariant rather than as a list of edges.**
+                # The closing edge above holds, and `_fail_safe` holds, and between them they
+                # covered every way a *running* control stops acting - but not a control that
+                # restarted into a cycle where it was already not acting. `enable_when` false
+                # at startup was the second way in, after the active period, and enumerating
+                # them is how there came to be a second. Cheap and idempotent since a repeated
+                # hold no longer restamps its own clock.
+                self.controller.hold()
                 sleep(self.cycle_seconds)
+            # **After the window, not before it.** The gate resolves this control's inputs
+            # only where `enable_when` needs them, so a control without one arrives here
+            # having read nothing at all: the inputs are gathered inside `_spend_window`, and
+            # a stale or unreachable one fails there. Saying it beforehand announced
+            # "completed a cycle again" four seconds before that same cycle failed, and
+            # cleared the reporter on the way, so every failing cycle of an outage logged its
+            # ERROR afresh instead of once.
+            # Said only where something was being reported, so an ordinary cycle is silent.
+            self._problems.cleared("cycle", "Control %r completed a cycle again", self.name)
             return decision
         except (RuleEvaluationError, SourceConnectionError) as exc:
             # This cycle, not this control. The far end may be back next time, the
@@ -423,8 +533,41 @@ class ControlProcess:
         # Asked before the step, so the plan is built from what this window may actually do
         # rather than built and then contradicted. A device still inside its minimum keeps
         # the state it is in, and the demand is met as closely as the rungs that remain allow.
-        frozen = self.transitions.frozen(self.controller.min_transition_for, tuple(self.document.get("devices") or {}))
-        demand = self.controller.step(bindings, dt, frozen=frozen, states=self.transitions.states())
+        declared_now = self.document.get("devices") or {}
+        frozen = self.transitions.frozen(
+            self.controller.min_transition_for,
+            tuple(declared_now),
+            # Both kinds of device are filtered here rather than only the driven ones further
+            # down: a switched device's recorded state decides which rungs `reachable_ladder`
+            # leaves standing, so a record written against another switch pins the new one to
+            # a state it never had.
+            identities={name: device_identity(spec) for name, spec in declared_now.items()},
+        )
+        # The two kinds of device are held still by different means, because "do not change"
+        # means different things to them. A switched one is kept where it is by planning the
+        # window only from the rungs that leave it there. A driven one has no rung to be kept
+        # on - it holds a number - so its minimum is honoured by commanding the value it
+        # already has, which is what `min_transition_seconds` means for a device that is
+        # adjusted rather than switched: how often the adjustment is made.
+        driven = self.controller.driven
+        demand = self.controller.step(
+            bindings, dt, frozen=frozenset(frozen - set(driven)), states=self.transitions.states()
+        )
+        demand = self._hold(demand, frozen & set(driven))
+        # After the step, so what is stored is what the loop actually knows now. Written every
+        # cycle: the file is a few hundred bytes and the alternative is a memory that is
+        # always one cycle out of date, which is the cycle a restart is most likely to land in.
+        #
+        # **Before the commands, and deliberately.** Writing it after the window instead would
+        # leave a process killed mid-window recording nothing at all, and the window is most of
+        # `cycle_seconds` - so the ordinary case, a kill or a package upgrade partway through,
+        # would lose a whole cycle. What writing first costs is that a failing `_apply` leaves
+        # one cycle of integration stored for a cycle no actuator acted on, and that is bounded
+        # at exactly one: `_fail_safe` calls `hold`, which puts simple-pid in manual, and it
+        # returns the last output without integrating until `resume`. Every later cycle of the
+        # outage therefore stores the same figure rather than a growing one. One cycle of
+        # ki x error x dt is the cheaper of the two losses.
+        self.transitions.record_loop(self.controller.capture(), self.controller.fingerprint)
         for dwell in demand:
             # Per rung rather than per cycle, and the states in full: "level 750" does not
             # say which heater that turned on, and the question being asked of this log is
@@ -438,12 +581,93 @@ class ControlProcess:
                 # can write one, and nothing constrains its characters - so an unquoted one
                 # containing a newline writes its own line into the journal. The same reason
                 # `_render_names` exists two modules away.
+                # A driven device holds a number, and rendering it as on/off threw the value
+                # away entirely: a lamp at 56% and the same lamp at 5% both logged as "on",
+                # which is the one thing this line exists to tell you. The rung's own level
+                # can also read low for a driven control - the window collapses onto the
+                # lower rung and the value is carried in the states - so the states are the
+                # answer and the controller's own line above carries the demand.
                 ", ".join(
-                    f"{device!r}={'on' if state else 'off'}" for device, state in sorted(dwell.stage.states.items())
+                    f"{device!r}={('on' if state else 'off') if isinstance(state, bool) else state}"
+                    for device, state in sorted(dwell.stage.states.items())
                 ),
             )
             self._apply(dict(dwell.stage.states))
             sleep(dwell.seconds)
+
+    def _resume_the_loop(self) -> None:
+        """Put back the integral this control had built before it was last restarted.
+
+        **A slow plant spends a long time earning its integral**, and a restart threw it away:
+        the loop began again from nothing and took as long as it had the first time, which on
+        a room is an hour of sitting below target. The supervisor restarts a control on every
+        document edit, so that was the ordinary cost of changing a setpoint by one degree.
+
+        Declined rather than risked where the stored memory may not describe the present - see
+        `TransitionLog.loop_state` for the two guards. Starting fresh is exactly today's
+        behaviour, so the worse outcome of the two is the one that is already normal.
+        """
+        state = self.transitions.loop_state(self.controller.fingerprint, self.cycle_seconds * RESUMABLE_CYCLES)
+        if state:
+            self.controller.resume_from(state, age=self.transitions.loop_age() or 0.0)
+            logging.info(
+                "Control %r resumed the loop it had built before it stopped, so it does not have to "
+                "earn it again (integral %.3g)",
+                self.name,
+                state.get("integral", 0.0),
+            )
+
+    def _hold(self, plan, held):
+        """Return the plan with each held device pinned to the value it already has.
+
+        Args:
+            plan (tuple): Dwell, as planned
+            held (set): devices whose minimum has not elapsed, and which are driven
+
+        Returns:
+            tuple: Dwell, with those devices unchanged from their last command
+        """
+        if not held:
+            return plan
+        from types import MappingProxyType
+
+        from toinflux.staging import Dwell, Stage
+
+        known = self.transitions.states()
+        # **Only a value that still means what it meant when it was written.** The log
+        # survives a document edit - a device plan change is logged, not erased - so it can
+        # describe a device in a shape the document no longer uses, and pinning that sends the
+        # far end something it rightly refuses. `command_devices` turns that refusal into the
+        # ConfigError that stops a control for good: halted by its own history, with a
+        # document that is perfectly valid and no retry that helps.
+        #
+        # Two ways in, and only the first was closed before. Switched to driven leaves a
+        # `true` behind, which arrives as `brightness_pct=True`. One parameter to another
+        # leaves a number, and 2700 arrives as a brightness or 80 as a colour temperature -
+        # the first refused, the second quietly clamped and wrong, which is worse. So the test
+        # is the parameter rather than the type: the value is only usable if the scale it was
+        # recorded on is the scale the device is on now.
+        #
+        # A log written before the parameter was kept reads as None and so matches nothing
+        # driven, which costs that device its minimum for one command and then corrects itself.
+        # The identity is settled upstream, where `frozen` is decided, so that switched and
+        # driven devices are judged by the same rule. What is left to check here is the value
+        # itself: a driven device holds a number, and a boolean left over from when it was
+        # switched is a record of something that never happened.
+        pinned = {device: known[device] for device in held if holdable_value(known.get(device))}
+        if not pinned:
+            return plan
+        return tuple(
+            Dwell(
+                stage=Stage(
+                    level=dwell.stage.level,
+                    declared=dwell.stage.declared,
+                    states=MappingProxyType({**dwell.stage.states, **pinned}),
+                ),
+                seconds=dwell.seconds,
+            )
+            for dwell in plan
+        )
 
     def _fail_safe(self, reason) -> None:
         """Put the devices somewhere safe after a cycle that could not be completed.
@@ -467,12 +691,31 @@ class ControlProcess:
         )
         self.controller.hold()
         try:
-            self._apply_safe(commands_for(self.guard.safe_state, tuple(self.document.get("devices") or {})))
+            self._apply_safe(commands_for(self.guard.safe_state, self.document.get("devices") or {}))
         except (SourceConnectionError, ConfigError) as exc:
             # The one place a broad-ish catch is right: the cycle has already failed, and a
             # device that cannot be reached to be made safe is exactly what the supervisor's
             # own safe-state pass exists for.
-            logging.error("Control %r could not reach its devices to make them safe: %r", self.name, exc)
+            #
+            # Through the reporter, and keyed apart from the cycle failure above: where the
+            # devices are on the far end of whatever just broke - a Hue bridge is both the
+            # sensor and the actuator - this fails every cycle for as long as the cycle does,
+            # and it used to go straight to logging.error and say so every time. Its own key
+            # because the two are different problems: sharing one would make each cycle look
+            # like a changed fault to the other and report both afresh.
+            self._problems.report(
+                "safe",
+                logging.ERROR,
+                "Control %r could not reach its devices to make them safe: %r",
+                self.name,
+                exc,
+            )
+        else:
+            # Only where a safe-state command was actually attempted and got through, which
+            # is the only evidence this key's problem has passed. Said here rather than on
+            # any completed cycle because a control outside its active period commands
+            # nothing, and clearing it there would claim a reachability nothing had tested.
+            self._problems.cleared("safe", "Control %r reached its devices to make them safe again", self.name)
 
     def close(self) -> None:
         """Release what this process opened."""
@@ -504,7 +747,11 @@ def run_control(name, settings_file=None, heartbeat=None, cycles=None, sleep=tim
     """
     control = ControlProcess(name, settings_file=settings_file)
     try:
-        control.guard.assert_safe_state()
+        # The gate picks it, because only the gate knows whether this control is inside its
+        # active period - and a control starting outside its window belongs in its end state
+        # rather than its safe state. Clock only: nothing is read from a sensor before the
+        # devices are in a known condition.
+        control.guard.assert_starting_state(control.gate.starting_state(datetime.datetime.now(datetime.timezone.utc)))
         logging.info("Control %r started, cycling every %.0fs", name, control.cycle_seconds)
         completed = 0
         while cycles is None or completed < cycles:

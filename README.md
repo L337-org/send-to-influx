@@ -488,8 +488,11 @@ is deliberately not retried by systemd (`RestartPreventExitStatus` in the unit),
 configuration error: both require an edit and a restart, and neither resolves itself by waiting, so
 there's no point bouncing the service every few seconds until you do.
 
-Logs go to the journal (`journalctl -u send-to-influx -f`) with the same timestamped format as
-above. Journald also forwards to syslog as usual, and the package ships rsyslog and
+Logs go to the journal (`journalctl -u send-to-influx -f`). Under systemd the timestamp is left
+to the journal rather than written twice: the service detects `$JOURNAL_STREAM` and drops its own,
+so a line reads `LEVEL message` and journalctl, syslog and `/var/log/send-to-influx.log` each stamp
+it themselves. Run by hand, or with stderr redirected to a file, the timestamp stays. Journald also
+forwards to syslog as usual, and the package ships rsyslog and
 logrotate config (`/etc/rsyslog.d/49-send-to-influx.conf`, `/etc/logrotate.d/send-to-influx`,
 `Recommends:`, not `Depends:` - the service works via the journal alone either way) that redirects
 this service's messages out of the shared `daemon.log`/`syslog` into their own

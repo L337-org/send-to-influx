@@ -11,6 +11,7 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import datetime
+import unittest.mock
 import logging
 import os
 import selectors
@@ -22,8 +23,9 @@ import pytest
 import requests
 
 from tests.harness import faults, invariants
-from tests.harness.installation import conservatory
-from toinflux.control_process import ControlProcess, command_devices, gather, heartbeat_writer
+from tests.harness.installation import conservatory, record_command
+from toinflux.controls import device_identity
+from toinflux.control_process import ControlProcess, command_devices, gather, heartbeat_writer, run_control
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.rules import RuleEvaluationError, parse_rule
 
@@ -161,6 +163,148 @@ class TestAFailedCycleIsNotAFailedControl:
         with faults.unreachable(influx), faults.unreachable(bridge):
             assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
         assert "could not reach its devices" in caplog.text
+
+
+class TestSayingItRecovered:
+    """The recovery line is the only thing that explains a gap in the journal, so it has to
+    arrive when the cycle really did complete and not merely when it was attempted."""
+
+    def _fail_once(self, control, bridge, influx):
+        """Run one cycle that cannot be completed.
+
+        Args:
+            control (ControlProcess): the control to cycle
+            bridge (StubBridge): the bridge to strand
+            influx (StubInflux): the database holding the stale point
+        """
+        influx.age_reading("conservatory_temperature", 86400)
+        with faults.frozen(influx), faults.unreachable(bridge):
+            assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+
+    def test_a_failing_cycle_does_not_claim_it_completed(self, control, bridge, influx, caplog):
+        """It said so four seconds before the same cycle failed, on a real control during a
+        bridge outage: the inputs are read inside the window, so a cycle that has reached the
+        window has not yet done the part that fails.
+
+        **The second consecutive failure, not the first.** The recovery line is silent where
+        nothing was being reported, so the first failure has nothing to wrongly clear and a
+        one-cycle outage shows nothing at all. It takes two to see it, which is what an outage
+        actually looks like.
+        """
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        self._fail_once(control, bridge, influx)
+        caplog.clear()
+        # DEBUG, because the repeated failure is deliberately throttled down to it - the
+        # point here is that the recovery line is absent, and capturing only INFO and above
+        # would assert that by capturing nothing at all.
+        with caplog.at_level(logging.DEBUG):
+            self._fail_once(control, bridge, influx)
+        assert "could not complete a cycle" in caplog.text
+        assert "completed a cycle again" not in caplog.text
+
+    def test_a_sustained_outage_reports_each_problem_once_and_counts_the_rest(self, control, bridge, influx, caplog):
+        """Every cycle of the outage said everything afresh: the staleness message carries the
+        reading's age, which grows by a cycle every cycle, and the unreachable-bridge message
+        carries an exception whose repr carries the connection object's address.  Neither was
+        ever equal to the one before it, so a five-minute outage logged four ERRORs every
+        thirty seconds instead of one at the start."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(3):
+                self._fail_once(control, bridge, influx)
+        for phrase in ("could not complete a cycle", "could not reach its devices"):
+            levels = [record.levelno for record in caplog.records if phrase in record.getMessage()]
+            assert levels == [logging.ERROR, logging.DEBUG, logging.DEBUG], f"{phrase}: {levels}"
+        caplog.set_level(logging.INFO)
+        caplog.clear()
+        influx.write_reading("conservatory_temperature", 16.0)
+        assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is not None
+        assert "completed a cycle again (after 3 failure(s))" in caplog.text
+
+    def test_a_cycle_that_really_completed_says_so(self, control, bridge, influx, caplog):
+        """The other half: the line still has to appear, or the fix would be indistinguishable
+        from deleting it."""
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        self._fail_once(control, bridge, influx)
+        caplog.set_level(logging.INFO)
+        caplog.clear()
+        influx.write_reading("conservatory_temperature", 16.0)
+        assert control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is not None
+        assert "completed a cycle again" in caplog.text
+
+
+class TestRestartingOutsideTheWindow:
+    """A restart outside the active period must not carry an integral into the next opening.
+
+    simple-pid's `set_auto_mode(True)` resets only on an actual manual-to-automatic change.
+    After a restart the loop is already automatic and, outside its window, nothing ever holds
+    it - so `resume` at the opening edge did nothing and whatever was restored at startup was
+    used hours later with no age check at all. The conservatory reopening at 23:30 would have
+    started from where the previous night left off, which is the case the age limit exists
+    for.
+    """
+
+    def _restart(self, installation, moment):
+        """Build a control process as a restart would, at a given moment.
+
+        Args:
+            installation (Installation): the state directory to build against
+            moment (datetime.datetime): when the restart happens
+
+        Returns:
+            ControlProcess: the new process
+        """
+        with unittest.mock.patch("toinflux.control_process.datetime") as clock:
+            clock.datetime.now.return_value = moment
+            clock.timezone = datetime.timezone
+            return ControlProcess("conservatory", settings_file=installation.settings_file)
+
+    def test_a_restart_outside_it_holds_so_the_opening_decides(self, state_directory, bridge, influx):
+        """Held, rather than left running, so the age is judged when the window opens rather
+        than assumed to be fine."""
+        state_directory.write_control(conservatory())
+        started = ControlProcess("conservatory", settings_file=state_directory.settings_file)
+        try:
+            started.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            assert started.controller.pid._integral != 0, "nothing was learned, so this proves nothing"
+        finally:
+            started.guard.close()
+            started.close()
+
+        restarted = self._restart(state_directory, DAY)
+        try:
+            assert restarted.controller.pid.auto_mode is False, "a restart outside the window left the loop running"
+        finally:
+            restarted.guard.close()
+            restarted.close()
+
+    def test_a_restart_inside_it_carries_straight_on(self, state_directory, bridge, influx):
+        """The other side: the ordinary restart must stay free, or this would have traded one
+        fault for a loop that always starts from nothing.
+
+        Asserted on the integral after a cycle rather than on the mode at construction. Every
+        restored loop is held now, whichever side of the window it lands on; what differs is
+        whether the next cycle releases it, and that is the thing worth pinning.
+        """
+        state_directory.write_control(conservatory())
+        started = ControlProcess("conservatory", settings_file=state_directory.settings_file)
+        try:
+            started.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            learned = started.controller.pid._integral
+            assert learned != 0, "nothing was learned, so this proves nothing"
+        finally:
+            started.guard.close()
+            started.close()
+
+        restarted = self._restart(state_directory, NIGHT)
+        try:
+            restarted.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            assert restarted.controller.pid.auto_mode is True, "an acting cycle did not release the loop"
+            assert restarted.controller.pid._integral != 0, "the ordinary restart started from nothing"
+        finally:
+            restarted.guard.close()
+            restarted.close()
 
 
 class TestGathering:
@@ -670,3 +814,457 @@ class TestANonFiniteReadingIsRefusedWhereItHasAName:
         and the next point written may be fine. The loop catches this one and fails safe."""
         with pytest.raises(RuleEvaluationError):
             self._gathering(float("nan"), installation, monkeypatch)
+
+
+class TestWhatRunControlAssertsBeforeItsFirstCycle:
+    """Driving `run_control` itself, which nothing did - every test of it patched it out.
+
+    That gap is why this matters: `Gate.starting_state` can be entirely correct and simply
+    never be called, and the whole suite stays green. Removing the call from `run_control`
+    was caught by no test until this one.
+    """
+
+    @staticmethod
+    def _store(installation, safe_state, period):
+        """Write a single-heater control and return its name.
+
+        Args:
+            installation (Installation): the installation to write into
+            safe_state (str): the control's safe_state
+            period (dict or None): its active_period, or None for no window
+
+        Returns:
+            str: the control's name
+        """
+        from tests.harness.installation import conservatory
+
+        document = conservatory(name="pump")
+        document.pop("enable_when", None)
+        document["safe_state"] = safe_state
+        if period is None:
+            document.pop("active_period", None)
+        else:
+            document["active_period"] = period
+        document["devices"] = {"pump": {"source": "hue", "device": "far"}}
+        document["output"] = dict(
+            document["output"],
+            cycle_seconds=1,
+            min_transition_seconds=1,
+            stages=[{"level": 0, "set": {"pump": False}}, {"level": 1500, "set": {"pump": True}}],
+        )
+        document["output"].pop("max_level", None)
+        installation.write_control(document, name="pump")
+        return "pump"
+
+    def _first_and_last(self, state_directory, safe_state, period):
+        """Run a control for no cycles and return what it commanded, first and last.
+
+        Args:
+            state_directory (Installation): the installation
+            safe_state (str): the control's safe_state
+            period (dict or None): its active_period
+
+        Returns:
+            tuple: (the first commanded on-state, the last)
+        """
+        name = self._store(state_directory, safe_state, period)
+        state_directory.bridge.clear()
+        run_control(name, settings_file=state_directory.settings_file, cycles=0, sleep=lambda _seconds: None)
+        commands = state_directory.bridge.commanded("far")
+        assert commands, "the control commanded nothing at all"
+        return commands[0].state.get("on"), commands[-1].state.get("on")
+
+    # A window that is closed for all but six hours of the night, so "now" is outside it
+    # whenever this suite runs in daylight - and inside it whenever it does not, which is why
+    # the test below picks its own window rather than trusting the clock.
+    ALL_DAY = {"from": "00:00", "to": "23:59", "end_state": "unenergised"}
+    NEVER = {"from": "23:58", "to": "23:59", "end_state": "unenergised"}
+
+    def test_outside_its_window_it_starts_in_the_end_state(self, state_directory, bridge):
+        """The defect: a pump with `safe_state: energised` restarted outside its window used
+        to run in its failure state through normal scheduled downtime."""
+        first, _last = self._first_and_last(state_directory, "energised", self.NEVER)
+        assert first is False, "it started in its safe state rather than its end state"
+
+    def test_inside_its_window_it_starts_in_the_safe_state(self, state_directory, bridge):
+        first, _last = self._first_and_last(state_directory, "energised", self.ALL_DAY)
+        assert first is True, "it started in its end state while inside its window"
+
+    def test_with_no_window_the_safe_state_is_the_only_answer(self, state_directory, bridge):
+        first, _last = self._first_and_last(state_directory, "energised", None)
+        assert first is True
+
+    def test_and_the_exit_half_still_applies_the_safe_state(self, state_directory, bridge):
+        """Whatever the clock said on the way in. A process that is ending leaves nothing
+        supervising the devices, which is what a safe state is for."""
+        first, last = self._first_and_last(state_directory, "energised", self.NEVER)
+        assert (first, last) == (False, True)
+
+
+class TestCommandingADeviceSetToAValue:
+    """The value travels on the parameter's own keyword, not on `on`."""
+
+    @staticmethod
+    def _document(parameter="brightness_pct"):
+        """Return a control owning one driven device.
+
+        Args:
+            parameter (str): the parameter it is driven by
+
+        Returns:
+            dict: the control document
+        """
+        from tests.harness.installation import conservatory
+
+        document = conservatory(name="lamp")
+        document["devices"] = {"lamp": {"source": "hue", "device": "far", "parameter": parameter}}
+        return document
+
+    def test_a_value_reaches_the_far_end_on_its_own_keyword(self, installation, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            "toinflux.philipshue.Hue.mcp_set_device_state",
+            lambda self, device, **kwargs: seen.append((device, kwargs)),
+        )
+        command_devices("lamp", self._document(), {"lamp": 40}, installation.settings_file)
+        assert seen == [("far", {"brightness_pct": 40})]
+
+    def test_zero_is_an_explicit_off_rather_than_the_dimmest_setting(self, installation, monkeypatch):
+        """Which is what makes `unenergised` mean the same thing to both kinds of device."""
+        seen = []
+        monkeypatch.setattr(
+            "toinflux.philipshue.Hue.mcp_set_device_state",
+            lambda self, device, **kwargs: seen.append((device, kwargs)),
+        )
+        command_devices("lamp", self._document(), {"lamp": 0}, installation.settings_file)
+        assert seen == [("far", {"on": False})]
+
+    def test_a_switched_device_is_unchanged(self, installation, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            "toinflux.philipshue.Hue.mcp_set_device_state",
+            lambda self, device, **kwargs: seen.append((device, kwargs)),
+        )
+        document = self._document()
+        document["devices"]["lamp"].pop("parameter")
+        command_devices("lamp", document, {"lamp": True}, installation.settings_file)
+        assert seen == [("far", {"on": True})]
+
+    def test_the_value_is_what_gets_recorded(self, installation, monkeypatch):
+        from toinflux.transitions import TransitionLog
+
+        monkeypatch.setattr("toinflux.philipshue.Hue.mcp_set_device_state", lambda self, device, **kwargs: None)
+        command_devices("lamp", self._document(), {"lamp": 40}, installation.settings_file)
+        assert TransitionLog("lamp", installation.settings_file).states() == {"lamp": 40}
+
+
+class TestAControlResumesItsLoopOnStart:
+    """The wiring, which is the half that can be right and never reached. `Controller.resume_from`
+    and `TransitionLog.loop_state` both have their own tests; neither says the control calls them.
+    """
+
+    @staticmethod
+    def _store(installation):
+        """Write a slow lamp control and return its name.
+
+        Args:
+            installation (Installation): the installation to write into
+
+        Returns:
+            str: the control's name
+        """
+        from tests.harness.bridge import bulb
+        from tests.harness.installation import conservatory
+        from toinflux.controls import save_control
+
+        installation.bridge.lights["9"] = bulb("office-lamp")
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["parameters"] = {"target": 1000}
+        document["inputs"] = {"lux": {"source": "hue", "field": "L", "max_age": 60}}
+        document["pid"] = {"input": "lux", "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0}
+        document["devices"] = {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "brightness_pct"}}
+        document["output"] = {
+            "cycle_seconds": 60,
+            "min_transition_seconds": 15,
+            "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 100, "set": {"lamp": 100}}],
+        }
+        save_control("lamp", document, installation.settings_file)
+        return "lamp"
+
+    @staticmethod
+    def _spend(control, cycles):
+        """Step a control and store what it learned, as a running loop does.
+
+        Args:
+            control (ControlProcess): the control
+            cycles (int): how many cycles to run
+
+        Returns:
+            list: the brightness commanded each cycle
+        """
+        seen = []
+        # As the cycle does: a restored loop comes back held, and stepping it before it is
+        # released is a caller fault the controller now names.
+        control.controller.resume()
+        for _ in range(cycles):
+            plan = control.controller.step({"lux": 300.0, "target": 1000}, dt=60)
+            seen.append(plan[0].stage.states["lamp"])
+            control.transitions.record_loop(control.controller.capture(), control.controller.fingerprint)
+        return seen
+
+    def test_the_second_run_starts_where_the_first_left_off(self, state_directory, bridge, caplog):
+        from toinflux.control_process import ControlProcess
+
+        name = self._store(state_directory)
+        first = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            climb = self._spend(first, 5)
+        finally:
+            first.guard.stop("done")
+            first.close()
+        with caplog.at_level(logging.INFO):
+            second = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            resumed = self._spend(second, 5)
+        finally:
+            second.guard.stop("done")
+            second.close()
+        assert climb[0] < climb[-1], "the first run did not have to climb, so this proves nothing"
+        assert resumed[0] == pytest.approx(climb[-1], abs=1), "the second run started from nothing"
+        assert "resumed the loop" in caplog.text
+
+    def test_an_edited_document_starts_afresh(self, state_directory, bridge, caplog):
+        """The commonest restart there is, and the one where the memory means something else:
+        an integral is in the output's units."""
+        from toinflux.control_process import ControlProcess
+        from toinflux.controls import load_control, save_control
+
+        name = self._store(state_directory)
+        first = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            self._spend(first, 5)
+        finally:
+            first.guard.stop("done")
+            first.close()
+        document = load_control(name, state_directory.settings_file)
+        document["pid"]["kp"] = 0.2
+        save_control(name, document, state_directory.settings_file)
+        with caplog.at_level(logging.INFO):
+            second = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            assert "resumed the loop" not in caplog.text
+        finally:
+            second.guard.stop("done")
+            second.close()
+
+    def test_a_control_that_has_never_run_starts_afresh_quietly(self, state_directory, bridge, caplog):
+        from toinflux.control_process import ControlProcess
+
+        name = self._store(state_directory)
+        with caplog.at_level(logging.INFO):
+            control = ControlProcess(name, settings_file=state_directory.settings_file)
+        try:
+            assert "resumed the loop" not in caplog.text
+        finally:
+            control.guard.stop("done")
+            control.close()
+
+
+class TestAStateLeftOverFromAnOlderDocument:
+    """The transition log outlives a document edit, so it can describe a device that no
+    longer exists in the shape it records.
+
+    A device changed from on/off to a driven parameter keeps a `true` or `false` in the log.
+    While its minimum has not elapsed the loop pins it to that stored value, which used to
+    send `brightness_pct=True`: the Hue handler refuses it as a caller mistake, and
+    `command_devices` turns that into the ConfigError that stops a control for good. A
+    control halted by its own history with a perfectly valid document, and no retry fixes it.
+    """
+
+    @staticmethod
+    def _store_driven(installation, parameter, top):
+        """Write a lamp control driven by one parameter.
+
+        Args:
+            installation (Installation): the state directory to write into
+            parameter (str): the device parameter
+            top (float): what the top rung sets it to
+
+        Returns:
+            dict: the stored document
+        """
+        from toinflux.controls import save_control
+
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["parameters"] = {"target": 1000}
+        document["inputs"] = {"lux": {"source": "hue", "field": "L", "max_age": 60}}
+        document["pid"] = {"input": "lux", "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0}
+        document["devices"] = {"lamp": {"source": "hue", "device": "office-lamp", "parameter": parameter}}
+        document["output"] = {
+            "cycle_seconds": 60,
+            "min_transition_seconds": 600,
+            "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 100, "set": {"lamp": top}}],
+        }
+        save_control("lamp", document, installation.settings_file)
+        return document
+
+    def test_a_value_past_its_parameter_s_scale_is_clamped_and_said(self, state_directory, bridge, influx, caplog):
+        """Validation refuses a percentage past 100 while the caller is still listening. This
+        is the path where one arrives anyway, and at that moment the choice is a light at its
+        brightest or a control that stops for good.
+
+        WARNING, because the device did something and it was not quite what was asked.
+        """
+        from tests.harness.bridge import bulb
+
+        bridge.lights["9"] = bulb("office-lamp")
+        document = self._store_driven(state_directory, "brightness_pct", 100)
+        with caplog.at_level(logging.WARNING):
+            command_devices("lamp", document, {"lamp": 150}, state_directory.settings_file)
+        commanded = bridge.commanded("office-lamp")
+        assert commanded, "nothing was commanded"
+        # 254 is the bridge's own full scale, which is what 100 percent maps onto.
+        assert commanded[-1].state["bri"] == 254, commanded[-1].state
+        assert "tops out" in caplog.text and "150" in caplog.text, caplog.text
+
+    def test_a_value_within_the_scale_is_left_alone(self, state_directory, bridge, influx, caplog):
+        """The other side, or the clamp could be rewriting every command it sees."""
+        from tests.harness.bridge import bulb
+
+        bridge.lights["9"] = bulb("office-lamp")
+        document = self._store_driven(state_directory, "brightness_pct", 100)
+        with caplog.at_level(logging.WARNING):
+            command_devices("lamp", document, {"lamp": 40}, state_directory.settings_file)
+        assert "tops out" not in caplog.text, caplog.text
+
+    def test_a_number_from_a_different_parameter_is_not_pinned_either(self, state_directory, bridge, influx):
+        """The same fault with a number instead of a boolean, and the worse of the two.
+
+        A device moved from `color_temp_k` to `brightness_pct` leaves 2700 in the log, which
+        arrives as a brightness and is refused. Going the other way leaves 80, which is a
+        legal colour temperature, gets clamped, and is silently wrong - so the test cannot be
+        "is it a number" but "is it on the scale this device is on now".
+        """
+        from tests.harness.bridge import bulb
+        from toinflux.transitions import TransitionLog
+
+        bridge.lights["9"] = bulb("office-lamp")
+        self._store_driven(state_directory, "brightness_pct", 100)
+        # What the previous, colour-temperature, version of this document left behind.
+        record_command(
+            TransitionLog("lamp", state_directory.settings_file),
+            {"devices": {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "color_temp_k"}}},
+            {"lamp": 2700},
+        )
+
+        control = ControlProcess("lamp", settings_file=state_directory.settings_file)
+        try:
+            influx.write_reading("L", 300.0)
+            control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            control.guard.close()
+            control.close()
+        commanded = [command.state for command in bridge.commanded("office-lamp")]
+        assert commanded, "the lamp was never commanded at all, so this proves nothing"
+        assert all("bri" in state for state in commanded), commanded
+
+    def test_a_state_sent_to_another_actuator_is_not_pinned(self, state_directory, bridge, influx):
+        """A control key is a name in a document, and what it points at can be changed
+        underneath it. The recorded state belongs to whatever was there at the time, so
+        pinning it commands the new actuator a value it has never been given - and under
+        `leave_unchanged` it would suppress that actuator's first command entirely."""
+        from tests.harness.bridge import bulb
+        from toinflux.transitions import TransitionLog
+
+        bridge.lights["9"] = bulb("office-lamp")
+        self._store_driven(state_directory, "brightness_pct", 100)
+        # The same key, the same scale, a different bulb.
+        record_command(
+            TransitionLog("lamp", state_directory.settings_file),
+            {"devices": {"lamp": {"source": "hue", "device": "a-different-lamp", "parameter": "brightness_pct"}}},
+            {"lamp": 35},
+        )
+        control = ControlProcess("lamp", settings_file=state_directory.settings_file)
+        try:
+            # The same call `_spend_window` makes, identities and all: the question moved
+            # there so that switched and driven devices are judged by one rule, and asking it
+            # without them is asking a question the loop no longer asks.
+            declared = control.document["devices"]
+            held = control.transitions.frozen(
+                control.controller.min_transition_for,
+                ("lamp",),
+                identities={name: device_identity(spec) for name, spec in declared.items()},
+            )
+        finally:
+            control.guard.close()
+            control.close()
+        assert held == frozenset(), "a state recorded against another bulb still held the new one"
+
+    def test_a_value_on_the_same_parameter_is_still_pinned(self, state_directory, bridge, influx):
+        """The other side: the minimum must still hold a device that has not changed shape, or
+        this would have turned `min_transition_seconds` off for every driven device."""
+        from tests.harness.bridge import bulb
+        from toinflux.transitions import TransitionLog
+
+        bridge.lights["9"] = bulb("office-lamp")
+        document = self._store_driven(state_directory, "brightness_pct", 100)
+        log = TransitionLog("lamp", state_directory.settings_file)
+        record_command(log, document, {"lamp": 35})
+
+        control = ControlProcess("lamp", settings_file=state_directory.settings_file)
+        try:
+            held = control.transitions.frozen(control.controller.min_transition_for, ("lamp",))
+            assert held == frozenset({"lamp"}), "a 600s minimum did not hold a lamp moved a moment ago"
+            control.controller.resume()
+            plan = control._hold(
+                control.controller.step({"lux": 300.0, "target": 1000}, dt=60),
+                held & set(control.controller.driven),
+            )
+        finally:
+            control.guard.close()
+            control.close()
+        assert {dwell.stage.states["lamp"] for dwell in plan} == {35}
+
+    def test_a_boolean_is_not_pinned_onto_a_device_that_now_takes_a_value(self, state_directory, bridge, influx):
+        from tests.harness.bridge import bulb
+        from toinflux.controls import save_control
+        from toinflux.transitions import TransitionLog
+
+        bridge.lights["9"] = bulb("office-lamp")
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["parameters"] = {"target": 1000}
+        document["inputs"] = {"lux": {"source": "hue", "field": "L", "max_age": 60}}
+        document["pid"] = {"input": "lux", "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0}
+        document["devices"] = {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "brightness_pct"}}
+        document["output"] = {
+            "cycle_seconds": 60,
+            "min_transition_seconds": 600,
+            "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 100, "set": {"lamp": 100}}],
+        }
+        save_control("lamp", document, state_directory.settings_file)
+        # What the previous, switched, version of this document left behind. A long minimum so
+        # the device is certainly still inside it, which is when the pinning happens at all.
+        TransitionLog("lamp", state_directory.settings_file).record({"lamp": False}, forced=False)
+
+        control = ControlProcess("lamp", settings_file=state_directory.settings_file)
+        try:
+            influx.write_reading("L", 300.0)
+            control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            control.guard.close()
+            control.close()
+        # The cycle completing at all is half the claim: under the fault it raised ConfigError
+        # out of `cycle`, which catches only a failed read.
+        commanded = [command.state for command in bridge.commanded("office-lamp")]
+        assert commanded, "the lamp was never commanded at all, so this proves nothing"
+        # `bri`, the brightness the plan asked for. Asserted rather than the absence of a
+        # boolean, because the CLIP wire format carries `on` alongside `bri` and that one is
+        # a boolean by rights - the first version of this test read the protocol and called
+        # it the bug.
+        assert all("bri" in state for state in commanded), commanded

@@ -26,7 +26,7 @@ import urllib3
 import requests
 from dataclasses import dataclass
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToInfluxError, ToolParamError
-from toinflux.general import load_settings
+from toinflux.general import load_settings, render_external
 
 
 class InfluxWriteError(ToInfluxError):
@@ -208,6 +208,11 @@ class DataHandler:
         MCP_ACTUATES_DEVICES (bool): False - whether this source can switch a named device
             on and off, which is narrower than ``MCP_WRITABLE`` and is what a control's
             devices section requires.
+        MCP_DEVICE_PARAMETERS (tuple): empty - the continuous settings a control may drive on
+            this source's devices, by the keyword ``mcp_set_device_state`` takes for each.
+            Empty means on/off only. Whether a *particular* device has one is a question for
+            the far end and stays there; this is what the source understands at all, which is
+            what ``--check-config`` can answer without touching a bridge.
         MCP_INSTANCE_TAG (str or None): None for a single-target source - the tag naming which
             instance produced a point, where one source has several.
         MCP_LIVE_STATE_COVERS_ALL_INSTANCES (bool): False - whether one live read returns every
@@ -306,6 +311,7 @@ class DataHandler:
     # naming Speedtest as a device source past the check and into an AttributeError.
     # tests/test_repo_hygiene.py fails any source declaring this without the method.
     MCP_ACTUATES_DEVICES = False
+    MCP_DEVICE_PARAMETERS: tuple = ()
     # The tag key that distinguishes *producers* within this source's measurement,
     # or None when the measurement has only one. This is the tag as an **axis** -
     # something to enumerate and scope by - as opposed to MCP_TAG_FILTERS above,
@@ -1034,11 +1040,11 @@ def _get(session, url, kwargs, description):
         # RequestException handler so a parse failure isn't misreported as a
         # transport read failure. raise_for_status()'s HTTPError is a
         # RequestException but not a ValueError, so it still classifies as transport.
-        logging.error("InfluxDB read returned non-JSON (%s): %r", description, exc)
-        raise SourceConnectionError(f"InfluxDB read returned an unparseable response ({description})") from exc
+        raise SourceConnectionError(
+            f"InfluxDB read returned an unparseable response ({description}): {render_external(exc)}"
+        ) from exc
     except requests.exceptions.RequestException as exc:
-        logging.error("InfluxDB read failed (%s): %r", description, exc)
-        raise SourceConnectionError(f"InfluxDB read failed ({description}): {exc!r}") from exc
+        raise SourceConnectionError(f"InfluxDB read failed ({description}): {render_external(exc)}") from exc
 
 
 @dataclass(frozen=True)

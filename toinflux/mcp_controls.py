@@ -43,11 +43,13 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import logging
+import time
 import threading
 
 
 from toinflux.controls import (
     CONTROL_EXAMPLES,
+    TUNING_NOTES,
     actuators_owned,
     enabled_owner_of,
     CONTROL_KEY_HELP,
@@ -55,6 +57,9 @@ from toinflux.controls import (
     BUILT_IN_SAFE_STATES,
     REQUIRED_CONTROL_KEYS,
     control_dir,
+    device_identity,
+    holdable_value,
+    parameter_devices,
     control_writes_enabled,
     controls_enabled,
     load_control,
@@ -67,7 +72,7 @@ from toinflux.controls import delete_control as remove_stored_control
 from toinflux.controls import list_controls as stored_control_names
 from toinflux.controls import save_control as store_control
 from toinflux.exceptions import ConfigError, ToolParamError
-from toinflux.general import load_settings
+from toinflux.general import load_settings, render_external
 from toinflux.mcp_common import configured_sources, register_tool
 
 # One writer at a time across the control-write tools. Each of them is a read-modify-write -
@@ -242,6 +247,29 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
 
     @register_tool(
         server,
+        title="Get Control Loop State",
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    )
+    async def get_control_state(name: str) -> dict:  # noqa: DOC101,DOC103,DOC108,DOC201
+        """Report what a running control has worked out: its PID's integral, and what each
+        device was last commanded to and when.
+
+        `get_control` gives the document - what it was told to do. This gives what it has
+        since learned, which device output alone cannot show. Read it before concluding a
+        demand is misbehaving: an output falling while the input is still far from target is
+        usually the integral, which is invisible from outside.
+
+        `matches_document` is false once the control has been edited, when that memory stops
+        meaning anything. `held_by_minimum` names devices still inside their
+        `min_transition_seconds`, so they are being commanded what they already have.
+
+        Fails where there is no such control, naming it. Reads stored files and changes
+        nothing. See `get_control` for the document and `list_controls` for what is running.
+        """
+        return await anyio.to_thread.run_sync(_control_state_result, name, settings_file, supervisor)
+
+    @register_tool(
+        server,
         title="Get Control Loop",
         annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
     )
@@ -256,7 +284,9 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
         An unknown name, or one the store will not accept as a filename, is an error naming
         the control asked for. So is a document that is present but will not parse - which
         `list_controls` reports as `readable: false` rather than failing, so list first if
-        you are not sure the name exists. Reads a stored file and changes nothing.
+        you are not sure the name exists. This is what the control was told to do; for what it
+        has since worked out - its integral, and what each device was last set to - use
+        `get_control_state`. Reads a stored file and changes nothing.
         """
         return await anyio.to_thread.run_sync(_get_control_result, name, settings_file)
 
@@ -422,6 +452,141 @@ def _usable_sources(settings):
     return {"readable_as_inputs": readable, "can_switch_devices": actuating}
 
 
+def _control_state_result(name, settings_file=None, supervisor=None):
+    """Assemble what a running control currently knows, off the event loop.
+
+    **Read from the file the control writes rather than asked of the control itself.** The
+    PID lives in a child process and the MCP server does not, so the alternative would be
+    inventing a channel between them - and the child already writes this down every cycle so
+    that a restart does not lose it. The state is therefore at most one cycle old, which is
+    the same freshness anything else here reports.
+
+    Args:
+        name (str): the control to describe
+        settings_file (str or None): the settings path the process was started with
+        supervisor (Supervisor or None): the running supervisor, where there is one
+
+    Returns:
+        dict: the tool's result
+
+    Raises:
+        ToolParamError: there is no such control
+    """
+    from toinflux.controller import Controller
+    from toinflux.transitions import TransitionLog
+
+    try:
+        document = load_control(name, settings_file)
+    except ConfigError as exc:
+        raise ToolParamError(f"control {name!r} cannot be read: {render_external(exc)}") from exc
+    log = TransitionLog(name, settings_file)
+    now = time.time()
+    entry: dict = {"control": name, **_supervision_of(name, _supervision_by_name(supervisor))}
+
+    fingerprint = None
+    if not validate_control(name, document):
+        fingerprint = Controller(document).fingerprint
+    stored = log.loop
+    if stored.get("integral") is not None:
+        entry["loop"] = {
+            "integral": stored["integral"],
+            "recorded_at": stored.get("at"),
+            # Through the log's own reader, which refuses a moment it cannot measure against.
+            # Fed raw, a hand-edited `pid.at` holding a list raised TypeError here and turned
+            # a documented result into an internal error.
+            "age_seconds": log.loop_age(now=now),
+            # The question a reader actually has: would a restart keep this, or start over?
+            "matches_document": fingerprint is not None and stored.get("fingerprint") == fingerprint,
+        }
+    else:
+        entry["loop"] = None
+
+    minimum_for = Controller(document).min_transition_for if fingerprint is not None else None
+    # Coerced, not trusted: this tool reads a document that may have been hand-edited, and
+    # it validates only to decide whether a fingerprint is meaningful. A `devices:` holding a
+    # list would otherwise reach `parameter_devices` and come back as an AttributeError,
+    # which is an internal error where the tool documents a ToolParamError.
+    declared = document.get("devices")
+    declared = declared if isinstance(declared, dict) else {}
+    devices = tuple(declared)
+    entry["devices"] = {
+        device: {
+            "state": record.get("state"),
+            # **The scale the state is on, because the number means nothing without it.** A
+            # driven device's 40 is forty percent or forty kelvin depending on this, and a
+            # client reading the state has no other way to tell.
+            #
+            # The scale it was *recorded* against, not the document's current one: after an
+            # edit those differ, and it is the recorded value a client is trying to read.
+            # Taken from the identity, which is the declaration as it stood at the time.
+            "parameter": dict(record.get("for") or ()).get("parameter"),
+            "changed_at": record.get("at"),
+            "age_seconds": _age(record.get("at"), now),
+            # A safe state overrides min_transition_seconds in both directions, so a device
+            # marked this way is free to move whatever its clock says.
+            "forced": bool(record.get("forced")),
+        }
+        for device, record in sorted(log.entries.items())
+    }
+    # **The same test the loop applies, not just the clock.** `_hold` refuses to pin a device
+    # whose recorded parameter is not the one the document now drives it by, because the value
+    # is on a scale that no longer means anything - so after such an edit the next cycle will
+    # move that device whatever its timer says. Reporting it as held would describe a restraint
+    # that is not going to happen.
+    # The same call the loop makes, identities and all, so this cannot report a restraint the
+    # next cycle will not honour. It used to ask the question separately, which is how the two
+    # came to disagree.
+    held = (
+        log.frozen(
+            minimum_for,
+            devices,
+            now=now,
+            identities={name: device_identity(spec) for name, spec in declared.items()},
+        )
+        if minimum_for is not None
+        else set()
+    )
+    driven = parameter_devices(declared)
+    entry["held_by_minimum"] = sorted(
+        # And, for a driven device, a value it could actually be pinned to - the other half of
+        # what `_hold` requires of it.
+        device
+        for device in held
+        if device not in driven or holdable_value(record_of(log, device))
+    )
+    return entry
+
+
+def record_of(log, device):
+    """Return what a device was last commanded to, or None where nothing was.
+
+    Args:
+        log (TransitionLog): the control's log
+        device (str): the device name
+
+    Returns:
+        object: the recorded state
+    """
+    return (log.entries.get(device) or {}).get("state")
+
+
+def _age(at, now):
+    """Return how long ago something was recorded, or None where it was not.
+
+    Args:
+        at (float or None): epoch seconds it happened, or anything a hand-edited cache held
+        now (float): epoch seconds now
+
+    Returns:
+        float or None: seconds, never negative, or None where there is no moment
+    """
+    from toinflux.transitions import usable_number
+
+    if not usable_number(at):
+        return None
+    return round(max(0.0, now - float(at)), 1)
+
+
 def _control_schema_result(settings, settings_file=None, supervisor=None):
     """Assemble the control document format off the event loop.
 
@@ -465,6 +630,10 @@ def _control_schema_result(settings, settings_file=None, supervisor=None):
             ],
         },
         "safe_states": list(BUILT_IN_SAFE_STATES),
+        # Beside the examples, because the examples are what get copied: the numbers in them
+        # are the one part of a control document that cannot be right in the abstract, and
+        # every word explaining that used to live in comments this payload does not carry.
+        "tuning": TUNING_NOTES,
         "sources": _usable_sources(settings),
         "examples": CONTROL_EXAMPLES,
         "writing": _writing_availability(settings, settings_file, supervisor),

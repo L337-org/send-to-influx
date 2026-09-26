@@ -15,7 +15,7 @@ import math
 import pytest
 
 from toinflux.controls import DEFAULT_CYCLE_SECONDS
-from toinflux.controller import Controller, first_order_plant, simulate
+from toinflux.controller import RESUMABLE_HOLD_SECONDS, Controller, first_order_plant, simulate
 from toinflux.exceptions import ConfigError
 from toinflux.rules import RuleEvaluationError
 
@@ -425,3 +425,296 @@ class TestHoldTakesNoLastOutput:
         from toinflux.controller import Controller
 
         assert "last_output" in inspect.signature(Controller.resume).parameters
+
+
+class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
+    """A cycle that cannot read its input calls `hold` through the fail-safe, and the next
+    healthy cycle used to call `resume` - which resets simple-pid and zeroes the integral.
+
+    Measured on a real install: a control holding a lamp at full output dropped to 64% on a
+    single flaky read, with the error unchanged and large. The loop then spent minutes
+    earning back what it already knew, and the drop looked from outside like a hidden
+    anti-windup mechanism rather than lost state.
+    """
+
+    @staticmethod
+    def _mixed(max_level=None):
+        """Return a controller owning one switched device and one driven by a percentage.
+
+        Args:
+            max_level (str or None): a cap rule, where the test wants one
+
+        Returns:
+            Controller: built from a two-rung ladder moving both devices
+        """
+        output = {
+            "cycle_seconds": 60,
+            "min_transition_seconds": 10,
+            "stages": [
+                {"level": 0, "set": {"lamp": 0, "heater": False}},
+                {"level": 1000, "set": {"lamp": 100, "heater": True}},
+            ],
+        }
+        if max_level:
+            output["max_level"] = max_level
+        return Controller(
+            {
+                "parameters": {"target": 1000},
+                "inputs": {"lux": {"source": "hue", "field": "L"}},
+                "pid": {"input": "lux", "setpoint": "target", "kp": 1.0, "ki": 0.0, "kd": 0.0},
+                "output": output,
+                "devices": {
+                    "lamp": {"source": "hue", "device": "Lamp", "parameter": "brightness_pct"},
+                    "heater": {"source": "hue", "device": "Heater"},
+                },
+            }
+        )
+
+    @staticmethod
+    def _settled(clock):
+        """Return a controller with an integral already built.
+
+        Args:
+            clock (list): a one-element list holding the current time
+
+        Returns:
+            Controller: settled against a steady error
+        """
+        controller = Controller(
+            {
+                "parameters": {"target": 1000},
+                "inputs": {"lux": {"source": "hue", "field": "L"}},
+                "pid": {"input": "lux", "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0},
+                "output": {
+                    "cycle_seconds": 60,
+                    "min_transition_seconds": 15,
+                    "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 100, "set": {"lamp": 100}}],
+                },
+                "devices": {"lamp": {"source": "hue", "device": "L", "parameter": "brightness_pct"}},
+            },
+            time_fn=lambda: clock[0],
+        )
+        for _ in range(4):
+            clock[0] += 60
+            controller.step({"lux": 300.0, "target": 1000}, dt=60)
+        return controller
+
+    def test_a_one_cycle_fail_safe_keeps_the_integral(self):
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.pid._integral
+        assert before > 0, "nothing was learned, so this proves nothing"
+        controller.hold()
+        clock[0] += 60
+        controller.resume()
+        assert controller.pid._integral == pytest.approx(before)
+
+    def test_and_the_output_does_not_drop(self):
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.step({"lux": 300.0, "target": 1000}, dt=60)[0].stage.states["lamp"]
+        controller.hold()
+        clock[0] += 60
+        controller.resume()
+        after = controller.step({"lux": 300.0, "target": 1000}, dt=60)[0].stage.states["lamp"]
+        assert after == pytest.approx(before), f"output fell from {before} to {after} on an unchanged input"
+
+    def test_a_brief_hold_also_keeps_what_the_derivative_measures_from(self):
+        """The integral survived a brief hold but the derivative's own memory did not.
+
+        `capture` saves the last input and `resume_from` puts it back, both documented as making
+        the derivative term continuous across a restart - but simple-pid's manual-to-automatic
+        switch calls `reset`, which clears `_last_input`, so the restored value was wiped a
+        moment later and the D term always began again from nothing.  It changes no shipped
+        control, every one of which runs kd at zero, and it makes the promise true for the first
+        one that does not.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.pid._last_input
+        assert before is not None, "nothing was measured, so this proves nothing"
+        controller.hold()
+        clock[0] += 60
+        controller.resume()
+        assert controller.pid._last_input == pytest.approx(before), "the derivative restarted from nothing"
+
+    def test_a_restart_also_keeps_what_the_derivative_measures_from(self):
+        """The path the finding was actually about, which the first test for it did not take.
+
+        `resume_from` is how a restart puts back what was saved, and it leaves the loop held, so
+        the wipe happens at the `resume` that follows rather than at the restore.  Covering only
+        hold-then-resume tested the same line by a different route and left this one to be
+        inferred.  Both captured values are checked, because `reset` clears the last error as
+        well and `capture` saves it.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        state = controller.capture()
+        assert state.get("last_input") is not None, "nothing was captured, so this proves nothing"
+        fresh = self._settled([0.0])
+        fresh.resume_from(state, age=0.0)
+        fresh.resume()
+        assert fresh.pid._last_input == pytest.approx(state["last_input"]), "a restart lost the derivative"
+        if state.get("last_error") is not None:
+            assert fresh.pid._last_error == pytest.approx(state["last_error"]), "the last error was dropped"
+
+    def test_an_integral_of_exactly_zero_is_still_a_loop_being_continued(self):
+        """Nought is a value the loop holds, not an absence of one.
+
+        Whether the derivative's memory is carried is decided by whether the integral is being
+        carried, and that question is asked as `is not None` rather than for truth.  A loop
+        sitting at zero because it has arrived is being continued exactly as one sitting at
+        five is, so reading the gate as truthiness would throw away the last input in the one
+        case where the loop is doing best.  Nothing distinguishes the two outcomes in any other
+        test, so the boundary is pinned here.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.pid._last_input
+        controller.hold()
+        controller._held["integral"] = 0.0
+        clock[0] += 60
+        controller.resume()
+        assert controller.pid._integral == 0.0, "the held value itself did not survive"
+        assert controller.pid._last_input == pytest.approx(before), "a held zero was read as nothing held"
+
+    def test_a_long_hold_drops_it_with_the_integral(self):
+        """The other half: a stale reading must not be differentiated against.
+
+        A hold long enough to drop the integral has made the last input just as stale, and
+        carrying it would answer the first cycle back with a step the plant never made.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.hold()
+        clock[0] += RESUMABLE_HOLD_SECONDS + 60
+        controller.resume()
+        assert controller.pid._last_input is None, "a reading from before the gap was carried over"
+
+    def test_a_long_hold_still_starts_afresh(self):
+        """An active period lasts eighteen hours, and what the room was doing last night says
+        nothing about this evening."""
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.hold()
+        clock[0] += RESUMABLE_HOLD_SECONDS + 1
+        controller.resume()
+        assert controller.pid._integral == 0
+
+    def test_a_long_outage_holding_every_cycle_still_starts_afresh(self):
+        """The test above holds once, which is not what an outage looks like.
+
+        The fail-safe holds on *every* failing cycle, and each call used to restamp the
+        clock - so the age measured the gap since the last failure, about one cycle, however
+        long the outage ran. Six hours of failing cycles then handed back a six-hour-old
+        integral, which is the one thing RESUMABLE_HOLD_SECONDS exists to refuse.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        assert controller.pid._integral > 0, "nothing was learned, so this proves nothing"
+        for _ in range(int(6 * 3600 / 30)):
+            controller.hold()
+            clock[0] += 30
+        controller.resume()
+        assert controller.pid._integral == 0
+
+    def test_a_short_outage_holding_every_cycle_still_carries_on(self):
+        """The other side of it: repeated holds must not make a brief outage look long
+        either, or the fix would be a different bug."""
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.pid._integral
+        for _ in range(10):
+            controller.hold()
+            clock[0] += 30
+        controller.resume()
+        assert controller.pid._integral == pytest.approx(before)
+
+    def test_a_restored_loop_starts_held_so_the_release_decides(self):
+        """A restart that lands while the control is not acting is held by nothing, and
+        simple-pid only resets on a real manual-to-automatic change - so `resume` at the next
+        opening did nothing and the restored integral was used hours later unchecked.
+
+        Reached through `enable_when` rather than the clock, which is the second way in after
+        the active period, and the reason the hold is no longer conditional on either.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.resume_from({"integral": 90.0}, age=0.0)
+        assert controller.pid.auto_mode is False, "a restored loop was left running"
+        clock[0] += 6 * 3600
+        controller.resume()
+        assert controller.pid._integral == 0
+
+    def test_a_restored_loop_is_dated_from_when_it_was_written(self):
+        """`loop_state` hands back state up to RESUMABLE_CYCLES cycles old, which outlasts
+        RESUMABLE_HOLD_SECONDS once the cycle passes six minutes. Without backdating, a
+        restart bought a fresh lease on an integral a running process would have dropped."""
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.resume_from({"integral": 90.0}, age=RESUMABLE_HOLD_SECONDS + 1)
+        controller.resume()
+        assert controller.pid._integral == 0, "a restart bought more leniency than staying up would"
+
+    def test_an_unusable_age_spends_the_whole_lease(self):
+        """A clock that went backwards must not buy extra time."""
+        controller = self._settled([0.0])
+        controller.resume_from({"integral": 90.0}, age=float("nan"))
+        controller.resume()
+        assert controller.pid._integral == 0
+
+    def test_stepping_while_held_says_so(self):
+        """simple-pid answers with its last output while manual, which is None where it has
+        never produced one - and that reached `plan_window` as a demand it could not place,
+        so the complaint arrived from staging and named the rungs."""
+        controller = self._settled([0.0])
+        controller.hold()
+        controller.pid._last_output = None
+        with pytest.raises(ConfigError, match="held"):
+            controller.step({"lux": 300.0, "target": 1000}, dt=60)
+
+    def test_a_frozen_switched_device_does_not_move_a_driven_one(self):
+        """Freezing says which rungs may be *switched to*. It says nothing about the number a
+        driven device should hold, because that device is not the one being protected.
+
+        Interpolating on the censored ladder let one device's transition minimum drag another
+        to an end of its range: a heater frozen off pinned the lamp to 0 and frozen on pinned
+        it to 100, when at half demand it belongs at half brightness either way.
+        """
+        controller = self._mixed()
+        for state in (False, True):
+            plan = controller.step(
+                {"lux": 500.0, "target": 1000},
+                dt=60,
+                frozen=frozenset({"heater"}),
+                states={"heater": state, "lamp": 50},
+            )
+            lamps = {dwell.stage.states["lamp"] for dwell in plan}
+            assert lamps == {50.0}, f"heater frozen {state}: lamp at {lamps}"
+            # The heater is still protected: only the rung it is already on was commanded.
+            assert {dwell.stage.states["heater"] for dwell in plan} == {state}
+
+    def test_a_cap_does_still_bound_a_driven_device(self):
+        """The other side, and the reason this is not simply "ignore the narrowed ladder": a
+        cap is a standing instruction about how hard the control may drive, so it bounds the
+        driven value where a freeze does not."""
+        controller = self._mixed(max_level="0")
+        plan = controller.step({"lux": 500.0, "target": 1000}, dt=60)
+        assert {dwell.stage.states["lamp"] for dwell in plan} == {0.0}
+
+    def test_an_explicit_last_output_still_wins(self):
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.hold()
+        clock[0] += 60
+        controller.resume(last_output=12.0)
+        assert controller.pid._integral == pytest.approx(12.0)
+
+    def test_resuming_without_a_hold_changes_nothing(self):
+        """The cycle calls `resume` unconditionally, so it must be a no-op while already
+        running - which is what makes the ordinary path free."""
+        clock = [0.0]
+        controller = self._settled(clock)
+        before = controller.pid._integral
+        controller.resume()
+        assert controller.pid._integral == pytest.approx(before)

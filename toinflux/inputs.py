@@ -40,6 +40,7 @@ from toinflux.general import (
     MAX_AGE_KEY,
     MINIMUM_INTERVAL_KEY,
     RepeatingProblem,
+    render_external,
     close_session,
     get_class,
     known_sources,
@@ -402,7 +403,7 @@ def handler_reading(session, settings, handler, field, now=None):
         # Here the name came from a control document, so it is a configuration fault: the
         # control must not start, and no retry helps. Re-typed rather than documented as-is,
         # because a caller catching ConfigError to mean "stop" would otherwise miss it.
-        raise ConfigError(f"control input names an unusable field: {exc!r}") from exc
+        raise ConfigError(f"control input names an unusable field: {render_external(exc)}") from exc
     db = resolve_db(handler.source_settings, settings["influx"])
     columns, values = single_series(run_query(session, settings["influx"], db, query))
     if not values:
@@ -637,7 +638,7 @@ def fetch_lock(  # noqa: DOC403 - a generator, but unannotated
         # where the default is whatever the umask allows.
         os.chmod(directory, stat.S_IRWXU)
     except OSError as exc:
-        raise ConfigError(f"cannot create the fetch lock directory {directory!r}: {exc!r}") from exc
+        raise ConfigError(f"cannot create the fetch lock directory {directory!r}: {render_external(exc)}") from exc
     deadline = monotonic() + budget
     # Opened once and kept open: the lock is on the descriptor, so reopening per attempt
     # would drop it. "a" rather than "w" so a waiter cannot truncate the holder's file.
@@ -647,7 +648,7 @@ def fetch_lock(  # noqa: DOC403 - a generator, but unannotated
         # rather than as a message naming the file it could not open.
         handle = open(path, "a", encoding="utf-8")  # noqa: SIM115 - closed by the with below
     except OSError as exc:
-        raise ConfigError(f"cannot open the fetch lock {path!r}: {exc!r}") from exc
+        raise ConfigError(f"cannot open the fetch lock {path!r}: {render_external(exc)}") from exc
     with handle:
         held = _acquire(handle, path, source, deadline, rng, sleep, monotonic)
         try:
@@ -694,7 +695,9 @@ def _acquire(handle, path, source, deadline, rng, sleep, monotonic):
             # look identical to a busy lock, so every control would wait its whole budget,
             # report "busy", and carry on with serialisation silently switched off - a lock
             # that appears to work and guarantees nothing.
-            raise ConfigError(f"cannot lock {path!r} to serialise live fetches of {source!r}: {exc!r}") from exc
+            raise ConfigError(
+                f"cannot lock {path!r} to serialise live fetches of {source!r}: {render_external(exc)}"
+            ) from exc
 
 
 def input_max_age(spec, settings):

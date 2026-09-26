@@ -29,7 +29,7 @@ import urllib3
 import yaml
 
 from toinflux.exceptions import ConfigError
-from toinflux.general import render_values
+from toinflux.general import render_external, render_values
 from toinflux.process import MAX_CAPTURED_BYTES, ProcessError, run_command
 from toinflux.credentials import (
     CANONICAL_SLOT_SUFFIX_RE,
@@ -107,7 +107,7 @@ def _require_systemd_creds():
             "host - edit settings.yaml directly instead."
         ) from exc
     except ProcessError as exc:
-        raise CredentialCliError(f"checking the systemd-creds version: {exc}") from exc
+        raise CredentialCliError(f"checking the systemd-creds version: {render_external(exc)}") from exc
     if not result.ok:
         # !r on the external half: this is systemd-creds' own stderr, it can carry
         # newlines, and main() prints this message straight to stderr - so an unquoted
@@ -259,7 +259,7 @@ def _regenerate_dropin(credstore_dir=None, dropin_path=None, exclude=None) -> No
         os.makedirs(os.path.dirname(dropin_path), exist_ok=True)
         _atomic_write(dropin_path, "\n".join(lines) + "\n")
     except OSError as exc:
-        raise CredentialCliError(f"could not update {dropin_path}: {exc}") from exc
+        raise CredentialCliError(f"could not update {dropin_path}: {render_external(exc)}") from exc
 
 
 def _reload_systemd():
@@ -309,7 +309,7 @@ def _encrypt_credential(name, value, credstore_dir=None):
         os.makedirs(credstore_dir, exist_ok=True)
         os.chmod(credstore_dir, stat_module.S_IRWXU)
     except OSError as exc:
-        raise CredentialCliError(f"could not create/secure {credstore_dir}: {exc}") from exc
+        raise CredentialCliError(f"could not create/secure {credstore_dir}: {render_external(exc)}") from exc
     cred_path = _cred_path(name, credstore_dir)
     # The plaintext goes in on stdin, never in argv, where it would be readable from
     # /proc by any local user for as long as the process lives.
@@ -325,7 +325,7 @@ def _encrypt_credential(name, value, credstore_dir=None):
         # with no indication of what to do about it. Both of run_command's exceptions are
         # caught, not just the timeout - systemd-creds can also be absent or unexecutable
         # by the time this runs, whatever the earlier version check found.
-        raise CredentialCliError(f"storing '{name}' in systemd-creds: {exc}") from exc
+        raise CredentialCliError(f"storing '{name}' in systemd-creds: {render_external(exc)}") from exc
     if not result.ok:
         raise CredentialCliError(
             f"systemd-creds encrypt failed for '{name}': {(result.stderr_text or result.returncode)!r}"
@@ -333,7 +333,7 @@ def _encrypt_credential(name, value, credstore_dir=None):
     try:
         os.chmod(cred_path, stat_module.S_IRUSR | stat_module.S_IWUSR)
     except OSError as exc:
-        raise CredentialCliError(f"could not secure {cred_path}: {exc}") from exc
+        raise CredentialCliError(f"could not secure {cred_path}: {render_external(exc)}") from exc
 
 
 def _decrypt_credential(name, credstore_dir=None):
@@ -373,7 +373,7 @@ def _decrypt_credential(name, credstore_dir=None):
             timeout=CREDS_TIMEOUT_SECONDS,
         )
     except (ConfigError, ProcessError) as exc:
-        raise CredentialCliError(f"reading '{name}' back from systemd-creds: {exc}") from exc
+        raise CredentialCliError(f"reading '{name}' back from systemd-creds: {render_external(exc)}") from exc
     if not result.ok:
         raise CredentialCliError(
             f"systemd-creds decrypt failed for '{name}': {(result.stderr_text or result.returncode)!r}"
@@ -389,7 +389,7 @@ def _decrypt_credential(name, credstore_dir=None):
     try:
         decoded = result.stdout.decode()
     except UnicodeDecodeError as exc:
-        raise CredentialCliError(f"decrypted value for '{name}' is not valid UTF-8: {exc}") from exc
+        raise CredentialCliError(f"decrypted value for '{name}' is not valid UTF-8: {render_external(exc)}") from exc
     # Only strip a trailing line ending, not all whitespace - a password can
     # legitimately start/end with spaces, and _encrypt_credential() never appends
     # one, but strip defensively in case anything else in the pipeline did.
@@ -640,12 +640,12 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value) -> None:
         with open(settings_path, encoding="utf8") as f:
             text = f.read()
     except OSError as exc:
-        raise CredentialCliError(f"could not read {settings_path}: {exc}") from exc
+        raise CredentialCliError(f"could not read {settings_path}: {render_external(exc)}") from exc
 
     try:
         root = yaml.compose(text)
     except yaml.YAMLError as exc:
-        raise CredentialCliError(f"{settings_path}: could not parse YAML: {exc}") from exc
+        raise CredentialCliError(f"{settings_path}: could not parse YAML: {render_external(exc)}") from exc
 
     top_node = _find_mapping_value(root, top_key)
     if top_node is None:
@@ -686,7 +686,7 @@ def _rewrite_settings_field(settings_path, top_key, field, new_value) -> None:
     try:
         _atomic_write(settings_path, "".join(lines))
     except OSError as exc:
-        raise CredentialCliError(f"could not write {settings_path}: {exc}") from exc
+        raise CredentialCliError(f"could not write {settings_path}: {render_external(exc)}") from exc
 
 
 def _compose_settings_mapping(settings_path):
@@ -712,12 +712,12 @@ def _compose_settings_mapping(settings_path):
         with open(settings_path, encoding="utf8") as f:
             text = f.read()
     except OSError as exc:
-        raise CredentialCliError(f"could not read {settings_path}: {exc}") from exc
+        raise CredentialCliError(f"could not read {settings_path}: {render_external(exc)}") from exc
 
     try:
         root = yaml.compose(text)
     except yaml.YAMLError as exc:
-        raise CredentialCliError(f"{settings_path}: could not parse YAML: {exc}") from exc
+        raise CredentialCliError(f"{settings_path}: could not parse YAML: {render_external(exc)}") from exc
 
     if not isinstance(root, yaml.MappingNode):
         raise CredentialCliError(f"{settings_path}: does not contain a top-level mapping - edit it manually first")
@@ -829,7 +829,7 @@ def _enable_source(name, settings_path=None):
         try:
             _atomic_write(settings_path, "".join(lines))
         except OSError as exc:
-            raise CredentialCliError(f"could not write {settings_path}: {exc}") from exc
+            raise CredentialCliError(f"could not write {settings_path}: {render_external(exc)}") from exc
         return True
 
     existing = [item.value for item in sources_node.value if isinstance(item, yaml.ScalarNode)]
@@ -847,7 +847,7 @@ def _enable_source(name, settings_path=None):
     try:
         _atomic_write(settings_path, "".join(lines))
     except OSError as exc:
-        raise CredentialCliError(f"could not write {settings_path}: {exc}") from exc
+        raise CredentialCliError(f"could not write {settings_path}: {render_external(exc)}") from exc
     return True
 
 
@@ -1076,7 +1076,7 @@ def _cmd_set(name, settings_path):
         # alone wouldn't tell the user that - make it explicit here instead.
         raise CredentialCliError(
             f"'{name}' was encrypted and stored in systemd-creds, but {settings_path} "
-            f"could not be updated to match ({exc}) - the plaintext value is still "
+            f"could not be updated to match ({render_external(exc)}) - the plaintext value is still "
             f"there and should be removed by hand."
         ) from exc
     print(f"Stored '{name}' in systemd-creds and updated {settings_path}.")
@@ -1111,7 +1111,7 @@ def _cmd_remove(name, settings_path):
         try:
             os.remove(cred_path)
         except OSError as exc:
-            raise CredentialCliError(f"could not remove {cred_path}: {exc}") from exc
+            raise CredentialCliError(f"could not remove {cred_path}: {render_external(exc)}") from exc
         print(f"Removed '{name}' from systemd-creds and reverted {settings_path} to the placeholder value.")
     else:
         print(f"'{name}' was not stored in systemd-creds - reverted {settings_path} to the placeholder value.")
@@ -1286,12 +1286,12 @@ def _ensure_section(settings_path, name, example_path):
         with open(settings_path, encoding="utf8") as f:
             current = f.read()
     except OSError as exc:
-        raise CredentialCliError(f"could not read {settings_path}: {exc}") from exc
+        raise CredentialCliError(f"could not read {settings_path}: {render_external(exc)}") from exc
 
     try:
         root = yaml.compose(current)
     except yaml.YAMLError as exc:
-        raise CredentialCliError(f"{settings_path}: could not parse YAML: {exc}") from exc
+        raise CredentialCliError(f"{settings_path}: could not parse YAML: {render_external(exc)}") from exc
     _require_mapping_document(root, settings_path)
     if root is not None and _find_mapping_value(root, name) is not None:
         return False
@@ -1300,7 +1300,7 @@ def _ensure_section(settings_path, name, example_path):
         with open(example_path, encoding="utf8") as f:
             example = f.read()
     except OSError as exc:
-        raise CredentialCliError(f"could not read {example_path}: {exc}") from exc
+        raise CredentialCliError(f"could not read {example_path}: {render_external(exc)}") from exc
 
     section = _extract_section(example, name)
     if section is None:

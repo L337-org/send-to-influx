@@ -9,6 +9,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import json
 import logging
 import os
 
@@ -17,11 +18,14 @@ import pytest
 import yaml
 from mcp.server.mcpserver import MCPServer
 
-from tests.harness.installation import conservatory
+from tests.harness.installation import conservatory, record_command
+from toinflux.controls import load_control
+from toinflux.transitions import TransitionLog, transition_path
 from toinflux.exceptions import ConfigError
 from toinflux.exceptions import ToolParamError
 from toinflux.mcp_controls import (
     _control_schema_result,
+    _control_state_result,
     _delete_control_result,
     _get_control_result,
     _list_controls_result,
@@ -247,15 +251,28 @@ class TestRegistration:
         assert self._tools(settings) == set()
 
     def test_every_read_tool_is_registered_when_controls_are_on(self):
-        assert self._tools({"controls": {"enabled": True}}) == {"list_controls", "get_control", "get_control_schema"}
+        assert self._tools({"controls": {"enabled": True}}) == {
+            "list_controls",
+            "get_control",
+            "get_control_state",
+            "get_control_schema",
+        }
 
     def test_reading_is_not_gated_behind_the_write_flag(self):
         """A control document holds no secrets, and gating "what is this install controlling"
         behind the switch that permits changing a heating loop would mean nobody could look
         without also granting that. No write flag is set here and every read tool appears,
         `get_control_schema` included - so an installation where nothing may write controls can
-        still be asked for a document to paste in, or to explain one written by hand."""
-        assert self._tools({"controls": {"enabled": True}}) == {"list_controls", "get_control", "get_control_schema"}
+        still be asked for a document to paste in, or to explain one written by hand.
+
+        `get_control_state` belongs on this side of the line for the same reason: being able
+        to see why a loop is doing what it does must not require permission to change it."""
+        assert self._tools({"controls": {"enabled": True}}) == {
+            "list_controls",
+            "get_control",
+            "get_control_state",
+            "get_control_schema",
+        }
 
 
 class TestTheControlSchema:
@@ -1040,3 +1057,195 @@ class TestAnOmittedInstanceIsNotADifferentActuator:
         result = _save_control_result("spare", explicit, stored.settings_file, _Reloading())
         assert result["enabled"] is False
         assert "conservatory" in result["stored_disabled"]["because"]
+
+
+class TestReportingWhatAControlHasWorkedOut:
+    """The loop's own state, which device output alone cannot show.
+
+    Read from the file the control writes rather than asked of the control: the PID lives in
+    a child process and the MCP server does not, and the child already writes this down every
+    cycle so a restart does not lose it. The persistence and the tool are the same mechanism.
+    """
+
+    @staticmethod
+    def _ran(installation, cycles=3, minimum=1):
+        """Store a lamp control, run it, and return its name.
+
+        Args:
+            installation (Installation): the installation to write into
+            cycles (int): how many cycles to spend
+            minimum (float): its min_transition_seconds
+
+        Returns:
+            str: the control's name
+        """
+        from tests.harness.bridge import bulb
+        from toinflux.control_process import ControlProcess
+        from toinflux.controls import save_control
+
+        installation.bridge.lights["9"] = bulb("office-lamp")
+        document = conservatory(name="lamp")
+        document.pop("active_period", None)
+        document.pop("enable_when", None)
+        document["parameters"] = {"target": 1000}
+        document["inputs"] = {"lux": {"source": "hue", "field": "L", "max_age": 60}}
+        document["pid"] = {"input": "lux", "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0}
+        document["devices"] = {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "brightness_pct"}}
+        document["output"] = {
+            "cycle_seconds": 60,
+            "min_transition_seconds": minimum,
+            "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 100, "set": {"lamp": 100}}],
+        }
+        save_control("lamp", document, installation.settings_file)
+        control = ControlProcess("lamp", settings_file=installation.settings_file)
+        try:
+            for _ in range(cycles):
+                control.controller.step({"lux": 300.0, "target": 1000}, dt=60)
+                control.transitions.record_loop(control.controller.capture(), control.controller.fingerprint)
+            control._apply({"lamp": 94})
+        finally:
+            control.guard.stop("the test is finished")
+            control.close()
+        return "lamp"
+
+    def test_it_reports_the_integral(self, state_directory, bridge):
+        """The number that explains an output moving against its input, and the one thing
+        nothing else advertised here can show."""
+        name = self._ran(state_directory)
+        result = _control_state_result(name, state_directory.settings_file)
+        assert result["loop"]["integral"] > 0
+        assert result["loop"]["age_seconds"] is not None
+
+    def test_it_says_whether_the_memory_still_matches_the_document(self, state_directory, bridge):
+        from toinflux.controls import load_control, save_control
+
+        name = self._ran(state_directory)
+        assert _control_state_result(name, state_directory.settings_file)["loop"]["matches_document"] is True
+        document = load_control(name, state_directory.settings_file)
+        document["pid"]["kp"] = 0.2
+        save_control(name, document, state_directory.settings_file)
+        assert _control_state_result(name, state_directory.settings_file)["loop"]["matches_document"] is False
+
+    def test_it_reports_what_each_device_was_last_set_to(self, state_directory, bridge):
+        name = self._ran(state_directory)
+        lamp = _control_state_result(name, state_directory.settings_file)["devices"]["lamp"]
+        assert lamp["state"] is not None
+        assert lamp["age_seconds"] is not None
+        assert lamp["forced"] is True, "the guard's exit command is a safe state"
+
+    def test_it_names_devices_held_by_their_minimum(self, state_directory, bridge):
+        """Which is the other thing that makes a control look like it is ignoring its input."""
+        name = self._ran(state_directory, minimum=3600)
+        result = _control_state_result(name, state_directory.settings_file)
+        assert result["held_by_minimum"] == [], "a forced move is exempt in both directions"
+        from toinflux.transitions import TransitionLog
+
+        log = TransitionLog(name, state_directory.settings_file)
+        # Through the harness helper, which builds the identity from the document exactly as
+        # `command_devices` does.
+        record_command(log, load_control(name, state_directory.settings_file), {"lamp": 55})
+        assert _control_state_result(name, state_directory.settings_file)["held_by_minimum"] == ["lamp"]
+
+    def test_a_device_recorded_on_another_scale_is_not_reported_as_held(self, state_directory, bridge):
+        """`_hold` refuses to pin a value whose parameter is not the one the document drives
+        the device by now, so the next cycle will move it whatever its timer says. Reporting
+        it as held would describe a restraint that is not going to happen."""
+        name = self._ran(state_directory, minimum=3600)
+        from toinflux.transitions import TransitionLog
+
+        log = TransitionLog(name, state_directory.settings_file)
+        record_command(
+            log,
+            {"devices": {"lamp": {"source": "hue", "device": "office-lamp", "parameter": "color_temp_k"}}},
+            {"lamp": 2700},
+        )
+        result = _control_state_result(name, state_directory.settings_file)
+        assert result["held_by_minimum"] == []
+        assert result["devices"]["lamp"]["parameter"] == "color_temp_k", "the scale was not reported"
+
+    def test_it_reports_the_scale_a_state_is_on(self, state_directory, bridge):
+        """A driven device's 40 is forty percent or forty kelvin depending on this, and a
+        client reading the state has no other way to tell."""
+        name = self._ran(state_directory, minimum=3600)
+        from toinflux.transitions import TransitionLog
+
+        record_command(
+            TransitionLog(name, state_directory.settings_file),
+            load_control(name, state_directory.settings_file),
+            {"lamp": 55},
+        )
+        lamp = _control_state_result(name, state_directory.settings_file)["devices"]["lamp"]
+        assert lamp == {**lamp, "state": 55, "parameter": "brightness_pct"}
+
+    def test_a_hand_edited_document_is_reported_rather_than_crashing(self, state_directory):
+        """This tool reads whatever is on disk and validates only to decide whether a
+        fingerprint means anything, so a `devices:` holding a list reached `parameter_devices`
+        and came back as an AttributeError - an internal error where the tool documents a
+        ToolParamError, which is the difference between a client being told and a client
+        seeing the server fall over."""
+        import yaml
+
+        from toinflux.controls import control_path
+
+        document = conservatory(name="broken")
+        document["devices"] = ["heater1", "heater2"]
+        path = control_path("broken", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(document, handle)
+        result = _control_state_result("broken", state_directory.settings_file)
+        assert result["control"] == "broken"
+        assert result["held_by_minimum"] == []
+
+    def test_a_state_a_driven_device_cannot_take_is_not_reported_as_held(self, state_directory, bridge):
+        """`_hold` requires an identity *and* a value it could pin. Checking only the identity
+        advertised a restraint the next cycle would not honour - the same two-places-one-
+        question fault the identity itself had, half fixed."""
+        name = self._ran(state_directory, minimum=3600)
+        log = TransitionLog(name, state_directory.settings_file)
+        document = load_control(name, state_directory.settings_file)
+        # A boolean, as the device would have left behind when it was switched rather than
+        # driven. The identity matches; the value is not one a dimmer can be set to.
+        record_command(log, document, {"lamp": True})
+        result = _control_state_result(name, state_directory.settings_file)
+        assert result["held_by_minimum"] == [], "a value the loop will not pin was reported as held"
+
+    @pytest.mark.parametrize("at", [float("nan"), float("inf"), True, 10**1000], ids=["nan", "inf", "bool", "huge"])
+    def test_a_device_moment_that_is_not_one_is_not_given_an_age(self, at, state_directory, bridge):
+        """`_age` is the shared reader and had its own looser rule, so it could hand back an
+        age for a moment the loader would have refused - 0.0 for a nan, the epoch's second for
+        a bool. It uses `is_moment` now, which is also the only thing that survives an integer
+        too large to convert."""
+        from toinflux.mcp_controls import _age
+
+        assert _age(at, 1_000_000.0) is None
+
+    @pytest.mark.parametrize("at", [float("nan"), float("inf"), True], ids=["nan", "inf", "bool"])
+    def test_a_loop_moment_that_is_not_one_is_not_given_an_age(self, at, state_directory, bridge):
+        """Quieter than a crash, and worse. Fed raw to `_age`, a nan or an infinity comes back
+        as **0.0** - so the tool tells a reader the loop state was recorded just now, when in
+        fact it cannot be measured at all. A bool reports the epoch's second as an age.
+
+        A list or a string was already refused, so the reported mechanism was not the one that
+        bites; these three are.
+        """
+        name = self._ran(state_directory, minimum=3600)
+        path = transition_path(name, state_directory.settings_file)
+        with open(path, encoding="utf-8") as handle:
+            stored = json.load(handle)
+        stored["pid"] = {"integral": 5.0, "fingerprint": "zzz", "at": at}
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(stored, handle)
+        result = _control_state_result(name, state_directory.settings_file)
+        assert result["loop"] is not None, "the loop half was dropped entirely"
+        assert result["loop"]["age_seconds"] is None, "an unusable moment was given an age"
+
+    def test_a_control_that_has_never_run_reports_no_loop(self, state_directory):
+        state_directory.write_control(conservatory())
+        result = _control_state_result("conservatory", state_directory.settings_file)
+        assert result["loop"] is None
+        assert result["devices"] == {}
+
+    def test_a_name_that_does_not_exist_is_refused(self, state_directory):
+        with pytest.raises(ToolParamError, match="nosuchcontrol"):
+            _control_state_result("nosuchcontrol", state_directory.settings_file)

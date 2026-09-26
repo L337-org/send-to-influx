@@ -26,7 +26,7 @@ import tempfile
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import yaml
 from toinflux.exceptions import ConfigError
-from toinflux.general import resolve_state_dir
+from toinflux.general import render_external, resolve_state_dir
 
 # Where control documents live inside the state directory.
 CONTROL_DIR_NAME = "controls"
@@ -40,6 +40,12 @@ DEFAULT_CYCLE_SECONDS = 900.0
 
 CONTROL_SUFFIX = ".yaml"
 
+#: How much staler than its own cycle a control's feedback may be before it is worth saying
+#: so. Two, because at that point the loop is certain to command twice on one reading rather
+#: than merely able to; one would fire on a control whose max_age is a few seconds over its
+#: window, which is a rounding difference rather than a problem.
+STALE_FEEDBACK_MULTIPLE = 2
+
 # A control's name is also its filename, and an MCP client can choose it. Anything
 # outside this set is refused rather than sanitised: silently rewriting a name would
 # make the control the caller asked for and the control that exists two different
@@ -47,20 +53,34 @@ CONTROL_SUFFIX = ".yaml"
 # Lowercase because the store must behave the same on a case-insensitive filesystem.
 CONTROL_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,62}$"
 
-# The two settings a control may leave its devices in when it stops actuating.
-# `unenergised` commands every device in the control's own device list off directly,
-# rather than meaning "the lowest stage" - that way it does not depend on the operator
-# having declared a zero stage correctly. `leave_unchanged` is the absence of a safe
-# state rather than a safe state, and is opt-in precisely so it is never reached by
-# omission.
 # What an active period's boundary looks like. Shared with toinflux.schedule, which parses
 # the same strings: strptime("%H:%M") accepts "9:00" and "9:0", so a parser left to itself
 # would be laxer than the validator and a document could pass one and not the other.
 CLOCK_TIME_PATTERN = r"([01]\d|2[0-3]):[0-5]\d"
 
+# What a control may leave its devices in when it stops actuating - at startup, on failure,
+# on the way out, and at the end of an active period.
+#
+# `unenergised` and `energised` both name every device in the control's own device list
+# directly, rather than meaning "the lowest stage" or "the highest" - that way neither
+# depends on the operator having declared their ladder correctly, and a mis-declared stage
+# cannot make a control energise something while trying to make itself safe.
+#
+# **`energised` is here because the device is not necessarily a heater.** A circulation pump
+# whose stopping lets a boiler overheat, a valve held open by power, frost protection, an
+# extractor that must not stop: for those, off is the dangerous state and the safe one is on.
+# Refusing the option would not have made any of them safer, only unexpressible. It stays
+# opt-in and `unenergised` stays the default, because a device failing to energised keeps
+# drawing power with nothing supervising it and that has to be chosen knowingly.
+#
+# `leave_unchanged` is the absence of a safe state rather than a safe state, and is opt-in
+# for the same reason: it must never be reached by omission.
 SAFE_STATE_UNENERGISED = "unenergised"
+SAFE_STATE_ENERGISED = "energised"
 SAFE_STATE_LEAVE_UNCHANGED = "leave_unchanged"
-BUILT_IN_SAFE_STATES = (SAFE_STATE_UNENERGISED, SAFE_STATE_LEAVE_UNCHANGED)
+#: Deterministic ones first, then the opt-out. The order is what every message and the
+#: schema tool render, so it is the order an operator reads them in.
+BUILT_IN_SAFE_STATES = (SAFE_STATE_UNENERGISED, SAFE_STATE_ENERGISED, SAFE_STATE_LEAVE_UNCHANGED)
 
 # Keys a control document may carry at the top level. Checked as a closed set: a
 # mistyped key that was merely ignored would leave the operator looking at a setting
@@ -74,7 +94,7 @@ BUILT_IN_SAFE_STATES = (SAFE_STATE_UNENERGISED, SAFE_STATE_LEAVE_UNCHANGED)
 # `parameters` is deliberately not here - its keys are the operator's own names - and
 # neither is a stage's `set`, whose keys are checked against the device list instead.
 INPUT_KEYS = frozenset({"source", "field", "instance", "max_age"})
-DEVICE_KEYS = frozenset({"source", "device", "instance", "min_transition_seconds"})
+DEVICE_KEYS = frozenset({"source", "device", "instance", "min_transition_seconds", "parameter"})
 PID_KEYS = frozenset({"input", "setpoint", "kp", "ki", "kd"})
 OUTPUT_KEYS = frozenset({"cycle_seconds", "min_transition_seconds", "max_level", "stages"})
 STAGE_KEYS = frozenset({"level", "set"})
@@ -110,7 +130,11 @@ CONTROL_KEY_HELP = {
     "inputs": "name -> {source, field, instance, max_age}: the readings the rules may use",
     "pid": "the loop itself: input and setpoint rules, and the kp, ki and kd gains",
     "output": "cycle_seconds, min_transition_seconds, an optional max_level rule, and the stage ladder",
-    "devices": "name -> {source, device, instance, min_transition_seconds}: what the control switches",
+    "devices": (
+        "name -> {source, device, instance, min_transition_seconds, parameter}: what the control "
+        "drives. A device with no `parameter` is switched on and off; one that names a parameter "
+        "is set to a value on it, and its stage entries are numbers rather than true/false"
+    ),
     "enable_when": "a rule gating actuation; the control acts only while it evaluates non-zero",
     "safe_state": "what the devices do at startup, on failure and at shutdown",
     "active_period": "{from, to, end_state}: a daily wall-clock window in the control's own timezone",
@@ -146,7 +170,11 @@ CONTROL_EXAMPLE = {
     "timezone": "Europe/London",
     "parameters": {"target": 18.0},
     "inputs": {
-        "inside": {"source": "hue", "field": "temperature_conservatory", "instance": "bridge1", "max_age": 900},
+        # At or under `output.cycle_seconds`, and it is the *feedback* input that has to be:
+        # a loop acting three times on one reading looks exactly like three times the gain,
+        # and detuning to compensate is chasing the wrong thing.  The others below stay long
+        # on purpose - an outdoor temperature and a grid carbon figure are legitimately old.
+        "inside": {"source": "hue", "field": "temperature_conservatory", "instance": "bridge1", "max_age": 300},
         "dew": {"source": "openmeteo", "field": "dew_point_2m", "max_age": 1800},
         # `outside` and `grid_co2` are declared because `enable_when` and `max_level`
         # read them. They were missing until the rule check existed, so this fixture -
@@ -155,7 +183,14 @@ CONTROL_EXAMPLE = {
         "outside": {"source": "openmeteo", "field": "temperature_2m", "max_age": 1800},
         "grid_co2": {"source": "carbonintensity", "field": "intensity_actual", "max_age": 3600},
     },
-    "pid": {"input": "inside", "setpoint": "max(target, dew + 5)", "kp": 12.0, "ki": 0.02, "kd": 0.0},
+    # **Gains are in the ladder's own units.** `level` is a scale the operator chooses - here
+    # watts, since the rungs are a 750W heater and a pair of them - so a gain has to be in
+    # that scale per degree, and `kp = top rung / the error you want full output at` is the
+    # whole of it. This example shipped kp=12 against a ladder topping out at 1500, which
+    # needed a 125-degree error to reach the top and delivered nothing at all below four
+    # degrees: numbers that look like a tuning and are three orders of magnitude out.
+    # 500 puts full output at three degrees below setpoint.
+    "pid": {"input": "inside", "setpoint": "max(target, dew + 5)", "kp": 500.0, "ki": 0.15, "kd": 0.0},
     "output": {
         "cycle_seconds": 300,
         "min_transition_seconds": 60,
@@ -188,11 +223,48 @@ CONTROL_EXAMPLE = {
 #:
 #: Every one is validated by CI, because an example nothing exercises is a document that
 #: stops working the first time the format moves.
+#: How to arrive at gains, published with the schema rather than left in comments here.
+#:
+#: **The examples are copied, so what they do not say is what goes wrong.** A client composing
+#: a control takes the shape *and the numbers* from whichever example fits, and a gain is the
+#: one field in a control document that cannot be right in the abstract: it depends on how far
+#: the device moves the reading, which is a property of the room. Every example says which
+#: error it was tuned for; none of that reasoning reached the client, because it lived in
+#: Python comments and the payload ships the documents as data.
+TUNING_NOTES = [
+    "a gain is not portable: kp is output per unit of error, and the right value depends on how "
+    "far your device moves your reading, which no example can know",
+    "kp = the top rung divided by the error you want full output at, so a ladder of 0-1500 with "
+    "full output wanted at 3 degrees gives kp 500. Change a ladder and you must change kp with it",
+    "measure the plant gain before choosing: set the device to one value, wait for the reading to "
+    "settle, set it to another, and divide the change in reading by the change in output",
+    "keep kp times the plant gain well below 1. At 1 the loop answers each error with a correction "
+    "that recreates it inverted and swings harder every cycle - measured at 1.04 on a real lamp, "
+    "which diverged within a quarter of an hour",
+    "too low is visible and harmless, too high is neither: start below your estimate and raise it",
+    "ki is what closes the last of the error, and it is slow by design. It is applied per second, "
+    "so a useful starting point is around kp/3000 for a slow plant like a room, and more for "
+    "something small and fast. Raise kp for a loop that never arrives, raise ki for one that stops "
+    "just short",
+    "a sensor that reports only when its reading changes leaves the loop steering blind between "
+    "reports, which looks like too much gain and is usually met by detuning",
+    "general PID references - Ziegler-Nichols, the usual manual method - are for understanding "
+    "what each term does, not for values to use here: they aim at quarter-amplitude decay, which "
+    "is deliberate oscillation, they start by driving the loop into it, and they assume a "
+    "continuous output rather than a ladder on a scale you chose",
+]
+
 CONTROL_EXAMPLES = {
     "normal": {
         "use_when": (
             "the usual case: devices that can be switched as often as the loop likes, and one "
             "transition minimum covering all of them"
+        ),
+        "tuning": (
+            "kp 500 against a ladder topping out at 1500 means full output at 3 degrees below "
+            "setpoint. That suits a conservatory whose two heaters lift it a few degrees; a "
+            "smaller room, a bigger heater or better insulation all want a smaller number. Work "
+            "out your own before copying this one - see `tuning` in the schema"
         ),
         "document": CONTROL_EXAMPLE,
     },
@@ -203,16 +275,23 @@ CONTROL_EXAMPLES = {
             "nearer one trims. Give that device its own longer minimum: it binds only at the rungs "
             "where that device actually changes, so the nearer one still moves at its own rate"
         ),
+        "tuning": (
+            "kp 500 against a ladder topping out at 1500 means full output at 3 degrees below "
+            "setpoint, chosen for that conservatory rather than for yours. The staging decides "
+            "which device moves when, not how hard the loop pushes, so tune the gain exactly as "
+            "you would without it - see `tuning` in the schema"
+        ),
         "document": {
             "name": "conservatory_staged",
             "enabled": True,
             "timezone": "Europe/London",
             "parameters": {"target": 18.0},
             "inputs": {
-                "inside": {"source": "hue", "field": "temperature_conservatory", "max_age": 900},
+                "inside": {"source": "hue", "field": "temperature_conservatory", "max_age": 300},
                 "outside": {"source": "openmeteo", "field": "temperature_2m", "max_age": 1800},
             },
-            "pid": {"input": "inside", "setpoint": "target", "kp": 12.0, "ki": 0.02, "kd": 0.0},
+            # Same ladder, same units: full output three degrees below setpoint.
+            "pid": {"input": "inside", "setpoint": "target", "kp": 500.0, "ki": 0.15, "kd": 0.0},
             "output": {
                 "cycle_seconds": 300,
                 "min_transition_seconds": 60,
@@ -237,7 +316,53 @@ CONTROL_EXAMPLES = {
             "safe_state": "unenergised",
         },
     },
+    "dimming": {
+        "use_when": (
+            "the device is set to a value rather than switched - a dimmable lamp, a variable "
+            "output. Name the parameter on the device and give each rung a number on it; the "
+            "control then holds the value the ladder describes at the demand, instead of "
+            "switching between rungs to average it out over the window"
+        ),
+        "tuning": (
+            "kp 5.0 against a ladder topping out at 1000 means full brightness at 200 lux short "
+            "of target, which suits a lamp that moves the reading by about that much at full. "
+            "**Measure yours.** One real room moved 14 to 21 lux per percent of lamp, where this "
+            "same number is twenty-five times too aggressive: the loop answers each error with a "
+            "correction that overshoots it, and swings harder every cycle instead of settling. "
+            "A light sensor reporting only on change makes it worse, because the loop is steering "
+            "blind between reports. See `tuning` in the schema for how to measure it"
+        ),
+        "document": {
+            "name": "office_lamp",
+            "enabled": True,
+            "timezone": "Europe/London",
+            "parameters": {"target": 300.0},
+            "inputs": {"brightness": {"source": "hue", "field": "light_level_office", "max_age": 30}},
+            # The input is lux, so the gain is per lux: 1000 of ladder over the 200 lux
+            # short of target at which the lamp should be fully up.
+            "pid": {"input": "brightness", "setpoint": "target", "kp": 5.0, "ki": 0.02, "kd": 0.0},
+            "output": {
+                "cycle_seconds": 30,
+                # How often the lamp is adjusted, which is what a minimum means for a device
+                # that is set rather than switched. A dimmer chasing every reading is as
+                # unpleasant to sit under as one that never moves.
+                "min_transition_seconds": 30,
+                "stages": [
+                    {"level": 0, "set": {"lamp": 0}},
+                    {"level": 1000, "set": {"lamp": 100}},
+                ],
+            },
+            "devices": {"lamp": {"source": "hue", "device": "Office Lamp", "parameter": "brightness_pct"}},
+            "safe_state": "unenergised",
+        },
+    },
     "fast_adjustment": {
+        "tuning": (
+            "kp 1000 against a ladder topping out at 1000 means full output at 1 degree below "
+            "setpoint, which is aggressive and suits a propagator tray: small, fast to respond, "
+            "and nothing that minds being switched often. On anything with real thermal mass the "
+            "same number would overshoot and hunt"
+        ),
         "use_when": (
             "a small thermal mass and a device with nothing to protect, where the loop should "
             "recompute often and the window should split finely"
@@ -247,8 +372,9 @@ CONTROL_EXAMPLES = {
             "enabled": True,
             "timezone": "Europe/London",
             "parameters": {"target": 21.0},
-            "inputs": {"tray": {"source": "hue", "field": "temperature_propagator", "max_age": 300}},
-            "pid": {"input": "tray", "setpoint": "target", "kp": 40.0, "ki": 0.1, "kd": 0.0},
+            "inputs": {"tray": {"source": "hue", "field": "temperature_propagator", "max_age": 60}},
+            # A seed tray has almost no thermal mass, so full output one degree down.
+            "pid": {"input": "tray", "setpoint": "target", "kp": 1000.0, "ki": 2.0, "kd": 0.0},
             "output": {
                 "cycle_seconds": 60,
                 "min_transition_seconds": 10,
@@ -365,7 +491,7 @@ def list_controls(settings_file=None):
         # No controls have ever been created. Not a fault: the subsystem is optional.
         return []
     except OSError as exc:
-        raise ConfigError(f"cannot read the control directory {directory!r}: {exc}") from exc
+        raise ConfigError(f"cannot read the control directory {directory!r}: {render_external(exc)}") from exc
 
     names = []
     for entry in sorted(entries):
@@ -402,9 +528,9 @@ def load_control(name, settings_file=None):
     except FileNotFoundError as exc:
         raise ConfigError(f"no control named {name!r} at {path!r}") from exc
     except OSError as exc:
-        raise ConfigError(f"cannot read control {name!r} from {path!r}: {exc}") from exc
+        raise ConfigError(f"cannot read control {name!r} from {path!r}: {render_external(exc)}") from exc
     except yaml.YAMLError as exc:
-        raise ConfigError(f"control {name!r} at {path!r} is not valid YAML: {exc}") from exc
+        raise ConfigError(f"control {name!r} at {path!r} is not valid YAML: {render_external(exc)}") from exc
 
     if document is None:
         # An empty file. Distinguished from a malformed one because the cause differs:
@@ -440,7 +566,7 @@ def save_control(name, document, settings_file=None) -> None:
         # default would be whatever the umask allows.
         os.chmod(directory, stat.S_IRWXU)
     except OSError as exc:
-        raise ConfigError(f"cannot create the control directory {directory!r}: {exc}") from exc
+        raise ConfigError(f"cannot create the control directory {directory!r}: {render_external(exc)}") from exc
 
     handle = None
     temporary = None
@@ -459,7 +585,7 @@ def save_control(name, document, settings_file=None) -> None:
         os.replace(temporary, path)
         temporary = None
     except (OSError, yaml.YAMLError) as exc:
-        raise ConfigError(f"cannot write control {name!r} to {path!r}: {exc}") from exc
+        raise ConfigError(f"cannot write control {name!r} to {path!r}: {render_external(exc)}") from exc
     finally:
         if handle is not None:
             handle.close()
@@ -490,7 +616,7 @@ def delete_control(name, settings_file=None) -> None:
     except FileNotFoundError as exc:
         raise ConfigError(f"no control named {name!r} at {path!r}") from exc
     except OSError as exc:
-        raise ConfigError(f"cannot delete control {name!r} at {path!r}: {exc}") from exc
+        raise ConfigError(f"cannot delete control {name!r} at {path!r}: {render_external(exc)}") from exc
     # After the document is gone: the log is bookkeeping, and failing to remove it must not
     # leave a control that is half-deleted.
     forget_control(name, settings_file)
@@ -646,17 +772,88 @@ def _check_stages(document, devices, errors) -> None:
         return
 
     device_names = set(devices)
+    driven = parameter_devices(devices)
     for index, stage in enumerate(stages):
-        _check_one_stage(f"output.stages[{index}]", stage, device_names, errors)
+        _check_one_stage(f"output.stages[{index}]", stage, device_names, driven, errors)
 
 
-def _check_one_stage(where, stage, device_names, errors) -> None:
+#: What a device declaration says that does *not* change the meaning of a state recorded
+#: against it. A transition minimum is a promise about how often the device may move, not
+#: about what the recorded value means, so editing it must not discard the record and with it
+#: the very timing the setting is about.
+_DEVICE_IRRELEVANT = frozenset({"min_transition_seconds"})
+
+
+def device_identity(spec):
+    """Return what a recorded state for this device is only meaningful against.
+
+    **Everything the declaration says, less a named few**, for the reason the loop's own
+    fingerprint is built that way: this started as "the parameter", became "the parameter and
+    the actuator" a review later, and there is no reason to think that list was finished.
+
+    A recorded state is a number or a boolean, and it means something only alongside what it
+    was sent to and how that thing is driven - 40 is a percentage or a colour temperature, and
+    it belongs to one bulb on one bridge rather than to the name in the document that happened
+    to point there.
+
+    Args:
+        spec (dict): the device's declaration, or anything at all
+
+    Returns:
+        tuple: a comparable identity, empty where the declaration is unusable
+    """
+    if not isinstance(spec, dict):
+        return ()
+    return tuple(sorted((key, str(value)) for key, value in spec.items() if key not in _DEVICE_IRRELEVANT))
+
+
+def holdable_value(state):
+    """Whether a recorded state is one a driven device could be pinned to.
+
+    A driven device holds a number, so a boolean or a non-finite value is a record of
+    something that never happened - a leftover from when the device was switched, or a file
+    somebody edited. Shared rather than restated: `_hold` decides whether to pin and
+    `get_control_state` reports what is held, and when those two asked the question
+    separately they gave different answers.
+
+    Args:
+        state (object): the value as it was recorded
+
+    Returns:
+        bool: True where it can be commanded again
+    """
+    return isinstance(state, (int, float)) and not isinstance(state, bool) and math.isfinite(state)
+
+
+def parameter_devices(devices):
+    """Return the devices driven by a continuous parameter rather than switched.
+
+    One place, because four readers need the same answer and disagreeing about which devices
+    are dimmers and which are switches would have a stage validated one way and commanded
+    another.
+
+    Args:
+        devices (dict or None): the devices section
+
+    Returns:
+        dict: device name -> the parameter it is driven by
+    """
+    return {
+        name: spec["parameter"]
+        for name, spec in (devices or {}).items()
+        if isinstance(spec, dict) and isinstance(spec.get("parameter"), str) and spec["parameter"].strip()
+    }
+
+
+def _check_one_stage(where, stage, device_names, driven, errors) -> None:
     """Check a single rung of the ladder.
 
     Args:
         where (str): the stage's position, for the message
         stage (object): the parsed stage
         device_names (set): the devices this control owns
+        driven (dict): device name -> parameter, for the ones set to a value rather than
+            switched, whose rung entries are numbers instead of true/false
         errors (list): appended to with any problems found
     """
     if not isinstance(stage, dict):
@@ -685,11 +882,23 @@ def _check_one_stage(where, stage, device_names, errors) -> None:
     # into an everything-on rung, and it passed --check-config clean. Unquoted `off`/`no`/
     # `false` are YAML booleans and were always right; quoting them silently inverted the
     # meaning. `level` above has been guarded against the same class since it was written.
-    wrong = {name for name, state in assignments.items() if name in device_names and not isinstance(state, bool)}
+    switched = device_names - set(driven)
+    wrong = {name for name, state in assignments.items() if name in switched and not isinstance(state, bool)}
     if wrong:
         errors.append(
             f"{where}.set: must be true or false for {_render_names(wrong)} - "
             f"a quoted 'false' is a string, and every non-empty string switches the device on"
+        )
+    # A driven device takes a value on its parameter instead. The *range* belongs to the far
+    # end - a percentage and a colour temperature have nothing in common - so it is checked
+    # there, where the refusal can name the device and say what it can do.
+    unusable = {
+        name for name, state in assignments.items() if name in driven and not (_is_number(state) and state >= 0)
+    }
+    if unusable:
+        errors.append(
+            f"{where}.set: must be a number for {_render_names(unusable)}, which "
+            f"{'is' if len(unusable) == 1 else 'are'} set to a value rather than switched"
         )
 
 
@@ -712,10 +921,42 @@ def _check_active_period(document, errors) -> None:
         # fullmatch: `$` matches before a trailing newline, so "23:35\n" passed this and
         # became an active-period boundary carrying a line break.
         if not isinstance(value, str) or not re.fullmatch(CLOCK_TIME_PATTERN, value):
-            errors.append(f"active_period.{field}: is required and must be a 24-hour HH:MM time, got {value!r}")
+            errors.append(
+                f"active_period.{field}: is required and must be a 24-hour HH:MM time, got {value!r}"
+                + (_unquoted_time_hint(value) if isinstance(value, int) and not isinstance(value, bool) else "")
+            )
     end_state = period.get("end_state", SAFE_STATE_UNENERGISED)
-    if end_state not in BUILT_IN_SAFE_STATES:
-        errors.append(f"active_period.end_state: must be one of {', '.join(BUILT_IN_SAFE_STATES)}, got {end_state!r}")
+    before = len(errors)
+    _check_safe_state("active_period.end_state", end_state, errors)
+    if len(errors) == before:
+        # Only where the value itself is usable: asking the runtime about a state already
+        # known to be wrong would name the same fault twice in different words.
+        _check_state_reaches_the_devices("active_period.end_state", end_state, document, errors)
+
+
+def _unquoted_time_hint(value):
+    """Return the explanation for a time that YAML turned into a number, or nothing.
+
+    **An unquoted `23:35` is the integer 1415.** YAML 1.1 reads a colon-separated number as
+    sexagesimal, so an hour with no leading zero becomes minutes-since-midnight while
+    `05:25` survives as the string it looks like - which is why the shipped examples appear
+    to quote inconsistently and why a hand-edited document can fail on one boundary and not
+    the other. Without this, the error reads "got 1415" against a document that plainly says
+    23:35, and the reader has to know the trap to see it.
+
+    Args:
+        value (int): what the document holds
+
+    Returns:
+        str: a sentence naming the cause, empty where the number is not a plausible time
+    """
+    hours, minutes = divmod(value, 60)
+    if not 0 <= value < 24 * 60 or minutes > 59:
+        return ""
+    return (
+        f". An unquoted {hours:02d}:{minutes:02d} is read by YAML as the number {value}, "
+        f"because a colon-separated value with no leading zero is sexagesimal - quote it"
+    )
 
 
 def _check_timezone_and_parameters(document, errors) -> None:
@@ -767,8 +1008,10 @@ def _check_scalars(name, document, errors) -> None:
     _check_timezone_and_parameters(document, errors)
 
     safe_state = document.get("safe_state", SAFE_STATE_UNENERGISED)
-    if safe_state not in BUILT_IN_SAFE_STATES:
-        errors.append(f"safe_state: must be one of {', '.join(BUILT_IN_SAFE_STATES)}, got {safe_state!r}")
+    before = len(errors)
+    _check_safe_state("safe_state", safe_state, errors)
+    if len(errors) == before:
+        _check_state_reaches_the_devices("safe_state", safe_state, document, errors)
 
 
 def validate_control(name, document, settings=None):
@@ -849,10 +1092,7 @@ def validate_control_sources(document, settings=None):
             except ConfigError:
                 errors.append(f"{where}: source {source!r} is not one this build collects from")
                 continue
-            if must_actuate and not getattr(handler, "MCP_ACTUATES_DEVICES", False):
-                errors.append(
-                    f"{where}: source {source!r} cannot switch a device on and off, so a control " f"cannot actuate it"
-                )
+            if must_actuate and _check_actuation(where, entry, source, handler, errors):
                 continue
             # Knowing the class is not knowing the installation. Without this, a control
             # naming `hue` on a machine whose settings have no `hue` block passed
@@ -864,6 +1104,58 @@ def validate_control_sources(document, settings=None):
             if unusable:
                 errors.append(f"{where}: {unusable}")
     return errors
+
+
+def _check_actuation(where, entry, source, handler, errors):
+    """Check a devices entry against what its source can actually do.
+
+    Args:
+        where (str): the entry's position, for the message
+        entry (dict): the device's declaration
+        source (str): the source it names
+        handler (type): the source's class
+        errors (list): appended to with any problems found
+
+    Returns:
+        bool: True where the source cannot actuate at all, so nothing further applies
+    """
+    _check_device_parameter(where, entry, source, handler, errors)
+    if not getattr(handler, "MCP_ACTUATES_DEVICES", False):
+        errors.append(f"{where}: source {source!r} cannot switch a device on and off, so a control cannot actuate it")
+        return True
+    return False
+
+
+def _check_device_parameter(where, entry, source, handler, errors) -> None:
+    """Refuse a device parameter the source does not understand.
+
+    Whether a *particular* lamp is dimmable is a question for the bridge, asked at the moment
+    of use, where the refusal can name the device. Whether the source drives brightness at all
+    is a fact about the code, so it is answered here - the same split as the rest of this
+    function, and it is the half `--check-config` can answer without touching anything.
+
+    Args:
+        where (str): the entry's position, for the message
+        entry (dict): the device's declaration
+        source (str): the source it names
+        handler (type): the source's class
+        errors (list): appended to with any problems found
+    """
+    if "parameter" not in entry:
+        return
+    parameter = entry["parameter"]
+    drivable = getattr(handler, "MCP_DEVICE_PARAMETERS", ())
+    if not isinstance(parameter, str) or not parameter.strip():
+        errors.append(
+            f"{where}: parameter must be a name where it is given, got {parameter!r} - "
+            f"omit it entirely for a device that is only switched on and off"
+        )
+        return
+    if parameter not in drivable:
+        errors.append(
+            f"{where}: source {source!r} cannot drive {parameter!r} - it drives "
+            f"{_render_names(drivable) if drivable else 'nothing but on and off'}"
+        )
 
 
 def validate_control_rules(document):
@@ -1089,6 +1381,168 @@ def enabled_owner_of(actuators, documents, excluding=None):
     return None
 
 
+def control_warnings(document, settings=None):
+    """Return what is worth saying about a valid control, without refusing it.
+
+    Separate from validation because none of this makes a document wrong. A control that
+    reads staler data than its own cycle still runs, still holds a target, and may well be
+    exactly what its operator meant - a heater against an outdoor temperature that changes by
+    the hour has no use for a fresher reading. It is only the *feedback* variable where the
+    combination bites, and even then it is a judgement rather than a fault.
+
+    Args:
+        document (dict): a control document already known to be valid
+        settings (dict or None): the parsed settings, for a source's own bounds
+
+    Returns:
+        list: human-readable warnings, empty where there is nothing to say
+    """
+    warnings = []
+    _warn_about_stale_feedback(document, settings, warnings)
+    return warnings
+
+
+def _warn_about_stale_feedback(document, settings, warnings) -> None:
+    """Warn where the loop acts faster than its own input can refresh.
+
+    **A loop cannot react to what it cannot yet see.** Where the PID's input may be older
+    than the window, the control acts, acts again, and acts a third time on one reading -
+    each time on evidence that predates its own last command - then discovers it overshot and
+    drives as hard the other way. The symptom is an oscillation that looks like too much gain,
+    so the usual response is to detune until it stops, which buys stability by making the
+    control slow instead of making it informed.
+
+    Only the PID's own input. Every other input is an observation rather than feedback: an
+    outdoor temperature, a dew point or a grid carbon figure is legitimately hours old, and
+    warning about those would be noise that teaches people to skim warnings.
+
+    Args:
+        document (dict): the control document
+        settings (dict or None): the parsed settings, for the source's own max_age default
+        warnings (list): appended to with anything worth saying
+    """
+    from toinflux.inputs import input_max_age
+
+    feedback = (document.get("pid") or {}).get("input")
+    spec = ((document.get("inputs") or {}).get(feedback)) if isinstance(feedback, str) else None
+    if not isinstance(spec, dict):
+        return
+    cycle = (document.get("output") or {}).get("cycle_seconds", DEFAULT_CYCLE_SECONDS)
+    if not (_is_number(cycle) and cycle > 0):
+        return
+    try:
+        limit = input_max_age(spec, settings or {})
+    except ConfigError:
+        # Reported precisely by validation; a second complaint here would name one fault twice.
+        return
+    if limit < cycle * STALE_FEEDBACK_MULTIPLE:
+        return
+    warnings.append(
+        f"inputs.{feedback}: may be up to {limit:.0f}s old while the loop acts every {cycle:.0f}s, "
+        f"so it can command {limit / cycle:.0f} times before seeing the effect of the first. That "
+        f"reads as too much gain and is usually met by detuning. Lower its max_age towards "
+        f"output.cycle_seconds, or lengthen the cycle to match the data"
+    )
+
+
+def safe_state_problem(where, value):
+    """Return why a safe or end state is unusable, or None where it is fine.
+
+    **One predicate because there were three, and they disagreed.** The validator learned to
+    accept a number when driven devices arrived; `Gate` and `parse_active_period` did not,
+    so a document naming `safe_state: 40` passed `--check-config` and every MCP tool, and
+    then refused to start - with the code that handles the number sitting downstream, correct
+    and unreachable.  A rule stated once cannot drift from itself.
+
+    A number is permitted because a device driven by a parameter has more than two states to
+    be left in: 40 for a lamp is 40%, and for a switched device in the same control it means
+    on above zero. Negative and non-finite are refused here rather than at the far end, where
+    the message would be about a bridge rather than about the document.
+
+    Args:
+        where (str): the setting's position, for the message
+        value (object): what the document holds
+
+    Returns:
+        str or None: the problem, phrased for whoever reads it, or None
+    """
+    if _is_number(value):
+        if value < 0:
+            return f"{where}: a value must be at least zero, got {value!r}"
+        return None
+    if value not in BUILT_IN_SAFE_STATES:
+        return f"{where}: must be one of {', '.join(BUILT_IN_SAFE_STATES)}, or a value to set, got {value!r}"
+    return None
+
+
+def _check_state_reaches_the_devices(where, value, document, errors) -> None:
+    """Refuse a safe or end state the devices in this document cannot be put into.
+
+    **By asking the runtime rather than restating its rule.** `energised` means full scale,
+    and full scale is something only a percentage has: a light driven by `color_temp_k` has
+    no "all of it", because 100 kelvin is not a bright light but a nonsense. `commands_for`
+    knew that and refused at startup, while validation accepted the document and every MCP
+    tool saved it - so the first sign of trouble was a control that would not run.
+
+    Calling the real thing is what keeps the two from drifting a second time: any state the
+    runtime will not build commands for is refused here, including ones added later that
+    nobody remembers to mirror.
+
+    Args:
+        where (str): the setting's position, for the message
+        value (object): what the document holds, already known to be a usable state
+        document (dict): the parsed document, for its devices
+        errors (list): appended to with any problems found
+    """
+    # Imported here because gating imports this module, and at module level that is circular.
+    from toinflux.gating import commands_for, static_full_scale
+
+    devices = document.get("devices")
+    if not isinstance(devices, dict) or not devices:
+        # No devices, or a shape validation has already complained about. Nothing to ask.
+        return
+    try:
+        commands_for(value, devices)
+    except ConfigError as exc:
+        errors.append(f"{where}: {exc}")
+        return
+    if not _is_number(value):
+        return
+    # **Only the bound a name settles.** A percentage runs 0 to 100 wherever it is
+    # implemented, so 150 is a typo that can be refused here, while the caller is still
+    # listening and can fix it. A colour temperature's range belongs to the bulb and is left
+    # to the far end, which clamps it - there is nobody to tell at the moment a safe state is
+    # asserted, and a control that will not start is a worse answer than a light at its
+    # brightest.
+    for device, entry in devices.items():
+        if not isinstance(entry, dict):
+            continue
+        full = static_full_scale(entry.get("parameter"))
+        if full is not None and value > full:
+            errors.append(
+                f"{where}: {value!r} is past the {full:g} that {entry['parameter']!r} tops out at, "
+                f"for device {device!r}"
+            )
+
+
+def _check_safe_state(where, value, errors) -> None:
+    """Refuse a safe or end state that is neither a named state nor a usable value.
+
+    A number is permitted because a device driven by a parameter has more than two states to
+    be left in: 40 for a lamp is 40%, and for a switched device in the same control it means
+    on above zero. Negative and non-finite are refused here rather than at the far end, where
+    the message would be about a bridge rather than about the document.
+
+    Args:
+        where (str): the setting's position, for the message
+        value (object): what the document holds
+        errors (list): appended to with any problems found
+    """
+    problem = safe_state_problem(where, value)
+    if problem:
+        errors.append(problem)
+
+
 def _check_no_name_is_both_an_input_and_a_parameter(document, errors) -> None:
     """Refuse a name declared as an input and as a parameter.
 
@@ -1199,7 +1653,7 @@ def _check_one_key_per_actuator(document, devices, errors) -> None:
                 )
 
 
-def validate_stored_controls(settings_file=None, settings=None) -> None:
+def validate_stored_controls(settings_file=None, settings=None):
     """Check every stored control, reporting all of their problems at once.
 
     Args:
@@ -1207,10 +1661,17 @@ def validate_stored_controls(settings_file=None, settings=None) -> None:
         settings (dict or None): the parsed settings, so each control's sources can be
             checked against this installation as well as against the build
 
+    Returns:
+        list: warnings about controls that are valid but worth a second look, empty where
+        there is nothing to say. Returned rather than logged, because this runs before
+        logging is configured on the --check-config path and the caller knows where its
+        output goes
+
     Raises:
         ConfigError: one or more stored controls is unreadable or structurally wrong
     """
-    problems = []
+    problems: list = []
+    warnings: list = []
     documents = {}
     for name in list_controls(settings_file):
         try:
@@ -1221,6 +1682,9 @@ def validate_stored_controls(settings_file=None, settings=None) -> None:
         errors = validate_control(name, document, settings)
         problems.extend(f"control {name!r}: {error}" for error in errors)
         if not errors:
+            # Only for a document that is otherwise sound: a warning about the tuning of a
+            # control that will not start is noise on top of the reason it will not start.
+            warnings.extend(f"control {name!r}: {note}" for note in control_warnings(document, settings))
             # Only documents that are usable on their own. A broken one has already said so,
             # and reading actuators out of it would add a second complaint about the same
             # fault - or invent one, since its devices section may be the thing that is wrong.
@@ -1228,6 +1692,7 @@ def validate_stored_controls(settings_file=None, settings=None) -> None:
     problems.extend(shared_actuator_problems(documents))
     if problems:
         raise ConfigError("\n  ".join(["control configuration is invalid:"] + problems))
+    return warnings
 
 
 def shared_actuator_problems(documents):

@@ -19,7 +19,7 @@ import inspect
 from mcp.server.mcpserver.exceptions import ToolError
 
 from toinflux.exceptions import ConfigError, ToInfluxError, ToolParamError
-from toinflux.general import INSTANCED_SOURCES, close_session, expand_sources, get_class, render_values
+from toinflux.general import INSTANCED_SOURCES, close_session, expand_sources, get_class, render_external, render_values
 
 # Every failure this project raises deliberately inherits ToInfluxError, and that base is what the
 # translation catches. It was a tuple of two types, and a tuple is a list that goes stale: ConfigError
@@ -115,7 +115,7 @@ def translate_failures(fn, error_cls):
             try:
                 return await fn(*args, **kwargs)
             except ToInfluxError as exc:
-                raise error_cls(str(exc)) from exc
+                raise error_cls(render_external(exc)) from exc
 
         # After functools.wraps, which copies the wrapped function's __dict__ over the
         # wrapper's and would otherwise drop this.
@@ -127,7 +127,7 @@ def translate_failures(fn, error_cls):
         try:
             return fn(*args, **kwargs)
         except ToInfluxError as exc:
-            raise error_cls(str(exc)) from exc
+            raise error_cls(render_external(exc)) from exc
 
     setattr(wrapper, TRANSLATES_FAILURES, True)
     return wrapper
@@ -199,7 +199,7 @@ def resolve_handlers(source, settings, settings_file):
     except ConfigError as exc:
         for _, handler in handlers:
             close_session(handler.session)
-        raise ToolParamError(f"source {source!r} is not usable: {exc}") from exc
+        raise ToolParamError(f"source {source!r} is not usable: {render_external(exc)}") from exc
     return handlers
 
 
@@ -244,7 +244,7 @@ def resolve_handler(source, settings, settings_file, instance=None):
     try:
         handler = get_class(source, settings_file, instance=instance)
     except ConfigError as exc:
-        raise ToolParamError(f"source {source!r} is not usable: {exc}") from exc
+        raise ToolParamError(f"source {source!r} is not usable: {render_external(exc)}") from exc
 
     if instance is not None:
         # Force the instance to resolve now. Construction does not touch it, so an
@@ -258,5 +258,5 @@ def resolve_handler(source, settings, settings_file, instance=None):
             handler.mcp_tag_filters()
         except ConfigError as exc:
             close_session(handler.session)
-            raise ToolParamError(f"source {source!r} is not usable: {exc}") from exc
+            raise ToolParamError(f"source {source!r} is not usable: {render_external(exc)}") from exc
     return handler
