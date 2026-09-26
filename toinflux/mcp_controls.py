@@ -497,7 +497,12 @@ def _control_state_result(name, settings_file=None, supervisor=None):
         entry["loop"] = None
 
     minimum_for = Controller(document).min_transition_for if fingerprint is not None else None
-    declared = document.get("devices") or {}
+    # Coerced, not trusted: this tool reads a document that may have been hand-edited, and
+    # it validates only to decide whether a fingerprint is meaningful. A `devices:` holding a
+    # list would otherwise reach `parameter_devices` and come back as an AttributeError,
+    # which is an internal error where the tool documents a ToolParamError.
+    declared = document.get("devices")
+    declared = declared if isinstance(declared, dict) else {}
     devices = tuple(declared)
     driven = parameter_devices(declared)
     recorded = log.parameters()

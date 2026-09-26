@@ -893,7 +893,9 @@ class Hue(DataHandler):
         # cleanly here rather than returning it for a caller (parse_hue_data /
         # _fetch_lights) to crash on with a TypeError/AttributeError.
         if not isinstance(hue_data, dict):
-            raise SourceConnectionError(f"Hue Bridge returned an unexpected response type: {hue_data!r:.200}")
+            raise SourceConnectionError(
+                self._redact(f"Hue Bridge returned an unexpected response type: {hue_data!r:.200}")
+            )
         return hue_data
 
     def hue_device_name_to_name(self, device_name):

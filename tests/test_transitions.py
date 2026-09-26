@@ -1113,7 +1113,7 @@ class TestWhatTheControllerKeepsAndPutsBack:
         """
         from toinflux.controller import Controller
 
-        def built(parameter="brightness_pct", cap=None):
+        def built(parameter="brightness_pct", cap=None, field="t", setpoint="target", reads="inside"):
             output = {
                 "cycle_seconds": 60,
                 "min_transition_seconds": 1,
@@ -1124,8 +1124,11 @@ class TestWhatTheControllerKeepsAndPutsBack:
             return Controller(
                 {
                     "parameters": {"target": 20.0},
-                    "inputs": {"inside": {"source": "hue", "field": "t"}},
-                    "pid": {"input": "inside", "setpoint": "target", "kp": 10.0, "ki": 1.0, "kd": 0.0},
+                    "inputs": {
+                        "inside": {"source": "hue", "field": field},
+                        "other": {"source": "hue", "field": "o"},
+                    },
+                    "pid": {"input": reads, "setpoint": setpoint, "kp": 10.0, "ki": 1.0, "kd": 0.0},
                     "output": output,
                     "devices": {"a": {"source": "hue", "device": "A", "parameter": parameter}},
                 }
@@ -1135,6 +1138,11 @@ class TestWhatTheControllerKeepsAndPutsBack:
         assert built() == base, "the same document did not agree with itself"
         assert built(parameter="color_temp_k") != base, "the scale changed and the loop was kept"
         assert built(cap="50") != base, "the cap changed and the loop was kept"
+        assert built(reads="other") != base, "pid.input was repointed and the loop was kept"
+        assert built(setpoint="target + 1") != base, "the setpoint changed and the loop was kept"
+        # The same repointing one level down: the rule still says `inside`, but `inside` now
+        # reads a different sensor, so every number the loop remembers describes something else.
+        assert built(field="o") != base, "an input was repointed at another sensor and the loop was kept"
 
     def test_and_not_the_things_it_does_not(self, state_directory):
         """Discarding a hard-won integral because a gate rule changed would throw away the

@@ -58,6 +58,16 @@ class Controller:
         output = document.get("output") or {}
         self.ladder = build_ladder(output.get("stages") or [])
         self.devices = document.get("devices") or {}
+        # What each input name actually reads, kept for the fingerprint: the source, field and
+        # instance, and deliberately not `max_age`. See `fingerprint` for why the distinction
+        # matters.
+        self._signals = tuple(
+            sorted(
+                (name, spec.get("source"), spec.get("field"), spec.get("instance"))
+                for name, spec in (document.get("inputs") or {}).items()
+                if isinstance(spec, dict)
+            )
+        )
         # The same default as `ControlProcess.cycle_seconds` and `stall_seconds`, because
         # `cycle_seconds` is optional and three readers must not disagree about what an
         # omitted one means. Left as None here, a document that passed --check-config raised
@@ -232,6 +242,19 @@ class Controller:
                 "kd": self.pid.Kd,
                 "cycle": self.cycle_seconds,
                 "ladder": [(stage.level, sorted(stage.states.items())) for stage in self.ladder],
+                # Which signal the loop reads and what it chases: `last_input` and
+                # `last_error` are measurements of *this* input, so pointing `pid.input` at
+                # another sensor makes the whole memory describe something else - and with a
+                # derivative term it is used directly.
+                "input": self._input_rule.source,
+                "setpoint": self._setpoint_rule.source,
+                # And what those names resolve to. `pid.input` naming `inside` says nothing
+                # if `inside` is repointed at another sensor: the rule text is identical and
+                # every number the loop remembers now describes something else. The source,
+                # field and instance only - `max_age` changes how fresh a reading must be, not
+                # what it measures, and discarding a hard-won integral for it would be the
+                # over-reaction this digest is deliberately narrow to avoid.
+                "signals": self._signals,
                 "driven": sorted(self.driven.items()),
                 "max_level": self._max_level_rule.source if self._max_level_rule is not None else None,
             },

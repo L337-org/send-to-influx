@@ -1479,30 +1479,33 @@ def load_settings(settings_file=None):
         raise ConfigError(f"Error in {settings_path} - {e}") from e
 
 
-#: What varies between two reports of one unchanged fault: a measurement that grows with time,
-#: and the address in an object's repr. Both are detail rather than identity, and both were
-#: enough to defeat the throttle entirely - a staleness message counting up in seconds, and a
-#: urllib3 error carrying `0x7f...` from a fresh connection object each attempt.
-_VOLATILE = re.compile(r"0x[0-9a-fA-F]+|\d+(?:\.\d+)?")
+#: The two things in a failure message that move while the failure does not: an object's
+#: address in its repr, which a fresh connection object supplies anew on every attempt, and a
+#: duration, which counts up for as long as the fault lasts. Each was enough on its own to
+#: defeat the throttle entirely.
+_MOVING = re.compile(r"0x[0-9a-fA-F]+|\b\d+(?:\.\d+)?s\b")
 
 
-def _without_volatile_detail(rendered):
-    """Return a message with the parts that move on their own replaced.
+def without_moving_detail(rendered):
+    """Return a message with the parts that change on their own flattened.
 
-    **Numbers, rather than the exception's type.** An earlier fix used the type name as the
-    identity, which throttled the flood and broke the promise this class makes: every
-    `RuleEvaluationError` for one control became the same problem, so a cycle failing for a
-    new reason stayed silent for up to an hour. Normalising the digits keeps "the reading is
-    stale" and "the reading is not a number" apart while collapsing "31s old" into "71s old",
-    which is the distinction actually wanted.
+    **Addresses and durations, and nothing else.** Two earlier attempts were both too broad.
+    Using the exception's type collapsed every `RuleEvaluationError` for one control into a
+    single problem. Normalising every digit then collapsed an HTTP 404 into an HTTP 500, and
+    two different numeric rule failures into each other - breaking the same promise from the
+    other direction, because there the number *is* the reason.
+
+    A duration and an address are the two that are reliably not reasons: "31s old" becoming
+    "71s old" is one fault reported twice, while 404 becoming 500 is two faults. A status code
+    is not followed by a unit, which is what keeps them apart.
 
     Args:
         rendered (str): the message as it will be logged
 
     Returns:
-        str: the same message with numbers and object addresses flattened
+        str: the same message with addresses and durations replaced
     """
-    return _VOLATILE.sub("#", rendered)
+    return _MOVING.sub(lambda m: "0x#" if m.group().startswith("0x") else "#s", rendered)
 
 
 class RepeatingProblem:
@@ -1563,7 +1566,7 @@ class RepeatingProblem:
         # with every test still passing. Those callers pass an identity naming the fault
         # rather than the numbers describing it.
         rendered = message % args if args else message
-        same = _without_volatile_detail(rendered) if identity is None else identity
+        same = without_moving_detail(rendered) if identity is None else identity
         now = self._clock()
         seen = self._seen.get(key)
         if seen is not None and seen[0] == same and now - seen[1] < self._repeat_after:

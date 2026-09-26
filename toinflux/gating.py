@@ -408,13 +408,18 @@ class DeviceGuard:
 
         Args:
             name (str): the control's name, for the log lines
-            safe_state (str): one of the built-in safe states
-            devices (iterable): the device names the control owns
+            safe_state (str or float): one of the built-in safe states, or the value to leave
+                the devices at - a driven device has more than two states to be left in
+            devices (dict or iterable): the control's `devices` section, device name to its
+                declaration. An iterable of names still works and is what a caller with no
+                driven devices may have, but only the section says which devices are driven
+                by a parameter, and `commands_for` needs that to know what a state means for
+                each of them
             command (callable): applied to a device -> state mapping; whatever it raises
                 is what the caller sees
 
         Raises:
-            ConfigError: where the safe state is not one of the built-in names
+            ConfigError: where the safe state is neither a built-in name nor a usable value
         """
         self.name = name
         self.safe_state = safe_state

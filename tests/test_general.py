@@ -1317,6 +1317,36 @@ class TestRepeatingProblem:
         assert levels == [logging.ERROR, logging.DEBUG, logging.DEBUG], levels
         assert "111s old" in caplog.records[-1].getMessage(), "the throttled repeat lost the detail"
 
+    def test_a_number_that_is_the_reason_is_still_news(self, caplog):
+        """The correction to the correction. Keying on the exception's type collapsed every
+        failure of a kind into one; normalising every digit then collapsed an HTTP 404 into an
+        HTTP 500. A duration and an address are reliably not reasons - a status code is, and
+        it is not followed by a unit, which is what keeps them apart."""
+        problem, _now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            problem.report("cycle", logging.ERROR, "the API answered %s", 404)
+            problem.report("cycle", logging.ERROR, "the API answered %s", 500)
+        assert [record.levelno for record in caplog.records] == [logging.ERROR, logging.ERROR]
+
+    def test_a_duration_counting_up_is_the_same_fault(self, caplog):
+        problem, now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            for age in (31, 71, 111):
+                problem.report("cycle", logging.ERROR, "the reading is %ss old", age)
+                now[0] += 1
+        levels = [record.levelno for record in caplog.records]
+        assert levels == [logging.ERROR, logging.DEBUG, logging.DEBUG], levels
+        assert "111s old" in caplog.records[-1].getMessage(), "the throttled repeat lost the detail"
+
+    def test_an_address_that_moves_is_the_same_fault(self, caplog):
+        """A fresh connection object supplies a new one on every attempt."""
+        problem, now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            for address in ("0x7fcf376ae710", "0x7fcf376aee90"):
+                problem.report("cycle", logging.WARNING, "conn at %s timed out", address)
+                now[0] += 1
+        assert [record.levelno for record in caplog.records] == [logging.WARNING, logging.DEBUG]
+
     def test_an_identity_that_changes_is_still_news(self, caplog):
         """The default behaviour has to survive being made explicit, or a fault that turned
         into a different fault would be hidden by the thing that stops it repeating."""

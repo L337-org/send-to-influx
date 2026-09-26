@@ -1166,6 +1166,26 @@ class TestReportingWhatAControlHasWorkedOut:
         lamp = _control_state_result(name, state_directory.settings_file)["devices"]["lamp"]
         assert lamp == {**lamp, "state": 55, "parameter": "brightness_pct"}
 
+    def test_a_hand_edited_document_is_reported_rather_than_crashing(self, state_directory):
+        """This tool reads whatever is on disk and validates only to decide whether a
+        fingerprint means anything, so a `devices:` holding a list reached `parameter_devices`
+        and came back as an AttributeError - an internal error where the tool documents a
+        ToolParamError, which is the difference between a client being told and a client
+        seeing the server fall over."""
+        import yaml
+
+        from toinflux.controls import control_path
+
+        document = conservatory(name="broken")
+        document["devices"] = ["heater1", "heater2"]
+        path = control_path("broken", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(document, handle)
+        result = _control_state_result("broken", state_directory.settings_file)
+        assert result["control"] == "broken"
+        assert result["held_by_minimum"] == []
+
     def test_a_control_that_has_never_run_reports_no_loop(self, state_directory):
         state_directory.write_control(conservatory())
         result = _control_state_result("conservatory", state_directory.settings_file)
