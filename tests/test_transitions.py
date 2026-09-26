@@ -936,6 +936,24 @@ class TestReadingTheFile:
         held = log.frozen(lambda _d: 900.0, ["heater"], now=1010.0, identities=identities)
         assert held == frozenset({"heater"}), "an upgraded file lost every device's minimum"
 
+    def test_but_an_identity_that_cannot_be_read_still_withdraws_the_hold(self, state_directory):
+        """Nothing recorded and something unreadable both read as None, and they mean opposites.
+
+        `_usable_entries` writes None over an identity it cannot parse, deliberately, so that
+        `_hold` declines to reuse a value whose scale is unproven.  Letting None mean "written
+        before identities existed" gave that case the protection instead: a lamp logged at 2700
+        with a corrupt `for`, redeclared as a percentage, was held at 2700 and then pinned there
+        as a brightness.  The key is absent only where nothing was ever written, so presence is
+        the question and the value is the answer to a different one.
+        """
+        log = self._stored(
+            state_directory,
+            {"devices": {"lamp": {"state": 2700, "at": 1000.0, "for": "corrupt"}}, "pid": {}},
+        )
+        live = {"lamp": device_identity({"source": "hue", "device": "L", "parameter": "brightness_pct"})}
+        held = log.frozen(lambda _d: 900.0, ["lamp"], now=1010.0, identities=live)
+        assert held == frozenset(), "a state on an unprovable scale was held as if it were trusted"
+
     def test_one_corrupt_entry_cannot_reclassify_a_file_whose_loop_is_corrupt_too(self, state_directory):
         """The invariant itself: no single entry may decide what the whole file is.
 

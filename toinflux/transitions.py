@@ -524,11 +524,10 @@ class TransitionLog:
             frozenset: the device names that must keep the state they are in
         """
         moment = self._clock() if now is None else now
-        recorded = self.identities()
         held = set()
         for device in devices:
-            known = recorded.get(device)
-            if identities is not None and known is not None and known != identities.get(device):
+            entry = self.entries.get(device) or {}
+            if identities is not None and "for" in entry and entry["for"] != identities.get(device):
                 # **The record is not about this device any more.** A control key is a name in
                 # a document and what it points at can be changed underneath it, so a state
                 # written against the old target says nothing about the new one - not for a
@@ -537,13 +536,17 @@ class TransitionLog:
                 # Asked here because this is the one place both kinds pass through; it used to
                 # be asked further down, where only driven devices were looked at.
                 #
-                # **A record with nothing recorded against it is unknown, not different.** The
+                # **Asked of the key, not of its value, because None means two things.** The
                 # older writer stored no identity at all, so every device read out of an
                 # upgraded file compared as a mismatch and none was ever held: the first cycle
-                # after an upgrade was free to move hardware that was still inside its minimum.
-                # `device_identity` returns a tuple for any input, empty at worst, so None here
-                # means only that nothing was written - which is exactly the file the flat
-                # reader above exists to carry forward.
+                # after an upgrade was free to move hardware still inside its minimum. But
+                # `_usable_entries` also writes None over an identity it cannot read, and that
+                # one must keep excluding the device - the record is there and cannot be
+                # trusted, which is the case `_hold` declines to reuse a value for.
+                #
+                # Reading the value alone conflated them and re-froze a device whose scale was
+                # unproven. The key is absent only where nothing was ever written and present
+                # wherever something was, however unreadable, so the key is the question.
                 continue
             elapsed = self.elapsed(device, moment)
             if elapsed is None:
