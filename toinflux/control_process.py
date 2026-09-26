@@ -648,12 +648,16 @@ class ControlProcess:
         # is the parameter rather than the type: the value is only usable if the scale it was
         # recorded on is the scale the device is on now.
         #
-        # A log written before the parameter was kept reads as None and so matches nothing
-        # driven, which costs that device its minimum for one command and then corrects itself.
         # The identity is settled upstream, where `frozen` is decided, so that switched and
-        # driven devices are judged by the same rule. What is left to check here is the value
-        # itself: a driven device holds a number, and a boolean left over from when it was
-        # switched is a record of something that never happened.
+        # driven devices are judged by the same rule. A record written before identities were
+        # kept is held there rather than skipped, since nothing recorded is not the same as
+        # something recorded that disagrees - so such a record can reach this point and its
+        # value is pinned as it stands. Only a hand-edited file gets a number that way, because
+        # the writer that predates identities wrote booleans and nothing else, and the check
+        # below refuses those.
+        #
+        # What is left here is the value itself: a driven device holds a number, and a boolean
+        # left over from when it was switched is a record of something that never happened.
         pinned = {device: known[device] for device in held if holdable_value(known.get(device))}
         if not pinned:
             return plan
