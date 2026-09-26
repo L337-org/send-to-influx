@@ -83,11 +83,25 @@ def _usable_entries(devices):
     Returns:
         dict: device name to its entry, dropping anything malformed
     """
-    return {
-        device: entry
-        for device, entry in devices.items()
-        if isinstance(device, str) and isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))
-    }
+    usable = {}
+    for device, entry in devices.items():
+        if not (isinstance(device, str) and isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))):
+            continue
+        target = entry.get("target")
+        if target is not None and not isinstance(target, (list, tuple)):
+            # **Normalised, not discarded.** A corrupt `target` came back from `targets()` as
+            # a TypeError and took `get_control_state` and the next command with it, which is
+            # the opposite of what this file is for - it is a cache, and an unreadable one
+            # costs a transition sooner than asked rather than a control that will not run.
+            #
+            # The entry keeps its moment, so the device is still held for its minimum, and
+            # loses only the actuator it cannot prove: that makes `_hold` decline to pin it,
+            # so the device gets a fresh command. Dropping the whole entry would have thrown
+            # away the timestamp too, and switched a device sooner than its document promised
+            # - the one direction this module says to err away from.
+            entry = {**entry, "target": None}
+        usable[device] = entry
+    return usable
 
 
 def transition_dir(settings_file=None):

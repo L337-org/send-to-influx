@@ -799,6 +799,27 @@ class TestReadingTheFile:
         log.record({"lamp": 40}, parameters={"lamp": "brightness_pct"})
         assert log.elapsed("lamp") == 60, "commanding an unchanged value restarted its clock"
 
+    @pytest.mark.parametrize("bad", [1, "hue", {"a": 1}, True], ids=["int", "str", "dict", "bool"])
+    def test_a_corrupt_actuator_is_dropped_without_taking_the_entry_with_it(self, bad, state_directory):
+        """This file is a cache, so an unreadable one costs a transition sooner than asked -
+        never a control that will not run. A corrupt `target` came back from `targets()` as a
+        TypeError and took `get_control_state` and the next command with it.
+
+        Normalised rather than discarded: the entry keeps its moment, so the device is still
+        held for its minimum, and loses only the actuator it cannot prove - which makes
+        `_hold` decline to pin it, so the device gets a fresh command. Dropping the entry
+        would have thrown the timestamp away too and switched a device sooner than its
+        document promised.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {"lamp": {"state": 40, "at": 1000.0, "target": bad}}, "pid": {}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1060.0)
+        assert log.targets() == {"lamp": None}
+        assert log.elapsed("lamp") == 60.0, "the moment was thrown away with the actuator"
+        assert log.states() == {"lamp": 40}
+
     def test_both_halves_come_from_one_read(self, state_directory, monkeypatch):
         """They were read through separate opens, and `_read_loop` claimed in its own docstring
         that they could not disagree about which version of the file they came from. The
