@@ -580,9 +580,9 @@ def _age(at, now):
     Returns:
         float or None: seconds, never negative, or None where there is no moment
     """
-    from toinflux.transitions import is_moment
+    from toinflux.transitions import usable_number
 
-    if not is_moment(at):
+    if not usable_number(at):
         return None
     return round(max(0.0, now - float(at)), 1)
 

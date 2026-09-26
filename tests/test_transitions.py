@@ -918,6 +918,38 @@ class TestReadingTheFile:
         log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1000.0)
         assert log.states() == {}, "an unconvertible moment was kept"
 
+    @pytest.mark.parametrize(
+        "integral",
+        [True, float("nan"), float("inf"), "lots"],
+        ids=["bool", "nan", "inf", "string"],
+    )
+    def test_a_loop_integral_it_cannot_use_is_not_offered_as_resumable(self, integral, state_directory):
+        """A state returned from this reader is one the caller announces it has resumed.
+
+        `resume_from` refuses a value it cannot use, but the announcement happens either way -
+        so a nan left a control logging that it had put back a memory it had in fact
+        discarded, `true` came back as an integral of 1.0, and a string broke the log line's
+        own formatting. The device half already refuses what it cannot use.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"devices": {}, "pid": {"integral": integral, "fingerprint": "abc", "at": 1000.0}},
+                handle,
+            )
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1100.0)
+        assert log.loop_state("abc", 3600.0) is None
+
+    def test_a_usable_loop_integral_still_resumes(self, state_directory):
+        """The other side, or this would have turned resumption off altogether."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {}, "pid": {"integral": 5.0, "fingerprint": "abc", "at": 1000.0}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1100.0)
+        assert (log.loop_state("abc", 3600.0) or {}).get("integral") == 5.0
+
     def test_both_halves_come_from_one_read(self, state_directory, monkeypatch):
         """They were read through separate opens, and `_read_loop` claimed in its own docstring
         that they could not disagree about which version of the file they came from. The

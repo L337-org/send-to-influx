@@ -72,11 +72,13 @@ TRANSITION_DIR_NAME = "transitions"
 #: definition shorter than the minimum wherever this code decides anything at all.
 
 
-def is_moment(value):
-    """Whether a stored timestamp is one this module can measure an age against.
+def usable_number(value):
+    """Whether a stored number is one this module can actually use.
 
     **Finite, and not a bool.** `isinstance(x, (int, float))` admits both, and a hand-edited
-    or interrupted file can hold either. An infinite `at` makes `now - at` negative for ever,
+    or interrupted file can hold either. Asked of a moment and of the loop's integral, because
+    the failure is the same shape for both: a value that arithmetic accepts and then means
+    nothing. An infinite `at` makes `now - at` negative for ever,
     which the backwards-clock clamp reads as "no time has passed" - so the device looks as
     though it has just moved, on every cycle, and its transition minimum freezes it
     permanently. A nan does the same by a different route, because every comparison against
@@ -143,7 +145,7 @@ def _usable_entries(devices):
     """
     usable = {}
     for device, entry in devices.items():
-        if not (isinstance(device, str) and isinstance(entry, dict) and is_moment(entry.get("at"))):
+        if not (isinstance(device, str) and isinstance(entry, dict) and usable_number(entry.get("at"))):
             continue
         identity = _usable_identity(entry.get("for"))
         if identity != entry.get("for"):
@@ -353,7 +355,15 @@ class TransitionLog:
         if not state or state.get("fingerprint") != fingerprint:
             return None
         at = state.get("at")
-        if not is_moment(at):
+        if not usable_number(at):
+            return None
+        if not usable_number(state.get("integral")):
+            # **The integral, here rather than only at the far end.** `resume_from` refuses a
+            # value it cannot use, but a state returned from this reader is a state the caller
+            # announces it has resumed - so a nan left the control logging that it had put back
+            # a memory it had in fact discarded, `true` came back as an integral of 1.0, and a
+            # string broke the log line's own formatting. The device half of this file already
+            # refuses what it cannot use; this half now does the same.
             return None
         moment = self._clock() if now is None else now
         # Clamped like every other age here: a wall clock that stepped backwards must not
@@ -378,7 +388,7 @@ class TransitionLog:
             float or None: seconds since it was written, never negative, or None
         """
         at = (self._pid or {}).get("at")
-        if not is_moment(at):
+        if not usable_number(at):
             return None
         # Clamped, matching `elapsed`: a clock that moved backwards makes a negative age,
         # which would otherwise read as state from the future.
