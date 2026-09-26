@@ -131,20 +131,20 @@ def _usable_identity(value):
     return tuple(pairs)
 
 
-def _holds_device_records(section):
-    """Say whether a mapping holds device records rather than being one itself.
+def _recovered(devices, loop):
+    """Count what a way of reading the file would actually salvage from it.
 
     Args:
-        section (object): the value stored under one of the two reserved keys
+        devices (object): whatever that reading treats as the device section
+        loop (object): whatever that reading treats as the loop's memory
 
     Returns:
-        bool: True where at least one value is a record
+        int: usable device records, plus one where the loop's memory is usable too
     """
-    # `any`, not `all` and not a named key. A section's values are records, a record's values
-    # are a state and a moment - so one well-formed entry anywhere in it settles what the
-    # mapping is, and no individual entry can unsettle it. Every earlier version of this asked
-    # a question that one corrupt entry could answer on its own, which is the whole defect.
-    return isinstance(section, dict) and any(isinstance(entry, dict) for entry in section.values())
+    found = len(_usable_entries(devices)) if isinstance(devices, dict) else 0
+    if isinstance(loop, dict) and usable_number(loop.get("at")) and "fingerprint" in loop:
+        found += 1
+    return found
 
 
 def _usable_entries(devices):
@@ -313,29 +313,29 @@ class TransitionLog:
         # `devices` entry has a usable `at`, while in the new format an `at` under `devices`
         # could only be a device of that name, and would hold a mapping rather than a number.
         #
-        # **The newer shape is the default; flatness has to be proved.** Three attempts here
-        # all failed the same way, by asking a question one corrupt entry could answer: first
-        # whether *every* value under `devices` was a mapping, then whether that key held a
-        # moment, then whether it held a non-mapping `state`. The last two read a device's own
-        # record whenever a device happened to be called `at` or `state`, so corrupting that
-        # one device threw away every other device in the file and the loop's memory with it.
+        # **Read it both ways and keep the reading that saves more.** Four attempts before this
+        # each nominated one field as the discriminator - every value under `devices` being a
+        # mapping, then that key holding a moment, then a `state` that was or was not a mapping -
+        # and every one of them was defeated by corrupting the single field it asked about, in
+        # one direction or the other. The fault was never the field chosen; it was choosing one
+        # at all, in a file whose whole premise is that any part of it may be unreadable.
         #
-        # Only the writer produces these files, and it emits exactly `devices` and `pid`, so a
-        # third key at the top level is a device name and proves the file flat. That leaves one
-        # ambiguous shape: a flat log whose only two devices are called `devices` and `pid`.
-        # Two independent signals have to agree before it is read that way - the value under
-        # `pid` carrying a `state`, which loop state never has, and the value under `devices`
-        # containing no record at all. A single malformed entry moves neither, because the
-        # second is an `any` over the whole mapping rather than a question about one key.
+        # So nothing is asked about the contents. A third top-level key is still decisive, since
+        # the writer emits these two and nothing else, and it is the case where a flat log has
+        # ordinary device names. For the one genuinely ambiguous shape - a file holding just the
+        # two reserved names, which may be the current format or a flat log of two devices that
+        # happen to be called that - both readings are tried and the one that recovers more
+        # usable records wins. A tie goes to the current format, because that is what the writer
+        # produces and the ambiguity only arises at all where neither reading recovers anything.
+        #
+        # Corrupting any single entry can now only lower that reading's own score, never flip
+        # the answer on its own, and the rule degrades in the direction of keeping data rather
+        # than discarding it.
         #
         # Checked rather than versioned, because the files that need reading are the ones
         # already on disk, written before any version number existed.
-        section = stored.get("devices")
-        loop = stored.get("pid")
-        flat_pair = isinstance(loop, dict) and "state" in loop and not _holds_device_records(section)
-        looks_new = (
-            "devices" in stored and "pid" in stored and not (stored.keys() - {"devices", "pid"}) and not flat_pair
-        )
+        reserved = "devices" in stored and "pid" in stored and not (stored.keys() - {"devices", "pid"})
+        looks_new = reserved and _recovered(stored, {}) <= _recovered(stored.get("devices"), stored.get("pid"))
         if not looks_new:
             return {"devices": stored, "pid": {}}
         devices = stored.get("devices")
@@ -456,11 +456,17 @@ class TransitionLog:
     def identities(self):
         """Return what each device's recorded state is meaningful against.
 
-        None where nothing was recorded, which reads the same way as "not what this device is
-        now" and is handled the same way - the state is not reused.
+        None covers two cases this cannot tell apart: nothing was ever recorded, and something
+        was recorded that could not be read. `frozen` distinguishes them by whether the key is
+        there at all, because they mean opposite things to it - the first is an old record
+        keeping its minimum, the second a scale that cannot be trusted. Anything needing that
+        distinction must ask the entry rather than this.
+
+        No production code calls this; it remains as a read accessor for tests and for anything
+        wanting the recorded identities without the surrounding judgement.
 
         Returns:
-            dict: device name to its identity, or None
+            dict: device name to its identity, or None where there is none to be had
         """
         return {device: entry.get("for") for device, entry in self.entries.items()}
 
