@@ -71,6 +71,35 @@ TRANSITION_DIR_NAME = "transitions"
 #: definition shorter than the minimum wherever this code decides anything at all.
 
 
+def _usable_identity(value):
+    """Return a stored identity in the shape it was written, or None where it is not.
+
+    What `controls.device_identity` produces is a tuple of ``(key, value)`` pairs of strings,
+    which JSON returns as a list of two-element lists. Anything else is a file somebody has
+    edited or a write that was interrupted, and the readers downstream assume the shape: one
+    of them builds a `dict` out of it.
+
+    Args:
+        value (object): whatever the file held
+
+    Returns:
+        tuple or None: the identity as a tuple of pairs, or None where it is unusable
+    """
+    if value is None or not isinstance(value, (list, tuple)):
+        return None
+    pairs = []
+    for item in value:
+        # A string is excluded explicitly: `dict(["ab"])` is `{"a": "b"}`, so a two-character
+        # string passes a length check and turns a corrupt file into a plausible identity.
+        if isinstance(item, str) or not isinstance(item, (list, tuple)) or len(item) != 2:
+            return None
+        key, held = item
+        if not isinstance(key, str) or not isinstance(held, str):
+            return None
+        pairs.append((key, held))
+    return tuple(pairs)
+
+
 def _usable_entries(devices):
     """Return only the device entries that carry a moment, which is what makes them useful.
 
@@ -87,24 +116,21 @@ def _usable_entries(devices):
     for device, entry in devices.items():
         if not (isinstance(device, str) and isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))):
             continue
-        identity = entry.get("for")
-        if identity is not None and not isinstance(identity, (list, tuple)):
-            # **Normalised, not discarded.** A corrupt identity came back from `identities()`
-            # as a TypeError and took `get_control_state` and the next command with it, which
-            # is the opposite of what this file is for: it is a cache, and an unreadable one
-            # should cost a transition sooner than asked, never a control that will not run.
+        identity = _usable_identity(entry.get("for"))
+        if identity != entry.get("for"):
+            # **Normalised, not discarded.** A corrupt identity reached `dict()` in
+            # `get_control_state` and raised there, and one shaped `["ab"]` was worse still:
+            # `dict(["ab"])` is `{"a": "b"}`, so a hand-edited file became a plausible-looking
+            # identity rather than an obvious fault. This file is a cache, and an unreadable
+            # one should cost a transition sooner than asked, never a control that will not
+            # run or a scale that is quietly wrong.
             #
             # The entry keeps its moment, so the device is still held for its minimum, and
             # loses only the identity it cannot prove - which makes `_hold` decline to reuse
             # the value, so the device gets a fresh command. Dropping the whole entry would
             # have thrown the moment away too and switched a device sooner than its document
             # promised, which is the one direction this module says to err away from.
-            entry = {**entry, "for": None}
-        elif isinstance(identity, list):
-            # JSON has no tuples, so what was written as one reads back as a list. Compared
-            # against a freshly built identity, which is a tuple, so it is restored here
-            # rather than at each of the three places that compare it.
-            entry = {**entry, "for": tuple(tuple(part) if isinstance(part, list) else part for part in identity)}
+            entry = {**entry, "for": identity}
         usable[device] = entry
     return usable
 

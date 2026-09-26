@@ -810,7 +810,22 @@ class TestReadingTheFile:
         )
         assert log.elapsed("lamp") == 60, "commanding an unchanged value restarted its clock"
 
-    @pytest.mark.parametrize("bad", [1, "hue", {"a": 1}, True], ids=["int", "str", "dict", "bool"])
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            1,
+            "hue",
+            {"a": 1},
+            True,
+            [["source", "hue"], "bad"],
+            [["parameter"]],
+            [[1, 2, 3]],
+            # `dict(["ab"])` is `{"a": "b"}`, so a two-character string passes a length check
+            # and turns a corrupt file into a plausible-looking identity rather than a fault.
+            ["ab"],
+        ],
+        ids=["int", "str", "dict", "bool", "ragged", "short-pair", "long-pair", "two-char-string"],
+    )
     def test_a_corrupt_identity_is_dropped_without_taking_the_entry_with_it(self, bad, state_directory):
         """This file is a cache, so an unreadable one costs a transition sooner than asked -
         never a control that will not run. A corrupt `target` came back from `targets()` as a
@@ -828,6 +843,9 @@ class TestReadingTheFile:
             json.dump({"devices": {"lamp": {"state": 40, "at": 1000.0, "for": bad}}, "pid": {}}, handle)
         log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1060.0)
         assert log.identities() == {"lamp": None}
+        # The reader the shape actually has to satisfy: `get_control_state` builds a dict out
+        # of it, and a ragged identity raised there rather than reading as unusable.
+        assert dict(log.identities()["lamp"] or ()) == {}
         assert log.elapsed("lamp") == 60.0, "the moment was thrown away with the actuator"
         assert log.states() == {"lamp": 40}
 
