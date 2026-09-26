@@ -578,6 +578,22 @@ class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
         assert controller.pid._integral == 0.0, "the held value itself did not survive"
         assert controller.pid._last_input == pytest.approx(before), "a held zero was read as nothing held"
 
+    def test_an_explicit_demand_does_not_buy_a_stale_reading(self):
+        """The gate asks the hold, not the argument, and the two part company here.
+
+        Carrying was decided by whether `last_output` was set, which is the same question as
+        whether the integral survived right up until a caller passes a demand of their own.
+        `resume(last_output=3.0)` after a six-hour hold says where to start the I-term and says
+        nothing about the last input, which is as stale as it would have been anyway.  Only the
+        public API can reach this; no cycle passes a demand.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        controller.hold()
+        clock[0] += RESUMABLE_HOLD_SECONDS + 60
+        controller.resume(last_output=3.0)
+        assert controller.pid._last_input is None, "an explicit demand carried a reading from before the gap"
+
     def test_a_long_hold_drops_it_with_the_integral(self):
         """The other half: a stale reading must not be differentiated against.
 

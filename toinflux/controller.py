@@ -436,21 +436,21 @@ class Controller:
         # continuous. Inert while every shipped example runs kd at zero, and wrong the day one
         # does not.
         #
-        # Carried only where the integral is being carried. A hold long enough to drop the
-        # integral has made the last input stale by the same argument, and differentiating
-        # against a reading from before the gap would answer the first cycle back with a kick
-        # the plant never made.
+        # Carried only where the hold was brief enough to keep an integral, asked of the hold
+        # itself rather than of `last_output`. Those are the same question until a caller passes
+        # a demand explicitly, and then they are not: `resume(last_output=3.0)` after a six-hour
+        # hold says what to start the I-term from and says nothing about whether a reading from
+        # before the gap is still worth differentiating against. It is not, and answering the
+        # first cycle back with a step the plant never made is exactly what this guards against.
+        # No production caller passes one, so only the public API could reach it.
         #
         # Both of the values `capture` saves, not only the one in use. `reset` clears the last
         # error too, and while `differential_on_measurement` keeps its default the derivative is
         # taken from the input alone and the error is never read - but `capture` writes it down
         # and `resume_from` puts it back, so restoring one and dropping the other would leave
         # that pair doing work this method silently undid.
-        carried = (
-            {name: getattr(self.pid, name, None) for name in ("_last_input", "_last_error")}
-            if last_output is not None
-            else {}
-        )
+        brief = self._held_integral() is not None
+        carried = {name: getattr(self.pid, name, None) for name in ("_last_input", "_last_error")} if brief else {}
         self.pid.set_auto_mode(True, last_output=last_output)
         for name, value in carried.items():
             if value is not None:
