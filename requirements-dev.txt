@@ -26,8 +26,12 @@ packaging~=26.3.0
 # than committed - a private key in a fixture is a private key in the repository, whatever
 # it is for - and this is the only way to generate one without shelling out to openssl.
 # abi3 wheels, so one build serves every supported minor: verified with
-# `pip download cryptography~=48.0.1 --only-binary=:all: --python-version 310` and 314,
-# which resolve to cp39-abi3 and cp311-abi3 manylinux wheels.
-cryptography~=48.0.1
+# `pip download cryptography~=50.0.1 --only-binary=:all: --python-version 310` through 314,
+# for manylinux x86_64 and aarch64, which resolve to cp39-abi3 and cp311-abi3 wheels. The
+# --only-binary matters: without it a missing wheel is a silent source build against the local
+# Rust toolchain, which succeeds here and tells you nothing about the build hosts.
+# Held at 50 rather than the 49 that first carried the fix, because two advisories against 48
+# landed in one week and the later release is the one less likely to need this again.
+cryptography~=50.0.1
 types-PyYAML~=6.0.12
 types-requests~=2.33.0
