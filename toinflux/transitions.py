@@ -345,7 +345,7 @@ class TransitionLog:
         #
         # Checked rather than versioned, because the files that need reading are the ones
         # already on disk, written before any version number existed.
-        reserved = "devices" in stored and "pid" in stored and not (stored.keys() - {"devices", "pid"})
+        reserved = bool(stored) and not (stored.keys() - {"devices", "pid"})
         looks_new = reserved and _recovered(stored, {}) <= _recovered(stored.get("devices"), stored.get("pid"))
         if not looks_new:
             return {"devices": stored, "pid": {}}

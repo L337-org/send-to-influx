@@ -1024,6 +1024,39 @@ class TestReadingTheFile:
         other = self._stored(state_directory, with_device)
         assert other.states() == {"heater": True}, "a real device did not settle the reading"
 
+    @pytest.mark.parametrize("missing", ["pid", "devices"], ids=["no-loop-key", "no-devices-key"])
+    def test_a_half_that_is_gone_entirely_does_not_take_the_other_with_it(self, state_directory, missing):
+        """Requiring both reserved keys before reading the newer shape outlived its reason.
+
+        It was asked for when key presence was the whole test, to stop a flat log holding one
+        device named `pid` being mistaken for the current format.  Scoring answers that on its
+        own - such a file recovers more read flat, because the device has a moment and nothing
+        there is loop state - so the precondition was only still deciding the case it gets
+        wrong: a current-format file whose other half has been removed, where it sent the entire
+        surviving section down the flat path and dropped every device in it.
+
+        Found by sweeping every single-point corruption of a cache file for collateral loss,
+        rather than one case at a time, which is how the previous four versions were checked.
+        """
+        stored = {
+            "devices": {"heater": {"state": True, "at": 1000.0}},
+            "pid": {"integral": 3.5, "at": 1000.0, "fingerprint": "fp"},
+        }
+        del stored[missing]
+        log = self._stored(state_directory, stored)
+        if missing == "pid":
+            assert log.states().get("heater") is True, "losing the loop key lost every device"
+        else:
+            assert log.loop_state("fp", 10_000) is not None, "losing the device key lost the loop"
+
+    def test_a_flat_log_of_one_device_named_after_a_section_is_still_flat(self, state_directory):
+        """And the case the precondition existed for, which scoring settles without it: a flat
+        log whose only device is called `devices` or `pid` recovers more read flat, because a
+        device's record carries a moment and nothing in it is a fingerprint."""
+        for name in ("devices", "pid"):
+            log = self._stored(state_directory, {name: {"state": True, "at": 1000.0}})
+            assert log.states().get(name) is True, f"a lone device named {name!r} was read as a section"
+
     def test_a_file_neither_reading_can_salvage_is_read_as_the_current_shape(self, state_directory):
         """Where both readings recover nothing the file is genuinely ambiguous, and the tie goes
         to the shape the writer actually produces - an empty current-format file is ordinary and
