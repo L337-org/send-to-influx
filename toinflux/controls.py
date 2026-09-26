@@ -242,8 +242,10 @@ TUNING_NOTES = [
     "that recreates it inverted and swings harder every cycle - measured at 1.04 on a real lamp, "
     "which diverged within a quarter of an hour",
     "too low is visible and harmless, too high is neither: start below your estimate and raise it",
-    "ki is what closes the last of the error, and it is slow by design - roughly kp/100 in these "
-    "examples. Raise kp for a loop that never arrives, raise ki for one that stops just short",
+    "ki is what closes the last of the error, and it is slow by design. It is applied per second, "
+    "so a useful starting point is around kp/3000 for a slow plant like a room, and more for "
+    "something small and fast. Raise kp for a loop that never arrives, raise ki for one that stops "
+    "just short",
     "a sensor that reports only when its reading changes leaves the loop steering blind between "
     "reports, which looks like too much gain and is usually met by detuning",
     "general PID references - Ziegler-Nichols, the usual manual method - are for understanding "

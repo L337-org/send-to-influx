@@ -2427,3 +2427,35 @@ def test_an_exception_reaches_a_message_through_render_external():
         "these raise a message holding an exception rendered unsafely - pass it through "
         f"`render_external` so a newline in it cannot forge a line: {sites}"
     )
+
+
+def test_the_tuning_note_quotes_a_ratio_the_examples_bear_out():
+    """The client-facing `ki` note quoted a ratio that none of the shipped examples used.
+
+    It read "roughly kp/100 in these examples" while they run kp/3333, kp/500 and kp/250, so
+    a client copying an example and following the note would have set `ki` between two and
+    thirty times too high - and the neighbouring note warns that too high is the direction
+    that is neither visible nor harmless.  Two rounds of review raised it and it survived
+    both, because nothing was holding the sentence to the numbers it describes.
+
+    The claim checked is deliberately loose: the quoted starting ratio only has to fall
+    inside the range the shipped examples actually span.  It is a starting point rather than
+    a formula, so any figure a real example bears out passes, and only one describing no
+    example at all fails.
+    """
+    from toinflux.controls import CONTROL_EXAMPLES, TUNING_NOTES
+
+    ratios = sorted(
+        entry["document"]["pid"]["kp"] / entry["document"]["pid"]["ki"]
+        for entry in CONTROL_EXAMPLES.values()
+        if entry["document"].get("pid", {}).get("ki")
+    )
+    assert ratios, "no shipped example declares a ki, so this test is checking nothing"
+    quoted = [int(found) for note in TUNING_NOTES for found in re.findall(r"kp\s*/\s*(\d+)", note)]
+    assert quoted, "the tuning notes no longer quote a kp/ki ratio, so the guidance has moved"
+    stray = sorted(value for value in quoted if not ratios[0] <= value <= ratios[-1])
+    assert stray == [], (
+        "the tuning notes tell a client to start at a kp/ki ratio that no shipped example "
+        f"uses, so copying an example and following the note disagree: quoted {stray}, "
+        f"examples span kp/{ratios[0]:.0f} to kp/{ratios[-1]:.0f}"
+    )
