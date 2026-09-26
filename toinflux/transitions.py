@@ -131,6 +131,29 @@ def _usable_identity(value):
     return tuple(pairs)
 
 
+def _records_in(mapping):
+    """Count the values of a mapping that are a device's record rather than anything else.
+
+    Args:
+        mapping (object): a candidate device section, or a candidate record
+
+    Returns:
+        int: how many of its values carry both halves of a record
+    """
+    # **A state as well as a moment.** Counting anything with a moment made a section header and
+    # loop state score as devices, and a reading is only worth comparing by what it would really
+    # recover: a phantom named `pid` counted the same as a heater, which cancelled out the point
+    # the loop earns and left the whole decision resting on one field again. Both halves are
+    # what a record is, and neither a section nor loop state has the pair.
+    if not isinstance(mapping, dict):
+        return 0
+    return sum(
+        1
+        for entry in mapping.values()
+        if isinstance(entry, dict) and usable_number(entry.get("at")) and "state" in entry
+    )
+
+
 def _recovered(devices, loop):
     """Count what a way of reading the file would actually salvage from it.
 
@@ -139,20 +162,15 @@ def _recovered(devices, loop):
         loop (object): whatever that reading treats as the loop's memory
 
     Returns:
-        int: usable device records, plus one where the loop's memory is usable too
+        int: device records found, plus one where the loop's memory is usable too
     """
-    found = len(_usable_entries(devices)) if isinstance(devices, dict) else 0
+    found = _records_in(devices)
     # The fingerprint is what separates loop state from a device's record, both of which are
-    # flat mappings carrying a moment. It is the one thing read inside either value, and it is
-    # read to score a reading rather than to choose one - but a loop that has lost it does score
-    # a point lower, so with an empty device section as well the file tips to being read flat.
-    #
-    # **Accepted, because the alternative is worse and the loss is nil.** `loop_state` refuses a
-    # memory with no fingerprint anyway, so nothing usable goes: what is left is a phantom device
-    # named `pid`. Dropping the requirement to avoid that makes every flat log whose `devices`
-    # record is empty read as the current shape instead, which loses a real device - three tests
-    # fail on it. A truncated write cannot reach this either, since `record_loop` writes the
-    # fingerprint and the moment in the same statement.
+    # flat mappings carrying a moment. It is read to score a reading rather than to choose one,
+    # and a loop that has lost it scores a point lower - so with an empty device section as well
+    # the file tips to being read flat. Accepted: `loop_state` refuses a memory with no
+    # fingerprint anyway, so nothing usable goes, and a truncated write cannot reach it because
+    # `record_loop` writes the fingerprint and the moment in the same statement.
     if isinstance(loop, dict) and usable_number(loop.get("at")) and "fingerprint" in loop:
         found += 1
     return found
@@ -316,14 +334,6 @@ class TransitionLog:
         """
         if not isinstance(stored, dict):
             return {"devices": {}, "pid": {}}
-        # **The shape, not just the keys.** The writer always emits both, so a file carrying
-        # only one is not the new format - but requiring both is still not enough, because an
-        # older flat log may hold devices named *both* `pid` and `devices`, and reading those
-        # two entries as the sections loses every device in the file. What separates them is
-        # that a device's own entry carries a moment and a section does not: in a flat log the
-        # `devices` entry has a usable `at`, while in the new format an `at` under `devices`
-        # could only be a device of that name, and would hold a mapping rather than a number.
-        #
         # **Read it both ways and keep the reading that saves more.** Four attempts before this
         # each nominated one field as the discriminator - every value under `devices` being a
         # mapping, then that key holding a moment, then a `state` that was or was not a mapping -
@@ -339,9 +349,12 @@ class TransitionLog:
         # usable records wins. A tie goes to the current format, because that is what the writer
         # produces and the ambiguity only arises at all where neither reading recovers anything.
         #
-        # Corrupting any single entry can now only lower that reading's own score, never flip
-        # the answer on its own, and the rule degrades in the direction of keeping data rather
-        # than discarding it.
+        # A corruption can move either reading's score, in either direction - a `state`
+        # appearing in loop state makes the flat reading count it as a record, and that is
+        # exactly how the sixth fault here worked. What it cannot do is decide the answer by
+        # itself, because both readings are counted the same way and the loser has to be beaten
+        # rather than merely doubted. The rule errs towards keeping data: where the two agree
+        # the file is read the way the writer wrote it.
         #
         # Checked rather than versioned, because the files that need reading are the ones
         # already on disk, written before any version number existed.

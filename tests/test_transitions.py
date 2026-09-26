@@ -10,6 +10,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import copy
 import json
 import logging
 import os
@@ -837,8 +838,8 @@ class TestReadingTheFile:
 
         The two entries are themselves the devices and must still come back - an earlier version
         of this docstring said there were no siblings to lose, which was wrong, because each of
-        the two is the other's sibling.  What settles it is that the value under `pid` carries a
-        `state`, which loop state never does, while the value under `devices` holds no record.
+        the two is the other's sibling.  What settles it now is that both values are records,
+        carrying a state and a moment, so the flat reading recovers two and the other none.
         """
         path = transition_path("conservatory", state_directory.settings_file)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -954,7 +955,9 @@ class TestReadingTheFile:
         held = log.frozen(lambda _d: 900.0, ["lamp"], now=1010.0, identities=live)
         assert held == frozenset(), "a state on an unprovable scale was held as if it were trusted"
 
-    @pytest.mark.parametrize("lost", [{"at": 1000.0}, {}, None, 5], ids=["no-state", "empty", "null", "number"])
+    @pytest.mark.parametrize(
+        "lost", [{"at": 1000.0}, {}, None, 5, [], "x"], ids=["no-state", "empty", "null", "number", "list", "string"]
+    )
     def test_a_flat_log_survives_whatever_became_of_its_other_entry(self, state_directory, lost):
         """Naming a field as the discriminator fails whenever that field is the corrupt one.
 
@@ -1008,16 +1011,16 @@ class TestReadingTheFile:
     def test_a_loop_that_has_lost_its_fingerprint_costs_only_a_phantom_device(self, state_directory):
         """The one field still read inside a value, and what it costs when it goes.
 
-        The fingerprint is what tells loop state from a device's record, since both are flat
-        mappings carrying a moment.  A loop without one scores a point lower, so with an empty
-        device section the file tips to being read flat and a device called `pid` appears that
-        was never declared.  Nothing usable is lost with it - `loop_state` refuses a memory with
-        no fingerprint in any case - and the alternative costs a real device, so this is pinned
-        as the accepted behaviour rather than left to be discovered and "fixed" back.
+        This was once an accepted loss: a loop without a fingerprint scored a point lower, so
+        with an empty device section the file tipped to being read flat and a device called
+        `pid` appeared that nobody had declared, permanently, since every rewrite put it back.
+        Requiring a record to carry a state as well as a moment ended that, because a loop with
+        no fingerprint is not a record either and now scores nothing on the flat side.  What is
+        left is the correct outcome: the memory stays in the file and `loop_state` declines it.
         """
         log = self._stored(state_directory, {"devices": {}, "pid": {"at": 1000.0, "integral": 5.0}})
         assert log.loop_state("f", 10_000) is None, "a memory with no fingerprint was resumed"
-        assert log.states() == {"pid": None}, "the accepted cost of this has changed"
+        assert log.states() == {}, "a loop nobody can use came back as a device"
 
         # One real device is enough to settle it the other way, which is every actual file.
         with_device = {"devices": {"heater": {"state": True, "at": 1000.0}}, "pid": {"at": 1000.0, "integral": 5.0}}
@@ -1056,6 +1059,156 @@ class TestReadingTheFile:
         for name in ("devices", "pid"):
             log = self._stored(state_directory, {name: {"state": True, "at": 1000.0}})
             assert log.states().get(name) is True, f"a lone device named {name!r} was read as a section"
+
+    #: Ways a single value in a cache file can be wrong, including not being there at all.
+    CORRUPTIONS = [None, 0, "x", [], {}, True, "<delete>"]
+
+    def test_no_single_corruption_anywhere_loses_an_unrelated_device(self, state_directory):
+        """The invariant five versions of this reader broke, asked of every case rather than a few.
+
+        Each version was checked by trying inputs one at a time, and each was found wanting by
+        someone who tried a different one.  The rule they all broke is one sentence - a device
+        may be lost to its own corruption and never to another's - so it is asked here of every
+        field of every entry, of the top-level keys themselves, and of both file shapes, against
+        every way a value can be wrong.
+
+        The shapes matter as much as the fields: an earlier version of this test swept only a
+        current-format file and only the fields inside entries, and it passed against two of the
+        five faults, because one lived in flat logs and the other in a whole key going missing.
+        The reserved words appear as device names because three of the faults lived there.
+        """
+        record = {"state": True, "at": 1000.0}
+        loop = {"integral": 3.5, "at": 1000.0, "fingerprint": "fp"}
+        current = {
+            "devices": {name: dict(record) for name in ("state", "at", "pid", "devices", "heater")},
+            "pid": dict(loop),
+        }
+        flat = {name: dict(record) for name in ("pid", "devices", "heater")}
+        ambiguous = {"devices": dict(record), "pid": dict(record)}
+        for label, base, keep in (
+            ("current", current, "heater"),
+            ("flat", flat, "heater"),
+            ("flat, only the reserved names", ambiguous, "devices"),
+        ):
+            for path in self._corruptible(base, keep):
+                for bad in self.CORRUPTIONS:
+                    log = self._stored(state_directory, self._corrupted(base, path, bad))
+                    where = ".".join(map(str, path))
+                    assert log.states().get(keep) is True, f"{label}: {where}={bad!r} took {keep!r} with it"
+
+    @staticmethod
+    def _corruptible(base, keep):
+        """Return every path into a file worth breaking, leaving the bystander alone.
+
+        Args:
+            base (dict): the file as it should be
+            keep (str): the device that must survive whatever happens elsewhere
+
+        Returns:
+            list: paths as tuples of keys, top-level ones included
+        """
+        paths = []
+        for key, value in base.items():
+            if key == keep:
+                continue
+            holds_the_bystander = isinstance(value, dict) and keep in value
+            if not holds_the_bystander:
+                # Breaking the container the bystander lives in is meant to lose it, so that
+                # is not collateral damage and asking for it would only make the test wrong.
+                paths.append((key,))
+            if not isinstance(value, dict):
+                continue
+            for inner, entry in value.items():
+                if key == "devices" and inner == keep:
+                    continue
+                paths.append((key, inner))
+                if isinstance(entry, dict):
+                    paths.extend((key, inner, field) for field in ("state", "at", "for"))
+        return paths
+
+    @staticmethod
+    def _corrupted(base, path, bad):
+        """Return a copy of a file with one value broken or removed.
+
+        Args:
+            base (dict): the file as it should be
+            path (tuple): where to break it
+            bad (object): what to put there, or the delete marker
+
+        Returns:
+            dict: the damaged file
+        """
+        stored = copy.deepcopy(base)
+        node = stored
+        for step in path[:-1]:
+            node = node[step]
+        if bad == "<delete>":
+            node.pop(path[-1], None)
+        else:
+            node[path[-1]] = bad
+        return stored
+
+    def test_and_a_write_keeps_whatever_the_read_kept(self, state_directory):
+        """Reading it wrongly is recoverable until something writes the file back.
+
+        Every fault in this reader did its real damage at the next write, which put the
+        misreading on disk in the other shape and made a hidden device a deleted one.  So the
+        states surviving a read must still be there after a write cycle, whatever was wrong with
+        the file to begin with.
+        """
+        base = {
+            "devices": {"heater": {"state": True, "at": 1000.0}, "lamp": {"state": 40, "at": 1000.0}},
+            "pid": {"integral": 3.5, "at": 1000.0, "fingerprint": "fp"},
+        }
+        for path in [("devices", "lamp", "at"), ("devices", "lamp"), ("pid", "fingerprint"), ("pid",)]:
+            for bad in self.CORRUPTIONS:
+                stored = copy.deepcopy(base)
+                node = stored
+                for step in path[:-1]:
+                    node = node[step]
+                if bad == "<delete>":
+                    node.pop(path[-1], None)
+                else:
+                    node[path[-1]] = bad
+                log = self._stored(state_directory, stored)
+                before = dict(log.states())
+                log.record_loop({"integral": 9.0}, "fp")
+                after = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 2000.0)
+                where = ".".join(map(str, path))
+                assert dict(after.states()) == before, f"{where}={bad!r} lost state across a write"
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            {"devices": {"at": 1000.0}, "pid": {"integral": 5.0, "fingerprint": "f", "at": 1000.0}},
+            {
+                "devices": {"at": 1000.0, "heater": {"state": True, "at": 1000.0}},
+                "pid": {"integral": 5.0, "at": 1000.0},
+            },
+        ],
+        ids=["lone-corrupt-at", "with-a-real-device-and-no-fingerprint"],
+    )
+    def test_a_phantom_must_not_outscore_a_real_device(self, state_directory, stored):
+        """Counting anything with a moment let a section header beat the devices it contained.
+
+        A current-format file whose only device is called `at`, its record replaced by a number,
+        scored two on the flat reading and one on the other: both reserved keys held a moment, so
+        both counted as devices, and the point the loop earns was cancelled by a phantom.  The
+        good integral went and two devices that were never declared took its place, permanently.
+        A record is a state *and* a moment, and neither a section nor loop state has both.
+        """
+        log = self._stored(state_directory, stored)
+        assert "devices" not in log.states(), "a section header was counted as a device"
+        assert log.states().get("heater", True) is True, "a real device lost to a phantom"
+
+    def test_and_the_same_from_the_other_side(self, state_directory):
+        """The mirror, where a real record's moment is corrupted into a mapping: the flat reading
+        then loses the point it should have, and the good `pid` device goes with it."""
+        log = self._stored(
+            state_directory,
+            {"devices": {"state": True, "at": {"at": 1000.0}}, "pid": {"state": True, "at": 1000.0}},
+        )
+        assert log.states().get("pid") is True, "a good device was read as the loop's memory"
 
     def test_a_file_neither_reading_can_salvage_is_read_as_the_current_shape(self, state_directory):
         """Where both readings recover nothing the file is genuinely ambiguous, and the tie goes
