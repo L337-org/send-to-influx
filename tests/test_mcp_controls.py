@@ -1140,7 +1140,11 @@ class TestReportingWhatAControlHasWorkedOut:
         log = TransitionLog(name, state_directory.settings_file)
         # With the parameter, as `command_devices` records it: a value whose scale no longer
         # matches the document is not one the loop will hold, so it is not reported as held.
-        log.record({"lamp": 55}, parameters={"lamp": "brightness_pct"})
+        log.record(
+            {"lamp": 55},
+            parameters={"lamp": "brightness_pct"},
+            targets={"lamp": ("hue", None, "office-lamp")},
+        )
         assert _control_state_result(name, state_directory.settings_file)["held_by_minimum"] == ["lamp"]
 
     def test_a_device_recorded_on_another_scale_is_not_reported_as_held(self, state_directory, bridge):

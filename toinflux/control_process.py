@@ -189,11 +189,27 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
                 commanded,
                 forced=forced,
                 parameters={key: (declared.get(key) or {}).get("parameter") for key in commanded},
+                # And which actuator it went to. A control key is a name in this document;
+                # repointing it at another bulb, or the same bulb on another bridge, leaves a
+                # state the new actuator has never been given.
+                targets={key: _actuator(declared.get(key) or {}) for key in commanded},
             )
 
 
 #: Keyed per control and device, because two devices out of range are two problems.
 _SCALE_PROBLEMS = RepeatingProblem()
+
+
+def _actuator(spec):
+    """Return what a device declaration points at, as a comparable identity.
+
+    Args:
+        spec (dict): the device's declaration
+
+    Returns:
+        tuple: ``(source, instance, device)``
+    """
+    return (spec.get("source"), spec.get("instance"), spec.get("device"))
 
 
 def _within_scale(control, device, parameter, state):
@@ -621,12 +637,18 @@ class ControlProcess:
         #
         # A log written before the parameter was kept reads as None and so matches nothing
         # driven, which costs that device its minimum for one command and then corrects itself.
-        was = self.transitions.parameters()
-        now_driven = parameter_devices(self.document.get("devices") or {})
+        declared = self.document.get("devices") or {}
+        was, sent_to = self.transitions.parameters(), self.transitions.targets()
+        now_driven = parameter_devices(declared)
         pinned = {
             device: known[device]
             for device in held
             if was.get(device) == now_driven.get(device)
+            # And the same actuator. A key repointed at another bulb has a state that bulb
+            # has never been given, so pinning it would command a value out of nowhere - and
+            # under `leave_unchanged` it would suppress the new actuator's first command
+            # entirely.
+            and sent_to.get(device) == _actuator(declared.get(device) or {})
             and isinstance(known.get(device), (int, float))
             and not isinstance(known[device], bool)
         }

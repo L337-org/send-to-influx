@@ -863,7 +863,11 @@ class TestAHeldDimmerKeepsTheValueItHas:
         try:
             # With the parameter, as `command_devices` records it: the state and the scale it
             # is on are only meaningful together.
-            control.transitions.record({"lamp": 35}, parameters={"lamp": "brightness_pct"})
+            control.transitions.record(
+                {"lamp": 35},
+                parameters={"lamp": "brightness_pct"},
+                targets={"lamp": ("hue", None, "far")},
+            )
             held = control.transitions.frozen(control.controller.min_transition_for, ("lamp",))
             assert held == frozenset({"lamp"}), "a 600s minimum did not hold a lamp moved a moment ago"
             plan = control._hold(
@@ -1113,7 +1117,17 @@ class TestWhatTheControllerKeepsAndPutsBack:
         """
         from toinflux.controller import Controller
 
-        def built(parameter="brightness_pct", cap=None, field="t", setpoint="target", reads="inside", target=20.0):
+        def built(
+            parameter="brightness_pct",
+            cap=None,
+            field="t",
+            setpoint="target",
+            reads="inside",
+            target=20.0,
+            device="A",
+            instance=None,
+            source="hue",
+        ):
             output = {
                 "cycle_seconds": 60,
                 "min_transition_seconds": 1,
@@ -1130,7 +1144,9 @@ class TestWhatTheControllerKeepsAndPutsBack:
                     },
                     "pid": {"input": reads, "setpoint": setpoint, "kp": 10.0, "ki": 1.0, "kd": 0.0},
                     "output": output,
-                    "devices": {"a": {"source": "hue", "device": "A", "parameter": parameter}},
+                    "devices": {
+                        "a": {"source": source, "instance": instance, "device": device, "parameter": parameter}
+                    },
                 }
             ).fingerprint
 
@@ -1146,6 +1162,12 @@ class TestWhatTheControllerKeepsAndPutsBack:
         # The commonest edit of all: the setpoint rule still says `target`, and `target` is a
         # different number. The integral is the accumulated error against the old one.
         assert built(target=30.0) != base, "the setpoint value changed and the loop was kept"
+        # What a device points at, not only what it is driven by. Two lamps take the same
+        # brightness ladder and are different plants, so an integral learned from one would
+        # command the other from history that was never about it.
+        assert built(device="Other") != base, "the actuator changed and the loop was kept"
+        assert built(instance="bridge2") != base, "the bridge changed and the loop was kept"
+        assert built(source="mqtt") != base, "the source changed and the loop was kept"
 
     def test_and_not_the_things_it_does_not(self, state_directory):
         """Discarding a hard-won integral because a gate rule changed would throw away the

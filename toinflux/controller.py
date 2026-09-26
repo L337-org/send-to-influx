@@ -233,8 +233,11 @@ class Controller:
         while the integral it earned is the accumulated error against the old number - and
         editing a target is the commonest change anybody makes to a control.
 
-        **The device parameters and the cap belong here for the same reason the ladder does**,
-        and were missing. A device moved from `brightness_pct` to `color_temp_k` keeps its rung
+        **The device bindings and the cap belong here for the same reason the ladder does**,
+        and were missing. Two lamps take the same `brightness_pct` ladder and are different
+        plants, so what a device *points at* matters as much as what it is driven by - the
+        same argument as for the inputs, which is where it was first applied and then not
+        carried across. A device moved from `brightness_pct` to `color_temp_k` keeps its rung
         numbers while every one of them comes to mean something else, and a changed
         `max_level` changes the range the integral is clamped into - both left this digest
         identical, so a loop earned against one scale was handed back for another.
@@ -267,7 +270,15 @@ class Controller:
                 # over-reaction this digest is deliberately narrow to avoid.
                 "signals": self._signals,
                 "parameters": self._settings,
-                "driven": sorted(self.driven.items()),
+                # The whole binding, not just the parameter. Two lamps take the same
+                # `brightness_pct` ladder and are different plants: swap one for the other, or
+                # the same lamp for its twin on another bridge, and an integral learned from
+                # the first commands the second from history that was never about it.
+                "actuators": sorted(
+                    (name, spec.get("source"), spec.get("instance"), spec.get("device"), spec.get("parameter"))
+                    for name, spec in self.devices.items()
+                    if isinstance(spec, dict)
+                ),
                 "max_level": self._max_level_rule.source if self._max_level_rule is not None else None,
             },
             sort_keys=True,

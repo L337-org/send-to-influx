@@ -349,6 +349,22 @@ class TransitionLog:
         """
         return {device: entry.get("parameter") for device, entry in self.entries.items()}
 
+    def targets(self):
+        """Return the actuator each device's state was last sent to.
+
+        A control key is a name in a document and the thing it points at can be changed
+        underneath it. The recorded state belongs to whatever was there at the time, so a key
+        repointed at another bulb - or the same bulb on another bridge - has a state its new
+        actuator has never been given.
+
+        Returns:
+            dict: device name to its ``(source, instance, device)``, or None where none was
+            recorded
+        """
+        return {
+            device: tuple(entry["target"]) if entry.get("target") else None for device, entry in self.entries.items()
+        }
+
     def elapsed(self, device, now=None):
         """Return how long since a device last changed, or None where it never has.
 
@@ -420,7 +436,7 @@ class TransitionLog:
                 held.add(device)
         return frozenset(held)
 
-    def record(self, commands, now=None, forced=False, parameters=None) -> None:
+    def record(self, commands, now=None, forced=False, parameters=None, targets=None) -> None:
         """Note the devices whose state this command actually changes.
 
         Only the ones that change: commanding a heater off when it is already off is not a
@@ -436,8 +452,13 @@ class TransitionLog:
             parameters (dict or None): device name to the parameter it is driven by, or None
                 for one that is switched. Kept with the state because a number means nothing
                 without the scale it is on - 2700 is a colour temperature, 40 is a percentage
+            targets (dict or None): device name to the actuator it was sent to, as a
+                ``(source, instance, device)`` tuple. Kept for the same reason as the
+                parameter: a control key is a name in a document, and the thing it points at
+                can be changed underneath it
         """
         parameters = parameters or {}
+        targets = targets or {}
         moment = float(self._clock() if now is None else now)
         changed = False
         for device, state in commands.items():
@@ -446,7 +467,12 @@ class TransitionLog:
             # 5% is a move. Under the old comparison both were true and nothing was timed,
             # which would have made `min_transition_seconds` mean nothing at all for the one
             # kind of device whose whole job is to change by degrees.
-            if entry is not None and entry.get("state") == state and entry.get("parameter") == parameters.get(device):
+            if (
+                entry is not None
+                and entry.get("state") == state
+                and entry.get("parameter") == parameters.get(device)
+                and tuple(entry.get("target") or ()) == tuple(targets.get(device) or ())
+            ):
                 # No move, so nothing to time. The mark still has to go when an ordinary
                 # command confirms a state a safe state put the device in, or the exemption
                 # would outlive the safe state that earned it.
@@ -454,7 +480,12 @@ class TransitionLog:
                     del entry["forced"]
                     changed = True
                 continue
-            self.entries[device] = {"state": state, "at": moment, "parameter": parameters.get(device)}
+            self.entries[device] = {
+                "state": state,
+                "at": moment,
+                "parameter": parameters.get(device),
+                "target": list(targets.get(device) or ()) or None,
+            }
             if forced:
                 self.entries[device]["forced"] = True
             changed = True

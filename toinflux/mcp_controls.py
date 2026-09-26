@@ -528,10 +528,28 @@ def _control_state_result(name, settings_file=None, supervisor=None):
     # move that device whatever its timer says. Reporting it as held would describe a restraint
     # that is not going to happen.
     held = log.frozen(minimum_for, devices, now=now) if minimum_for is not None else set()
+    sent_to = log.targets()
     entry["held_by_minimum"] = sorted(
-        device for device in held if device not in driven or recorded.get(device) == driven.get(device)
+        device
+        for device in held
+        if (device not in driven or recorded.get(device) == driven.get(device))
+        # And the same actuator the state was sent to, matching `_hold`: a key repointed at
+        # another bulb will be commanded next cycle whatever its timer says.
+        and sent_to.get(device) == _actuator_of(declared.get(device) or {})
     )
     return entry
+
+
+def _actuator_of(spec):
+    """Return what a device declaration points at, as `command_devices` records it.
+
+    Args:
+        spec (dict): the device's declaration
+
+    Returns:
+        tuple: ``(source, instance, device)``
+    """
+    return (spec.get("source"), spec.get("instance"), spec.get("device"))
 
 
 def _age(at, now):

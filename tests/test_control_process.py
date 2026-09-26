@@ -1169,6 +1169,37 @@ class TestAStateLeftOverFromAnOlderDocument:
         assert commanded, "the lamp was never commanded at all, so this proves nothing"
         assert all("bri" in state for state in commanded), commanded
 
+    def test_a_state_sent_to_another_actuator_is_not_pinned(self, state_directory, bridge, influx):
+        """A control key is a name in a document, and what it points at can be changed
+        underneath it. The recorded state belongs to whatever was there at the time, so
+        pinning it commands the new actuator a value it has never been given - and under
+        `leave_unchanged` it would suppress that actuator's first command entirely."""
+        from tests.harness.bridge import bulb
+        from toinflux.transitions import TransitionLog
+
+        bridge.lights["9"] = bulb("office-lamp")
+        self._store_driven(state_directory, "brightness_pct", 100)
+        # The same key, the same scale, a different bulb.
+        TransitionLog("lamp", state_directory.settings_file).record(
+            {"lamp": 35},
+            forced=False,
+            parameters={"lamp": "brightness_pct"},
+            targets={"lamp": ("hue", None, "a-different-lamp")},
+        )
+        control = ControlProcess("lamp", settings_file=state_directory.settings_file)
+        try:
+            held = control.transitions.frozen(control.controller.min_transition_for, ("lamp",))
+            assert held == frozenset({"lamp"}), "a 600s minimum did not hold a lamp moved a moment ago"
+            control.controller.resume()
+            plan = control._hold(
+                control.controller.step({"lux": 300.0, "target": 1000}, dt=60),
+                held & set(control.controller.driven),
+            )
+        finally:
+            control.guard.close()
+            control.close()
+        assert {dwell.stage.states["lamp"] for dwell in plan} != {35}, "a value from another bulb was pinned"
+
     def test_a_value_on_the_same_parameter_is_still_pinned(self, state_directory, bridge, influx):
         """The other side: the minimum must still hold a device that has not changed shape, or
         this would have turned `min_transition_seconds` off for every driven device."""
@@ -1178,7 +1209,12 @@ class TestAStateLeftOverFromAnOlderDocument:
         bridge.lights["9"] = bulb("office-lamp")
         self._store_driven(state_directory, "brightness_pct", 100)
         log = TransitionLog("lamp", state_directory.settings_file)
-        log.record({"lamp": 35}, forced=False, parameters={"lamp": "brightness_pct"})
+        log.record(
+            {"lamp": 35},
+            forced=False,
+            parameters={"lamp": "brightness_pct"},
+            targets={"lamp": ("hue", None, "office-lamp")},
+        )
 
         control = ControlProcess("lamp", settings_file=state_directory.settings_file)
         try:
