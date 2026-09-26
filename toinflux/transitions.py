@@ -41,6 +41,7 @@ __license__ = "MIT"
 import contextlib
 import json
 import logging
+import math
 import os
 import stat
 import tempfile
@@ -69,6 +70,25 @@ TRANSITION_DIR_NAME = "transitions"
 #:
 #: So the error is now always in the safe direction and is bounded by one window, which is by
 #: definition shorter than the minimum wherever this code decides anything at all.
+
+
+def _is_moment(value):
+    """Whether a stored timestamp is one this module can measure an age against.
+
+    **Finite, and not a bool.** `isinstance(x, (int, float))` admits both, and a hand-edited
+    or interrupted file can hold either. An infinite `at` makes `now - at` negative for ever,
+    which the backwards-clock clamp reads as "no time has passed" - so the device looks as
+    though it has just moved, on every cycle, and its transition minimum freezes it
+    permanently. A nan does the same by a different route, because every comparison against
+    it is False. `True` is simply the epoch's second, which is merely wrong.
+
+    Args:
+        value (object): whatever the file held
+
+    Returns:
+        bool: True where it can be used as a moment
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _usable_identity(value):
@@ -114,7 +134,7 @@ def _usable_entries(devices):
     """
     usable = {}
     for device, entry in devices.items():
-        if not (isinstance(device, str) and isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))):
+        if not (isinstance(device, str) and isinstance(entry, dict) and _is_moment(entry.get("at"))):
             continue
         identity = _usable_identity(entry.get("for"))
         if identity != entry.get("for"):
@@ -324,7 +344,7 @@ class TransitionLog:
         if not state or state.get("fingerprint") != fingerprint:
             return None
         at = state.get("at")
-        if not isinstance(at, (int, float)):
+        if not _is_moment(at):
             return None
         moment = self._clock() if now is None else now
         # Clamped like every other age here: a wall clock that stepped backwards must not
@@ -349,7 +369,7 @@ class TransitionLog:
             float or None: seconds since it was written, never negative, or None
         """
         at = (self._pid or {}).get("at")
-        if not isinstance(at, (int, float)):
+        if not _is_moment(at):
             return None
         # Clamped, matching `elapsed`: a clock that moved backwards makes a negative age,
         # which would otherwise read as state from the future.

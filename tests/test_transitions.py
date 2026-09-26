@@ -849,6 +849,40 @@ class TestReadingTheFile:
         assert log.elapsed("lamp") == 60.0, "the moment was thrown away with the actuator"
         assert log.states() == {"lamp": 40}
 
+    @pytest.mark.parametrize(
+        "at",
+        [float("inf"), float("-inf"), float("nan"), True],
+        ids=["inf", "-inf", "nan", "bool"],
+    )
+    def test_a_moment_that_is_not_a_moment_takes_its_entry_with_it(self, at, state_directory):
+        """Discarded here, unlike a corrupt identity, because without a usable moment there is
+        nothing left to keep: the entry exists to say *when*.
+
+        An infinite `at` makes `now - at` negative for ever, which the backwards-clock clamp
+        reads as "no time has passed" - so the device looks as though it has just moved, on
+        every cycle, and its transition minimum freezes it permanently. A nan does the same by
+        another route, because every comparison against it is False.
+        """
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {"lamp": {"state": 40, "at": at}}, "pid": {}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1_000_000.0)
+        assert log.states() == {}, "an unusable moment was kept"
+        assert log.frozen(lambda device: 600.0, ("lamp",)) == set(), "the device was frozen by a bad clock"
+
+    @pytest.mark.parametrize("at", [float("inf"), float("nan"), True], ids=["inf", "nan", "bool"])
+    def test_the_loop_half_refuses_the_same(self, at, state_directory):
+        """The same rule, because the same file holds both and a reader of either can be
+        handed a moment it cannot measure against."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"devices": {}, "pid": {"integral": 5.0, "fingerprint": "abc", "at": at}}, handle)
+        log = TransitionLog("conservatory", state_directory.settings_file, clock=lambda: 1_000_000.0)
+        assert log.loop_state("abc", 3600.0) is None
+        assert log.loop_age() is None
+
     def test_both_halves_come_from_one_read(self, state_directory, monkeypatch):
         """They were read through separate opens, and `_read_loop` claimed in its own docstring
         that they could not disagree about which version of the file they came from. The
