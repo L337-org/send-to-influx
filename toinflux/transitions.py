@@ -142,6 +142,17 @@ def _recovered(devices, loop):
         int: usable device records, plus one where the loop's memory is usable too
     """
     found = len(_usable_entries(devices)) if isinstance(devices, dict) else 0
+    # The fingerprint is what separates loop state from a device's record, both of which are
+    # flat mappings carrying a moment. It is the one thing read inside either value, and it is
+    # read to score a reading rather than to choose one - but a loop that has lost it does score
+    # a point lower, so with an empty device section as well the file tips to being read flat.
+    #
+    # **Accepted, because the alternative is worse and the loss is nil.** `loop_state` refuses a
+    # memory with no fingerprint anyway, so nothing usable goes: what is left is a phantom device
+    # named `pid`. Dropping the requirement to avoid that makes every flat log whose `devices`
+    # record is empty read as the current shape instead, which loses a real device - three tests
+    # fail on it. A truncated write cannot reach this either, since `record_loop` writes the
+    # fingerprint and the moment in the same statement.
     if isinstance(loop, dict) and usable_number(loop.get("at")) and "fingerprint" in loop:
         found += 1
     return found

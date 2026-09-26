@@ -1005,6 +1005,25 @@ class TestReadingTheFile:
         assert log.loop.get("integral") == 5.0, "a usable integral was thrown away"
         assert "pid" not in log.states(), "the loop's memory came back as a device"
 
+    def test_a_loop_that_has_lost_its_fingerprint_costs_only_a_phantom_device(self, state_directory):
+        """The one field still read inside a value, and what it costs when it goes.
+
+        The fingerprint is what tells loop state from a device's record, since both are flat
+        mappings carrying a moment.  A loop without one scores a point lower, so with an empty
+        device section the file tips to being read flat and a device called `pid` appears that
+        was never declared.  Nothing usable is lost with it - `loop_state` refuses a memory with
+        no fingerprint in any case - and the alternative costs a real device, so this is pinned
+        as the accepted behaviour rather than left to be discovered and "fixed" back.
+        """
+        log = self._stored(state_directory, {"devices": {}, "pid": {"at": 1000.0, "integral": 5.0}})
+        assert log.loop_state("f", 10_000) is None, "a memory with no fingerprint was resumed"
+        assert log.states() == {"pid": None}, "the accepted cost of this has changed"
+
+        # One real device is enough to settle it the other way, which is every actual file.
+        with_device = {"devices": {"heater": {"state": True, "at": 1000.0}}, "pid": {"at": 1000.0, "integral": 5.0}}
+        other = self._stored(state_directory, with_device)
+        assert other.states() == {"heater": True}, "a real device did not settle the reading"
+
     def test_a_file_neither_reading_can_salvage_is_read_as_the_current_shape(self, state_directory):
         """Where both readings recover nothing the file is genuinely ambiguous, and the tie goes
         to the shape the writer actually produces - an empty current-format file is ordinary and
