@@ -538,6 +538,26 @@ class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
         controller.resume()
         assert controller.pid._last_input == pytest.approx(before), "the derivative restarted from nothing"
 
+    def test_a_restart_also_keeps_what_the_derivative_measures_from(self):
+        """The path the finding was actually about, which the first test for it did not take.
+
+        `resume_from` is how a restart puts back what was saved, and it leaves the loop held, so
+        the wipe happens at the `resume` that follows rather than at the restore.  Covering only
+        hold-then-resume tested the same line by a different route and left this one to be
+        inferred.  Both captured values are checked, because `reset` clears the last error as
+        well and `capture` saves it.
+        """
+        clock = [0.0]
+        controller = self._settled(clock)
+        state = controller.capture()
+        assert state.get("last_input") is not None, "nothing was captured, so this proves nothing"
+        fresh = self._settled([0.0])
+        fresh.resume_from(state, age=0.0)
+        fresh.resume()
+        assert fresh.pid._last_input == pytest.approx(state["last_input"]), "a restart lost the derivative"
+        if state.get("last_error") is not None:
+            assert fresh.pid._last_error == pytest.approx(state["last_error"]), "the last error was dropped"
+
     def test_an_integral_of_exactly_zero_is_still_a_loop_being_continued(self):
         """Nought is a value the loop holds, not an absence of one.
 

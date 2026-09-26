@@ -440,10 +440,21 @@ class Controller:
         # integral has made the last input stale by the same argument, and differentiating
         # against a reading from before the gap would answer the first cycle back with a kick
         # the plant never made.
-        carried = getattr(self.pid, "_last_input", None) if last_output is not None else None
+        #
+        # Both of the values `capture` saves, not only the one in use. `reset` clears the last
+        # error too, and while `differential_on_measurement` keeps its default the derivative is
+        # taken from the input alone and the error is never read - but `capture` writes it down
+        # and `resume_from` puts it back, so restoring one and dropping the other would leave
+        # that pair doing work this method silently undid.
+        carried = (
+            {name: getattr(self.pid, name, None) for name in ("_last_input", "_last_error")}
+            if last_output is not None
+            else {}
+        )
         self.pid.set_auto_mode(True, last_output=last_output)
-        if carried is not None:
-            self.pid._last_input = carried
+        for name, value in carried.items():
+            if value is not None:
+                setattr(self.pid, name, value)
         self._held = None
 
     def _held_integral(self):
