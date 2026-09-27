@@ -49,7 +49,7 @@ import time
 
 from toinflux.controls import require_valid_control_name
 from toinflux.exceptions import ConfigError
-from toinflux.general import resolve_state_dir
+from toinflux.general import render_values, resolve_state_dir
 
 #: Where the logs live. Beside the control documents rather than among them: ``list_controls``
 #: filters by suffix so a stray file there would be ignored, but a directory holding one kind
@@ -131,33 +131,8 @@ def _usable_identity(value):
     return tuple(pairs)
 
 
-def _looks_like_a_record(value):
-    """Say whether a value is one device's own record.
-
-    Args:
-        value (object): a value found under one of the file's keys
-
-    Returns:
-        bool: True where it carries both halves of a record
-    """
-    # Both halves, because this is only ever asked of the two reserved names, where the question
-    # is whether a flat log meant a device by one of them. A section has no moment of its own and
-    # loop state has no state, so requiring the pair is what tells those two from a record - and
-    # asking for the moment alone turned a section holding one corrupt entry, and a loop that had
-    # lost its fingerprint, into devices that were never declared.
-    return isinstance(value, dict) and usable_number(value.get("at")) and "state" in value
-
-
-def _holds_records(value):
-    """Say whether a value is a section of records rather than a record itself.
-
-    Args:
-        value (object): the value found under the `devices` key
-
-    Returns:
-        bool: True where at least one of its values is a record
-    """
-    return isinstance(value, dict) and any(_looks_like_a_record(entry) for entry in value.values())
+#: The file's only two top-level keys, and all the reader looks at. See `TransitionLog._sections`.
+SECTIONS = ("devices", "pid")
 
 
 def _usable_entries(devices):
@@ -299,16 +274,25 @@ class TransitionLog:
                 self.path,
             )
             return {"devices": {}, "pid": {}}
+        ignored = [key for key in stored if key not in SECTIONS]
+        unreadable = [key for key in SECTIONS if key in stored and not isinstance(stored[key], dict)]
+        if ignored or unreadable:
+            # Said, because what is dropped here is a device's minimum or the loop's integral,
+            # and a control switching sooner than its document asks with nothing in the log to
+            # say why is the failure this module exists to prevent. Once per load, not per key.
+            logging.warning(
+                "Control %r ignored part of its transition log at %r (unknown keys: %s; sections that "
+                "are not mappings: %s), so a device may change once sooner than its minimum asks",
+                self.name,
+                self.path,
+                render_values(ignored),
+                render_values(unreadable),
+            )
         return self._sections(stored)
 
     @staticmethod
     def _sections(stored):
-        """Return a stored document as its two halves, reading the older flat shape too.
-
-        The file held a bare mapping of device to entry before the loop's own state joined
-        it. An installation upgrading in place has one of those on disk, and refusing to read
-        it would cost every device one transition sooner than its minimum asks - a silly
-        price for a format change nobody asked about.
+        """Return a stored document's two sections, reading nothing else.
 
         Args:
             stored (object): whatever was parsed out of the file
@@ -316,59 +300,26 @@ class TransitionLog:
         Returns:
             dict: ``{"devices": mapping, "pid": mapping}``, either possibly empty
         """
+        # **Each section is read from its own key, and no value decides how another is read.**
+        # The writer emits exactly these two keys. Anything else at the top of the file - a
+        # hand edit, or the flat shape an unreleased build wrote before the sections existed -
+        # is ignored rather than guessed at. Earlier versions tried to read that flat shape
+        # too, and every one could be fooled by corrupting one value, because a flat log may
+        # name its devices `devices` and `pid` and so only a value's contents could tell the
+        # two shapes apart. Nothing released ever wrote the flat shape, so dropping it costs at
+        # most one early transition on a machine that ran the unreleased build.
+        #
+        # What is left has one property to check: damage is confined to where it happens. A
+        # section that is not a mapping is empty and costs only itself. Within a section,
+        # `_usable_entries` judges each device's entry on its own, and `loop_state` judges the
+        # loop's memory.
         if not isinstance(stored, dict):
             return {"devices": {}, "pid": {}}
-        # **Nothing chooses between two readings any more, because that choice was the defect.**
-        # Six versions tried to decide which shape the whole file was - by whether every value
-        # under `devices` was a mapping, by whether a key held a moment, by a `state` that was or
-        # was not a mapping, by a third key at the top, by scoring what each reading would
-        # recover. Every one of them could be flipped by corrupting a single field, because every
-        # one of them had to look inside a value to decide, and a corrupted field can make a
-        # value look like something it is not. The loser of that choice was then discarded whole,
-        # so one bad field cost a file its devices.
-        #
-        # There is no choice left to get wrong. Each key is read for what it is, on its own, and
-        # nothing is discarded for the sake of a decision about something else. A key that is
-        # neither of the two reserved names is a device, because only the writer produces these
-        # files and it never writes a third. `pid` is the loop's memory where it carries a
-        # fingerprint, which is what tells loop state from a record and which `record_loop`
-        # always writes; failing that it is a device of that name, which is what a flat log from
-        # before the sections existed would have meant by it. `devices` is a section where it
-        # holds a record, and a device of that name where it is one.
-        #
-        # A corrupted field can still cost its own entry, and can still leave a device named
-        # after whatever the corruption looked like. What it can no longer do is decide anything
-        # about the entries either side of it.
-        devices = {}
-        loop = {}
-        for key, value in stored.items():
-            if key in ("devices", "pid"):
-                if key == "pid" and isinstance(value, dict) and ("fingerprint" in value or "integral" in value):
-                    # Asked before anything else about this key: a fingerprint or an integral is
-                    # something only the loop writes, and a stray `state` arriving beside them -
-                    # hand-edited, or a key added later - must not turn the loop's memory into a
-                    # device nobody declared and lose the integral with it.
-                    loop = value
-                elif key == "devices" and _holds_records(value):
-                    # Asked before anything else about this key, for the same reason: a mapping
-                    # holding even one record is a section, and a section whose devices happen to
-                    # be named `state` and `at` reads as a record itself the moment one of them
-                    # is corrupted to a number. Whole sections were lost that way.
-                    devices.update(value)
-                elif _looks_like_a_record(value):
-                    # A flat log meant a device by this name. Nothing else carries both halves.
-                    devices[key] = value
-                elif key == "devices":
-                    # Whatever it is, it is this file's device section; `_usable_entries` decides
-                    # which of its entries can be used, one at a time.
-                    devices.update(value if isinstance(value, dict) else {})
-                else:
-                    # And this is the loop's memory, handed on exactly as stored. `loop_state`
-                    # judges whether it can be resumed; this is not the place to decide that.
-                    loop = value if isinstance(value, dict) else {}
-            else:
-                devices[key] = value
-        return {"devices": devices, "pid": loop}
+        devices, loop = (stored.get(key) for key in SECTIONS)
+        return {
+            "devices": devices if isinstance(devices, dict) else {},
+            "pid": loop if isinstance(loop, dict) else {},
+        }
 
     @property
     def loop(self):
@@ -481,11 +432,8 @@ class TransitionLog:
     def identities(self):
         """Return what each device's recorded state is meaningful against.
 
-        None covers two cases this cannot tell apart: nothing was ever recorded, and something
-        was recorded that could not be read. `frozen` distinguishes them by whether the key is
-        there at all, because they mean opposite things to it - the first is an old record
-        keeping its minimum, the second a scale that cannot be trusted. Anything needing that
-        distinction must ask the entry rather than this.
+        None where the entry has no identity or one that could not be read; `frozen` treats
+        both as a record it cannot vouch for.
 
         No production code calls this; it remains as a read accessor for tests and for anything
         wanting the recorded identities without the surrounding judgement.
@@ -558,26 +506,19 @@ class TransitionLog:
         held = set()
         for device in devices:
             entry = self.entries.get(device) or {}
-            if identities is not None and "for" in entry and entry["for"] != identities.get(device):
-                # **The record is not about this device any more.** A control key is a name in
+            if identities is not None and entry.get("for") != identities.get(device):
+                # **The record is not provably about this device.** A control key is a name in
                 # a document and what it points at can be changed underneath it, so a state
                 # written against the old target says nothing about the new one - not for a
                 # driven device, whose value would be pinned, and not for a switched one,
                 # whose recorded state decides which rungs `reachable_ladder` leaves standing.
-                # Asked here because this is the one place both kinds pass through; it used to
-                # be asked further down, where only driven devices were looked at.
+                # Asked here because this is the one place both kinds pass through.
                 #
-                # **Asked of the key, not of its value, because None means two things.** The
-                # older writer stored no identity at all, so every device read out of an
-                # upgraded file compared as a mismatch and none was ever held: the first cycle
-                # after an upgrade was free to move hardware still inside its minimum. But
-                # `_usable_entries` also writes None over an identity it cannot read, and that
-                # one must keep excluding the device - the record is there and cannot be
-                # trusted, which is the case `_hold` declines to reuse a value for.
-                #
-                # Reading the value alone conflated them and re-froze a device whose scale was
-                # unproven. The key is absent only where nothing was ever written and present
-                # wherever something was, however unreadable, so the key is the question.
+                # The writer always records an identity, so a missing one and one that
+                # `_usable_entries` could not read (and replaced with None) are both a damaged
+                # record, and are treated alike: the device is not held, and `_hold` never sees
+                # it, so it is not pinned to a value on a scale nobody can vouch for. That costs
+                # at most one transition sooner than the minimum asks, on a damaged file.
                 continue
             elapsed = self.elapsed(device, moment)
             if elapsed is None:

@@ -649,12 +649,8 @@ class ControlProcess:
         # recorded on is the scale the device is on now.
         #
         # The identity is settled upstream, where `frozen` is decided, so that switched and
-        # driven devices are judged by the same rule. A record written before identities were
-        # kept is held there rather than skipped, since nothing recorded is not the same as
-        # something recorded that disagrees - so such a record can reach this point and its
-        # value is pinned as it stands. Only a hand-edited file gets a number that way, because
-        # the writer that predates identities wrote booleans and nothing else, and the check
-        # below refuses those.
+        # driven devices are judged by the same rule: a device reaches this point only where
+        # its record carries an identity matching the declaration it has now.
         #
         # What is left here is the value itself: a driven device holds a number, and a boolean
         # left over from when it was switched is a record of something that never happened.

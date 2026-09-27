@@ -622,7 +622,10 @@ remembered. Failing either, the control starts afresh - which is simply what it 
 `--verbose` says which happened.
 
 The file is written whenever a device actually changes, and once per cycle for the loop
-half. Deleting it costs nothing but the memory; the control rebuilds both.
+half. Deleting it costs nothing but the memory; the control rebuilds both. A damaged file
+costs no more than that: an entry the control cannot use is dropped on its own, and a key it
+does not write, or a half that is not the shape it writes, is ignored with a warning in the
+log.
 
 The same memory survives a **momentary** failure within one run. A cycle that cannot read its
 input falls to the safe state and stops actuating, and the loop is held; resuming keeps the
