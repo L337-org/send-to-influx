@@ -1061,7 +1061,10 @@ class TestReadingTheFile:
             assert log.states().get(name) is True, f"a lone device named {name!r} was read as a section"
 
     #: Ways a single value in a cache file can be wrong, including not being there at all.
-    CORRUPTIONS = [None, 0, "x", [], {}, True, "<delete>"]
+    #: The last two matter most and were missing: a value corrupted into something record-shaped
+    #: is what let a corruption manufacture a device and outvote the real ones, and a plain
+    #: number is what a moment looks like, so it turns a section into a record on sight.
+    CORRUPTIONS = [None, 0, "x", [], {}, True, 1000.0, {"at": 1000.0}, {"state": True, "at": 1.0}, "<delete>"]
 
     def test_no_single_corruption_anywhere_loses_an_unrelated_device(self, state_directory):
         """The invariant five versions of this reader broke, asked of every case rather than a few.
@@ -1085,10 +1088,17 @@ class TestReadingTheFile:
         }
         flat = {name: dict(record) for name in ("pid", "devices", "heater")}
         ambiguous = {"devices": dict(record), "pid": dict(record)}
+        # Two devices only, one of them named after a section. A third device gives the reader a
+        # key it cannot mistake for anything, which is why a three-device base never reached the
+        # case that broke it: with only two, the corrupted one is the whole of the evidence.
+        pair_devices = {"heater": dict(record), "devices": dict(record)}
+        pair_pid = {"heater": dict(record), "pid": dict(record)}
         for label, base, keep in (
             ("current", current, "heater"),
             ("flat", flat, "heater"),
             ("flat, only the reserved names", ambiguous, "devices"),
+            ("flat, heater and devices", pair_devices, "heater"),
+            ("flat, heater and pid", pair_pid, "heater"),
         ):
             for path in self._corruptible(base, keep):
                 for bad in self.CORRUPTIONS:
@@ -1147,6 +1157,33 @@ class TestReadingTheFile:
         else:
             node[path[-1]] = bad
         return stored
+
+    def test_no_key_added_anywhere_loses_a_device_either(self, state_directory):
+        """Corrupting what is there and adding what is not are different attacks.
+
+        Every sweep until now broke existing values, and a whole fault went unseen because of
+        it: a stray key at the top level, which the reader took as proof of a flat log, cost a
+        good file every device it had.  A key can arrive from a hand edit, from a half-finished
+        format change, or from a reader of some later version - and none of them should be able
+        to take a device with them.
+        """
+        record = {"state": True, "at": 1000.0}
+        base = {
+            "devices": {"heater": dict(record), "lamp": {"state": 40, "at": 1000.0}},
+            "pid": {"integral": 3.5, "at": 1000.0, "fingerprint": "fp"},
+        }
+        additions = {"state": True, "at": 1000.0, "fingerprint": "fp", "integral": 1.0, "for": [["parameter", "x"]]}
+        for where in [(), ("devices",), ("pid",), ("devices", "heater")]:
+            for key, value in additions.items():
+                stored = copy.deepcopy(base)
+                node = stored
+                for step in where:
+                    node = node[step]
+                node[key] = value
+                log = self._stored(state_directory, stored)
+                at = ".".join(where + (key,))
+                assert log.states().get("heater") is True, f"adding {at}={value!r} lost a device"
+                assert log.loop_state("fp", 10_000) is not None, f"adding {at}={value!r} lost the loop"
 
     def test_and_a_write_keeps_whatever_the_read_kept(self, state_directory):
         """Reading it wrongly is recoverable until something writes the file back.
