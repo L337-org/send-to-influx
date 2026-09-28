@@ -17,7 +17,7 @@ import threading
 import faulthandler
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
-from toinflux.general import render_values
+from toinflux.general import enabled_sources, render_values
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.controls import control_dir, controls_enabled, list_controls, validate_stored_controls
@@ -766,7 +766,7 @@ def _start_control_supervisor(settings, args):
             )
         return None
     names = list_controls(args.settings)
-    supervisor = Supervisor(names, settings_file=args.settings)
+    supervisor = Supervisor(names, settings_file=args.settings, enabled=enabled_sources(settings))
     supervised = list(supervisor.children)
     # **Started even with nothing to supervise**, which it did not used to be. An empty
     # supervisor looked like a thread and a banner about nothing, and that was true until

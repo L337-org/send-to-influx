@@ -38,7 +38,14 @@ from toinflux.controls import (
 )
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.gating import DeviceGuard, Gate, commands_for, static_full_scale
-from toinflux.general import RepeatingProblem, load_settings, render_external, render_values, source_class
+from toinflux.general import (
+    RepeatingProblem,
+    enabled_sources,
+    load_settings,
+    render_external,
+    render_values,
+    source_class,
+)
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
 from toinflux.staging import build_ladder
@@ -110,7 +117,7 @@ def gather(document, settings, session, settings_file=None, now=None):
     return bindings
 
 
-def command_devices(name, document, commands, settings_file=None, transitions=None, forced=False) -> None:
+def command_devices(name, document, commands, settings_file=None, transitions=None, forced=False, *, enabled) -> None:
     """Put a control's devices into the states given, and note which of them moved.
 
     Grouped by source and instance so one handler serves every device on the same bridge,
@@ -140,9 +147,13 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
             made. A safe state overrides ``min_transition_seconds`` going in, and must not
             then hold the control off going out: a heater forced off by a transient fault
             would otherwise sit there for a whole minimum after the fault had cleared
+        enabled (frozenset): the sources enabled when the caller started, from
+            ``general.enabled_sources``. Required and keyword-only, because every caller has
+            to decide it: the supervisor's is the service's, a control process's its own
 
     Raises:
-        ConfigError: where a device names a source that cannot actuate anything
+        ConfigError: where a device names a source that cannot actuate anything, or one
+            that is disabled
         SourceConnectionError: where the far end refused or could not be reached
     """
     declared = document.get("devices") or {}
@@ -179,7 +190,7 @@ def command_devices(name, document, commands, settings_file=None, transitions=No
             (device_key, spec["device"], state, spec.get("parameter"))
         )
     try:
-        _command_each(targets, commanded, settings_file)
+        _command_each(targets, commanded, settings_file, enabled)
     finally:
         # **In a finally, because a partial failure is the dangerous case.** Two heaters on
         # two bridges, the first commanded and the second unreachable: the exception used to
@@ -254,7 +265,7 @@ def _within_scale(control, device, parameter, state):
     return clamped
 
 
-def _command_each(targets, commanded, settings_file) -> None:
+def _command_each(targets, commanded, settings_file, enabled) -> None:
     """Command every device, noting in `commanded` each one that the far end accepted.
 
     Split out so the caller can record what succeeded whether this returns or raises. The
@@ -267,10 +278,11 @@ def _command_each(targets, commanded, settings_file) -> None:
         commanded (dict): filled in with the control's key -> state, for each device the far
             end accepted
         settings_file (str or None): the settings path the process was started with
+        enabled (frozenset): the sources enabled when the caller started
 
     Raises:
-        ConfigError: where a device names a source that cannot actuate anything, or the far
-            end cannot resolve the device the document names
+        ConfigError: where a device names a source that cannot actuate anything or is
+            disabled, or the far end cannot resolve the device the document names
         SourceConnectionError: where the far end refused or could not be reached
     """
     for (source, instance), devices in sorted(targets.items(), key=lambda item: str(item[0])):
@@ -295,7 +307,7 @@ def _command_each(targets, commanded, settings_file) -> None:
                 f"names source {source!r}, which cannot switch a device on and off. Name a "
                 f"source that can, or remove the device from this control"
             )
-        with source_handler(source, settings_file=settings_file, instance=instance) as handler:
+        with source_handler(source, enabled, settings_file=settings_file, instance=instance) as handler:
             for key, device, state, parameter in devices:
                 # A device that names a parameter is *set* rather than switched, so the value
                 # travels on that keyword. The handler turns a light on implicitly when it is
@@ -357,6 +369,10 @@ class ControlProcess:
         self.settings_file = settings_file
         self.document = load_control(name, settings_file)
         self.settings = load_settings(settings_file)
+        # Decided once, here, and kept until the process stops. Read per command instead, an
+        # edit disabling a source followed by a restart would have the stopping process refuse
+        # its own safe state, and leave a heater on with nothing left to turn it off.
+        self.enabled = enabled_sources(self.settings)
         errors = validate_control(name, self.document, self.settings)
         if errors:
             raise ConfigError(f"control {name!r} is not valid:\n  " + "\n  ".join(errors))
@@ -407,7 +423,15 @@ class ControlProcess:
         """
         if commands is None:
             return
-        command_devices(self.name, self.document, commands, self.settings_file, self.transitions, forced=forced)
+        command_devices(
+            self.name,
+            self.document,
+            commands,
+            self.settings_file,
+            self.transitions,
+            forced=forced,
+            enabled=self.enabled,
+        )
 
     def _apply_safe(self, commands) -> None:
         """Command the devices into a safe state.

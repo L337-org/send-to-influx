@@ -1409,3 +1409,41 @@ class TestHowLongATeardownIsAllowed:
     def test_an_empty_supervisor_still_gets_a_sensible_bound(self, state_directory):
         """A join of zero would report every shutdown as a timeout."""
         assert Supervisor([], settings_file=state_directory.settings_file).teardown_seconds() > 0
+
+
+class TestADisabledSource:
+    """A source left out of ``sources:`` is switched off, even with its section in place."""
+
+    def test_a_control_naming_one_is_not_started_and_the_others_are(self, state_directory, caplog):
+        installation = state_directory
+        names = _two_controls(installation)
+        grid = _quick("grid", {"lamp": {"source": "hue", "device": "near"}})
+        grid["inputs"]["grid_co2"] = {"source": "carbonintensity", "field": "intensity_actual"}
+        installation.write_control(grid)
+        installation.set_sources("hue", "openmeteo")
+        with caplog.at_level(logging.ERROR):
+            running = Supervisor([*names, "grid"], settings_file=installation.settings_file)
+        assert sorted(running.children) == ["conservatory", "porch"]
+        assert "Control 'grid' cannot be supervised" in caplog.text
+        assert "source 'carbonintensity' is disabled" in caplog.text
+
+    def test_a_restart_that_disables_it_still_makes_the_devices_safe(self, supervisor, state_directory, bridge):
+        """The supervisor keeps the sources the service started with. Deciding afresh, it
+        would refuse the safe state of the control it is stopping, and a heater switched on
+        before the edit would stay on with no control left to turn it off."""
+        state_directory.set_sources("openmeteo", "carbonintensity")
+        bridge.lights[bridge.id_of("far")]["state"]["on"] = True
+        bridge.clear()
+        supervisor.make_safe("conservatory")
+        assert [command.name for command in bridge.commanded()] == ["far"]
+        assert bridge.energised()["far"] is False
+
+    def test_the_service_s_own_list_is_the_one_used(self, state_directory, bridge):
+        """Passed in by the service rather than read here, and honoured when it is."""
+        installation = state_directory
+        names = _two_controls(installation)
+        running = Supervisor(names, settings_file=installation.settings_file, enabled=frozenset({"openmeteo"}))
+        bridge.lights[bridge.id_of("far")]["state"]["on"] = True
+        bridge.clear()
+        running.make_safe("conservatory")
+        assert bridge.commanded() == []

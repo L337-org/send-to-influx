@@ -299,7 +299,7 @@ def flatten_dict(data, parent_key="", sep="_"):
     return flattened
 
 
-def get_class(source, settings_file=None, instance=None):
+def get_class(source, settings_file=None, instance=None, enabled=None):
     """Construct and return a DataHandler for the given data source name.
 
     Returns an *instance*, not the class - ``source_class()`` is the one that returns the
@@ -322,6 +322,8 @@ def get_class(source, settings_file=None, instance=None):
             means the source's single target, or the first configured bridge or device, which
             is what keeps single-target installs and the MCP tools behaving exactly as they did
             before instances existed.
+        enabled (frozenset or None): the sources the handler may see, or None for every one;
+            see ``DataHandler.__init__``
 
     Returns:
         DataHandler: a constructed handler for the source
@@ -329,7 +331,7 @@ def get_class(source, settings_file=None, instance=None):
     Raises:
         ConfigError: the name is not a known source
     """
-    return source_class(source)(source.lower(), settings_file=settings_file, instance=instance)
+    return source_class(source)(source.lower(), settings_file=settings_file, instance=instance, enabled=enabled)
 
 
 def source_class(source):
@@ -434,6 +436,62 @@ def known_sources():
     # something that can actually run. Filtering afterwards was what let get_class() and
     # known_sources() disagree about whether the MyEnergi parent was a source.
     return sorted(name.lower() for name in _source_classes())
+
+
+def enabled_sources(settings):
+    """Return the sources the ``sources:`` list enables, lowercased.
+
+    Leaving a source out of that list is how an operator switches it off, and a section left
+    in place for it - credentials and all - is not a request to use it. The collectors decide
+    what runs from the same list, so a control deciding from this cannot disagree with them.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        frozenset: lowercased source names; empty where the list is absent or not a list
+    """
+    raw = settings.get("sources")
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(source.lower() for source in raw if isinstance(source, str))
+
+
+def without_disabled_sources(settings, enabled):
+    """Return a copy of the settings with every disabled source's section removed.
+
+    What a control builds its handlers from, so that using a disabled source is impossible
+    rather than merely checked for: a handler built from this raises for a missing section
+    whatever route reached it. Sections that are not sources - ``influx``, ``controls``,
+    ``mqtt`` - are kept, because a handler needs them.
+
+    Args:
+        settings (dict): the parsed settings document
+        enabled (frozenset): the lowercased source names to keep, from :func:`enabled_sources`
+
+    Returns:
+        dict: a shallow copy without the disabled sources' sections
+    """
+    disabled = set(known_sources()) - set(enabled)
+    return {key: value for key, value in settings.items() if key not in disabled}
+
+
+def disabled_source_problem(source, enabled):
+    """Return why a control may not use this source, or None where it may.
+
+    Args:
+        source (str): the source name, any case
+        enabled (frozenset): the lowercased source names enabled, from :func:`enabled_sources`
+
+    Returns:
+        str or None: the problem, naming the source and the setting that enables it
+    """
+    if source.lower() in enabled:
+        return None
+    return (
+        f"source {source!r} is disabled: it is not in the 'sources:' list in the settings file. "
+        f"Add it there to use it in a control"
+    )
 
 
 def shares_measurement(source):

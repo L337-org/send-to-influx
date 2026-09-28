@@ -42,6 +42,8 @@ from toinflux.general import (
     RepeatingProblem,
     render_external,
     close_session,
+    disabled_source_problem,
+    enabled_sources,
     get_class,
     known_sources,
     render_values,
@@ -181,7 +183,7 @@ class InputReading:
 
 
 @contextmanager
-def source_handler(source, settings_file=None, instance=None):  # noqa: DOC403 - a generator, but unannotated
+def source_handler(source, enabled, settings_file=None, instance=None):  # noqa: DOC403 - a generator, but unannotated
     """Yield a handler for a source and close the session it opened.
 
     ``DataHandler.__init__`` opens a ``requests.Session`` whether or not anything uses it,
@@ -192,8 +194,18 @@ def source_handler(source, settings_file=None, instance=None):  # noqa: DOC403 -
     Whoever opens a handler closes it. The alternative - letting each function build its
     own and hoping - is how the leak got here in the first place.
 
+    **Every handler a control uses is built here, and never for a disabled source.** A source
+    left out of ``sources:`` is switched off even where its section, credentials and all, is
+    still in the file. A disabled one is refused before anything is built, and the handler is
+    built from the settings with every disabled source's section removed, so no other route
+    to a handler can reach one either.
+
     Args:
         source (str): the source to build a handler for
+        enabled (frozenset): the sources enabled when the caller started, from
+            ``general.enabled_sources``. The caller's, not the file's now: a control keeps the
+            sources it started with until it stops, which is what lets it make its devices safe
+            on the way out of a restart that disables their source
         settings_file (str or None): the settings path, so the handler reads the same document
         instance (str or None): which producer, for a source that has several
 
@@ -201,14 +213,21 @@ def source_handler(source, settings_file=None, instance=None):  # noqa: DOC403 -
         DataHandler: the handler, valid for the duration of the block
 
     Raises:
-        ConfigError: where the source is not a known one, from get_class
+        ConfigError: where the source is disabled, or is not a known one, from get_class
     """
+    # Refused here first so the message names the setting; the handler's own filtering is what
+    # makes it impossible rather than merely checked. The settings themselves are still read
+    # afresh by the handler, so a rotated credential reaches a running control - only which
+    # sources are enabled is fixed at start.
+    problem = disabled_source_problem(source, enabled)
+    if problem:
+        raise ConfigError(problem)
     # Keywords at every call site. This module's functions do not agree on the order of
     # these two - stored_reading takes instance first, this takes settings_file first - and
     # transposing them here would drop settings_file into instance, which is the bug already
     # fixed once in this module: the handler reading a different settings document from the
     # caller, invisible until someone runs with -s.
-    handler = get_class(source, settings_file=settings_file, instance=instance)
+    handler = get_class(source, settings_file=settings_file, instance=instance, enabled=enabled)
     try:
         yield handler
     finally:
@@ -247,7 +266,7 @@ def stored_reading(session, settings, source, field, instance=None, settings_fil
     # name this can never read is wrong whatever the settings say - checking second meant a
     # missing settings.yaml masked the real complaint, which is how CI found this.
     _refuse_reserved_field(field)
-    with source_handler(source, settings_file=settings_file, instance=instance) as handler:
+    with source_handler(source, enabled_sources(settings), settings_file=settings_file, instance=instance) as handler:
         return handler_reading(session, settings, handler, field, now)
 
 
@@ -797,7 +816,9 @@ def read_input(session, settings, spec, settings_file=None, now=None):
     # One handler for the whole call, closed on the way out. Every path here needs one -
     # even the stored read, for the measurement, tags and database - and each build opens a
     # session nothing closes.
-    with source_handler(source, settings_file=settings_file, instance=spec.get("instance")) as handler:
+    with source_handler(
+        source, enabled_sources(settings), settings_file=settings_file, instance=spec.get("instance")
+    ) as handler:
         stored = handler_reading(session, settings, handler, field, now)
         if stored is not None and stored.age <= trigger:
             return stored

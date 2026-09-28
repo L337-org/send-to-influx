@@ -27,6 +27,7 @@ from tests.harness.installation import conservatory, record_command
 from toinflux.controls import device_identity
 from toinflux.control_process import ControlProcess, command_devices, gather, heartbeat_writer, run_control
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
+from toinflux.general import known_sources
 from toinflux.rules import RuleEvaluationError, parse_rule
 
 # Inside the conservatory's 23:35-05:25 window, and well outside it.
@@ -53,6 +54,10 @@ def control(state_directory):
     finally:
         process.guard.close()
         process.close()
+
+
+#: Every source this build knows, for tests about something other than which are enabled.
+EVERY_SOURCE = frozenset(known_sources())
 
 
 def _unevaluable_rule():
@@ -395,7 +400,7 @@ class TestCommandingDevices:
         document = conservatory()
         document["devices"] = {"far": {"source": "openmeteo", "device": "far"}}
         with pytest.raises(ConfigError, match="cannot switch a device"):
-            command_devices("conservatory", document, {"far": True}, installation.settings_file)
+            command_devices("conservatory", document, {"far": True}, installation.settings_file, enabled=EVERY_SOURCE)
 
     def test_a_writable_source_that_cannot_switch_a_device_is_refused_too(self, installation):
         """The case the old check let through. `MCP_WRITABLE` says only that *some* write
@@ -417,7 +422,7 @@ class TestCommandingDevices:
         document = conservatory()
         document["devices"] = {"far": {"source": "speedtest", "device": "far"}}
         with pytest.raises(ConfigError, match="cannot switch a device"):
-            command_devices("conservatory", document, {"far": True}, installation.settings_file)
+            command_devices("conservatory", document, {"far": True}, installation.settings_file, enabled=EVERY_SOURCE)
 
     def test_the_refusal_names_the_control_s_own_device_keys(self, installation):
         """What an operator edits is the entry they wrote, not the name the far end knows
@@ -430,7 +435,11 @@ class TestCommandingDevices:
         }
         with pytest.raises(ConfigError) as exc:
             command_devices(
-                "conservatory", document, {"upstairs": True, "downstairs": False}, installation.settings_file
+                "conservatory",
+                document,
+                {"upstairs": True, "downstairs": False},
+                installation.settings_file,
+                enabled=EVERY_SOURCE,
             )
         assert "'downstairs'" in str(exc.value) and "'upstairs'" in str(exc.value)
         assert "line-1" not in str(exc.value)
@@ -447,7 +456,7 @@ class TestCommandingDevices:
         document = conservatory()
         document["devices"] = {"far": {"source": "speedtest", "device": "far"}}
         with pytest.raises(ConfigError) as exc:
-            command_devices("conservatory", document, {"far": True}, installation.settings_file)
+            command_devices("conservatory", document, {"far": True}, installation.settings_file, enabled=EVERY_SOURCE)
         assert "cannot switch a device" in str(exc.value)
         assert "not found in settings" not in str(exc.value)
 
@@ -458,16 +467,20 @@ class TestCommandingDevices:
         document = conservatory()
         document["devices"] = {"far": {"device": "far"}}
         with pytest.raises(ConfigError, match="declares no"):
-            command_devices("conservatory", document, {"far": True}, installation.settings_file)
+            command_devices("conservatory", document, {"far": True}, installation.settings_file, enabled=EVERY_SOURCE)
 
     def test_a_device_the_document_does_not_declare_is_refused(self, installation):
         with pytest.raises(ConfigError, match="not declared"):
-            command_devices("conservatory", conservatory(), {"nosuchdevice": True}, installation.settings_file)
+            command_devices(
+                "conservatory", conservatory(), {"nosuchdevice": True}, installation.settings_file, enabled=EVERY_SOURCE
+            )
 
     def test_the_far_end_s_refusal_reaches_the_caller(self, installation, bridge):
         with faults.erroring(bridge, 503):
             with pytest.raises(SourceConnectionError):
-                command_devices("conservatory", conservatory(), {"far": True}, installation.settings_file)
+                command_devices(
+                    "conservatory", conservatory(), {"far": True}, installation.settings_file, enabled=EVERY_SOURCE
+                )
 
 
 def _quick_control(**overrides):
@@ -950,7 +963,7 @@ class TestCommandingADeviceSetToAValue:
             "toinflux.philipshue.Hue.mcp_set_device_state",
             lambda self, device, **kwargs: seen.append((device, kwargs)),
         )
-        command_devices("lamp", self._document(), {"lamp": 40}, installation.settings_file)
+        command_devices("lamp", self._document(), {"lamp": 40}, installation.settings_file, enabled=EVERY_SOURCE)
         assert seen == [("far", {"brightness_pct": 40})]
 
     def test_zero_is_an_explicit_off_rather_than_the_dimmest_setting(self, installation, monkeypatch):
@@ -960,7 +973,7 @@ class TestCommandingADeviceSetToAValue:
             "toinflux.philipshue.Hue.mcp_set_device_state",
             lambda self, device, **kwargs: seen.append((device, kwargs)),
         )
-        command_devices("lamp", self._document(), {"lamp": 0}, installation.settings_file)
+        command_devices("lamp", self._document(), {"lamp": 0}, installation.settings_file, enabled=EVERY_SOURCE)
         assert seen == [("far", {"on": False})]
 
     def test_a_switched_device_is_unchanged(self, installation, monkeypatch):
@@ -971,14 +984,14 @@ class TestCommandingADeviceSetToAValue:
         )
         document = self._document()
         document["devices"]["lamp"].pop("parameter")
-        command_devices("lamp", document, {"lamp": True}, installation.settings_file)
+        command_devices("lamp", document, {"lamp": True}, installation.settings_file, enabled=EVERY_SOURCE)
         assert seen == [("far", {"on": True})]
 
     def test_the_value_is_what_gets_recorded(self, installation, monkeypatch):
         from toinflux.transitions import TransitionLog
 
         monkeypatch.setattr("toinflux.philipshue.Hue.mcp_set_device_state", lambda self, device, **kwargs: None)
-        command_devices("lamp", self._document(), {"lamp": 40}, installation.settings_file)
+        command_devices("lamp", self._document(), {"lamp": 40}, installation.settings_file, enabled=EVERY_SOURCE)
         assert TransitionLog("lamp", installation.settings_file).states() == {"lamp": 40}
 
 
@@ -1148,7 +1161,7 @@ class TestAStateLeftOverFromAnOlderDocument:
         bridge.lights["9"] = bulb("office-lamp")
         document = self._store_driven(state_directory, "brightness_pct", 100)
         with caplog.at_level(logging.WARNING):
-            command_devices("lamp", document, {"lamp": 150}, state_directory.settings_file)
+            command_devices("lamp", document, {"lamp": 150}, state_directory.settings_file, enabled=EVERY_SOURCE)
         commanded = bridge.commanded("office-lamp")
         assert commanded, "nothing was commanded"
         # 254 is the bridge's own full scale, which is what 100 percent maps onto.
@@ -1162,7 +1175,7 @@ class TestAStateLeftOverFromAnOlderDocument:
         bridge.lights["9"] = bulb("office-lamp")
         document = self._store_driven(state_directory, "brightness_pct", 100)
         with caplog.at_level(logging.WARNING):
-            command_devices("lamp", document, {"lamp": 40}, state_directory.settings_file)
+            command_devices("lamp", document, {"lamp": 40}, state_directory.settings_file, enabled=EVERY_SOURCE)
         assert "tops out" not in caplog.text, caplog.text
 
     def test_a_number_from_a_different_parameter_is_not_pinned_either(self, state_directory, bridge, influx):
@@ -1292,3 +1305,41 @@ class TestAStateLeftOverFromAnOlderDocument:
         # a boolean by rights - the first version of this test read the protocol and called
         # it the bug.
         assert all("bri" in state for state in commanded), commanded
+
+
+class TestADisabledSource:
+    """A source left out of ``sources:`` is switched off, even with its section in place."""
+
+    def test_a_device_on_it_is_refused_before_a_handler_is_built(self, installation, monkeypatch):
+        built = []
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *args, **kwargs: built.append(args))
+        with pytest.raises(ConfigError, match=r"source 'hue' is disabled: it is not in the 'sources:' list"):
+            command_devices(
+                "conservatory",
+                conservatory(),
+                {"far": True},
+                installation.settings_file,
+                enabled=frozenset({"openmeteo"}),
+            )
+        assert built == []
+
+    def test_a_process_started_with_it_disabled_refuses_to_start(self, state_directory, bridge):
+        """Refused before the start-up safe state, so the disabled bridge is never asked."""
+        state_directory.write_control(conservatory())
+        state_directory.set_sources("openmeteo", "carbonintensity")
+        bridge.clear()
+        with pytest.raises(ConfigError, match="source 'hue' is disabled"):
+            ControlProcess("conservatory", settings_file=state_directory.settings_file)
+        assert bridge.commanded() == []
+
+    def test_a_stopping_process_keeps_the_sources_it_started_with(self, control, state_directory, bridge):
+        """The restart that disables a source: the process on its way out reads the edited
+        file, and must still turn off what it had switched on, because the one coming up
+        will refuse the control and nothing else would."""
+        state_directory.set_sources("openmeteo", "carbonintensity")
+        for device in ("far", "near"):
+            bridge.lights[bridge.id_of(device)]["state"]["on"] = True
+        bridge.clear()
+        control.guard.stop("the control is stopping")
+        assert sorted(command.name for command in bridge.commanded()) == ["far", "near"]
+        assert not any(bridge.energised()[device] for device in ("far", "near"))

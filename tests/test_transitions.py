@@ -21,9 +21,13 @@ import pytest
 from tests.harness.bridge import bulb
 from toinflux.controls import device_identity
 from toinflux.exceptions import ConfigError
+from toinflux.general import known_sources
 from toinflux.staging import build_ladder, plan_window, reachable_ladder
 from tests.harness.installation import record_command
 from toinflux.transitions import TransitionLog, forget_control, transition_path
+
+#: Every source this build knows, for tests about something other than which are enabled.
+EVERY_SOURCE = frozenset(known_sources())
 
 
 def _log(installation, name="conservatory", now=None):
@@ -407,8 +411,8 @@ class TestAMinimumLongerThanTheWindowIsKept:
 
         name = self._control(state_directory, minimum=900, cycle=1)
         document = load_control(name, state_directory.settings_file)
-        command_devices(name, document, {"far": True}, state_directory.settings_file)
-        command_devices(name, document, {"far": False}, state_directory.settings_file)
+        command_devices(name, document, {"far": True}, state_directory.settings_file, enabled=EVERY_SOURCE)
+        command_devices(name, document, {"far": False}, state_directory.settings_file, enabled=EVERY_SOURCE)
         log = TransitionLog(name, state_directory.settings_file)
         assert log.states() == {"far": False}
 
@@ -629,7 +633,9 @@ class TestAPartialFailureStillRecordsWhatMoved:
 
         monkeypatch.setattr(Hue, "mcp_set_device_state", one_then_fail)
         with pytest.raises(SourceConnectionError):
-            command_devices("pair", document, {"one": True, "two": True}, state_directory.settings_file)
+            command_devices(
+                "pair", document, {"one": True, "two": True}, state_directory.settings_file, enabled=EVERY_SOURCE
+            )
 
         log = TransitionLog("pair", state_directory.settings_file)
         assert log.states() == {"one": True}, "the device that actually moved was not recorded"

@@ -10,6 +10,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
+import ast
 import logging
 import os
 import random
@@ -43,6 +44,7 @@ from toinflux.inputs import (
     read_input,
     resolve_max_age,
     resolve_minimum_interval,
+    source_handler,
     stored_reading,
 )
 
@@ -601,7 +603,7 @@ class TestTheFetchLockSerialisesLiveFetches:
             holder.wait(timeout=10)
 
 
-def _reading_handler(source, settings_file=None, instance=None):
+def _reading_handler(source, settings_file=None, instance=None, enabled=None):
     """A stand-in handler carrying only what a stored read asks of one.
 
     Every attribute the code reads is set explicitly, for the reason given on _handler: a
@@ -634,9 +636,9 @@ def _recording_handler(seen=None):
         callable: a get_class replacement
     """
 
-    def get_class(source, settings_file=None, instance=None):
+    def get_class(source, settings_file=None, instance=None, enabled=None):
         if seen is not None:
-            seen.update(source=source, settings_file=settings_file, instance=instance)
+            seen.update(source=source, settings_file=settings_file, instance=instance, enabled=enabled)
         return _reading_handler(source, settings_file, instance)
 
     return get_class
@@ -663,7 +665,13 @@ def _handler(live=True, timeout=5, data=None, fails=None, timestamp=None, instan
     return handler
 
 
-SETTINGS = {"hue": {"interval": 300, "db": "x"}, "influx": {"url": "http://x", "user": "u", "password": "p"}}
+SETTINGS = {
+    # Every source the tests below read from, because a control refuses a source that is not
+    # in this list - see TestADisabledSourceIsNeverBuilt.
+    "sources": ["hue", "nuki", "carbonintensity"],
+    "hue": {"interval": 300, "db": "x"},
+    "influx": {"url": "http://x", "user": "u", "password": "p"},
+}
 SPEC = {"source": "hue", "field": "temperature", "max_age": 900}
 
 
@@ -723,7 +731,12 @@ class TestStoredReading:
         monkeypatch.setattr("toinflux.inputs.run_query", lambda *a: [])
         monkeypatch.setattr("toinflux.inputs.single_series", lambda series: ([], []))
         stored_reading(None, SETTINGS, "hue", "temperature", "bridge1", "/etc/other.yaml")
-        assert seen == {"source": "hue", "settings_file": "/etc/other.yaml", "instance": "bridge1"}
+        assert seen == {
+            "source": "hue",
+            "settings_file": "/etc/other.yaml",
+            "instance": "bridge1",
+            "enabled": frozenset({"hue", "nuki", "carbonintensity"}),
+        }
 
 
 class TestReadInput:
@@ -1049,7 +1062,6 @@ class TestClosingAHandlerCannotMaskTheRealFailure:
 
     def test_a_close_that_raises_does_not_replace_the_real_exception(self, installation, monkeypatch):
         from toinflux.exceptions import SourceConnectionError
-        from toinflux.inputs import source_handler
 
         class _Angry:
             def close(self):
@@ -1078,11 +1090,10 @@ class TestClosingAHandlerCannotMaskTheRealFailure:
 
         monkeypatch.setattr("toinflux.inputs.get_class", with_an_angry_session)
         with pytest.raises(SourceConnectionError, match="the real failure"):
-            with source_handler("hue", settings_file=installation.settings_file):
+            with source_handler("hue", frozenset({"hue"}), settings_file=installation.settings_file):
                 raise SourceConnectionError("the real failure")
 
     def test_and_the_session_is_still_closed_on_the_ordinary_path(self, installation, monkeypatch):
-        from toinflux.inputs import source_handler
 
         closed = []
         from toinflux.general import get_class as real
@@ -1109,6 +1120,137 @@ class TestClosingAHandlerCannotMaskTheRealFailure:
             return handler
 
         monkeypatch.setattr("toinflux.inputs.get_class", recording)
-        with source_handler("hue", settings_file=installation.settings_file):
+        with source_handler("hue", frozenset({"hue"}), settings_file=installation.settings_file):
             pass
         assert closed == [True]
+
+
+#: Every module that makes up the control subsystem, by name under ``toinflux/``.
+CONTROL_MODULES = (
+    "control_process",
+    "controller",
+    "controls",
+    "gating",
+    "inputs",
+    "schedule",
+    "staging",
+    "supervision",
+    "transitions",
+)
+
+
+def _handler_builds_outside_source_handler(text):
+    """Return the line of every handler built anywhere but inside ``source_handler``.
+
+    A build is a call to ``get_class``, however it is reached, or a call on the result of
+    ``source_class`` - which constructs the class it returns. Asking ``source_class`` about the
+    class, as the actuation check does, is not a build.
+
+    Args:
+        text (str): a module's source
+
+    Returns:
+        list: line numbers of the offending calls
+    """
+
+    def called(func):
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return None
+
+    found = []
+
+    def visit(node, inside):
+        for child in ast.iter_child_nodes(node):
+            here = inside or (
+                isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == "source_handler"
+            )
+            if isinstance(child, ast.Call):
+                builds = called(child.func) == "get_class" or (
+                    isinstance(child.func, ast.Call) and called(child.func.func) == "source_class"
+                )
+                if builds and not here:
+                    found.append(child.lineno)
+            visit(child, here)
+
+    visit(ast.parse(text), False)
+    return found
+
+
+class TestADisabledSourceIsNeverBuilt:
+    """A control never builds a handler for a source left out of ``sources:``.
+
+    Leaving a source out of that list is how an operator switches it off, and they should not
+    also have to comment out its section, credentials and all. A control used the section
+    anyway: it read inputs through, and switched devices on, a source nothing was collecting.
+    """
+
+    def test_source_handler_refuses_before_building_anything(self, monkeypatch):
+        built = []
+        monkeypatch.setattr("toinflux.inputs.get_class", lambda *args, **kwargs: built.append(args))
+        with pytest.raises(ConfigError) as raised:
+            with source_handler("Hue", frozenset({"openmeteo"})):
+                pass
+        assert str(raised.value) == (
+            "source 'Hue' is disabled: it is not in the 'sources:' list in the settings file. "
+            "Add it there to use it in a control"
+        )
+        assert built == []
+
+    def test_a_read_uses_the_sources_its_caller_started_with(self, monkeypatch):
+        """The settings a control passes are the ones it loaded at start, so a source that is
+        not listed there is refused however the file reads now."""
+        monkeypatch.setattr("toinflux.inputs.get_class", _recording_handler())
+        with pytest.raises(ConfigError, match="source 'hue' is disabled"):
+            stored_reading(None, {**SETTINGS, "sources": ["nuki"]}, "hue", "temperature")
+
+    def test_a_handler_given_the_enabled_list_cannot_see_a_disabled_section(self, installation):
+        """The structural half: whatever route reached the factory, a handler built with the
+        list finds no section for a disabled source, and raises for its own."""
+        from toinflux.general import get_class as real
+
+        with pytest.raises(ConfigError, match="Source hue not found in settings"):
+            real("hue", settings_file=installation.settings_file, enabled=frozenset({"openmeteo"}))
+        handler = real("hue", settings_file=installation.settings_file, enabled=frozenset({"hue"}))
+        try:
+            assert "hue" in handler.settings and "influx" in handler.settings
+            assert "openmeteo" not in handler.settings and "carbonintensity" not in handler.settings
+        finally:
+            handler.session.close()
+
+    def test_no_control_module_builds_a_handler_any_other_way(self):
+        """The guard that keeps ``source_handler`` the only door. A handler built anywhere
+        else in the control subsystem skips the refusal and the filtering both, which is how
+        the disabled source was reached in the first place."""
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "toinflux")
+        offenders = {}
+        for module in CONTROL_MODULES:
+            with open(os.path.join(root, f"{module}.py"), encoding="utf-8") as handle:
+                lines = _handler_builds_outside_source_handler(handle.read())
+            if lines:
+                offenders[module] = lines
+        assert not offenders, f"handlers built outside inputs.source_handler: {offenders}"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "get_class('hue')",
+            "general.get_class('hue')",
+            "def f():\n    return toinflux.general.get_class('hue', enabled=None)\n",
+            "source_class('hue')('hue')",
+        ],
+    )
+    def test_the_guard_sees_every_way_to_build_one(self, text):
+        """A guard with a known bypass reads as enforcement and provides none."""
+        assert _handler_builds_outside_source_handler(text), f"not detected: {text!r}"
+
+    def test_the_guard_does_not_fire_where_it_should_not(self):
+        """Guards the guard: firing on everything would report every module as an offender,
+        and firing on nothing would pass the check above whatever the tree held."""
+        allowed = (
+            "def source_handler(source, enabled):\n    return get_class(source)\n"
+            "getattr(source_class('hue'), 'MCP_ACTUATES_DEVICES', False)\n"
+        )
+        assert _handler_builds_outside_source_handler(allowed) == []

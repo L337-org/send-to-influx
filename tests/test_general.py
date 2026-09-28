@@ -13,6 +13,8 @@ from toinflux.general import (
     IndentedFormatter,
     RepeatingProblem,
     configure_logging,
+    disabled_source_problem,
+    enabled_sources,
     MCP_DEFAULT_BIND_ADDRESS,
     expand_sources,
     flatten_dict,
@@ -24,6 +26,7 @@ from toinflux.general import (
     render_external,
     render_values,
     validate_settings,
+    without_disabled_sources,
 )
 from toinflux.exceptions import ConfigError
 
@@ -593,7 +596,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 result = get_class("hue")
-                mock_hue.assert_called_once_with("hue", settings_file=None, instance=None)
+                mock_hue.assert_called_once_with("hue", settings_file=None, instance=None, enabled=None)
                 assert result is mock_hue.return_value
 
     def test_get_class_returns_hue_for_uppercase(self, sample_settings):
@@ -602,7 +605,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 result = get_class("Hue")
-                mock_hue.assert_called_once_with("hue", settings_file=None, instance=None)
+                mock_hue.assert_called_once_with("hue", settings_file=None, instance=None, enabled=None)
                 assert result is mock_hue.return_value
 
     def test_get_class_returns_zappi_for_lowercase(self, sample_settings):
@@ -611,7 +614,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.myenergi.Zappi") as mock_zappi:
                 result = get_class("zappi")
-                mock_zappi.assert_called_once_with("zappi", settings_file=None, instance=None)
+                mock_zappi.assert_called_once_with("zappi", settings_file=None, instance=None, enabled=None)
                 assert result is mock_zappi.return_value
 
     def test_get_class_returns_speedtest_for_lowercase(self, sample_settings):
@@ -620,7 +623,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.speedtest.Speedtest") as mock_speedtest:
                 result = get_class("speedtest")
-                mock_speedtest.assert_called_once_with("speedtest", settings_file=None, instance=None)
+                mock_speedtest.assert_called_once_with("speedtest", settings_file=None, instance=None, enabled=None)
                 assert result is mock_speedtest.return_value
 
     def test_get_class_returns_speedtest_for_uppercase(self, sample_settings):
@@ -629,7 +632,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.speedtest.Speedtest") as mock_speedtest:
                 result = get_class("Speedtest")
-                mock_speedtest.assert_called_once_with("speedtest", settings_file=None, instance=None)
+                mock_speedtest.assert_called_once_with("speedtest", settings_file=None, instance=None, enabled=None)
                 assert result is mock_speedtest.return_value
 
     def test_get_class_returns_nuki_for_lowercase(self, sample_settings):
@@ -638,7 +641,7 @@ class TestGetClass:
             mock_load_settings.return_value = sample_settings
             with patch("toinflux.nuki.Nuki") as mock_nuki:
                 result = get_class("nuki")
-                mock_nuki.assert_called_once_with("nuki", settings_file=None, instance=None)
+                mock_nuki.assert_called_once_with("nuki", settings_file=None, instance=None, enabled=None)
                 assert result is mock_nuki.return_value
 
     def test_get_class_mqtt_data_handler_is_not_selectable(self):
@@ -659,7 +662,7 @@ class TestGetClass:
             with patch("toinflux.philipshue.Hue") as mock_hue:
                 get_class("hue", settings_file="/etc/send-to-influx/settings.yaml")
                 mock_hue.assert_called_once_with(
-                    "hue", settings_file="/etc/send-to-influx/settings.yaml", instance=None
+                    "hue", settings_file="/etc/send-to-influx/settings.yaml", instance=None, enabled=None
                 )
 
     def test_get_class_datahandler_is_not_selectable(self):
@@ -1419,3 +1422,43 @@ class TestRepeatingProblem:
         with caplog.at_level(logging.DEBUG):
             problem.cleared("cycle", "it works again")
         assert caplog.text == ""
+
+
+class TestWhichSourcesAreEnabled:
+    """The ``sources:`` list decides, for a control as for the collectors."""
+
+    def test_the_list_is_lowercased(self):
+        assert enabled_sources({"sources": ["Hue", "openmeteo"]}) == frozenset({"hue", "openmeteo"})
+
+    @pytest.mark.parametrize("settings", [{}, {"sources": None}, {"sources": "hue"}, {"sources": {"hue": 1}}])
+    def test_no_list_enables_nothing(self, settings):
+        """A scalar is not a list of one: validation reports it, and nothing here may read
+        ``"hue"`` character by character into a set of single letters."""
+        assert enabled_sources(settings) == frozenset()
+
+    def test_an_entry_that_is_not_a_name_is_skipped(self):
+        assert enabled_sources({"sources": ["hue", None, 7, {"x": 1}]}) == frozenset({"hue"})
+
+    def test_a_disabled_source_s_section_is_removed_and_nothing_else(self):
+        settings = {
+            "sources": ["hue"],
+            "hue": {"db": "h"},
+            "openmeteo": {"db": "w"},
+            "influx": {"url": "http://x"},
+            "controls": {"enabled": True},
+        }
+        assert without_disabled_sources(settings, frozenset({"hue"})) == {
+            "sources": ["hue"],
+            "hue": {"db": "h"},
+            "influx": {"url": "http://x"},
+            "controls": {"enabled": True},
+        }
+        assert "openmeteo" in settings, "a copy, not the caller's own document"
+
+    def test_the_problem_names_the_source_and_the_setting(self):
+        assert disabled_source_problem("hue", frozenset({"hue"})) is None
+        assert disabled_source_problem("Hue", frozenset({"hue"})) is None
+        assert disabled_source_problem("hue", frozenset()) == (
+            "source 'hue' is disabled: it is not in the 'sources:' list in the settings file. "
+            "Add it there to use it in a control"
+        )

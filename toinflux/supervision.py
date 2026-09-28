@@ -55,7 +55,7 @@ from toinflux.controls import (
 )
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import commands_for
-from toinflux.general import load_settings, render_external
+from toinflux.general import enabled_sources, load_settings, render_external
 from toinflux.process import TimeoutExpired, spawn
 from toinflux.transitions import forget_control
 
@@ -300,7 +300,7 @@ class Supervisor:
     :meth:`poll` saw).
     """
 
-    def __init__(self, names, settings_file=None, argv_for=None, clock=time.monotonic, backoff=None):
+    def __init__(self, names, settings_file=None, argv_for=None, clock=time.monotonic, backoff=None, enabled=None):
         """Prepare to supervise a set of controls without starting them.
 
         Args:
@@ -311,12 +311,18 @@ class Supervisor:
             clock (callable): the monotonic clock, injectable so a backoff is a test rather
                 than a wait
             backoff (callable or None): failures -> seconds before a restart
+            enabled (frozenset or None): the sources the service started with enabled, from
+                ``general.enabled_sources``; read from the settings file now when None
 
         Raises:
             ConfigError: never for one unusable control - that one is logged and skipped -
                 but the signature keeps the type for a caller that passes nothing readable
         """
         self.settings_file = settings_file
+        # The service's, fixed for as long as it runs, and used for nothing but making devices
+        # safe. A restart that disables a source then still turns off what the stopping
+        # service's controls had switched on; the service that comes up refuses the control.
+        self.enabled = enabled_sources(load_settings(settings_file)) if enabled is None else frozenset(enabled)
         self._clock = clock
         self._argv_for = argv_for or self._default_argv
         self._backoff = backoff or _default_backoff
@@ -927,7 +933,7 @@ class Supervisor:
                 # No log passed, so one is opened for this control and closed again. The
                 # child owning the other one is already dead by the time this runs - that is
                 # what "make its devices safe" is for - so the two never write at once.
-                command_devices(name, document, commands, self.settings_file, forced=True)
+                command_devices(name, document, commands, self.settings_file, forced=True, enabled=self.enabled)
             except (ConfigError, SourceConnectionError) as exc:
                 # Logged rather than raised: the supervisor's job is to keep going, and a
                 # bridge that cannot be reached now is one the next restart will try again.

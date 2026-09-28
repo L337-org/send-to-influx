@@ -84,6 +84,19 @@ Every source a control names needs a settings section on the machine running it,
 devices and its inputs alike: an input is read through a source handler too, which resolves
 the database to query from that source's own section.
 
+**It must also be enabled: listed in `sources:` in `settings.yaml`.** Leaving a source out of
+that list is how you switch it off, and a control respects that even where the source's
+section, credentials and all, is still in the file. A control naming a disabled source is
+refused, with a message naming the source, by `--check-config`, when it is saved (including
+over MCP), and when the service starts; every other control and every collector carries on.
+To use the source, add it back to `sources:` and restart the service.
+
+A running control keeps the sources that were enabled when it started until it stops. That is
+what makes disabling a source safe: the control being stopped by the restart still puts its
+devices into their safe state on the way out, and the service that comes up then refuses it.
+Which sources are enabled is the only thing fixed at start; a changed credential in a source's
+section still reaches a running control without a restart.
+
 A required key that is present with nothing under it - `inputs:` with the block unindented
 beneath it - is refused too, and says so specifically, because that is what the mistake
 actually looks like.
@@ -649,8 +662,9 @@ once, not the first, because fixing one typo per run is not a review. It checks 
 * **the shape** - unknown keys at any level, missing or empty required sections, a stage
   that omits a device, a device referenced by no stage;
 * **the rules** - every slot parses, and every name it reads is declared;
-* **the sources** - every source named is one this build collects from, has a settings
-  section on this machine, and, in `devices`, can actually switch a device on and off.
+* **the sources** - every source named is one this build collects from, is enabled in
+  `sources:`, has a settings section on this machine, and, in `devices`, can actually switch
+  a device on and off.
 
 Left to a control's startup: whether the device exists on the bridge, and whether it has a
 capability a stage asks for. Those need the far end, and they fail that control only.

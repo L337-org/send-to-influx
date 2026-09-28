@@ -548,6 +548,17 @@ class TestSavingAControl:
             _save_control_result("conservatory", {"name": "conservatory"}, stored.settings_file, supervisor)
         assert supervisor.requests == []
 
+    def test_a_document_naming_a_disabled_source_writes_nothing(self, state_directory):
+        """Refused over MCP as it is by --check-config: saved, it would be a control the
+        service will not start, reported to the operator as stored."""
+        state_directory.set_sources("openmeteo", "carbonintensity")
+        supervisor = _Reloading()
+        with pytest.raises(ToolParamError, match="source 'hue' is disabled: it is not in the 'sources:' list"):
+            _save_control_result("conservatory", conservatory(), state_directory.settings_file, supervisor)
+        assert supervisor.requests == []
+        with pytest.raises(ConfigError, match="no control named 'conservatory'"):
+            load_control("conservatory", state_directory.settings_file)
+
     def test_every_problem_is_reported_at_once(self, state_directory):
         """One fault per round trip is one exchange per fault, and they are independent."""
         broken = conservatory()
