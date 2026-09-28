@@ -1,7 +1,8 @@
 """Many controls, seeded random faults, and the same invariants the static scenarios use.
 
-The long seeded run is excluded from the default suite and scheduled instead, because a run
-long enough to be worth anything is minutes rather than seconds.
+The long seeded run is excluded from the default suite and run by its own workflow instead -
+short on every pull request and long nightly - because a run long enough to be worth anything
+is minutes rather than seconds.
 
 Two things here are *not* excluded, and run with the ordinary suite. Any seed that has failed,
 from `SEEDS_THAT_FAILED` - which is how a chaos failure becomes a permanent regression test

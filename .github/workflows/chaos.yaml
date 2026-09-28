@@ -2,11 +2,13 @@ name: 'Chaos run'
 permissions:
   contents: read
 
-# Scheduled rather than per pull request: a run long enough to find anything is minutes, and
-# what it looks for - an interaction between several controls, a bridge and a database under
-# randomly chosen faults - is not a property of one change. Any seed that has *failed* runs
-# with the ordinary suite instead, so a finding is never waiting on this job to run again.
+# Two lengths of the same run. Every pull request gets a short one, so a change that breaks what
+# it checks - an interaction between several controls, a bridge and a database under randomly
+# chosen faults - is caught before it merges rather than the morning after. Main gets a long one
+# nightly, because some interactions only turn up after thousands of ticks. Any seed that has
+# *failed* also runs with the ordinary suite, so a finding is never waiting on this job again.
 on:
+  pull_request:
   schedule:
     # 03:17 UTC daily. Not on the hour, because every scheduled job in the world is.
     - cron: '17 3 * * *'
@@ -22,17 +24,20 @@ on:
         default: '300'
         type: string
 
+# One group per pull request, so pull requests do not queue behind each other or cancel each
+# other: GitHub keeps only one pending run per group. A newer push supersedes a pull request's
+# run; the nightly run is never cancelled.
 concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
 
   chaos:
     runs-on: [ubuntu-latest]
     name: Seeded chaos run
-    # A 300-tick run is about 2 minutes of real processes; the ceiling is for a run that
-    # wedges rather than for one that is merely long.
+    # 300 ticks is about a minute of real processes and 3000 about eight to twelve; the ceiling is
+    # for a run that wedges rather than for one that is merely long.
     timeout-minutes: 30
     steps:
       - name: Check out source repository
@@ -51,7 +56,8 @@ jobs:
       - name: Run the chaos scenarios
         env:
           CHAOS_SEED: ${{ inputs.seed }}
-          CHAOS_TICKS: ${{ inputs.ticks || '300' }}
+          # A dispatch says how long; a pull request gets the short run; the nightly run the long one.
+          CHAOS_TICKS: ${{ inputs.ticks || (github.event_name == 'pull_request' && '300') || '3000' }}
         # -s so the seed is in the log of a run that passed as well as one that failed: the
         # seed of a run nobody can repeat is worth nothing, and a green run whose seed is
         # only in captured output is a run nobody can repeat.

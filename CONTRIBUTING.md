@@ -285,6 +285,29 @@ merging:
 
 Run all three locally before pushing (see "Local development" above) to avoid CI failures.
 
+### The chaos run
+
+`.github/workflows/chaos.yaml` drives several real control processes against stub endpoints under
+randomly injected faults - controls killed and stalled, the bridge and the database going away -
+and checks at the end that no device was left energised by a dead control, that nothing leaked and
+that the supervisor never stalled. It runs at two lengths:
+
+- **On every pull request, 300 ticks**, about a minute. It is not a required check, but a failure is
+  a real finding rather than noise: read it before merging.
+- **Nightly on `main`, 3000 ticks**, about ten minutes, because some interactions only turn up in a
+  long run.
+
+Every run prints its seed as `chaos seed: <n>`, whether it passed or failed. To repeat a run, use the
+same seed and tick count:
+
+```bash
+CHAOS_SEED=<n> CHAOS_TICKS=300 .venv/bin/pytest -m chaos -s
+```
+
+or run the workflow by hand from the Actions tab, giving it the seed. Once a failure is understood,
+add its seed to `SEEDS_THAT_FAILED` in `tests/harness/chaos.py`, which runs it with the ordinary suite
+from then on.
+
 Per repo convention, update `README.md`, the relevant file under `architecture/` and `AGENTS.md`
 alongside any behaviour change, before committing - see the "Checklist when adding a new data
 source" above for the common case, but the same applies to any change to CLI flags, settings
