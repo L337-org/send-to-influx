@@ -258,7 +258,10 @@ class TransitionLog:
             # Nothing has been commanded yet, which is the ordinary state of a control that
             # has never run. Not worth a line.
             return {"devices": {}, "pid": {}}
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
+            # RecursionError because deeply nested JSON raises it rather than a ValueError, and
+            # escaping here would stop the control starting and a safe state being applied, for
+            # the sake of a cache whose loss costs one early transition.
             logging.warning(
                 "Control %r could not read its transition log at %r, so every device may change "
                 "once sooner than its minimum asks: %r",
@@ -281,8 +284,9 @@ class TransitionLog:
             # and a control switching sooner than its document asks with nothing in the log to
             # say why is the failure this module exists to prevent. Once per load, not per key.
             logging.warning(
-                "Control %r ignored part of its transition log at %r (unknown keys: %s; sections that "
-                "are not mappings: %s), so a device may change once sooner than its minimum asks",
+                # Each list truncated, so a hand-edited file cannot put an unbounded line in the journal.
+                "Control %r ignored part of its transition log at %r (unknown keys: %.200s; sections "
+                "that are not mappings: %.200s), so a device may change once sooner than its minimum asks",
                 self.name,
                 self.path,
                 render_values(ignored),

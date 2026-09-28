@@ -167,6 +167,21 @@ class TestALogThatCannotBeRead:
         assert log.entries == {}
         assert "transition log" in caplog.text
 
+    def test_nesting_too_deep_to_parse_starts_empty_and_says_so(self, state_directory, caplog):
+        """Deep nesting raises RecursionError rather than a ValueError, and it escaped: the
+        control could not start, and a forced safe state raised before commanding anything.
+        Nested far enough to raise on every supported Python - the limit differs by version
+        and is higher again under pytest on 3.14."""
+        path = transition_path("conservatory", state_directory.settings_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        depth = 2_000_000
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write('{"devices": {"bad": ' + "[" * depth + "]" * depth + "}}")
+        log = TransitionLog("conservatory", state_directory.settings_file)
+        assert log.entries == {}
+        assert "could not read its transition log" in caplog.text
+        assert "RecursionError" in caplog.text, "the reason it could not be read was not said"
+
     def test_a_missing_one_is_not_a_fault(self, state_directory):
         """The ordinary state of a control that has never run."""
         assert TransitionLog("conservatory", state_directory.settings_file).entries == {}
@@ -876,6 +891,13 @@ class TestReadingTheFile:
         assert log.states() == {"heater": True}, f"a stray {key!r} changed the devices"
         assert log.elapsed("heater", 2000.0) == 1000.0, f"a stray {key!r} moved heater's moment"
         assert log.loop_state("fp", 10_000) is not None, f"a stray {key!r} lost the loop"
+
+    def test_the_warning_stays_one_readable_line_whatever_the_file_holds(self, state_directory, caplog):
+        """A hand-edited file could carry a key of any length, and all of it went into the log."""
+        with caplog.at_level(logging.WARNING):
+            self._stored(state_directory, {"devices": {}, "x" * 10_000: True})
+        (record,) = [record for record in caplog.records if "ignored part of" in record.getMessage()]
+        assert len(record.getMessage()) < 1000, "an unbounded key reached the log whole"
 
     def test_a_file_the_writer_produced_logs_nothing(self, state_directory, caplog):
         """The warning is for a damaged file, so an ordinary one must not raise it on every start."""
