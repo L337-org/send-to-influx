@@ -365,8 +365,8 @@ it, where the error can name the device.
 Worked examples
 ---------------
 
-Three complete documents, one per situation, and `get_control_schema` hands out all
-three. CI validates every one of them, so they are known to work rather than known to
+A complete document for each situation, and `get_control_schema` hands out all of
+them. CI validates every one of them, so they are known to work rather than known to
 have been checked once.
 
 **Copy one whole rather than taking values from several.** These are templates, not
