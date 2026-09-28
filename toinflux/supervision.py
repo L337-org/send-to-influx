@@ -106,6 +106,8 @@ class Child:
         restart_at (float or None): when it may next be started, or None when it is running.
         stall_seconds (float): how long this control may be silent before it is killed,
             derived from its own cycle window.
+        enabled (frozenset): the sources enabled in the settings as they read when this was
+            last started, which is what the process read for itself.
     """
 
     name: str
@@ -118,6 +120,7 @@ class Child:
     failures: int = 0
     restart_at: "float | None" = None
     stall_seconds: float = MINIMUM_STALL_SECONDS
+    enabled: frozenset = frozenset()
 
     @property
     def running(self):
@@ -300,7 +303,7 @@ class Supervisor:
     :meth:`poll` saw).
     """
 
-    def __init__(self, names, settings_file=None, argv_for=None, clock=time.monotonic, backoff=None, enabled=None):
+    def __init__(self, names, settings_file=None, argv_for=None, clock=time.monotonic, backoff=None, *, enabled):
         """Prepare to supervise a set of controls without starting them.
 
         Args:
@@ -311,8 +314,9 @@ class Supervisor:
             clock (callable): the monotonic clock, injectable so a backoff is a test rather
                 than a wait
             backoff (callable or None): failures -> seconds before a restart
-            enabled (frozenset or None): the sources the service started with enabled, from
-                ``general.enabled_sources``; read from the settings file now when None
+            enabled (frozenset): the sources the service started with enabled, from
+                ``general.enabled_sources``. Required, as it is for ``command_devices``,
+                because every caller has to decide it rather than inherit a file read here
 
         Raises:
             ConfigError: never for one unusable control - that one is logged and skipped -
@@ -322,7 +326,8 @@ class Supervisor:
         # The service's, fixed for as long as it runs, and used for nothing but making devices
         # safe. A restart that disables a source then still turns off what the stopping
         # service's controls had switched on; the service that comes up refuses the control.
-        self.enabled = enabled_sources(load_settings(settings_file)) if enabled is None else frozenset(enabled)
+        # Each child's own set is added to it at that point - see make_safe.
+        self.enabled = frozenset(enabled)
         self._clock = clock
         self._argv_for = argv_for or self._default_argv
         self._backoff = backoff or _default_backoff
@@ -433,12 +438,17 @@ class Supervisor:
             name (str): the control to start
 
         Raises:
-            ConfigError: where the process could not be started at all
+            ConfigError: where the process could not be started at all, including where the
+                settings it would read cannot be
         """
         child = self.children[name]
         # Before the spawn, because the child reads the same file for itself and the two
         # must agree from the first beat.
         self._refresh(child)
+        # What the child is about to read for itself. A source enabled since the service
+        # started is one a control saved now may use, and the service's own set would then
+        # refuse to make that control's devices safe after it dies.
+        child.enabled = enabled_sources(load_settings(self.settings_file))
         try:
             read_fd, write_fd = os.pipe()
         except OSError as exc:
@@ -924,6 +934,10 @@ class Supervisor:
         Args:
             name (str): the control whose devices to make safe
         """
+        child = self.children.get(name)
+        # Either set, because turning a device off is never the thing to refuse: the service's
+        # covers a source disabled since it started, the child's one enabled since.
+        enabled = self.enabled | (child.enabled if child is not None else frozenset())
         for document in self._documents_for(name):
             try:
                 commands = commands_for(document.get("safe_state", "unenergised"), document.get("devices") or {})
@@ -933,7 +947,7 @@ class Supervisor:
                 # No log passed, so one is opened for this control and closed again. The
                 # child owning the other one is already dead by the time this runs - that is
                 # what "make its devices safe" is for - so the two never write at once.
-                command_devices(name, document, commands, self.settings_file, forced=True, enabled=self.enabled)
+                command_devices(name, document, commands, self.settings_file, forced=True, enabled=enabled)
             except (ConfigError, SourceConnectionError) as exc:
                 # Logged rather than raised: the supervisor's job is to keep going, and a
                 # bridge that cannot be reached now is one the next restart will try again.

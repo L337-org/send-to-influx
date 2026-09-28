@@ -17,7 +17,7 @@ import threading
 import faulthandler
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
-from toinflux.general import enabled_sources, render_values
+from toinflux.general import enabled_sources, listed_sources, render_values
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.controls import control_dir, controls_enabled, list_controls, validate_stored_controls
@@ -656,10 +656,7 @@ def _requested_sources(settings, args):
     """
     if args.source:
         return [args.source.lower()]
-    configured = settings.get("sources")
-    if isinstance(configured, list):
-        return [src.lower() for src in configured if isinstance(src, str)]
-    return []
+    return listed_sources(settings)
 
 
 def _check_config_and_exit(settings, args):

@@ -196,9 +196,9 @@ def source_handler(source, enabled, settings_file=None, instance=None):  # noqa:
 
     **Every handler a control uses is built here, and never for a disabled source.** A source
     left out of ``sources:`` is switched off even where its section, credentials and all, is
-    still in the file. A disabled one is refused before anything is built, and the handler is
-    built from the settings with every disabled source's section removed, so no other route
-    to a handler can reach one either.
+    still in the file, and it is refused before anything is built. That this is the only place
+    a control builds one is held by a test rather than by convention - see
+    ``TestADisabledSourceIsNeverBuilt`` in the tests for this module.
 
     Args:
         source (str): the source to build a handler for
@@ -215,10 +215,8 @@ def source_handler(source, enabled, settings_file=None, instance=None):  # noqa:
     Raises:
         ConfigError: where the source is disabled, or is not a known one, from get_class
     """
-    # Refused here first so the message names the setting; the handler's own filtering is what
-    # makes it impossible rather than merely checked. The settings themselves are still read
-    # afresh by the handler, so a rotated credential reaches a running control - only which
-    # sources are enabled is fixed at start.
+    # The handler still reads its own section afresh, so a credential rotated in that section
+    # reaches a running control; only which sources are enabled is fixed at start.
     problem = disabled_source_problem(source, enabled)
     if problem:
         raise ConfigError(problem)
@@ -227,7 +225,7 @@ def source_handler(source, enabled, settings_file=None, instance=None):  # noqa:
     # transposing them here would drop settings_file into instance, which is the bug already
     # fixed once in this module: the handler reading a different settings document from the
     # caller, invisible until someone runs with -s.
-    handler = get_class(source, settings_file=settings_file, instance=instance, enabled=enabled)
+    handler = get_class(source, settings_file=settings_file, instance=instance)
     try:
         yield handler
     finally:

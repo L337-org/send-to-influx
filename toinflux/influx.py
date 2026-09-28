@@ -26,7 +26,7 @@ import urllib3
 import requests
 from dataclasses import dataclass
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToInfluxError, ToolParamError
-from toinflux.general import load_settings, render_external, without_disabled_sources
+from toinflux.general import load_settings, render_external
 
 
 class InfluxWriteError(ToInfluxError):
@@ -434,7 +434,7 @@ class DataHandler:
     # destination.
     _write_buffers: dict = {}
 
-    def __init__(self, source=None, settings_file=None, instance=None, enabled=None):
+    def __init__(self, source=None, settings_file=None, instance=None):
         """Build a handler for one source, and optionally one instance of it.
 
         Args:
@@ -442,18 +442,11 @@ class DataHandler:
             settings_file (str or None): Path to settings.yaml, or None for the default location.
             instance (str or None): Which instance of the source this serves, where a source can have
                 more than one - a Hue bridge host, say. None for a single-target source.
-            enabled (frozenset or None): the sources this handler may see, from
-                ``general.enabled_sources``. Every other source's section is removed from the
-                settings as they load, so a handler built for a disabled source finds no section
-                and raises. A control passes it; the collectors pass nothing and see every section.
 
         Raises:
-            ConfigError: ``source`` names no section in the loaded settings, including one
-                removed because it is not in ``enabled``
+            ConfigError: ``source`` names no section in the loaded settings
         """
         self.settings = load_settings(settings_file)
-        if enabled is not None:
-            self.settings = without_disabled_sources(self.settings, enabled)
         self.source = source
         # Which instance of the source this handler serves, for a source that can have
         # more than one target behind a single settings block (currently only Hue, whose

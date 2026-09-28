@@ -75,15 +75,14 @@ After each cycle `maybe_send_heartbeat()` writes a `collector_status,source=<nam
 
 - `load_settings(settings_file=None)` - raises `ConfigError` on missing or invalid YAML;
   defaults to `settings.yaml` in the project root.
-- `get_class(source, settings_file=None, instance=None, enabled=None)` - case-insensitive
-  factory returning a constructed handler, threading `settings_file` through to the handler's
-  own `load_settings()`. With `enabled`, the handler drops every other source's section as it
-  loads, so it cannot see a disabled one; the collectors pass nothing. `source_class()` returns
-  the class uninstantiated. Both raise `ConfigError` for an unknown source, including the
-  abstract `DataHandler` and `MyEnergi` bases.
-- `enabled_sources()`, `without_disabled_sources()` and `disabled_source_problem()` - what the
-  `sources:` list enables, the settings without the rest, and the message for a control that
-  names a disabled source. See "Control configuration" below.
+- `get_class(source, settings_file=None, instance=None)` - case-insensitive factory returning a
+  constructed handler, threading `settings_file` through to the handler's own `load_settings()`.
+  `source_class()` returns the class uninstantiated. Both raise `ConfigError` for an unknown
+  source, including the abstract `DataHandler` and `MyEnergi` bases.
+- `listed_sources()` - the one reading of the `sources:` list, used by the collectors
+  (`_requested_sources()`), the MCP tools (`configured_sources()`) and controls.
+  `enabled_sources()` is the same as a set, and `disabled_source_problem()` is the message for
+  a control that names a source not in it. See "Control configuration" below.
 - `flatten_dict()` - used by Speedtest to flatten nested JSON.
 - `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` -
   stderr logging plus an optional `RotatingFileHandler`. Raises `ConfigError` rather
@@ -279,27 +278,38 @@ live in `settings.yaml`, and that mode answers whether this installation would s
 ### A control never uses a disabled source
 
 A source left out of `sources:` is switched off for controls as for collection, whatever its
-section still holds. Three layers, each covering what the one before cannot:
+section still holds. Two layers, the second covering what the first cannot:
 
 1. **Validation refuses it.** `validate_control_sources()` reports a disabled source before
    judging its section, so the message names `sources:` rather than sending the operator to
    configure something they switched off. That covers `--check-config`, saving over MCP, the
    supervisor deciding what to start, and a control process starting.
 2. **`inputs.source_handler()` is the only way a control gets a handler**, and it refuses a
-   disabled source before building anything. `tests/test_inputs.py::TestADisabledSourceIsNeverBuilt::test_no_control_module_builds_a_handler_any_other_way`
-   fails any `get_class()` call, or build from `source_class()`, anywhere else in the control
-   modules.
-3. **The handler it builds cannot see a disabled section.** It is given `enabled` and drops
-   every other source's section as it loads, so a route that skipped the check above still
-   finds no section and raises.
+   disabled source before building anything - which is what stops a path that never went
+   through validation. `tests/test_inputs.py::TestADisabledSourceIsNeverBuilt::test_no_control_module_builds_a_handler_any_other_way`
+   holds that: across the control modules, worked out from what `control_process` and
+   `supervision` import, it fails any reference to `get_class()` or the MCP handler helpers,
+   any collector class or import from a collector's module, and any construction from
+   `source_class()`, outside `source_handler`. It catches the shapes found so far; it is not a
+   proof there are no others.
 
 **Which sources are enabled is decided once, at start, and kept until the process stops**:
-`ControlProcess.enabled` for a control, `Supervisor.enabled` for the service, both passed to
-every `command_devices()` call (a required keyword, so no caller can leave it out). Decided per
+`ControlProcess.enabled` for a control, `Supervisor.enabled` for the service. Decided per
 command instead, an edit disabling a source followed by a restart has the stopping process
 read the edited file and refuse its own safe state, leaving a heater on with nothing left to
-turn it off. The settings themselves are still read afresh by each handler, so a rotated
-credential reaches a running control without a restart.
+turn it off. `command_devices()` and `Supervisor` take it as a required keyword, so every
+caller decides it.
+
+**The supervisor makes a control safe with the union of two sets**: its own, and the one the
+child was started with (`Child.enabled`, read in `start()` just before the spawn). The first
+covers a source disabled since the service started. The second covers one enabled since - a
+control saved over MCP then starts on it without a restart, and the service's set alone would
+refuse to turn that control's devices off after it died.
+
+A handler still reads its own source's section afresh, so a credential rotated there reaches a
+running control. The control's InfluxDB settings do not: `ControlProcess` reads the settings
+once at start and queries through that copy, so a changed `influx` block needs the control
+restarted.
 
 ## The control rule language (`toinflux/rules.py`)
 

@@ -603,7 +603,7 @@ class TestTheFetchLockSerialisesLiveFetches:
             holder.wait(timeout=10)
 
 
-def _reading_handler(source, settings_file=None, instance=None, enabled=None):
+def _reading_handler(source, settings_file=None, instance=None):
     """A stand-in handler carrying only what a stored read asks of one.
 
     Every attribute the code reads is set explicitly, for the reason given on _handler: a
@@ -636,9 +636,9 @@ def _recording_handler(seen=None):
         callable: a get_class replacement
     """
 
-    def get_class(source, settings_file=None, instance=None, enabled=None):
+    def get_class(source, settings_file=None, instance=None):
         if seen is not None:
-            seen.update(source=source, settings_file=settings_file, instance=instance, enabled=enabled)
+            seen.update(source=source, settings_file=settings_file, instance=instance)
         return _reading_handler(source, settings_file, instance)
 
     return get_class
@@ -731,12 +731,7 @@ class TestStoredReading:
         monkeypatch.setattr("toinflux.inputs.run_query", lambda *a: [])
         monkeypatch.setattr("toinflux.inputs.single_series", lambda series: ([], []))
         stored_reading(None, SETTINGS, "hue", "temperature", "bridge1", "/etc/other.yaml")
-        assert seen == {
-            "source": "hue",
-            "settings_file": "/etc/other.yaml",
-            "instance": "bridge1",
-            "enabled": frozenset({"hue", "nuki", "carbonintensity"}),
-        }
+        assert seen == {"source": "hue", "settings_file": "/etc/other.yaml", "instance": "bridge1"}
 
 
 class TestReadInput:
@@ -1125,58 +1120,156 @@ class TestClosingAHandlerCannotMaskTheRealFailure:
         assert closed == [True]
 
 
-#: Every module that makes up the control subsystem, by name under ``toinflux/``.
-CONTROL_MODULES = (
-    "control_process",
-    "controller",
-    "controls",
-    "gating",
-    "inputs",
-    "schedule",
-    "staging",
-    "supervision",
-    "transitions",
-)
+#: Names that build a handler wherever they are reached: the factory and the MCP layer's two
+#: helpers over it. Referenced at all, rather than called in a particular shape, because
+#: `make = get_class` is as much a second door as `get_class(...)`.
+HANDLER_BUILDERS = frozenset({"get_class", "resolve_handler", "resolve_handlers"})
+
+#: The modules that hold nothing but the handler machinery itself, where building one is the
+#: point, so the search for control modules does not follow imports into them.
+FACTORY_MODULES = frozenset({"general", "influx", "exceptions", "process", "mcp_common"})
 
 
-def _handler_builds_outside_source_handler(text):
-    """Return the line of every handler built anywhere but inside ``source_handler``.
+def _handler_classes():
+    """Return every collector class's name and the module it lives in.
 
-    A build is a call to ``get_class``, however it is reached, or a call on the result of
-    ``source_class`` - which constructs the class it returns. Asking ``source_class`` about the
-    class, as the actuation check does, is not a build.
+    Returns:
+        tuple: (class names, module names), both frozensets
+    """
+    from toinflux.general import known_sources, source_class
+
+    classes = {source_class(name) for name in known_sources()}
+    names = {cls.__name__ for cls in classes} | {"DataHandler"}
+    modules = {cls.__module__.rsplit(".", 1)[-1] for cls in classes}
+    return frozenset(names), frozenset(modules)
+
+
+def _toinflux_imports(text):
+    """Return the ``toinflux`` modules a module imports, by short name.
 
     Args:
         text (str): a module's source
 
     Returns:
-        list: line numbers of the offending calls
+        set: module names under ``toinflux``
     """
+    found = set()
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("toinflux."):
+            found.add(node.module.split(".")[1])
+        elif isinstance(node, ast.Import):
+            found.update(alias.name.split(".")[1] for alias in node.names if alias.name.startswith("toinflux."))
+    return found
 
-    def called(func):
-        if isinstance(func, ast.Name):
-            return func.id
-        if isinstance(func, ast.Attribute):
-            return func.attr
-        return None
 
+def _control_modules():
+    """Return the control subsystem's modules, worked out rather than listed.
+
+    Everything the two processes that run controls import, followed through ``toinflux``, plus
+    every module that imports one of those - which is how the MCP layer's control tools come
+    in. Derived so that a module added to the subsystem is searched without anybody
+    remembering to add it here.
+
+    Returns:
+        dict: module name to its source text
+    """
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "toinflux")
+    texts = {}
+    for entry in sorted(os.listdir(root)):
+        if entry.endswith(".py") and entry != "__init__.py":
+            with open(os.path.join(root, entry), encoding="utf-8") as handle:
+                texts[entry[:-3]] = handle.read()
+    _names, collectors = _handler_classes()
+    excluded = FACTORY_MODULES | collectors
+    imports = {name: _toinflux_imports(text) & set(texts) for name, text in texts.items()}
+    found, pending = set(), ["control_process", "supervision"]
+    while pending:
+        name = pending.pop()
+        if name in found or name in excluded:
+            continue
+        found.add(name)
+        pending.extend(imports[name])
+    found |= {name for name, uses in imports.items() if uses & found and name not in excluded}
+    return {name: texts[name] for name in sorted(found)}
+
+
+def _handler_builds_outside_source_handler(text):
+    """Return the line of every way to a handler anywhere but inside ``source_handler``.
+
+    Four shapes, each found by review in a version that looked for fewer:
+
+    * any reference to a builder in ``HANDLER_BUILDERS``, called or not;
+    * any reference to a collector class, or an import from a collector's module;
+    * a call on the result of ``source_class``, which constructs the class it returns;
+    * a call on a name bound from ``source_class``, the same thing in two steps.
+
+    Asking ``source_class`` about the class - ``getattr(source_class(x), ...)``, or binding it
+    and reading attributes, as validation does - is not a build and is not reported.
+
+    Args:
+        text (str): a module's source
+
+    Returns:
+        list: line numbers of what was found
+    """
+    classes, collectors = _handler_classes()
     found = []
 
-    def visit(node, inside):
+    def visit(node, inside, bound):
         for child in ast.iter_child_nodes(node):
             here = inside or (
                 isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == "source_handler"
             )
-            if isinstance(child, ast.Call):
-                builds = called(child.func) == "get_class" or (
-                    isinstance(child.func, ast.Call) and called(child.func.func) == "source_class"
-                )
-                if builds and not here:
-                    found.append(child.lineno)
-            visit(child, here)
+            scope = set() if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) else bound
+            if isinstance(child, ast.Assign) and isinstance(child.value, ast.Call):
+                if _called(child.value.func) == "source_class":
+                    scope.update(target.id for target in child.targets if isinstance(target, ast.Name))
+            if not here and _is_a_way_to_a_handler(child, classes, collectors, scope):
+                found.append(child.lineno)
+            visit(child, here, scope)
 
-    visit(ast.parse(text), False)
+    visit(ast.parse(text), False, set())
     return found
+
+
+def _called(func):
+    """Return the name a call is made through, or None.
+
+    Args:
+        func (ast.expr): the call's function expression
+
+    Returns:
+        str or None: the bare or attribute name
+    """
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _is_a_way_to_a_handler(node, classes, collectors, bound):
+    """Whether one node is one of the shapes ``_handler_builds_outside_source_handler`` reports.
+
+    Args:
+        node (ast.AST): the node
+        classes (frozenset): collector class names
+        collectors (frozenset): collector module names
+        bound (set): names bound from ``source_class`` in the enclosing scope
+
+    Returns:
+        bool: True where it reaches a handler
+    """
+    name = node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else None
+    if name in HANDLER_BUILDERS or name in classes:
+        return True
+    if isinstance(node, ast.ImportFrom):
+        return (node.module or "").split(".")[-1] in collectors
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Call) and _called(node.func.func) == "source_class":
+            return True
+        return isinstance(node.func, ast.Name) and node.func.id in bound
+    return False
 
 
 class TestADisabledSourceIsNeverBuilt:
@@ -1206,44 +1299,36 @@ class TestADisabledSourceIsNeverBuilt:
         with pytest.raises(ConfigError, match="source 'hue' is disabled"):
             stored_reading(None, {**SETTINGS, "sources": ["nuki"]}, "hue", "temperature")
 
-    def test_a_handler_given_the_enabled_list_cannot_see_a_disabled_section(self, installation):
-        """The structural half: whatever route reached the factory, a handler built with the
-        list finds no section for a disabled source, and raises for its own."""
-        from toinflux.general import get_class as real
-
-        with pytest.raises(ConfigError, match="Source hue not found in settings"):
-            real("hue", settings_file=installation.settings_file, enabled=frozenset({"openmeteo"}))
-        handler = real("hue", settings_file=installation.settings_file, enabled=frozenset({"hue"}))
-        try:
-            assert "hue" in handler.settings and "influx" in handler.settings
-            assert "openmeteo" not in handler.settings and "carbonintensity" not in handler.settings
-        finally:
-            handler.session.close()
-
     def test_no_control_module_builds_a_handler_any_other_way(self):
         """The guard that keeps ``source_handler`` the only door. A handler built anywhere
-        else in the control subsystem skips the refusal and the filtering both, which is how
-        the disabled source was reached in the first place."""
-        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "toinflux")
-        offenders = {}
-        for module in CONTROL_MODULES:
-            with open(os.path.join(root, f"{module}.py"), encoding="utf-8") as handle:
-                lines = _handler_builds_outside_source_handler(handle.read())
-            if lines:
-                offenders[module] = lines
-        assert not offenders, f"handlers built outside inputs.source_handler: {offenders}"
+        else in the control subsystem skips the refusal, which is how the disabled source was
+        reached in the first place."""
+        modules = _control_modules()
+        # A search that found nothing to search reads exactly like a clean tree.
+        expected = {"control_process", "supervision", "inputs", "controls", "gating", "mcp_controls"}
+        assert expected <= set(modules), f"module discovery is broken: found {sorted(modules)}"
+        offenders = {
+            name: lines for name, text in modules.items() if (lines := _handler_builds_outside_source_handler(text))
+        }
+        assert not offenders, f"handlers reachable outside inputs.source_handler: {offenders}"
 
     @pytest.mark.parametrize(
         "text",
         [
             "get_class('hue')",
             "general.get_class('hue')",
-            "def f():\n    return toinflux.general.get_class('hue', enabled=None)\n",
+            "def f():\n    return toinflux.general.get_class('hue')\n",
+            "make = get_class\nmake('hue')",
+            "resolve_handler('hue', settings, None)",
             "source_class('hue')('hue')",
+            "def f(source):\n    cls = source_class(source)\n    return cls(source)\n",
+            "Hue('hue')",
+            "from toinflux.philipshue import Hue",
         ],
     )
-    def test_the_guard_sees_every_way_to_build_one(self, text):
-        """A guard with a known bypass reads as enforcement and provides none."""
+    def test_the_guard_sees_each_shape_review_has_found(self, text):
+        """A guard with a known bypass reads as enforcement and provides none. These are the
+        shapes found so far; the guard is not a proof that there are no others."""
         assert _handler_builds_outside_source_handler(text), f"not detected: {text!r}"
 
     def test_the_guard_does_not_fire_where_it_should_not(self):
@@ -1252,5 +1337,6 @@ class TestADisabledSourceIsNeverBuilt:
         allowed = (
             "def source_handler(source, enabled):\n    return get_class(source)\n"
             "getattr(source_class('hue'), 'MCP_ACTUATES_DEVICES', False)\n"
+            "def check(source):\n    handler = source_class(source)\n    return handler.MCP_ACTUATES_DEVICES\n"
         )
         assert _handler_builds_outside_source_handler(allowed) == []

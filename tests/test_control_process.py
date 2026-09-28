@@ -1343,3 +1343,15 @@ class TestADisabledSource:
         control.guard.stop("the control is stopping")
         assert sorted(command.name for command in bridge.commanded()) == ["far", "near"]
         assert not any(bridge.energised()[device] for device in ("far", "near"))
+
+    def test_a_credential_rotated_in_the_source_s_section_reaches_a_running_control(
+        self, control, state_directory, bridge
+    ):
+        """Only which sources are enabled is fixed at start. A bridge user replaced in the
+        settings must reach the next command, or rotating one would silently cut a running
+        control off from its devices until somebody restarted it."""
+        bridge.user = "rotated-user"
+        state_directory.set_settings("hue", user="rotated-user")
+        bridge.clear()
+        control.guard.stop("the control is stopping")
+        assert sorted(command.name for command in bridge.commanded()) == ["far", "near"]

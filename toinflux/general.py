@@ -299,7 +299,7 @@ def flatten_dict(data, parent_key="", sep="_"):
     return flattened
 
 
-def get_class(source, settings_file=None, instance=None, enabled=None):
+def get_class(source, settings_file=None, instance=None):
     """Construct and return a DataHandler for the given data source name.
 
     Returns an *instance*, not the class - ``source_class()`` is the one that returns the
@@ -322,8 +322,6 @@ def get_class(source, settings_file=None, instance=None, enabled=None):
             means the source's single target, or the first configured bridge or device, which
             is what keeps single-target installs and the MCP tools behaving exactly as they did
             before instances existed.
-        enabled (frozenset or None): the sources the handler may see, or None for every one;
-            see ``DataHandler.__init__``
 
     Returns:
         DataHandler: a constructed handler for the source
@@ -331,7 +329,7 @@ def get_class(source, settings_file=None, instance=None, enabled=None):
     Raises:
         ConfigError: the name is not a known source
     """
-    return source_class(source)(source.lower(), settings_file=settings_file, instance=instance, enabled=enabled)
+    return source_class(source)(source.lower(), settings_file=settings_file, instance=instance)
 
 
 def source_class(source):
@@ -438,12 +436,34 @@ def known_sources():
     return sorted(name.lower() for name in _source_classes())
 
 
+def listed_sources(settings):
+    """Return the ``sources:`` list as lowercased names, in the order written.
+
+    The one reading of that setting. The collectors run what it names, the MCP tools expose
+    it and a control may use only what it enables, and three readings of it had been written
+    that each lowercased, dropped a non-string entry and treated a non-list as empty - which is
+    three chances to disagree.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        list: lowercased source names; empty where the list is absent or not a list, which
+        validation reports separately
+    """
+    raw = settings.get("sources")
+    if not isinstance(raw, list):
+        return []
+    return [source.lower() for source in raw if isinstance(source, str)]
+
+
 def enabled_sources(settings):
-    """Return the sources the ``sources:`` list enables, lowercased.
+    """Return the sources the ``sources:`` list enables, for deciding what a control may use.
 
     Leaving a source out of that list is how an operator switches it off, and a section left
-    in place for it - credentials and all - is not a request to use it. The collectors decide
-    what runs from the same list, so a control deciding from this cannot disagree with them.
+    in place for it - credentials and all - is not a request to use it. The collectors normally
+    run the same list; ``--source`` overrides it for collection only, and a control still
+    decides from the list.
 
     Args:
         settings (dict): the parsed settings document
@@ -451,29 +471,7 @@ def enabled_sources(settings):
     Returns:
         frozenset: lowercased source names; empty where the list is absent or not a list
     """
-    raw = settings.get("sources")
-    if not isinstance(raw, list):
-        return frozenset()
-    return frozenset(source.lower() for source in raw if isinstance(source, str))
-
-
-def without_disabled_sources(settings, enabled):
-    """Return a copy of the settings with every disabled source's section removed.
-
-    What a control builds its handlers from, so that using a disabled source is impossible
-    rather than merely checked for: a handler built from this raises for a missing section
-    whatever route reached it. Sections that are not sources - ``influx``, ``controls``,
-    ``mqtt`` - are kept, because a handler needs them.
-
-    Args:
-        settings (dict): the parsed settings document
-        enabled (frozenset): the lowercased source names to keep, from :func:`enabled_sources`
-
-    Returns:
-        dict: a shallow copy without the disabled sources' sections
-    """
-    disabled = set(known_sources()) - set(enabled)
-    return {key: value for key, value in settings.items() if key not in disabled}
+    return frozenset(listed_sources(settings))
 
 
 def disabled_source_problem(source, enabled):
