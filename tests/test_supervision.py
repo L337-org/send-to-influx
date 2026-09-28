@@ -12,6 +12,7 @@ __license__ = "MIT"
 import dataclasses
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -279,6 +280,77 @@ class TestWhenOneDies:
             event = _wait_for(supervisor, "stalled", "conservatory")
         assert "no heartbeat" in event.detail
         _wait_for(supervisor, "started", "conservatory")
+
+    def test_one_that_ignores_the_stop_signal_is_killed_and_still_made_safe(self, supervisor, bridge, monkeypatch):
+        """Shutdown asks politely first and must not rely on the answer.
+
+        A stopped process cannot act on SIGTERM, so `stop_all` waits out its grace, kills it,
+        and then makes its devices safe itself - the child's own guard never ran.
+        """
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        # Kept here because `stop_all` releases the child, which clears its process.
+        process = supervisor.children["conservatory"].process
+        bridge.lights[bridge.id_of("far")]["state"]["on"] = True
+        monkeypatch.setattr("toinflux.supervision.KILL_GRACE_SECONDS", 0.5)
+        with faults.stopped(process):
+            supervisor.stop_all()
+        assert process.returncode == -signal.SIGKILL, "it was not killed, so this proves nothing"
+        assert bridge.energised()["far"] is False, "a control killed at shutdown left its heater on"
+
+
+class TestLettingGoOfAControlThatIsNotRunning:
+    """A control can be disabled or deleted while it has no process: it died and its restart
+    is waiting out a backoff. There is nothing to stop, so the supervisor makes its devices
+    safe itself - and nothing tested that it does, because every disable and delete test acted
+    on a control that was running."""
+
+    @staticmethod
+    def _dead_and_waiting(supervisor, bridge, monkeypatch):
+        """Leave the conservatory control dead, with its restart refused, and its heater on.
+
+        Args:
+            supervisor (Supervisor): the supervisor over the two controls
+            bridge (StubBridge): the stub bridge
+            monkeypatch: to refuse the restart
+
+        Returns:
+            Child: the control, not running
+        """
+        supervisor.start_all()
+        _wait_for(supervisor, "beat", "conservatory")
+        monkeypatch.setattr(supervisor, "start", _refuse_to_spawn)
+        supervisor.children["conservatory"].process.kill()
+        _wait_for(supervisor, "died", "conservatory")
+        child = supervisor.children["conservatory"]
+        assert not child.running, "the control is still running, so this proves nothing"
+        # On again after the parent made it safe for the death - somebody switched it back on
+        # by hand, say - so the only thing that can turn it off now is the path under test.
+        bridge.lights[bridge.id_of("far")]["state"]["on"] = True
+        bridge.clear()
+        return child
+
+    def test_disabling_it_still_makes_its_devices_safe(self, supervisor, state_directory, bridge, monkeypatch):
+        self._dead_and_waiting(supervisor, bridge, monkeypatch)
+        state_directory.write_control(
+            _quick("conservatory", {"far": {"source": "hue", "device": "far"}}, enabled=False)
+        )
+        supervisor.request_reload("conservatory")
+        _wait_for(supervisor, "disabled", "conservatory")
+        assert "conservatory" not in supervisor.children
+        assert bridge.energised()["far"] is False, "a disabled control in backoff kept its heater on"
+        assert "far" in [command.name for command in bridge.commanded()]
+
+    def test_deleting_it_still_makes_its_devices_safe(self, supervisor, state_directory, bridge, monkeypatch):
+        """Deleted, so the stored document is gone too and only the copy the process was
+        started with says which devices it owned."""
+        self._dead_and_waiting(supervisor, bridge, monkeypatch)
+        os.remove(os.path.join(state_directory.state_dir, "controls", "conservatory.yaml"))
+        supervisor.request_reload("conservatory")
+        _wait_for(supervisor, "dropped", "conservatory")
+        assert "conservatory" not in supervisor.children
+        assert bridge.energised()["far"] is False, "a deleted control in backoff kept its heater on"
+        assert "far" in [command.name for command in bridge.commanded()]
 
 
 class TestADocumentThatChanged:

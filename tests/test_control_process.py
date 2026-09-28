@@ -120,6 +120,30 @@ class TestWhenItShouldNotBeActing:
         assert decision.edge == "closed"
         assert bridge.energised() == {"far": False, "near": False}
 
+    def test_entering_the_window_releases_the_loop_and_acts(self, control, bridge, caplog):
+        """The other edge, which nothing drove through the process: the gate's decision was
+        tested, and so was the controller's resume, but not that one leads to the other. A
+        control held outside its window that stayed held at the opening would return the same
+        demand whatever the room did, all night.
+
+        Asked twice, because the second opening follows a close rather than a start-up, and
+        those reach the held state by different routes.
+        """
+        control.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        assert control.controller.pid.auto_mode is False, "a control starting outside its window should be held"
+        for opening in ("first", "second"):
+            bridge.clear()
+            with caplog.at_level(logging.INFO):
+                decision = control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            assert decision.edge == "opened", f"the {opening} opening was not an edge"
+            assert decision.actuating is True
+            assert control.controller.pid.auto_mode is True, f"the {opening} opening left the loop held"
+            assert "Control 'conservatory' resumed" in caplog.text, f"the {opening} opening was not logged"
+            assert any(bridge.energised().values()), f"a cold room got no heat at the {opening} opening"
+            caplog.clear()
+            assert control.cycle(dt=60, moment=DAY, sleep=_never_sleep).edge == "closed"
+            assert control.controller.pid.auto_mode is False, "the close did not hold the loop"
+
 
 class TestAFailedCycleIsNotAFailedControl:
     def test_a_stale_reading_fails_safe_and_the_control_carries_on(self, control, bridge, influx):

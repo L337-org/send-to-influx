@@ -295,7 +295,7 @@ class TransitionLog:
         """Return a stored document's two sections, reading nothing else.
 
         Args:
-            stored (object): whatever was parsed out of the file
+            stored (dict): the parsed file, already known to be a mapping
 
         Returns:
             dict: ``{"devices": mapping, "pid": mapping}``, either possibly empty
@@ -312,9 +312,7 @@ class TransitionLog:
         # What is left has one property to check: damage is confined to where it happens. A
         # section that is not a mapping is empty and costs only itself. Within a section,
         # `_usable_entries` judges each device's entry on its own, and `loop_state` judges the
-        # loop's memory.
-        if not isinstance(stored, dict):
-            return {"devices": {}, "pid": {}}
+        # loop's memory. `_load` has already refused a file that is not a mapping at all.
         devices, loop = (stored.get(key) for key in SECTIONS)
         return {
             "devices": devices if isinstance(devices, dict) else {},

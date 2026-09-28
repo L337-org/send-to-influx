@@ -200,6 +200,60 @@ class TestTheFileItself:
     def test_forgetting_one_that_never_ran_is_not_a_fault(self, state_directory):
         forget_control("conservatory", state_directory.settings_file)
 
+    def test_a_write_that_fails_is_said_and_not_raised(self, state_directory, caplog, monkeypatch):
+        """The devices have already been commanded by the time the note is filed, so a full disk
+        or a read-only directory must cost the note and not the control - loudly, with the
+        previous file left intact and no temporary file left behind."""
+        log, now = _log(state_directory)
+        log.record({"heater": True})
+
+        def refuse(*_args, **_kwargs):
+            raise OSError(28, "No space left on device")
+
+        now[0] += 60
+        # A context rather than `undo()`, which would also undo the state directory fixture.
+        with monkeypatch.context() as patch, caplog.at_level(logging.WARNING):
+            patch.setattr("toinflux.transitions.os.replace", refuse)
+            log.record({"heater": False})
+        assert "could not write its transition log" in caplog.text
+        assert "No space left on device" in caplog.text, "the reason the write failed was not said"
+        assert log.states() == {"heater": False}, "the control lost track of what it had just commanded"
+        assert sorted(os.listdir(os.path.dirname(log.path))) == ["conservatory.json"], "a temporary file was left"
+        assert _log(state_directory)[0].states() == {"heater": True}, "the previous file was damaged"
+
+    def test_an_interrupted_write_cleans_up_and_is_not_swallowed(self, state_directory, monkeypatch):
+        """Only an OSError is tolerated. An interrupt or a MemoryError mid-write belongs to the
+        caller, and the temporary file it leaves is still this method's to remove."""
+        log, now = _log(state_directory)
+        log.record({"heater": True})
+
+        def interrupt(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        now[0] += 60
+        with monkeypatch.context() as patch, pytest.raises(KeyboardInterrupt):
+            patch.setattr("toinflux.transitions.json.dump", interrupt)
+            log.record({"heater": False})
+        assert sorted(os.listdir(os.path.dirname(log.path))) == ["conservatory.json"], "a temporary file was left"
+        assert _log(state_directory)[0].states() == {"heater": True}, "the previous file was damaged"
+
+    @pytest.mark.parametrize("name", ["conservatory", "../elsewhere"], ids=["unlink-refused", "name-refused"])
+    def test_a_log_that_cannot_be_removed_is_said_and_not_raised(self, state_directory, caplog, monkeypatch, name):
+        """The control is already deleted, so a log left behind is worth a warning and not worth
+        failing the delete over - whether the file would not go or the name could not be used."""
+        log, _now = _log(state_directory)
+        log.record({"heater": True})
+
+        def refuse(*_args, **_kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        with monkeypatch.context() as patch, caplog.at_level(logging.WARNING):
+            patch.setattr("toinflux.transitions.os.unlink", refuse)
+            forget_control(name, state_directory.settings_file)
+        assert f"Could not remove the transition log for deleted control {name!r}" in caplog.text
+        expected = "Permission denied" if name == "conservatory" else "ConfigError"
+        assert expected in caplog.text, "the reason it could not be removed was not said"
+
 
 class TestTheLadderAFrozenDeviceLeaves:
     LADDER = build_ladder(
