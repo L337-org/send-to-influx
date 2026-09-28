@@ -211,7 +211,7 @@ CONTROL_EXAMPLE = {
 }
 
 
-#: Three complete documents, one per situation, handed out together by the schema tool.
+#: A complete document for each situation, handed out together by the schema tool.
 #:
 #: **Separate documents rather than one annotated with alternatives.** An example is copied,
 #: not read: an agent writing a control took this example's `min_transition_seconds: 300` at
