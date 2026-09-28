@@ -694,10 +694,16 @@ def _check_config_and_exit(settings, args):
     # forgets a device would otherwise be discovered by the control process at the
     # moment it was meant to start actuating a heater.
     try:
-        validate_stored_controls(args.settings, settings)
+        control_notes = validate_stored_controls(args.settings, settings)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         sys.exit(1)
+    for note in control_notes:
+        # A warning rather than an error: the control runs, and for a slow plant against a
+        # slow input this may be exactly what its operator meant. Said here because
+        # --check-config is where somebody looks before concluding that a loop which
+        # oscillates needs less gain.
+        print(f"Warning: {note}", file=sys.stderr)
     # A config that validates cleanly but configures nothing to collect isn't "OK" -
     # it's the same "nothing to collect" state _exit_if_nothing_to_collect() stops a
     # real run for, so --check-config must not report success on it either.

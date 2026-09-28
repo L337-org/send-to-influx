@@ -4,10 +4,10 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
-import logging
 import requests
 from toinflux.influx import DataHandler
 from toinflux.exceptions import SourceConnectionError
+from toinflux.general import render_external
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -100,8 +100,9 @@ class OpenMeteo(DataHandler):
             )
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            logging.error("Error connecting to Open-Meteo - %s", e)
-            raise SourceConnectionError(str(e)) from e
+            # Raised, not logged as well: every caller reports a failed read itself, and at
+            # the level its own situation deserves. See the note in philipshue.py.
+            raise SourceConnectionError(render_external(e)) from e
 
         current = response.json().get("current", {})
         self.data = {k: current[k] for k in fields if k in current}

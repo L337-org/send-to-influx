@@ -35,7 +35,8 @@ isn't covered here, look in `architecture/`.
 │   ├── gating.py           # whether a control may act this cycle (enabled/period/enable_when), DeviceGuard
 │   ├── schedule.py         # the active period in the control's own zone, across daylight saving
 │   ├── staging.py          # the stage ladder and time-proportioning between adjacent rungs
-│   ├── transitions.py      # when each device last moved, so min_transition_seconds survives a restart
+│   ├── transitions.py      # when each device last moved and what the loop had learned, so
+│   │                       # min_transition_seconds and the PID integral survive a restart
 │   ├── inputs.py           # reading a control's inputs: InfluxDB first, live fetch past max_age
 │   ├── credentials.py      # systemd-creds substitution into loaded settings
 │   ├── credential_cli.py   # send-to-influx-set-credential

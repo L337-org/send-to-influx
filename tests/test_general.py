@@ -1,6 +1,7 @@
 """Unit tests for toinflux.general (load_settings, get_class)."""
 
 import logging
+from logging.handlers import RotatingFileHandler
 import io
 import os
 import tempfile
@@ -20,6 +21,7 @@ from toinflux.general import (
     mcp_block_errors,
     mcp_enabled,
     parse_mcp_bind_address,
+    render_external,
     render_values,
     validate_settings,
 )
@@ -1225,6 +1227,69 @@ class TestControlsBlockValidation:
         validate_settings(sample_settings)
 
 
+class TestRenderingSomethingExternal:
+    """The readable form where it is safe, the quoted form where it is not.
+
+    Quoting everything costs readability in the common case, and quoting nothing leaves the
+    injection: a raised message is the only report of a failure once its duplicate log is
+    gone, and the text inside it was chosen by a library, a bridge or a parser.
+    """
+
+    def test_an_ordinary_message_is_left_readable(self):
+        """`repr` on an OSError gives "FileNotFoundError(2, 'No such file...')", which is not
+        what somebody at a terminal wants to read."""
+        assert render_external(OSError(2, "No such file or directory")) == "[Errno 2] No such file or directory"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "bad\nERROR forged entry",
+            "carriage\rreturn",
+            "unicode\u2028separator",
+            "next\u0085line",
+            "vertical\x0btab",
+        ],
+        ids=["newline", "carriage-return", "line-separator", "next-line", "vertical-tab"],
+    )
+    def test_anything_that_could_break_a_line_is_quoted(self, text):
+        """Every one of these is a break to `splitlines`, which is what makes them able to
+        forge an entry in a log or a paragraph in a model's context."""
+        rendered = render_external(ValueError(text))
+        assert "\n" not in rendered and "\r" not in rendered
+        assert rendered.startswith("ValueError("), rendered
+
+    def test_the_detail_survives_being_quoted(self):
+        """Made safe rather than thrown away: the text is still there to read."""
+        assert "forged" in render_external(ValueError("bad\nforged"))
+
+
+class TestWhoStampsTheTimestamp:
+    """Under systemd the journal stamps every line, and an rsyslog rule copying it to a file
+    stamps it again, so ours was the second timestamp on an already long line."""
+
+    def test_under_systemd_the_stderr_handler_leaves_the_timestamp_to_the_journal(self, tmp_path, monkeypatch):
+        """The journal and the rsyslog rule copying it to a file both stamp every line, so
+        ours was the second timestamp on an already long one.  The file handler keeps its
+        own, because nothing else is stamping that."""
+        monkeypatch.setenv("JOURNAL_STREAM", "8:123456")
+        configure_logging(logfile=str(tmp_path / "out.log"))
+        installed = [h for h in logging.getLogger().handlers if getattr(h, "_send_to_influx_handler", False)]
+        streams = [h for h in installed if not isinstance(h, RotatingFileHandler)]
+        files = [h for h in installed if isinstance(h, RotatingFileHandler)]
+        assert streams and files, [type(h).__name__ for h in installed]
+        assert all("asctime" not in h.formatter._fmt for h in streams), [h.formatter._fmt for h in streams]
+        assert all("asctime" in h.formatter._fmt for h in files), [h.formatter._fmt for h in files]
+
+    def test_run_by_hand_the_timestamp_stays(self, monkeypatch):
+        """Deliberately not a tty check: output redirected to a file from a shell has nothing
+        else stamping it, and is exactly the case a tty check would strip it from."""
+        monkeypatch.delenv("JOURNAL_STREAM", raising=False)
+        configure_logging()
+        installed = [h for h in logging.getLogger().handlers if getattr(h, "_send_to_influx_handler", False)]
+        assert installed
+        assert all("asctime" in h.formatter._fmt for h in installed), [h.formatter._fmt for h in installed]
+
+
 class TestRepeatingProblem:
     """A fault that does not clear repeats every cycle for as long as the service runs, and
     the identical line each time says nothing after the first."""
@@ -1275,6 +1340,58 @@ class TestRepeatingProblem:
             problem.report("cycle", logging.ERROR, "it broke")
         assert [record.levelno for record in caplog.records] == [logging.ERROR, logging.ERROR]
         assert "still" in caplog.records[1].getMessage()
+
+    def test_an_identity_decides_what_counts_as_the_same_problem(self, caplog):
+        """A message carrying something that moves on its own - a reading's age, the address
+        in an exception's repr - renders differently every time, so nothing is ever a repeat
+        and the throttle is defeated while every test still passes."""
+        problem, now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            for age in (31, 71, 111):
+                problem.report("cycle", logging.ERROR, "the reading is %ss old", age, identity="stale")
+                now[0] += 1
+        levels = [record.levelno for record in caplog.records]
+        assert levels == [logging.ERROR, logging.DEBUG, logging.DEBUG], levels
+        assert "111s old" in caplog.records[-1].getMessage(), "the throttled repeat lost the detail"
+
+    def test_a_number_that_is_the_reason_is_still_news(self, caplog):
+        """The correction to the correction. Keying on the exception's type collapsed every
+        failure of a kind into one; normalising every digit then collapsed an HTTP 404 into an
+        HTTP 500. A duration and an address are reliably not reasons - a status code is, and
+        it is not followed by a unit, which is what keeps them apart."""
+        problem, _now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            problem.report("cycle", logging.ERROR, "the API answered %s", 404)
+            problem.report("cycle", logging.ERROR, "the API answered %s", 500)
+        assert [record.levelno for record in caplog.records] == [logging.ERROR, logging.ERROR]
+
+    def test_a_duration_counting_up_is_the_same_fault(self, caplog):
+        problem, now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            for age in (31, 71, 111):
+                problem.report("cycle", logging.ERROR, "the reading is %ss old", age)
+                now[0] += 1
+        levels = [record.levelno for record in caplog.records]
+        assert levels == [logging.ERROR, logging.DEBUG, logging.DEBUG], levels
+        assert "111s old" in caplog.records[-1].getMessage(), "the throttled repeat lost the detail"
+
+    def test_an_address_that_moves_is_the_same_fault(self, caplog):
+        """A fresh connection object supplies a new one on every attempt."""
+        problem, now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            for address in ("0x7fcf376ae710", "0x7fcf376aee90"):
+                problem.report("cycle", logging.WARNING, "conn at %s timed out", address)
+                now[0] += 1
+        assert [record.levelno for record in caplog.records] == [logging.WARNING, logging.DEBUG]
+
+    def test_an_identity_that_changes_is_still_news(self, caplog):
+        """The default behaviour has to survive being made explicit, or a fault that turned
+        into a different fault would be hidden by the thing that stops it repeating."""
+        problem, _now = self._reporter()
+        with caplog.at_level(logging.DEBUG):
+            problem.report("cycle", logging.ERROR, "the reading is 31s old", identity="stale")
+            problem.report("cycle", logging.ERROR, "the bridge is unreachable", identity="unreachable")
+        assert [record.levelno for record in caplog.records] == [logging.ERROR, logging.ERROR]
 
     def test_two_problems_do_not_hide_each_other(self, caplog):
         problem, _now = self._reporter()

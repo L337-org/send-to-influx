@@ -2800,3 +2800,69 @@ class TestControlsStoredButSwitchedOff:
                 assert sendtoinflux._start_control_supervisor({}, args) is None
         assert not warned.called
         assert not listed.called, "the store was read on a path that does nothing"
+
+
+class TestCheckConfigWarnsAboutStaleFeedback:
+    """The printing, not the rule. The rule has its own tests in tests/test_controls.py, and
+    it can be entirely correct while nothing puts it in front of anybody - which is what a
+    mutation run found here, against a test named for --check-config that never called it.
+    """
+
+    @staticmethod
+    def _stored(tmp_path, max_age):
+        """Write one control whose feedback outlives its cycle by the given amount.
+
+        Args:
+            tmp_path (pathlib.Path): the state directory
+            max_age (float): the PID input's max_age
+
+        Returns:
+            dict: settings for the stubbed loader
+        """
+        from tests.test_controls import a_valid_control
+        from toinflux.controls import save_control
+
+        document = a_valid_control()
+        document["output"]["cycle_seconds"] = 60
+        document["inputs"][document["pid"]["input"]]["max_age"] = max_age
+        save_control("conservatory", document)
+        return {
+            "sources": ["hue"],
+            "hue": {"db": "hue_db", "interval": 300},
+            "openmeteo": {"db": "weather", "interval": 900},
+            "carbonintensity": {"db": "grid", "interval": 1800},
+        }
+
+    def _run(self, tmp_path, monkeypatch, capsys, max_age):
+        """Run --check-config over that control and return what it printed.
+
+        Args:
+            tmp_path (pathlib.Path): the state directory
+            monkeypatch (pytest.MonkeyPatch): to point the state directory
+            capsys (pytest.CaptureFixture): to read stderr
+            max_age (float): the PID input's max_age
+
+        Returns:
+            str: everything written to stderr
+        """
+        monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+        settings = self._stored(tmp_path, max_age)
+        with (
+            patch("sendtoinflux.signal.signal"),
+            patch("sendtoinflux.toinflux.load_settings", return_value=settings),
+            patch("sendtoinflux.toinflux.validate_settings"),
+            patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
+        ):
+            with pytest.raises(SystemExit) as exit_code:
+                sendtoinflux.main()
+        assert exit_code.value.code == 0, "a warning must not fail the check"
+        return capsys.readouterr().err
+
+    def test_it_reaches_stderr(self, tmp_path, monkeypatch, capsys):
+        printed = self._run(tmp_path, monkeypatch, capsys, 900)
+        assert "Warning:" in printed
+        assert "conservatory" in printed and "max_age" in printed
+
+    def test_and_says_nothing_when_the_feedback_keeps_up(self, tmp_path, monkeypatch, capsys):
+        printed = self._run(tmp_path, monkeypatch, capsys, 60)
+        assert "Warning:" not in printed

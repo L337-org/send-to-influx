@@ -30,6 +30,23 @@ timestamp: `self.timestamp` when `get_data()` set one - Octopus uses the reading
 `interval_start`, so re-writing a reading overwrites rather than duplicates - otherwise the time
 `send_data()` is called. Field keys are escaped per line protocol rules (commas, `=`, spaces).
 
+## A handler reports a failure by raising, and only by raising
+
+Do not log a failure and then raise it. Every caller reports it already, and at the level its own
+situation deserves: the worker loop warns and backs off, a control's input read warns and falls
+back to its stored value, an MCP tool hands the message to the client. A handler that also logged
+put an ERROR in front of each of those, saying the same words at a severity none of them agreed
+with - during a five-minute Hue outage one control produced four ERRORs a cycle, half of them from
+the handler. Where the log line said something the exception did not - which light a write was
+rejected for, whether a malformed body came back from a read or a write - that detail belongs in
+the exception message, which is now the only report.
+
+`tests/test_repo_hygiene.py::test_no_handler_logs_a_failure_and_then_raises_it` fails CI on a log
+call followed by a `raise` in the same block. `general.py` is the one exemption, recorded beside
+the allow-list: `load_settings` and `validate_settings` run before `configure_logging`, and
+`main()` catches their `ConfigError` with a bare `sys.exit(1)`, so the log line there is the only
+account a misconfigured service gives of why it stopped.
+
 ## The write buffer
 
 A failed write buffers the point in memory rather than dropping it, and still raises
@@ -151,7 +168,7 @@ rewriting the value would change the series identity of an install already runni
 The token sits in the URL path, and `requests` puts the request URL into its exception messages -
 both `Max retries exceeded with url: /api/<token>` and
 `503 Server Error ... for url: https://host/api/<token>/...`, confirmed by reproduction. So pass
-every Hue error through `Hue._redact()` before logging *or* raising it. Without it one unreachable
+every Hue error through `Hue._redact()` before raising it. Without it one unreachable
 bridge wrote the token to the journal and `/var/log/send-to-influx.log` via the worker loop's
 `Source '%s' failed` line, and handed it to any connected MCP client, since a
 `SourceConnectionError` from a tool is returned to the caller.

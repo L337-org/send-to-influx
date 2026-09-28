@@ -1,4 +1,11 @@
-"""When each of a control's devices last changed state, and what that forbids now.
+"""What a control had done when it last ran: its devices, and its loop's own memory.
+
+Named for the transitions because that is the bulk of it and the part with a rule attached.
+The PID's integral lives in the same file for the same reason the device states do - it is
+what this control knew, it is worthless to anybody else, and it must not outlive the document
+that produced it.
+
+
 
 ``min_transition_seconds`` is a promise to the hardware: do not switch this more often
 than that. It used to be kept only *inside* a cycle window, because the planner is a pure
@@ -34,6 +41,7 @@ __license__ = "MIT"
 import contextlib
 import json
 import logging
+import math
 import os
 import stat
 import tempfile
@@ -41,7 +49,7 @@ import time
 
 from toinflux.controls import require_valid_control_name
 from toinflux.exceptions import ConfigError
-from toinflux.general import resolve_state_dir
+from toinflux.general import render_values, resolve_state_dir
 
 #: Where the logs live. Beside the control documents rather than among them: ``list_controls``
 #: filters by suffix so a stray file there would be ignored, but a directory holding one kind
@@ -62,6 +70,104 @@ TRANSITION_DIR_NAME = "transitions"
 #:
 #: So the error is now always in the safe direction and is bounded by one window, which is by
 #: definition shorter than the minimum wherever this code decides anything at all.
+
+
+def usable_number(value):
+    """Whether a stored number is one this module can actually use.
+
+    **Finite, and not a bool.** `isinstance(x, (int, float))` admits both, and a hand-edited
+    or interrupted file can hold either. Asked of a moment and of the loop's integral, because
+    the failure is the same shape for both: a value that arithmetic accepts and then means
+    nothing. An infinite `at` makes `now - at` negative for ever,
+    which the backwards-clock clamp reads as "no time has passed" - so the device looks as
+    though it has just moved, on every cycle, and its transition minimum freezes it
+    permanently. A nan does the same by a different route, because every comparison against
+    it is False. `True` is simply the epoch's second, which is merely wrong.
+
+    Args:
+        value (object): whatever the file held
+
+    Returns:
+        bool: True where it can be used as a moment
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        # An arbitrarily large JSON integer - `10**1000` is a legal literal, and this file is
+        # one somebody can edit. `isfinite` and `float` both raise on it rather than answering,
+        # so the guard that exists to keep a corrupt cache recoverable would itself have been
+        # the thing that stopped the control starting.
+        return False
+
+
+def _usable_identity(value):
+    """Return a stored identity in the shape it was written, or None where it is not.
+
+    What `controls.device_identity` produces is a tuple of ``(key, value)`` pairs of strings,
+    which JSON returns as a list of two-element lists. Anything else is a file somebody has
+    edited or a write that was interrupted, and the readers downstream assume the shape: one
+    of them builds a `dict` out of it.
+
+    Args:
+        value (object): whatever the file held
+
+    Returns:
+        tuple or None: the identity as a tuple of pairs, or None where it is unusable
+    """
+    if value is None or not isinstance(value, (list, tuple)):
+        return None
+    pairs = []
+    for item in value:
+        # A string is excluded explicitly: `dict(["ab"])` is `{"a": "b"}`, so a two-character
+        # string passes a length check and turns a corrupt file into a plausible identity.
+        if isinstance(item, str) or not isinstance(item, (list, tuple)) or len(item) != 2:
+            return None
+        key, held = item
+        if not isinstance(key, str) or not isinstance(held, str):
+            return None
+        pairs.append((key, held))
+    return tuple(pairs)
+
+
+#: The file's only two top-level keys, and all the reader looks at. See `TransitionLog._sections`.
+SECTIONS = ("devices", "pid")
+
+
+def _usable_entries(devices):
+    """Return only the device entries that carry a moment, which is what makes them useful.
+
+    Applied here rather than inside the read, because the read now hands back both sections
+    and only this half has a shape worth insisting on.
+
+    Args:
+        devices (dict): the stored device section
+
+    Returns:
+        dict: device name to its entry, dropping anything malformed
+    """
+    usable = {}
+    for device, entry in devices.items():
+        if not (isinstance(device, str) and isinstance(entry, dict) and usable_number(entry.get("at"))):
+            continue
+        identity = _usable_identity(entry.get("for"))
+        if identity != entry.get("for"):
+            # **Normalised, not discarded.** A corrupt identity reached `dict()` in
+            # `get_control_state` and raised there, and one shaped `["ab"]` was worse still:
+            # `dict(["ab"])` is `{"a": "b"}`, so a hand-edited file became a plausible-looking
+            # identity rather than an obvious fault. This file is a cache, and an unreadable
+            # one should cost a transition sooner than asked, never a control that will not
+            # run or a scale that is quietly wrong.
+            #
+            # The entry keeps its moment, so the device is still held for its minimum, and
+            # loses only the identity it cannot prove - which makes `_hold` decline to reuse
+            # the value, so the device gets a fresh command. Dropping the whole entry would
+            # have thrown the moment away too and switched a device sooner than its document
+            # promised, which is the one direction this module says to err away from.
+            entry = {**entry, "for": identity}
+        usable[device] = entry
+    return usable
 
 
 def transition_dir(settings_file=None):
@@ -115,10 +221,21 @@ class TransitionLog:
         self.settings_file = settings_file
         self._clock = clock
         self.path = transition_path(name, settings_file)
-        self.entries = self._read()
+        # **One open, both halves from the same parse.** They used to be read separately, and
+        # `_read_loop` claimed in its own docstring that they could not disagree about which
+        # version of the file they came from - which the code did not provide. The control
+        # replaces this file atomically every cycle, so a reader landing between the two opens
+        # could pair one generation's device entries with another's loop state.
+        sections = self._load()
+        self.entries = _usable_entries(sections["devices"])
+        self._pid = sections["pid"]
 
-    def _read(self):
-        """Return the stored entries, or an empty mapping.
+    def _load(self):
+        """Return both stored sections, from a single read of the file.
+
+        One open rather than two, so the device entries and the loop state cannot come from
+        different generations of a file the control rewrites every cycle.
+
 
         A log that cannot be read is not a reason to refuse to run: it is a cache of when
         things happened, and the worst an empty one costs is one transition sooner than the
@@ -128,16 +245,23 @@ class TransitionLog:
         than its document says and nobody knows why.
 
         Returns:
-            dict: device name to its last state and moment
+            dict: ``{"devices": mapping, "pid": mapping}``, either possibly empty
         """
         try:
             with open(self.path, encoding="utf-8") as handle:
+                # Parsed raw and checked here, before it is split into sections: the splitter
+                # answers "which half is which" and turns anything unusable into two empty
+                # ones, so a file holding a list would otherwise read as simply having nothing
+                # in it rather than as the broken file it is.
                 stored = json.load(handle)
         except FileNotFoundError:
             # Nothing has been commanded yet, which is the ordinary state of a control that
             # has never run. Not worth a line.
-            return {}
-        except (OSError, ValueError) as exc:
+            return {"devices": {}, "pid": {}}
+        except (OSError, ValueError, RecursionError) as exc:
+            # RecursionError because deeply nested JSON raises it rather than a ValueError, and
+            # escaping here would stop the control starting and a safe state being applied, for
+            # the sake of a cache whose loss costs one early transition.
             logging.warning(
                 "Control %r could not read its transition log at %r, so every device may change "
                 "once sooner than its minimum asks: %r",
@@ -145,27 +269,181 @@ class TransitionLog:
                 self.path,
                 exc,
             )
-            return {}
+            return {"devices": {}, "pid": {}}
         if not isinstance(stored, dict):
             logging.warning(
                 "Control %r found a transition log at %r that is not a mapping, so it is being ignored",
                 self.name,
                 self.path,
             )
-            return {}
+            return {"devices": {}, "pid": {}}
+        ignored = [key for key in stored if key not in SECTIONS]
+        unreadable = [key for key in SECTIONS if key in stored and not isinstance(stored[key], dict)]
+        if ignored or unreadable:
+            # Said, because what is dropped here is a device's minimum or the loop's integral,
+            # and a control switching sooner than its document asks with nothing in the log to
+            # say why is the failure this module exists to prevent. Once per load, not per key.
+            logging.warning(
+                # Each list truncated, so a hand-edited file cannot put an unbounded line in the journal.
+                "Control %r ignored part of its transition log at %r (unknown keys: %.200s; sections "
+                "that are not mappings: %.200s), so a device may change once sooner than its minimum asks",
+                self.name,
+                self.path,
+                render_values(ignored),
+                render_values(unreadable),
+            )
+        return self._sections(stored)
+
+    @staticmethod
+    def _sections(stored):
+        """Return a stored document's two sections, reading nothing else.
+
+        Args:
+            stored (dict): the parsed file, already known to be a mapping
+
+        Returns:
+            dict: ``{"devices": mapping, "pid": mapping}``, either possibly empty
+        """
+        # **Each section is read from its own key, and no value decides how another is read.**
+        # The writer emits exactly these two keys. Anything else at the top of the file - a
+        # hand edit, or the flat shape an unreleased build wrote before the sections existed -
+        # is ignored rather than guessed at. Earlier versions tried to read that flat shape
+        # too, and every one could be fooled by corrupting one value, because a flat log may
+        # name its devices `devices` and `pid` and so only a value's contents could tell the
+        # two shapes apart. Nothing released ever wrote the flat shape, so dropping it costs at
+        # most one early transition on a machine that ran the unreleased build.
+        #
+        # What is left has one property to check: damage is confined to where it happens. A
+        # section that is not a mapping is empty and costs only itself. Within a section,
+        # `_usable_entries` judges each device's entry on its own, and `loop_state` judges the
+        # loop's memory. `_load` has already refused a file that is not a mapping at all.
+        devices, loop = (stored.get(key) for key in SECTIONS)
         return {
-            device: entry
-            for device, entry in stored.items()
-            if isinstance(device, str) and isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))
+            "devices": devices if isinstance(devices, dict) else {},
+            "pid": loop if isinstance(loop, dict) else {},
         }
+
+    @property
+    def loop(self):
+        """Return the loop's stored memory as written, without judging it.
+
+        :meth:`loop_state` answers "may this be resumed from", which is the question the
+        control asks. This answers "what is written down", which is the question somebody
+        diagnosing it asks - including when the answer is that it no longer matches the
+        document, because that is the finding rather than a reason to withhold it.
+
+        Returns:
+            dict: the stored state, empty where there is none
+        """
+        return dict(self._pid)
+
+    def loop_state(self, fingerprint, max_age, now=None):
+        """Return the PID state worth resuming from, or None to start afresh.
+
+        **Two guards, both erring towards starting afresh**, because the failure they prevent
+        is a control commanding output on the strength of something that is no longer true,
+        and the cost of being wrong the other way is only the settling time it already has
+        today.
+
+        The fingerprint is the stricter of the two. An integral is in the output's units, so
+        it means one thing under one set of gains and ladder and something else under
+        another - and the commonest restart there is happens to be the one that changes them,
+        because the supervisor restarts a control whenever its document is edited.
+
+        Age covers the rest: a process that has been down long enough for the room to move on
+        should look at the room rather than at what it remembered.
+
+        Args:
+            fingerprint (str): what the current document's tuning and ladder hash to
+            max_age (float): how old the state may be and still describe the present
+            now (float or None): epoch seconds; read from the clock when None
+
+        Returns:
+            dict or None: the state to resume from, or None
+        """
+        state = self._pid
+        if not state or state.get("fingerprint") != fingerprint:
+            return None
+        at = state.get("at")
+        if not usable_number(at):
+            return None
+        if not usable_number(state.get("integral")):
+            # **The integral, here rather than only at the far end.** `resume_from` refuses a
+            # value it cannot use, but a state returned from this reader is a state the caller
+            # announces it has resumed - so a nan left the control logging that it had put back
+            # a memory it had in fact discarded, `true` came back as an integral of 1.0, and a
+            # string broke the log line's own formatting. The device half of this file already
+            # refuses what it cannot use; this half now does the same.
+            return None
+        moment = self._clock() if now is None else now
+        # Clamped like every other age here: a wall clock that stepped backwards must not
+        # make a stale state look fresh.
+        if not 0 <= float(moment) - float(at) <= float(max_age):
+            return None
+        return state
+
+    def loop_age(self, now=None):
+        """Return how long ago the loop state was written, or None where there is none.
+
+        Separate from :meth:`loop_state` because the controller needs the age in seconds and
+        must not read the timestamp itself: this log is written with epoch time so that it
+        survives a restart, while a hold is measured with a monotonic clock so that it is not
+        confused by one. Handing over the elapsed seconds is the only safe traffic between
+        the two.
+
+        Args:
+            now (float or None): epoch seconds; read from the clock when None
+
+        Returns:
+            float or None: seconds since it was written, never negative, or None
+        """
+        at = (self._pid or {}).get("at")
+        if not usable_number(at):
+            return None
+        # Clamped, matching `elapsed`: a clock that moved backwards makes a negative age,
+        # which would otherwise read as state from the future.
+        return max(0.0, float(self._clock() if now is None else now) - float(at))
+
+    def record_loop(self, state, fingerprint, now=None) -> None:
+        """Note the loop's own memory, so a restart does not rebuild it from nothing.
+
+        Args:
+            state (dict): what the controller wants back, already plain numbers
+            fingerprint (str): what the current document's tuning and ladder hash to
+            now (float or None): epoch seconds; read from the clock when None
+        """
+        self._pid = {
+            **state,
+            "fingerprint": fingerprint,
+            "at": float(self._clock() if now is None else now),
+        }
+        self._write()
 
     def states(self):
         """Return what each device was last commanded to.
 
+        The value as commanded, not coerced to a boolean: a switched device holds true or
+        false and a driven one holds a number, and flattening the second into the first would
+        make a lamp at 40% indistinguishable from the same lamp at 5%.
+
         Returns:
             dict: device name to the state it was last set to
         """
-        return {device: bool(entry.get("state")) for device, entry in self.entries.items()}
+        return {device: entry.get("state") for device, entry in self.entries.items()}
+
+    def identities(self):
+        """Return what each device's recorded state is meaningful against.
+
+        None where the entry has no identity or one that could not be read; `frozen` treats
+        both as a record it cannot vouch for.
+
+        No production code calls this; it remains as a read accessor for tests and for anything
+        wanting the recorded identities without the surrounding judgement.
+
+        Returns:
+            dict: device name to its identity, or None where there is none to be had
+        """
+        return {device: entry.get("for") for device, entry in self.entries.items()}
 
     def elapsed(self, device, now=None):
         """Return how long since a device last changed, or None where it never has.
@@ -207,7 +485,7 @@ class TransitionLog:
         """
         return bool((self.entries.get(device) or {}).get("forced"))
 
-    def frozen(self, min_transition_for, devices, now=None):
+    def frozen(self, min_transition_for, devices, now=None, identities=None):
         """Return the devices that may not change state yet.
 
         A device is free once its minimum has actually elapsed, and not a moment before.
@@ -219,6 +497,9 @@ class TransitionLog:
             min_transition_for (callable): device name -> its minimum in seconds
             devices (iterable): the control's device names
             now (float or None): epoch seconds; read from the clock when None
+            identities (dict or None): device name to what it is now, from
+                `controls.device_identity`. A device whose record was written against
+                something else is not held, because the state being protected is not its own
 
         Returns:
             frozenset: the device names that must keep the state they are in
@@ -226,6 +507,21 @@ class TransitionLog:
         moment = self._clock() if now is None else now
         held = set()
         for device in devices:
+            entry = self.entries.get(device) or {}
+            if identities is not None and entry.get("for") != identities.get(device):
+                # **The record is not provably about this device.** A control key is a name in
+                # a document and what it points at can be changed underneath it, so a state
+                # written against the old target says nothing about the new one - not for a
+                # driven device, whose value would be pinned, and not for a switched one,
+                # whose recorded state decides which rungs `reachable_ladder` leaves standing.
+                # Asked here because this is the one place both kinds pass through.
+                #
+                # The writer always records an identity, so a missing one and one that
+                # `_usable_entries` could not read (and replaced with None) are both a damaged
+                # record, and are treated alike: the device is not held, and `_hold` never sees
+                # it, so it is not pinned to a value on a scale nobody can vouch for. That costs
+                # at most one transition sooner than the minimum asks, on a damaged file.
+                continue
             elapsed = self.elapsed(device, moment)
             if elapsed is None:
                 # Never commanded, so there is nothing it is too soon after.
@@ -238,7 +534,7 @@ class TransitionLog:
                 held.add(device)
         return frozenset(held)
 
-    def record(self, commands, now=None, forced=False) -> None:
+    def record(self, commands, now=None, forced=False, identities=None) -> None:
         """Note the devices whose state this command actually changes.
 
         Only the ones that change: commanding a heater off when it is already off is not a
@@ -251,12 +547,21 @@ class TransitionLog:
             now (float or None): epoch seconds; read from the clock when None
             forced (bool): True where this is a safe state rather than a control decision,
                 which the minimum governs in neither direction - see :meth:`released`
+            identities (dict or None): device name to what its state is meaningful against,
+                from `controls.device_identity`. Kept with the state because a number means
+                nothing on its own: 40 is a percentage or a colour temperature, and it belongs
+                to one bulb on one bridge rather than to the name that happened to point there
         """
+        identities = identities or {}
         moment = float(self._clock() if now is None else now)
         changed = False
         for device, state in commands.items():
             entry = self.entries.get(device)
-            if entry is not None and bool(entry.get("state")) == bool(state):
+            # Compared as commanded rather than as booleans, so a dimmer moving from 40% to
+            # 5% is a move. Under the old comparison both were true and nothing was timed,
+            # which would have made `min_transition_seconds` mean nothing at all for the one
+            # kind of device whose whole job is to change by degrees.
+            if entry is not None and entry.get("state") == state and entry.get("for") == identities.get(device):
                 # No move, so nothing to time. The mark still has to go when an ordinary
                 # command confirms a state a safe state put the device in, or the exemption
                 # would outlive the safe state that earned it.
@@ -264,7 +569,7 @@ class TransitionLog:
                     del entry["forced"]
                     changed = True
                 continue
-            self.entries[device] = {"state": bool(state), "at": moment}
+            self.entries[device] = {"state": state, "at": moment, "for": identities.get(device)}
             if forced:
                 self.entries[device]["forced"] = True
             changed = True
@@ -294,7 +599,7 @@ class TransitionLog:
             )
             try:
                 with handle:
-                    json.dump(self.entries, handle)
+                    json.dump({"devices": self.entries, "pid": self._pid}, handle)
                 os.chmod(handle.name, stat.S_IRUSR | stat.S_IWUSR)
                 os.replace(handle.name, self.path)
             except BaseException:

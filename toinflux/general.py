@@ -10,6 +10,7 @@ import ipaddress
 import logging
 import math
 import os
+import re
 import stat
 import sys
 import time
@@ -112,6 +113,16 @@ def configure_logging(
         ConfigError: the logfile path cannot be opened for writing
     """
     fmt = IndentedFormatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    # systemd sets JOURNAL_STREAM for a unit whose stdout and stderr go to the journal, and
+    # both the journal and an rsyslog rule copying it to a file stamp every line themselves.
+    # Emitting ours as well put two timestamps on each line of an already long one:
+    #
+    #   Sep 25 15:53:57 galahad send-to-influx[2309344]: 2026-09-25 15:53:57 ERROR    ...
+    #
+    # Deliberately not a tty check, which would get the common case backwards: output
+    # redirected to a file by hand has nothing else stamping it, and is exactly where the
+    # timestamp must stay. A file handler below always keeps it, for the same reason.
+    stderr_fmt = IndentedFormatter("%(levelname)-8s %(message)s") if os.environ.get("JOURNAL_STREAM") else fmt
     root = logging.getLogger()
 
     resolved_level = getattr(logging, str(loglevel).upper(), None)
@@ -136,7 +147,7 @@ def configure_logging(
     # neither), and the rsyslog rule matches on programname rather than stream, so
     # journalctl and /var/log/send-to-influx.log are unaffected.
     stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setFormatter(fmt)
+    stderr_handler.setFormatter(stderr_fmt)
     stderr_handler._send_to_influx_handler = True
     root.addHandler(stderr_handler)
 
@@ -152,6 +163,39 @@ def configure_logging(
         file_handler.setFormatter(fmt)
         file_handler._send_to_influx_handler = True
         root.addHandler(file_handler)
+
+
+#: Anything that could end a line or start a new one: the C0 and C1 control ranges, and the
+#: Unicode separators. `splitlines` treats every one of these as a break, which is what makes
+#: them able to forge an entry in a log or a second paragraph in a model's context.
+_CONTROL_TEXT = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def render_external(value):
+    """Render something that came from outside this program, safely but readably.
+
+    **The readable form where it is safe, the quoted form where it is not.** An exception from
+    a library, a bridge or a parser is the most useful thing a message can carry, and
+    `str(exc)` is how a person wants to read it: "[Errno 2] No such file or directory" rather
+    than "FileNotFoundError(2, 'No such file or directory')". But that text is chosen by
+    something other than us, and one newline in it puts a line of its choosing into whatever
+    the caller logs - or a paragraph of its choosing into a model's context, where the message
+    reaches an MCP client.
+
+    Quoting everything costs readability in the common case; quoting nothing leaves the
+    injection. Deciding per value costs neither: the plain text where it is a single clean
+    line, and `repr` the moment it holds anything that could break one.
+
+    This is the sibling of :func:`render_values`, which does the same job for a collection.
+
+    Args:
+        value (object): the external value, usually an exception
+
+    Returns:
+        str: the value as it should appear inside a message
+    """
+    text = str(value)
+    return text if not _CONTROL_TEXT.search(text) else repr(value)
 
 
 def render_values(values, separator=", ", empty="none"):
@@ -1465,7 +1509,36 @@ def load_settings(settings_file=None):
         raise ConfigError(f"{settings_path} not found") from None
     except yaml.YAMLError as e:
         logging.critical("Error in %s - %s", settings_path, e)
-        raise ConfigError(f"Error in {settings_path} - {e}") from e
+        raise ConfigError(f"Error in {settings_path} - {render_external(e)}") from e
+
+
+#: The two things in a failure message that move while the failure does not: an object's
+#: address in its repr, which a fresh connection object supplies anew on every attempt, and a
+#: duration, which counts up for as long as the fault lasts. Each was enough on its own to
+#: defeat the throttle entirely.
+_MOVING = re.compile(r"0x[0-9a-fA-F]+|\b\d+(?:\.\d+)?s\b")
+
+
+def without_moving_detail(rendered):
+    """Return a message with the parts that change on their own flattened.
+
+    **Addresses and durations, and nothing else.** Two earlier attempts were both too broad.
+    Using the exception's type collapsed every `RuleEvaluationError` for one control into a
+    single problem. Normalising every digit then collapsed an HTTP 404 into an HTTP 500, and
+    two different numeric rule failures into each other - breaking the same promise from the
+    other direction, because there the number *is* the reason.
+
+    A duration and an address are the two that are reliably not reasons: "31s old" becoming
+    "71s old" is one fault reported twice, while 404 becoming 500 is two faults. A status code
+    is not followed by a unit, which is what keeps them apart.
+
+    Args:
+        rendered (str): the message as it will be logged
+
+    Returns:
+        str: the same message with addresses and durations replaced
+    """
+    return _MOVING.sub(lambda m: "0x#" if m.group().startswith("0x") else "#s", rendered)
 
 
 class RepeatingProblem:
@@ -1500,7 +1573,7 @@ class RepeatingProblem:
         self._clock = clock
         self._seen: dict = {}
 
-    def report(self, key, level, message, *args) -> None:
+    def report(self, key, level, message, *args, identity=None) -> None:
         """Log a problem, at ``level`` the first time and at DEBUG while it is unchanged.
 
         Args:
@@ -1508,22 +1581,36 @@ class RepeatingProblem:
             level (int): the level to use for a new or changed problem
             message (str): a %-style format string
             *args: its arguments, which also decide whether the problem has changed
+            identity (object or None): what counts as *the same problem*, where the rendered
+                message is not a fair test of that. The full message is still logged; only
+                the comparison changes
         """
-        # The rendered message is the identity, so a failure whose *reason* changes is
-        # reported again at full level: "unreachable" becoming "authentication failed" is
-        # news, and a key alone would have swallowed it.
+        # The rendered message is the identity by default, so a failure whose *reason*
+        # changes is reported again at full level: "unreachable" becoming "authentication
+        # failed" is news, and a key alone would have swallowed it.
+        #
+        # **It is a fair test only where nothing in the message moves on its own**, and a
+        # caller that interpolates an exception or a measurement usually breaks that without
+        # meaning to. Two did: a staleness message carries the reading's age, which grows by
+        # a cycle every cycle, and a urllib3 error's repr carries the object's address, which
+        # is different on every attempt. Each rendered a string no previous one could equal,
+        # so nothing was ever a repeat and a five-minute Hue outage logged an ERROR every
+        # thirty seconds - the exact flood this class exists to stop, defeated silently and
+        # with every test still passing. Those callers pass an identity naming the fault
+        # rather than the numbers describing it.
         rendered = message % args if args else message
+        same = without_moving_detail(rendered) if identity is None else identity
         now = self._clock()
         seen = self._seen.get(key)
-        if seen is not None and seen[0] == rendered and now - seen[1] < self._repeat_after:
-            self._seen[key] = (rendered, seen[1], seen[2] + 1)
+        if seen is not None and seen[0] == same and now - seen[1] < self._repeat_after:
+            self._seen[key] = (same, seen[1], seen[2] + 1)
             logging.debug("%s (still, %s times)", rendered, seen[2] + 1)
             return
-        if seen is not None and seen[0] == rendered:
+        if seen is not None and seen[0] == same:
             logging.log(level, "%s (still, after %s more)", rendered, seen[2])
         else:
             logging.log(level, "%s", rendered)
-        self._seen[key] = (rendered, now, 1)
+        self._seen[key] = (same, now, 1)
 
     def cleared(self, key, message, *args) -> None:
         """Note that a problem has stopped, where one was being reported.

@@ -207,6 +207,8 @@ class TestHueSetLight:
             handler.mcp_set_device_state("2", on=False)
         # Equality, not substring: pins that the token is gone *and* that the rest
         # of the message (status text, host, path) survives for diagnosis.
+        # Through `render_external`, which leaves a single clean line readable. The token is
+        # still gone, which is what this test is for.
         assert str(excinfo.value) == (
             "503 Server Error: Service Unavailable for url: https://hue.local/api/<redacted>/lights/2/state"
         )

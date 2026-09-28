@@ -256,3 +256,77 @@ class TestValuesThatCannotBeOrdered:
         from toinflux.rules import parse_rule
 
         assert parse_rule("1e400").evaluate({}) == float("inf")
+
+
+class TestADeviceSetToAValueRatherThanSwitched:
+    """A dimmer has a middle setting, which is the whole reason it does not need one made out
+    of time. Time-proportioning it would be flicker rather than control.
+
+    So the ladder is a transfer curve for these devices: they take the value it describes *at*
+    the demand and hold it for the whole window, while a switched device beside them is
+    proportioned between two rungs exactly as before. One control can hold both, each driven
+    by the method its own hardware supports, off the same demand.
+    """
+
+    LAMP = build_ladder([{"level": 0, "set": {"lamp": 0}}, {"level": 1000, "set": {"lamp": 100}}])
+    MIXED = build_ladder(
+        [
+            {"level": 0, "set": {"lamp": 0, "heater": False}},
+            {"level": 1000, "set": {"lamp": 100, "heater": True}},
+        ]
+    )
+    DRIVEN = {"lamp": "brightness_pct"}
+
+    @pytest.mark.parametrize(
+        "demand, expected",
+        [
+            pytest.param(0, 0.0, id="at-the-bottom"),
+            pytest.param(250, 25.0, id="quarter"),
+            pytest.param(500, 50.0, id="half"),
+            pytest.param(1000, 100.0, id="at-the-top"),
+            pytest.param(1500, 100.0, id="beyond-the-top-is-clamped"),
+            pytest.param(-50, 0.0, id="below-the-bottom-is-clamped"),
+        ],
+    )
+    def test_it_takes_the_ladders_value_at_the_demand(self, demand, expected):
+        plan = plan_window(self.LAMP, demand, 30, lambda _device: 1, self.DRIVEN)
+        assert [dwell.stage.states["lamp"] for dwell in plan] == [expected]
+
+    def test_a_window_with_nothing_else_in_it_is_not_split(self):
+        """Both rungs would command the same value, so splitting issues one command twice,
+        logs it twice, and buys nothing."""
+        plan = plan_window(self.LAMP, 250, 30, lambda _device: 1, self.DRIVEN)
+        assert len(plan) == 1
+        assert plan[0].seconds == 30
+
+    def test_a_switched_device_beside_it_is_still_proportioned(self):
+        plan = plan_window(self.MIXED, 200, 30, lambda _device: 1, self.DRIVEN)
+        assert [dwell.stage.states["heater"] for dwell in plan] == [False, True]
+        assert [dwell.seconds for dwell in plan] == [24.0, 6.0]
+
+    def test_and_the_driven_one_holds_one_value_across_both_dwells(self):
+        plan = plan_window(self.MIXED, 200, 30, lambda _device: 1, self.DRIVEN)
+        assert {dwell.stage.states["lamp"] for dwell in plan} == {20.0}
+
+    def test_a_driven_device_does_not_constrain_how_the_window_is_split(self):
+        """Its value is the same in both dwells, so nothing about it changes when the window
+        is split - and letting its minimum bind here would stop a switched device beside it
+        from proportioning for no reason."""
+        long_for_the_lamp = plan_window(self.MIXED, 200, 30, lambda device: 300 if device == "lamp" else 1, self.DRIVEN)
+        assert len(long_for_the_lamp) == 2, "the lamp's minimum collapsed a window it has no say in"
+
+    def test_a_switched_devices_minimum_still_binds(self):
+        collapsed = plan_window(self.MIXED, 200, 30, lambda device: 300 if device == "heater" else 1, self.DRIVEN)
+        assert len(collapsed) == 1
+
+    def test_with_nothing_driven_the_plan_is_exactly_as_it_was(self):
+        assert plan_window(self.MIXED, 200, 30, lambda _device: 1, {}) == plan_window(
+            self.MIXED, 200, 30, lambda _device: 1
+        )
+
+    def test_a_rung_that_omits_the_device_is_left_to_the_validator(self):
+        """Guessing a value here would command a lamp off the strength of a document already
+        known to be wrong."""
+        broken = build_ladder([{"level": 0, "set": {}}, {"level": 1000, "set": {"lamp": 100}}])
+        plan = plan_window(broken, 500, 30, lambda _device: 1, self.DRIVEN)
+        assert "lamp" not in plan[0].stage.states or plan[0].stage.states.get("lamp") is None

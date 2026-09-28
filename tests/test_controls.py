@@ -4,12 +4,16 @@ import copy
 import os
 import stat as stat_module
 import pytest
+import pathlib
+import re
+
 import yaml
 from toinflux.controls import (
     actuators_may_be_one,
     shared_actuator_problems,
     BUILT_IN_SAFE_STATES,
     CONTROL_EXAMPLE,
+    control_warnings,
     CONTROL_EXAMPLES,
     control_dir,
     control_path,
@@ -252,6 +256,68 @@ class TestStructuralValidation:
         document = a_valid_control() | {"safe_state": "off"}
         errors = validate_control("conservatory", document)
         assert any(all(state in error for state in BUILT_IN_SAFE_STATES) for error in errors)
+
+    @staticmethod
+    def _driven_by(parameter, top):
+        """Return a valid control whose one device is driven by a parameter.
+
+        Args:
+            parameter (str): the device parameter, e.g. "brightness_pct"
+            top (float): the value the top rung sets it to
+
+        Returns:
+            dict: a control document
+        """
+        document = a_valid_control()
+        document["devices"] = {"lamp": {"source": "hue", "device": "Office Lamp", "parameter": parameter}}
+        document["output"] = document["output"] | {
+            "stages": [{"level": 0, "set": {"lamp": 0}}, {"level": 1000, "set": {"lamp": top}}]
+        }
+        return document
+
+    def test_energised_is_refused_where_the_parameter_has_no_full_scale(self):
+        """`energised` means full scale and only a percentage has one: 100 kelvin is not a
+        bright light, it is a nonsense.
+
+        The runtime knew that and refused at startup; validation accepted the document and
+        every MCP tool saved it, so the first sign was a control that would not run.
+        """
+        document = self._driven_by("color_temp_k", 6500) | {"safe_state": "energised"}
+        errors = validate_control("conservatory", document)
+        assert any("color_temp_k" in error and "lamp" in error for error in errors), errors
+
+    def test_energised_is_fine_where_the_parameter_is_a_percentage(self):
+        """The other half, or the check above could be refusing every driven device."""
+        document = self._driven_by("brightness_pct", 100) | {"safe_state": "energised"}
+        assert validate_control("conservatory", document) == []
+
+    def test_the_same_holds_for_an_end_state(self):
+        """Two settings, one rule, and only one of them was being checked."""
+        document = self._driven_by("color_temp_k", 6500)
+        document["active_period"] = {"from": "23:35", "to": "05:25", "end_state": "energised"}
+        errors = validate_control("conservatory", document)
+        assert any("color_temp_k" in error for error in errors), errors
+
+    def test_a_percentage_past_its_own_top_is_refused(self):
+        """The bound a name settles: `brightness_pct` runs 0 to 100 wherever it is
+        implemented, so 150 is a typo that can be caught while the caller can still fix it."""
+        document = self._driven_by("brightness_pct", 100) | {"safe_state": 150}
+        errors = validate_control("conservatory", document)
+        assert any("tops out" in error and "lamp" in error for error in errors), errors
+
+    def test_a_colour_temperature_is_left_to_the_bulb(self):
+        """The other half of the split, and the reason it is not just a number check: a
+        colour temperature's range is a property of the bulb, so validation cannot know it and
+        the far end clamps instead."""
+        document = self._driven_by("color_temp_k", 6500) | {"safe_state": 2700}
+        assert validate_control("conservatory", document) == []
+
+    def test_a_value_that_is_wrong_twice_over_is_only_reported_once(self):
+        """The runtime is asked only about states already known to be usable, or a negative
+        number would be named once as out of range and again as something no device can be
+        put into, in two different wordings."""
+        document = self._driven_by("color_temp_k", 6500) | {"safe_state": -1}
+        assert len(validate_control("conservatory", document)) == 1
 
     def test_a_non_numeric_parameter_is_reported(self):
         document = a_valid_control()
@@ -1133,10 +1199,38 @@ class TestEveryShippedExample:
         assert validate_control(document["name"], document, state_directory.settings) == []
 
     @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
+    def test_it_does_not_trip_a_warning_of_our_own(self, scenario):
+        """An example that the product complains about teaches the thing it complains about.
+
+        Validation only asks whether a document is refused, and a warning is by definition
+        not a refusal, so every example passed the checks above while all four told a reader
+        to do what `--check-config` then told them off for.  It went unnoticed from the day
+        the stale-feedback warning was added until somebody read the two side by side.
+        """
+        assert control_warnings(CONTROL_EXAMPLES[scenario]["document"]) == []
+
+    @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
     def test_it_says_when_to_use_it(self, scenario):
         """The reason there are three. Without it a model picks the first, or averages
         across them, which is how a 600-second minimum arrived between a 300 and a 900."""
         assert CONTROL_EXAMPLES[scenario]["use_when"].strip()
+
+    @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
+    def test_it_says_what_its_gains_assume(self, scenario):
+        """The examples are copied wholesale, numbers and all, and a gain is the one field that
+        cannot be right in the abstract - it depends on how far the device moves the reading,
+        which is a property of the room.
+
+        Every example did explain itself, in a Python comment beside the document. The payload
+        ships the documents as data, so none of that reached the client that copies them: it
+        saw `kp: 5.0` and no reason to change it.
+        """
+        tuning = CONTROL_EXAMPLES[scenario]["tuning"]
+        # A floor rather than a shape: it must be about the gain and long enough to say
+        # something, without this test dictating how the sentence is phrased. Pinning the exact
+        # rendering of kp was the first attempt and it failed on 500.0 against "500" - a test
+        # about formatting rather than about whether the example explains itself.
+        assert "kp" in tuning and len(tuning.strip()) > 80, tuning
 
     @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
     def test_it_can_actually_be_stored_and_read_back(self, scenario, state_directory):
@@ -1201,3 +1295,270 @@ class TestANameDeclaredAsBothAnInputAndAParameter:
         document["parameters"] = "not a mapping"
         errors = [error for error in validate_control("conservatory", document) if "both declare" in error]
         assert errors == []
+
+
+class TestADeviceDrivenByAParameter:
+    """A device that names a parameter is set to a value rather than switched. Whether a
+    *particular* lamp is dimmable is a question for the bridge, asked where the refusal can
+    name the device; whether the source drives brightness at all is a fact about the code and
+    is answered by `--check-config`."""
+
+    @staticmethod
+    def _driving(parameter, low=0, high=100):
+        """Return a control whose first device is driven by `parameter`.
+
+        Args:
+            parameter (object): what to put in the device's parameter key
+            low (object): its value on the bottom rung
+            high (object): its value on the top rung
+
+        Returns:
+            tuple: (the document, the device's key)
+        """
+        document = a_valid_control()
+        key = sorted(document["devices"])[0]
+        document["devices"][key]["parameter"] = parameter
+        rungs = sorted({stage["level"] for stage in document["output"]["stages"]})
+        document["output"]["stages"] = [
+            dict(stage, set={**stage["set"], key: low if stage["level"] == rungs[0] else high})
+            for stage in document["output"]["stages"]
+        ]
+        return document, key
+
+    def test_a_parameter_the_source_drives_is_accepted(self, state_directory):
+        document, _key = self._driving("brightness_pct")
+        assert validate_control("conservatory", document, state_directory.settings) == []
+
+    def test_one_it_cannot_drive_is_refused_and_says_what_it_can(self, state_directory):
+        document, key = self._driving("fan_speed")
+        errors = validate_control("conservatory", document, state_directory.settings)
+        assert any("cannot drive 'fan_speed'" in error for error in errors)
+        assert any("brightness_pct" in error for error in errors), "it must say what is available"
+
+    @pytest.mark.parametrize("bad", ["", "   ", 7, ["brightness_pct"]])
+    def test_a_parameter_that_is_not_a_name_is_refused(self, bad, state_directory):
+        document, _key = self._driving(bad)
+        errors = validate_control("conservatory", document, state_directory.settings)
+        assert any("parameter" in error for error in errors)
+
+    def test_its_stage_entries_must_be_numbers(self, state_directory):
+        document, key = self._driving("brightness_pct", low=False, high=True)
+        errors = validate_control("conservatory", document, state_directory.settings)
+        assert any("must be a number" in error and key in error for error in errors)
+
+    def test_while_a_switched_device_must_still_be_true_or_false(self, state_directory):
+        document, _key = self._driving("brightness_pct")
+        other = sorted(set(document["devices"]) - {_key})[0]
+        document["output"]["stages"][0]["set"][other] = 50
+        errors = validate_control("conservatory", document, state_directory.settings)
+        assert any("must be true or false" in error and other in error for error in errors)
+
+    def test_a_negative_value_is_refused(self, state_directory):
+        document, key = self._driving("brightness_pct", low=-10)
+        errors = validate_control("conservatory", document, state_directory.settings)
+        assert any("must be a number" in error and key in error for error in errors)
+
+    def test_the_parameter_key_is_permitted_on_a_device(self):
+        """It has to be in DEVICE_KEYS or the unknown-key check refuses it before anything
+        else gets a look."""
+        from toinflux.controls import DEVICE_KEYS
+
+        assert "parameter" in DEVICE_KEYS
+
+    def test_parameter_devices_reports_only_the_driven_ones(self):
+        from toinflux.controls import parameter_devices
+
+        devices = {
+            "lamp": {"source": "hue", "device": "L", "parameter": "brightness_pct"},
+            "heater": {"source": "hue", "device": "H"},
+            "broken": {"source": "hue", "device": "B", "parameter": "  "},
+        }
+        assert parameter_devices(devices) == {"lamp": "brightness_pct"}
+
+
+class TestTheExamplesGainsMatchTheirOwnLadders:
+    """`level` is a scale the operator chooses, so a gain has to be in that scale per unit of
+    input. The examples shipped kp=12 against a ladder topping out at 1500 - a 125-unit error
+    to reach the top, and nothing delivered below four - which is not a tuning that suits a
+    different plant, it is one that is wrong by three orders of magnitude.
+
+    Copied numbers are the whole point of an example, so these are pinned: a future edit that
+    changes a ladder without its gains fails here rather than on somebody's heating.
+    """
+
+    @staticmethod
+    def _full_output_error(document):
+        """Return the input error at which proportional action alone reaches the top rung.
+
+        Args:
+            document (dict): a control document
+
+        Returns:
+            float: the error, in the units of the control's input
+        """
+        top = max(stage["level"] for stage in document["output"]["stages"])
+        return top / document["pid"]["kp"]
+
+    @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
+    def test_full_output_arrives_within_a_plausible_error(self, scenario):
+        """Wide, because what is plausible depends on the input - degrees for a heater, lux
+        for a lamp. Narrow enough to catch a gain that is out by orders of magnitude, which
+        is the failure this exists for."""
+        document = CONTROL_EXAMPLES[scenario]["document"]
+        error = self._full_output_error(document)
+        assert 0.5 <= error <= 500, f"{scenario} reaches full output only at an error of {error:g}"
+
+    @pytest.mark.parametrize("scenario", sorted(CONTROL_EXAMPLES))
+    def test_a_small_error_actually_delivers_something(self, scenario):
+        """The measure that matters is the level delivered over a window, not the top rung
+        touched: with a short transition minimum a demand of 36 still buys a brief burst at a
+        rung far above it, which looks like action and is not."""
+        from toinflux.controller import Controller
+
+        document = CONTROL_EXAMPLES[scenario]["document"]
+        controller = Controller(document)
+        error = self._full_output_error(document)
+        bindings = {name: 0.0 for name in rule_names(document)}
+        setpoint = controller._setpoint_rule.evaluate(bindings)
+        bindings[document["pid"]["input"]] = setpoint - error / 2
+        plan = controller.step(bindings, dt=document["output"]["cycle_seconds"])
+        cycle = document["output"]["cycle_seconds"]
+        top = max(stage["level"] for stage in document["output"]["stages"])
+        if controller.driven:
+            # A driven device's output is its value, not the rung: the window collapses onto
+            # the lower rung and carries the value in the states, so measuring the level here
+            # would read zero however bright the lamp was.
+            name = next(iter(controller.driven))
+            full = max(stage["set"][name] for stage in document["output"]["stages"])
+            delivered = plan[0].stage.states[name] / full
+        else:
+            delivered = sum(dwell.stage.level * dwell.seconds for dwell in plan) / cycle / top
+        assert delivered > 0.1, f"{scenario} delivered {delivered:.0%} of full output at half its full-output error"
+
+
+class TestAControlThatActsFasterThanItCanSee:
+    """A warning rather than an error: the control runs, and for a slow plant against a slow
+    input this may be exactly what its operator meant.
+
+    It earns its place because the symptom is misleading. A loop commanding several times on
+    one reading overshoots and swings back, which looks like too much gain, so the usual
+    response is to detune until it stops - buying stability by making the control slow rather
+    than informed. Found on a real install, where a light loop cycling every 60s read a lux
+    value up to 300s old and had already been detuned once to live with it.
+    """
+
+    @staticmethod
+    def _document(max_age, cycle=60, feedback="lux"):
+        """Return a control whose PID input has the given max_age.
+
+        Args:
+            max_age (float): the feedback input's max_age
+            cycle (float): the cycle window
+            feedback (str): which input the PID reads
+
+        Returns:
+            dict: the control document
+        """
+        return {
+            "pid": {"input": feedback, "setpoint": "target", "kp": 0.05, "ki": 0.0007, "kd": 0},
+            "parameters": {"target": 1000},
+            "inputs": {
+                "lux": {"source": "hue", "field": "L", "max_age": max_age},
+                "outside": {"source": "openmeteo", "field": "temperature_2m", "max_age": 3600},
+            },
+            "output": {"cycle_seconds": cycle, "stages": [{"level": 0, "set": {"lamp": 0}}]},
+            "devices": {"lamp": {"source": "hue", "device": "L"}},
+        }
+
+    @pytest.mark.parametrize("max_age", [120, 300, 1800])
+    def test_it_warns_where_the_feedback_outlives_the_window(self, max_age):
+        warnings = control_warnings(self._document(max_age), {})
+        assert warnings and "inputs.lux" in warnings[0]
+        assert "max_age" in warnings[0], "it must say which setting to change"
+
+    @pytest.mark.parametrize("max_age", [60, 90, 30])
+    def test_and_stays_quiet_where_it_does_not(self, max_age):
+        """A few seconds over the window is a rounding difference, not a problem. A warning
+        that fires on those is the noise that teaches people to skim warnings."""
+        assert control_warnings(self._document(max_age), {}) == []
+
+    def test_it_says_how_many_times_it_would_command_blind(self):
+        """The number is the argument: "five times before seeing the first" is actionable in
+        a way that "max_age is large" is not."""
+        assert "5 times" in control_warnings(self._document(300), {})[0]
+
+    def test_only_the_feedback_input_is_judged(self):
+        """An outdoor temperature or a dew point is an observation, not feedback, and is
+        legitimately hours old. Warning about those would be noise."""
+        document = self._document(60, feedback="lux")
+        assert document["inputs"]["outside"]["max_age"] == 3600
+        assert control_warnings(document, {}) == []
+
+    def test_a_document_with_no_pid_input_says_nothing(self):
+        document = self._document(300)
+        document["pid"].pop("input")
+        assert control_warnings(document, {}) == []
+
+    def test_an_unusable_max_age_is_left_to_validation(self):
+        """Reported precisely there; a second complaint here would name one fault twice."""
+        document = self._document("soon")
+        assert control_warnings(document, {}) == []
+
+    def test_validate_stored_controls_returns_it(self, state_directory):
+        """Whether --check-config actually prints it is a separate question, asked in
+        tests/test_sendtoinflux.py - a warning that is computed and never printed is the same
+        as no warning, and naming this test after that would have hidden it."""
+        document = a_valid_control()
+        document["output"]["cycle_seconds"] = 60
+        document["inputs"][document["pid"]["input"]]["max_age"] = 900
+        state_directory.write_control(document, name="conservatory")
+        notes = validate_stored_controls(state_directory.settings_file, state_directory.settings)
+        assert notes and "conservatory" in notes[0]
+
+
+class TestAnUnquotedClockTime:
+    """YAML 1.1 reads a colon-separated value with no leading zero as sexagesimal, so an
+    unquoted `23:35` is the integer 1415 while `05:25` survives as a string.
+
+    Both are refused, and always were. What this adds is the reason: "got 1415" against a
+    document that plainly says 23:35 is a message the reader can only decode by already
+    knowing the trap, which is the opposite of what an error is for.
+    """
+
+    @pytest.mark.parametrize(
+        "text, number, shown",
+        [
+            pytest.param("23:35", 1415, "23:35", id="the-shipped-example"),
+            pytest.param("9:00", 540, "09:00", id="single-digit-hour"),
+            pytest.param("17:00", 1020, "17:00", id="afternoon"),
+        ],
+    )
+    def test_the_error_names_the_cause(self, text, number, shown):
+        document = a_valid_control()
+        document["active_period"] = yaml.safe_load(f"from: {text}\nto: '05:25'\nend_state: unenergised")
+        assert document["active_period"]["from"] == number, "YAML did not mangle it; the premise is wrong"
+        errors = [e for e in validate_control("conservatory", document) if "active_period.from" in e]
+        assert errors and "sexagesimal" in errors[0]
+        assert shown in errors[0], "it must show the time the author meant, not only the number"
+
+    def test_a_leading_zero_survives_and_is_accepted(self):
+        """Which is exactly why the shipped examples look inconsistently quoted."""
+        assert yaml.safe_load("t: 05:25")["t"] == "05:25"
+        document = a_valid_control()
+        document["active_period"] = yaml.safe_load("from: '23:35'\nto: 05:25\nend_state: unenergised")
+        assert [e for e in validate_control("conservatory", document) if "active_period" in e] == []
+
+    def test_a_number_that_is_not_a_plausible_time_gets_no_hint(self):
+        """1500 is 25:00, which nobody wrote by accident. Explaining sexagesimal there would
+        be a guess dressed as a diagnosis."""
+        document = a_valid_control()
+        document["active_period"] = {"from": 1500, "to": "05:25", "end_state": "unenergised"}
+        errors = [e for e in validate_control("conservatory", document) if "active_period.from" in e]
+        assert errors and "sexagesimal" not in errors[0]
+
+    def test_the_documented_examples_quote_every_boundary(self):
+        """They are what gets copied, and copying the asymmetry is how somebody writes an
+        unquoted 23:30 and gets a number."""
+        reference = (pathlib.Path(__file__).resolve().parent.parent / "CONTROLS.md").read_text(encoding="utf-8")
+        bare = re.findall(r"(?m)^\s*(?:from|to): (?!')(\d{1,2}:\d{2})\s*$", reference)
+        assert not bare, f"unquoted clock times in the reference: {bare}"

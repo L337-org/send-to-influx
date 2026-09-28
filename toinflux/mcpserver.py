@@ -49,7 +49,7 @@ import time
 from urllib.parse import urlparse
 
 from toinflux.exceptions import ConfigError
-from toinflux.general import parse_mcp_bind_address, resolve_state_dir
+from toinflux.general import parse_mcp_bind_address, render_external, resolve_state_dir
 
 ACCESS_TOKEN_TTL_SECONDS = 3600
 REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 3600
@@ -475,7 +475,7 @@ def build_mcp_server(settings, settings_file=None, supervisor=None):
         from starlette.responses import HTMLResponse, RedirectResponse, Response
     except ImportError as exc:
         raise ConfigError(
-            f"The MCP server is enabled but the 'mcp' package could not be imported ({exc}). "
+            f"The MCP server is enabled but the 'mcp' package could not be imported ({render_external(exc)}). "
             "On a source checkout, run: .venv/bin/pip install -r requirements.txt"
         ) from exc
 

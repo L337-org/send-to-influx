@@ -2276,3 +2276,186 @@ def test_every_product_module_is_findable_from_the_contributor_docs():
         "these modules are not findable from the contributor documentation, which "
         f"CONTRIBUTING.md's own checklist requires: {missing}"
     )
+
+
+#: Where logging a failure and then raising it is correct rather than a double report, with
+#: the reason, because the general rule below would otherwise have to be weakened for all of
+#: them.  `load_settings` and `validate_settings` run before `configure_logging` and their
+#: ConfigError is caught in `main()` by a bare `sys.exit(1)` that reports nothing: the log
+#: line is the only account a misconfigured service ever gives of why it stopped.  Fixing
+#: that means moving the report to the caller, which is a change to startup control flow
+#: rather than to a collector.
+LOG_THEN_RAISE_ALLOWED = {"general.py"}
+
+
+def _log_then_raise_sites():
+    """Every place a module logs a failure and then raises in the next breath.
+
+    Matched on statement adjacency rather than by regular expression: the pair is a log call
+    followed immediately by a `raise` in the same block, and a comment, a blank line or a
+    reformat between them must not hide it.
+
+    Returns:
+        list: ``(module, line)`` for each site, module first so the result sorts readably
+    """
+    sites = []
+    for path in sorted((REPO_ROOT / "toinflux").glob("*.py")):
+        if path.name in LOG_THEN_RAISE_ALLOWED:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            # A list of statements, not any attribute called "body": a lambda's body is an
+            # expression and an if-expression's is too, and both would be walked into here.
+            blocks = [
+                attr
+                for name in ("body", "orelse", "finalbody")
+                for attr in [getattr(node, name, None)]
+                if isinstance(attr, list) and all(isinstance(item, ast.stmt) for item in attr)
+            ]
+            for block in blocks:
+                for first, second in zip(block, block[1:]):
+                    if not isinstance(second, ast.Raise) or not isinstance(first, ast.Expr):
+                        continue
+                    call = ast.unparse(first.value)
+                    if call.startswith("logging.error(") or call.startswith("logging.critical("):
+                        sites.append((path.name, first.lineno))
+    return sorted(set(sites))
+
+
+def test_no_handler_logs_a_failure_and_then_raises_it():
+    """A failure is reported once, where it is handled rather than where it is detected.
+
+    Every source handler used to do both: an ERROR naming the failure, then a raise carrying
+    the same text.  The caller then reported it again at the level its own situation deserved
+    - the collector worker warns and backs off, a control's input read warns and falls back
+    to its stored value, an MCP tool hands the message to the client - so each of those
+    arrived behind an ERROR that disagreed with it.  During a five-minute Hue outage one
+    control produced four ERRORs a cycle, half of them from the handler.
+
+    Written as a test rather than a note because the pattern was in eight modules at once,
+    and the next handler will be written by copying one of them.
+    """
+    sites = _log_then_raise_sites()
+    assert sites == [], (
+        "these log a failure and then raise it, which reports it twice - raise it and let the "
+        f"caller, which knows how bad it is, do the reporting: {sites}"
+    )
+
+
+def test_the_documented_examples_are_the_shipped_ones():
+    """CONTROLS.md carries each example as YAML and `CONTROL_EXAMPLES` carries it as a dict,
+    and nothing held the two together.
+
+    Two copies of the same thing in two files is the shape that goes stale, and here it goes
+    stale in the worst direction: an MCP client is handed the dict, a person reads the
+    markdown, and the two quietly stop being the same advice.  Compared after parsing, so
+    key order and quoting are free to differ - the only claim is that a reader and a client
+    get the same document.
+
+    Extra blocks are fine: the file also carries fragments illustrating one setting at a
+    time, which are not documents and are not checked here.
+    """
+    from toinflux.controls import CONTROL_EXAMPLES
+
+    text = (REPO_ROOT / "CONTROLS.md").read_text(encoding="utf-8")
+    blocks = []
+    for raw in re.findall(r"```yaml\n(.*?)```", text, re.S):
+        try:
+            loaded = yaml.safe_load(raw)
+        except yaml.YAMLError:
+            # A deliberately broken snippet, of which the file has several showing what is
+            # refused. Not a document, and not this test's business.
+            continue
+        if isinstance(loaded, dict):
+            blocks.append(loaded)
+    missing = sorted(name for name, entry in CONTROL_EXAMPLES.items() if entry["document"] not in blocks)
+    assert missing == [], (
+        "these shipped examples do not appear in CONTROLS.md exactly as they are shipped, so "
+        f"the documentation and the MCP client disagree about them: {missing}"
+    )
+
+
+def _bare_external_in_a_raise():
+    """Every place a raise interpolates an exception without rendering it safely.
+
+    Matched on the AST rather than by text, so `str(exc)`, `repr(exc)` and an f-string's
+    `{exc}` are all seen, and a reformat cannot hide one.
+
+    Returns:
+        list: ``(module, line)`` for each site
+    """
+    names = {"e", "exc", "error", "err"}
+    found = []
+    for path in sorted((REPO_ROOT / "toinflux").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Raise) or node.exc is None:
+                continue
+            for sub in ast.walk(node.exc):
+                bare_format = (
+                    isinstance(sub, ast.FormattedValue) and isinstance(sub.value, ast.Name) and sub.value.id in names
+                )
+                bare_call = (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Name)
+                    and sub.func.id in {"str", "repr"}
+                    and sub.args
+                    and isinstance(sub.args[0], ast.Name)
+                    and sub.args[0].id in names
+                )
+                if bare_format or bare_call:
+                    found.append((path.name, node.lineno))
+                    break
+    return sorted(set(found))
+
+
+def test_an_exception_reaches_a_message_through_render_external():
+    """A raised message is the only report of a failure once the duplicate log is gone, and
+    the text inside it was written by a library, a bridge or a parser rather than by us.
+
+    One newline in that text puts a line of its choosing into whatever the caller logs, or a
+    paragraph of its choosing into a model's context where the message reaches an MCP client.
+    `render_external` keeps the readable form where it is safe and quotes it where it is not,
+    so nothing has to choose between a message a person can read and one that cannot be
+    forged.
+
+    Written as a check because four review rounds on one branch were all this same rule,
+    found in a new place each time: two handlers fixed without a sweep, then the sweep, then
+    the sites the sweep did not reach.
+    """
+    sites = _bare_external_in_a_raise()
+    assert sites == [], (
+        "these raise a message holding an exception rendered unsafely - pass it through "
+        f"`render_external` so a newline in it cannot forge a line: {sites}"
+    )
+
+
+def test_the_tuning_note_quotes_a_ratio_the_examples_bear_out():
+    """The client-facing `ki` note quoted a ratio that none of the shipped examples used.
+
+    It read "roughly kp/100 in these examples" while they run kp/3333, kp/500 and kp/250, so
+    a client copying an example and following the note would have set `ki` between two and
+    thirty times too high - and the neighbouring note warns that too high is the direction
+    that is neither visible nor harmless.  Two rounds of review raised it and it survived
+    both, because nothing was holding the sentence to the numbers it describes.
+
+    The claim checked is deliberately loose: the quoted starting ratio only has to fall
+    inside the range the shipped examples actually span.  It is a starting point rather than
+    a formula, so any figure a real example bears out passes, and only one describing no
+    example at all fails.
+    """
+    from toinflux.controls import CONTROL_EXAMPLES, TUNING_NOTES
+
+    ratios = sorted(
+        entry["document"]["pid"]["kp"] / entry["document"]["pid"]["ki"]
+        for entry in CONTROL_EXAMPLES.values()
+        if entry["document"].get("pid", {}).get("ki")
+    )
+    assert ratios, "no shipped example declares a ki, so this test is checking nothing"
+    quoted = [int(found) for note in TUNING_NOTES for found in re.findall(r"kp\s*/\s*(\d+)", note)]
+    assert quoted, "the tuning notes no longer quote a kp/ki ratio, so the guidance has moved"
+    stray = sorted(value for value in quoted if not ratios[0] <= value <= ratios[-1])
+    assert stray == [], (
+        "the tuning notes tell a client to start at a kp/ki ratio that no shipped example "
+        f"uses, so copying an example and following the note disagree: quoted {stray}, "
+        f"examples span kp/{ratios[0]:.0f} to kp/{ratios[-1]:.0f}"
+    )

@@ -30,7 +30,14 @@ import logging
 import math
 from dataclasses import dataclass
 
-from toinflux.controls import BUILT_IN_SAFE_STATES, SAFE_STATE_LEAVE_UNCHANGED, SAFE_STATE_UNENERGISED
+from toinflux.controls import (
+    parameter_devices,
+    BUILT_IN_SAFE_STATES,
+    safe_state_problem,
+    SAFE_STATE_ENERGISED,
+    SAFE_STATE_LEAVE_UNCHANGED,
+    SAFE_STATE_UNENERGISED,
+)
 from toinflux.exceptions import ConfigError
 from toinflux.general import render_values
 from toinflux.controls import rule_names
@@ -39,6 +46,7 @@ from toinflux.schedule import is_inside, parse_active_period, require_aware
 
 #: What a falling edge or a failure does to the devices, when the answer is not "nothing".
 UNENERGISED = SAFE_STATE_UNENERGISED
+ENERGISED = SAFE_STATE_ENERGISED
 LEAVE_UNCHANGED = SAFE_STATE_LEAVE_UNCHANGED
 
 
@@ -85,10 +93,12 @@ class Gate:
             raise ConfigError(f"enabled must be true or false, got {self.enabled!r}")
         self.period = parse_active_period(document)
         self.safe_state = document.get("safe_state", UNENERGISED)
-        if self.safe_state not in BUILT_IN_SAFE_STATES:
-            raise ConfigError(
-                f"safe_state must be one of {render_values(BUILT_IN_SAFE_STATES)}, got {self.safe_state!r}"
-            )
+        # The validator's own rule, not a second copy of it: a number is a state a driven
+        # device can be left in, and this used to refuse one that `validate_control` had
+        # just accepted.
+        problem = safe_state_problem("safe_state", self.safe_state)
+        if problem:
+            raise ConfigError(problem)
         names = rule_names(document)
         text = document.get("enable_when")
         self._enable_when = None if text is None else parse_rule(str(text), allowed_names=names)
@@ -176,6 +186,46 @@ class Gate:
             return False, f"enable_when is false: {self._enable_when.source!r}"
         return True, None
 
+    def starting_state(self, moment):
+        """Return the state this control's devices should be in as it starts.
+
+        Normally ``safe_state``: a process that has just started has devices in an unknown
+        condition, and the point of asserting anything at all is to clear whatever a crash
+        or a power cut left behind before reading a single sensor.
+
+        **Except where the control is already outside its active period**, which is a
+        different situation wearing the same clothes. ``safe_state`` answers "something is
+        wrong, or nothing is known yet"; ``end_state`` answers "the control is deliberately
+        not acting", and the operator has declared it for exactly this. A control that starts
+        outside its window is the second.
+
+        It mattered not at all while ``unenergised`` was the only state either could hold -
+        off and off - and it matters immediately now that ``energised`` exists: a pump with
+        ``safe_state: energised`` and a window of 23:30 to 05:25, restarted at noon, ran all
+        afternoon in the failure state during what was normal scheduled downtime, and nothing
+        would have corrected it until the window opened that night and closed the next
+        morning. The gate does not report a closing edge for it either, and correctly so: the
+        control did not *become* inactive, it started that way.
+
+        ``enable_when`` deliberately does not participate. Answering it needs a sensor read,
+        and the whole point of the startup assertion is that it happens before anything is
+        read; the active period needs only the clock, so it costs nothing to get right.
+
+        Args:
+            moment (datetime.datetime): an aware moment, for the active period
+
+        Returns:
+            str or float: one of the built-in safe states, or the value to set - a driven
+            device may be left at a number, so this is not always a name
+
+        Raises:
+            ConfigError: where the moment is naive
+        """
+        require_aware(moment)
+        if self.period is not None and not is_inside(self.period, moment):
+            return self.period.end_state
+        return self.safe_state
+
     def closing_state(self):
         """Return the state the devices take when the control stops acting.
 
@@ -187,6 +237,54 @@ class Gate:
             str: one of the built-in safe states
         """
         return self.period.end_state if self.period is not None else self.safe_state
+
+
+def static_full_scale(parameter):
+    """Return what "all of it" is for a parameter, where that is knowable without asking.
+
+    A percentage is bounded by its own name: `brightness_pct` runs 0 to 100 wherever it is
+    implemented, and nothing has to be reachable to know it. A colour temperature is not -
+    its range is a property of the bulb - so this answers None and the bound stays where it
+    belongs, at the far end.
+
+    The same split the device checks already make: whether a source drives brightness at all
+    is a fact about the code, while whether a particular lamp is dimmable is a question for
+    the bridge.
+
+    Args:
+        parameter (str or None): the parameter a device is driven by, or None if switched
+
+    Returns:
+        float or None: the top of the range, or None where only the device knows
+    """
+    return 100 if isinstance(parameter, str) and parameter.endswith("_pct") else None
+
+
+def _full(device, parameter):
+    """Return what ``energised`` means for a device driven by ``parameter``.
+
+    Full scale, which is only a thing a percentage has. A colour temperature has no "all of
+    it" - 100 kelvin is not a bright light, it is a nonsense - so rather than send something
+    plausible-looking this refuses and says to give the value outright. The percentage case is
+    the one the option was asked for, and the other is reachable by writing the number.
+
+    Args:
+        device (str): the control's name for it, for the message
+        parameter (str): the parameter it is driven by
+
+    Returns:
+        float: the value meaning fully on
+
+    Raises:
+        ConfigError: where the parameter has no full scale
+    """
+    full = static_full_scale(parameter)
+    if full is not None:
+        return full
+    raise ConfigError(
+        f"{ENERGISED!r} has no meaning for device {device!r}, which is driven by {parameter!r} "
+        f"rather than a percentage - give the value to set instead"
+    )
 
 
 def _resolve(bindings):
@@ -234,33 +332,57 @@ def _holds(rule, bindings):
 def commands_for(state, devices):
     """Return what to command each device to reach a safe or end state.
 
-    ``unenergised`` names every device explicitly rather than meaning "stage 0". A control
-    whose lowest stage was mis-declared - or which has no zero stage at all - would
-    otherwise energise something while trying to make itself safe, and the failure would be
-    invisible until the day it mattered.
+    **The devices section, not a list of names**, because what a state means depends on how
+    each device is driven: `unenergised` is False for a switch and 0 for a dimmer, and a
+    number is that value for a dimmer and "on above zero" for a switch. A caller holding only
+    names cannot tell them apart.
+
+    ``unenergised`` and ``energised`` name every device explicitly rather than meaning
+    "stage 0" or "the top stage". A control whose lowest stage was mis-declared - or which
+    has no zero stage at all - would otherwise energise something while trying to make
+    itself safe, and the failure would be invisible until the day it mattered.
+
+    ``energised`` exists because the device is not necessarily a heater: for a pump whose
+    stopping lets a boiler overheat, or a valve held open by power, off is the dangerous
+    state. It stays opt-in, and ``unenergised`` stays the default.
 
     ``leave_unchanged`` returns None rather than an empty mapping. Those are different
     instructions, and a caller that treated an empty mapping as "nothing to do" would be
     right by accident: this says "do not touch these devices", which is also what the
     startup assertion must not override.
 
+    A number is a state too, in the driven device's own units - 40 for a lamp is 40% - and
+    for a switched device in the same control it means on above zero and off at zero.
+
     Args:
-        state (str): one of the built-in safe states
-        devices (iterable): the device names the control owns
+        state (str or float): one of the built-in safe states, or a value to set
+        devices (dict or iterable): the control's devices section; a bare iterable of names
+            is read as every device being switched
 
     Returns:
         dict or None: device -> the state to command, or None to touch nothing
 
     Raises:
-        ConfigError: where the state is not one of the built-in names
+        ConfigError: where the state is not one of the built-in names or a usable value
     """
     if state == LEAVE_UNCHANGED:
         return None
-    if state != UNENERGISED:
+    driven = parameter_devices(devices) if isinstance(devices, dict) else {}
+    names = tuple(devices)
+    if isinstance(state, (int, float)) and not isinstance(state, bool):
+        if not math.isfinite(state) or state < 0:
+            raise ConfigError(f"a safe state given as a value must be a finite number of at least zero, got {state!r}")
+        return {name: state if name in driven else state > 0 for name in names}
+    if state not in (UNENERGISED, ENERGISED):
         raise ConfigError(
-            f"{state!r} is not a safe state this knows: expected one of {render_values(BUILT_IN_SAFE_STATES)}"
+            f"{state!r} is not a safe state this knows: expected one of "
+            f"{render_values(BUILT_IN_SAFE_STATES)}, or a value to set"
         )
-    return {name: False for name in devices}
+    if state == UNENERGISED:
+        # Zero reaches the far end as an explicit "off" rather than a dimmest setting, so
+        # unenergised means the same thing to both kinds of device.
+        return {name: 0 if name in driven else False for name in names}
+    return {name: _full(name, driven[name]) if name in driven else True for name in names}
 
 
 class DeviceGuard:
@@ -286,17 +408,24 @@ class DeviceGuard:
 
         Args:
             name (str): the control's name, for the log lines
-            safe_state (str): one of the built-in safe states
-            devices (iterable): the device names the control owns
+            safe_state (str or float): one of the built-in safe states, or the value to leave
+                the devices at - a driven device has more than two states to be left in
+            devices (dict or iterable): the control's `devices` section, device name to its
+                declaration. An iterable of names still works and is what a caller with no
+                driven devices may have, but only the section says which devices are driven
+                by a parameter, and `commands_for` needs that to know what a state means for
+                each of them
             command (callable): applied to a device -> state mapping; whatever it raises
                 is what the caller sees
 
         Raises:
-            ConfigError: where the safe state is not one of the built-in names
+            ConfigError: where the safe state is neither a built-in name nor a usable value
         """
         self.name = name
         self.safe_state = safe_state
-        self.devices = tuple(devices)
+        # Kept as the section rather than a list of names: `commands_for` needs to know which
+        # devices are driven by a parameter, and names alone cannot say.
+        self.devices = devices if isinstance(devices, dict) else tuple(devices)
         self._command = command
         # Computed now rather than at exit: an unknown state should stop the control
         # starting, not surface as a failure on the one path that cannot do anything
@@ -305,15 +434,29 @@ class DeviceGuard:
         self._stopped = False
         atexit.register(self._at_exit)
 
-    def assert_safe_state(self) -> None:
-        """Command the devices into the safe state before the loop runs.
+    def assert_starting_state(self, state=None) -> None:
+        """Command the devices into the state this control starts in, before the loop runs.
+
+        The state is the caller's to choose because only the gate knows whether the control
+        is inside its active period - see :meth:`Gate.starting_state`. The exit half is not
+        parameterised and stays on ``safe_state``: a process that is ending leaves nothing
+        behind to supervise the devices, which is what a safe state is for, whatever the
+        clock happens to say as it goes.
+
+        Args:
+            state (str or float or None): the state to assert - a built-in name, or the value
+                to set, since a driven device may be left at a number. None means this
+                guard's own safe state
 
         Raises:
             Exception: whatever ``command`` raises, unwrapped - a device that is missing
                 and a bridge that is unreachable want different responses, and the caller
                 is the one that can tell them apart.
+            ConfigError: where the state is not one of the built-in names
         """
-        if self._commands is None:
+        chosen = self.safe_state if state is None else state
+        commands = commands_for(chosen, self.devices)
+        if commands is None:
             # INFO, not WARNING. `leave_unchanged` is what the operator asked for, and for
             # the case it exists to serve - a light that should not go out because a server
             # rebooted - there is no safety question at all. The consequence is real and
@@ -322,14 +465,14 @@ class DeviceGuard:
             # lifetime of a correct configuration is the noise that teaches people to skim
             # warnings, and buys a one-time mistake only if they happen to be watching.
             logging.info(
-                "Control %r starts with safe_state %r, so its devices keep whatever state they "
+                "Control %r starts with %r, so its devices keep whatever state they "
                 "were left in, including after a crash or a power cut",
                 self.name,
-                self.safe_state,
+                chosen,
             )
             return
-        logging.info("Control %r asserting %r on %s", self.name, self.safe_state, self._device_list())
-        self._command(self._commands)
+        logging.info("Control %r asserting %r on %s", self.name, chosen, self._device_list())
+        self._command(commands)
 
     def stop(self, reason) -> None:
         """Put the devices in the safe state on the way out, once.
