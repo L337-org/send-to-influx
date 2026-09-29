@@ -89,7 +89,9 @@ that list is how you switch it off, and a control respects that even where the s
 section, credentials and all, is still in the file. A control naming a disabled source is
 refused, with a message naming the source, by `--check-config`, when it is saved (including
 over MCP), and when the service starts; every other control and every collector carries on.
-To use the source, add it back to `sources:` and restart the service.
+To use the source, add it back to `sources:` and restart the service. (Saving the control
+again over MCP also starts it without a restart, but the collectors only start collecting the
+source at the next restart, so until then nothing records what its devices are doing.)
 
 A running control keeps the sources that were enabled when it started until it stops. That is
 what makes disabling a source safe: the control being stopped by the restart still puts its

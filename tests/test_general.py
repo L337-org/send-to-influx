@@ -1444,9 +1444,14 @@ class TestWhichSourcesAreEnabled:
         assert listed_sources({"sources": ["openmeteo", "Hue", 7, "zappi"]}) == ["openmeteo", "hue", "zappi"]
 
     def test_every_reader_of_the_list_agrees(self):
-        """The MCP tools and the collectors read it through the same function as a control."""
+        """The MCP tools and the collectors import the same function a control reads it
+        through, and give the same answer."""
+        import sendtoinflux
+        import toinflux.mcp_common
         from sendtoinflux import _requested_sources
         from toinflux.mcp_common import configured_sources
+
+        assert sendtoinflux.listed_sources is toinflux.mcp_common.listed_sources is listed_sources
 
         settings = {"sources": ["Hue", None, "openmeteo"]}
         args = type("Args", (), {"source": None})()

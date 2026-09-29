@@ -1520,6 +1520,20 @@ class TestADisabledSource:
         finally:
             running.stop_all()
 
+    def test_settings_that_cannot_be_read_stop_the_start_with_one_clear_reason(
+        self, supervisor, state_directory, caplog
+    ):
+        """Refused before the spawn, and said once: not a warning about re-reading a document
+        followed by a start that never happens."""
+        with open(state_directory.settings_file, "w", encoding="utf-8") as handle:
+            handle.write("sources: [unclosed\n")
+        with caplog.at_level(logging.WARNING):
+            supervisor.start_all()
+        assert {event.kind for event in supervisor.events} == {"start-failed"}
+        assert all(child.process is None for child in supervisor.children.values())
+        assert "was not started because its settings cannot be read" in caplog.text
+        assert "could not be re-read before starting it" not in caplog.text
+
     def test_the_service_s_own_list_is_the_one_used(self, state_directory, bridge):
         """Passed in by the service rather than read here, and honoured when it is."""
         installation = state_directory

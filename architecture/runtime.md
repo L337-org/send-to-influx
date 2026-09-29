@@ -79,8 +79,9 @@ After each cycle `maybe_send_heartbeat()` writes a `collector_status,source=<nam
   constructed handler, threading `settings_file` through to the handler's own `load_settings()`.
   `source_class()` returns the class uninstantiated. Both raise `ConfigError` for an unknown
   source, including the abstract `DataHandler` and `MyEnergi` bases.
-- `listed_sources()` - the one reading of the `sources:` list, used by the collectors
-  (`_requested_sources()`), the MCP tools (`configured_sources()`) and controls.
+- `listed_sources()` - the one reading of what the `sources:` list enables, used by the
+  collectors (`_requested_sources()`), the MCP tools (`configured_sources()`) and controls.
+  `validate_settings()` reads the list separately and more strictly, to report bad entries.
   `enabled_sources()` is the same as a set, and `disabled_source_problem()` is the message for
   a control that names a source not in it. See "Control configuration" below.
 - `flatten_dict()` - used by Speedtest to flatten nested JSON.
@@ -304,7 +305,19 @@ caller decides it.
 child was started with (`Child.enabled`, read in `start()` just before the spawn). The first
 covers a source disabled since the service started. The second covers one enabled since - a
 control saved over MCP then starts on it without a restart, and the service's set alone would
-refuse to turn that control's devices off after it died.
+refuse to turn that control's devices off after it died. `Child.enabled` is the parent's read
+just before the spawn; the child reads the file again a moment later, and a source enabled in
+that fraction of a second is in neither set. Accepted.
+
+Two consequences worth knowing when reading a journal:
+
+- **A source disabled without a restart is still used to make devices safe.** A control on it
+  that then crashes is refused on each restart attempt, and each refusal ends with the
+  supervisor commanding its devices off through that source - once per backoff, for as long as
+  the control stays down. Turning a device off is never the thing to refuse.
+- **A source enabled after the service started and then disabled again** is in neither set
+  once a restart attempt has read the edited file, so each attempt after that logs `Could not
+  make control ... safe` at ERROR, although the refused child never energised anything.
 
 A handler still reads its own source's section afresh, so a credential rotated there reaches a
 running control. The control's InfluxDB settings do not: `ControlProcess` reads the settings

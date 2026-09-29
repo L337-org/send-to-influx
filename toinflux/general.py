@@ -439,10 +439,11 @@ def known_sources():
 def listed_sources(settings):
     """Return the ``sources:`` list as lowercased names, in the order written.
 
-    The one reading of that setting. The collectors run what it names, the MCP tools expose
-    it and a control may use only what it enables, and three readings of it had been written
-    that each lowercased, dropped a non-string entry and treated a non-list as empty - which is
-    three chances to disagree.
+    The one reading of what that setting enables. The collectors run what it names, the MCP
+    tools expose it and a control may use only what it enables, and three readings of it had
+    been written that each lowercased, dropped a non-string entry and treated a non-list as
+    empty - which is three chances to disagree. ``validate_settings`` reads the list separately
+    and more strictly, because its job is to report those entries rather than skip them.
 
     Args:
         settings (dict): the parsed settings document

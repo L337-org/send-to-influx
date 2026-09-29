@@ -106,8 +106,9 @@ class Child:
         restart_at (float or None): when it may next be started, or None when it is running.
         stall_seconds (float): how long this control may be silent before it is killed,
             derived from its own cycle window.
-        enabled (frozenset): the sources enabled in the settings as they read when this was
-            last started, which is what the process read for itself.
+        enabled (frozenset): the sources enabled in the settings as the parent read them just
+            before this was last started - near enough what the process read for itself; see
+            ``Supervisor.start``.
     """
 
     name: str
@@ -132,7 +133,7 @@ class Child:
         return self.process is not None
 
 
-def _usable_control(name, settings_file):
+def _usable_control(name, settings_file, settings=None):
     """Read one control document and refuse it unless it is structurally sound.
 
     Checked here rather than defended against at each use. A document that parses as YAML
@@ -145,6 +146,7 @@ def _usable_control(name, settings_file):
     Args:
         name (str): the control to read
         settings_file (str or None): the settings path the process was started with
+        settings (dict or None): settings already read, or None to read them from the file
 
     Returns:
         dict: the validated document
@@ -153,7 +155,7 @@ def _usable_control(name, settings_file):
         ConfigError: where it cannot be read or is not structurally valid
     """
     document = load_control(name, settings_file)
-    errors = validate_control(name, document, load_settings(settings_file))
+    errors = validate_control(name, document, load_settings(settings_file) if settings is None else settings)
     if errors:
         raise ConfigError(f"control {name!r} is not valid:\n  " + "\n  ".join(errors))
     return document
@@ -442,13 +444,24 @@ class Supervisor:
                 settings it would read cannot be
         """
         child = self.children[name]
+        # Read once, first, and refused here if it cannot be: the child would fail on the same
+        # file, and saying so before spawning it is one clear line rather than a warning about
+        # a document followed by a process that dies.
+        try:
+            settings = load_settings(self.settings_file)
+        except ConfigError as exc:
+            raise ConfigError(
+                f"control {name!r} was not started because its settings cannot be read: {render_external(exc)}"
+            ) from exc
         # Before the spawn, because the child reads the same file for itself and the two
         # must agree from the first beat.
-        self._refresh(child)
-        # What the child is about to read for itself. A source enabled since the service
-        # started is one a control saved now may use, and the service's own set would then
-        # refuse to make that control's devices safe after it dies.
-        child.enabled = enabled_sources(load_settings(self.settings_file))
+        self._refresh(child, settings)
+        # What the child is about to read for itself, near enough: it reads the file again a
+        # moment later, after its interpreter starts, and a source enabled in between is in
+        # neither set. Accepted - the window is a fraction of a second. A source enabled since
+        # the service started is one a control saved now may use, and the service's own set
+        # alone would refuse to make that control's devices safe after it dies.
+        child.enabled = enabled_sources(settings)
         try:
             read_fd, write_fd = os.pipe()
         except OSError as exc:
@@ -480,7 +493,7 @@ class Supervisor:
         self._selector.register(child.beats, selectors.EVENT_READ, child)
         self._record("started", name, f"pid {child.process.pid}")
 
-    def _refresh(self, child) -> None:
+    def _refresh(self, child, settings) -> None:
         """Re-read the document a control is about to be started from.
 
         The child reads its own document at startup, so anything the parent derived from an
@@ -491,10 +504,10 @@ class Supervisor:
         on its own, and the restart after that goes through here and nowhere else.
 
         A document that will not read keeps the previous copy rather than refusing to start.
-        The child reads the same file and will fail on it in its own process, where it is
-        one control's failure and the restart path already handles it; raising here would
-        put it on the path ``start_all`` takes, which runs before the loop that would clean
-        up after it.
+        The child reads the same file and fails on it in its own process, which the restart
+        path handles like any other death - and the parent keeps a description of the devices
+        that process may have energised. An unreadable settings file is different, and
+        ``start`` refuses it before this runs.
 
         There may be no previous copy to keep. A control taken on by a reload is built with
         none, and its document was readable a moment earlier when the reload decided to
@@ -504,9 +517,10 @@ class Supervisor:
 
         Args:
             child (Child): the control about to be started
+            settings (dict): the settings ``start`` has just read, so the file is read once
         """
         try:
-            document = _usable_control(child.name, self.settings_file)
+            document = _usable_control(child.name, self.settings_file, settings)
             window = stall_seconds(document)
         except ConfigError as exc:
             logging.warning(
@@ -786,7 +800,7 @@ class Supervisor:
         except ConfigError as exc:
             child.failures += 1
             child.restart_at = self._clock() + self._backoff(child.failures)
-            logging.error("Control %r could not be restarted: %r. Trying again later", child.name, exc)
+            logging.error("Control %r could not be started: %r. Trying again later", child.name, exc)
             self._record("start-failed", child.name, repr(exc))
 
     def run(self, stop, poll_seconds=DEFAULT_POLL_SECONDS) -> None:

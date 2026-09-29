@@ -1355,3 +1355,11 @@ class TestADisabledSource:
         bridge.clear()
         control.guard.stop("the control is stopping")
         assert sorted(command.name for command in bridge.commanded()) == ["far", "near"]
+
+    def test_a_running_control_s_inputs_keep_the_sources_it_started_with(self, control, state_directory, bridge):
+        """Inputs as well as devices. Reads take the settings the process loaded at start, so a
+        source disabled in the file since reaches the next cycle only through a restart - the
+        rule that also lets the process make its devices safe on the way out of one."""
+        state_directory.set_sources("openmeteo", "carbonintensity")
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert any(state for state in bridge.energised().values()), "the cycle read nothing and did not heat"

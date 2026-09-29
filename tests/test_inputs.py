@@ -1193,21 +1193,32 @@ def _control_modules():
     return {name: texts[name] for name in sorted(found)}
 
 
-def _handler_builds_outside_source_handler(text):
-    """Return the line of every way to a handler anywhere but inside ``source_handler``.
+def _handler_builds_outside_source_handler(text, module=None):
+    """Return the line of every way to a handler anywhere but inside ``inputs.source_handler``.
 
-    Four shapes, each found by review in a version that looked for fewer:
+    The shapes, each found by review in a version that looked for fewer:
 
-    * any reference to a builder in ``HANDLER_BUILDERS``, called or not;
-    * any reference to a collector class, or an import from a collector's module;
+    * any reference to a builder in ``HANDLER_BUILDERS``, called or not, and any import that
+      renames one;
+    * any reference to a collector class, an import that renames one, or an import from a
+      collector's module;
     * a call on the result of ``source_class``, which constructs the class it returns;
-    * a call on a name bound from ``source_class``, the same thing in two steps.
+    * a call on a name bound from ``source_class`` by plain assignment, the same thing in two
+      steps.
 
     Asking ``source_class`` about the class - ``getattr(source_class(x), ...)``, or binding it
     and reading attributes, as validation does - is not a build and is not reported.
 
+    **Known limits, accepted:** a ``source_class`` result bound any other way - ``:=``, an
+    attribute target, a module-level name used in a function - and then called is not seen.
+    None of those is used in the control modules, and each would read as an obvious second
+    door in review.
+
     Args:
         text (str): a module's source
+        module (str or None): the module's short name. Only ``inputs`` has its top-level
+            ``source_handler`` exempted; a function of that name anywhere else is searched
+            like any other
 
     Returns:
         list: line numbers of what was found
@@ -1218,7 +1229,10 @@ def _handler_builds_outside_source_handler(text):
     def visit(node, inside, bound):
         for child in ast.iter_child_nodes(node):
             here = inside or (
-                isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == "source_handler"
+                module == "inputs"
+                and isinstance(node, ast.Module)
+                and isinstance(child, ast.FunctionDef)
+                and child.name == "source_handler"
             )
             scope = set() if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) else bound
             if isinstance(child, ast.Assign) and isinstance(child.value, ast.Call):
@@ -1264,7 +1278,8 @@ def _is_a_way_to_a_handler(node, classes, collectors, bound):
     if name in HANDLER_BUILDERS or name in classes:
         return True
     if isinstance(node, ast.ImportFrom):
-        return (node.module or "").split(".")[-1] in collectors
+        renamed = any(alias.asname and alias.name in HANDLER_BUILDERS | classes for alias in node.names)
+        return renamed or (node.module or "").split(".")[-1] in collectors
     if isinstance(node, ast.Call):
         if isinstance(node.func, ast.Call) and _called(node.func.func) == "source_class":
             return True
@@ -1293,8 +1308,9 @@ class TestADisabledSourceIsNeverBuilt:
         assert built == []
 
     def test_a_read_uses_the_sources_its_caller_started_with(self, monkeypatch):
-        """The settings a control passes are the ones it loaded at start, so a source that is
-        not listed there is refused however the file reads now."""
+        """A read decides from the settings it is given, not from a fresh read of the file, so a
+        source not listed in them is refused. A control passes the ones it loaded at start,
+        which ``test_a_running_control_s_inputs_keep_the_sources_it_started_with`` holds."""
         monkeypatch.setattr("toinflux.inputs.get_class", _recording_handler())
         with pytest.raises(ConfigError, match="source 'hue' is disabled"):
             stored_reading(None, {**SETTINGS, "sources": ["nuki"]}, "hue", "temperature")
@@ -1308,7 +1324,9 @@ class TestADisabledSourceIsNeverBuilt:
         expected = {"control_process", "supervision", "inputs", "controls", "gating", "mcp_controls"}
         assert expected <= set(modules), f"module discovery is broken: found {sorted(modules)}"
         offenders = {
-            name: lines for name, text in modules.items() if (lines := _handler_builds_outside_source_handler(text))
+            name: lines
+            for name, text in modules.items()
+            if (lines := _handler_builds_outside_source_handler(text, name))
         }
         assert not offenders, f"handlers reachable outside inputs.source_handler: {offenders}"
 
@@ -1324,6 +1342,8 @@ class TestADisabledSourceIsNeverBuilt:
             "def f(source):\n    cls = source_class(source)\n    return cls(source)\n",
             "Hue('hue')",
             "from toinflux.philipshue import Hue",
+            "from toinflux.general import get_class as build\nbuild('hue')",
+            "def g():\n    def source_handler(s):\n        return get_class(s)\n",
         ],
     )
     def test_the_guard_sees_each_shape_review_has_found(self, text):
@@ -1339,4 +1359,10 @@ class TestADisabledSourceIsNeverBuilt:
             "getattr(source_class('hue'), 'MCP_ACTUATES_DEVICES', False)\n"
             "def check(source):\n    handler = source_class(source)\n    return handler.MCP_ACTUATES_DEVICES\n"
         )
-        assert _handler_builds_outside_source_handler(allowed) == []
+        assert _handler_builds_outside_source_handler(allowed, "inputs") == []
+
+    def test_only_the_inputs_module_s_own_source_handler_is_exempt(self):
+        """A function borrowing the name elsewhere is searched like any other."""
+        text = "def source_handler(source, enabled):\n    return get_class(source)\n"
+        assert _handler_builds_outside_source_handler(text, "inputs") == []
+        assert _handler_builds_outside_source_handler(text, "supervision") == [2]
