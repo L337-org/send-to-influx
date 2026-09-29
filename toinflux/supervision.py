@@ -147,8 +147,8 @@ def _usable_control(name, settings_file, settings):
         name (str): the control to read
         settings_file (str or None): the settings path the process was started with, which is
             also what locates the control store
-        settings (dict): the settings, already read. Required, so each caller reads the file
-            once and decides for itself what an unreadable one means
+        settings (dict): the settings, already read. Required, so a caller checking many
+            controls reads the file once rather than once per control
 
     Returns:
         dict: the validated document
@@ -675,7 +675,7 @@ class Supervisor:
             # Read here both to decide whether to stop what is running and to see whether it
             # is still enabled. An unusable document must not cost a working control its
             # process.
-            document = self._read_stored(name)
+            document = _usable_control(name, self.settings_file, load_settings(self.settings_file))
         except ConfigError as exc:
             # Two different situations, and telling an operator the wrong one sends them
             # looking in the wrong place. Where a control *is* running, refusing to kill it
@@ -1013,25 +1013,6 @@ class Supervisor:
                 # call site.
                 logging.exception("Could not make control %r safe, and the reason was unexpected: %r", name, exc)
 
-    def _read_stored(self, name):
-        """Read the settings, then one stored control against them.
-
-        Args:
-            name (str): the control to read
-
-        Returns:
-            dict: the validated document
-
-        Raises:
-            ConfigError: where either cannot be used. A settings file that cannot be read says
-                so first, because the operator then has a different file to go and look at
-        """
-        try:
-            settings = load_settings(self.settings_file)
-        except ConfigError as exc:
-            raise ConfigError(f"the settings cannot be read: {render_external(exc)}") from exc
-        return _usable_control(name, self.settings_file, settings)
-
     def _documents_for(self, name):
         """Return every document worth making this control's devices safe against.
 
@@ -1074,7 +1055,7 @@ class Supervisor:
                 )
             return documents
         try:
-            current = self._read_stored(name)
+            current = _usable_control(name, self.settings_file, load_settings(self.settings_file))
         except ConfigError as exc:
             # The file is there and cannot be used, which is a fault. Said rather than
             # passed over: nothing is stranded, because the copy this process was started
