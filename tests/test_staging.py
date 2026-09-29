@@ -9,11 +9,13 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
+from types import MappingProxyType
+
 import pytest
 
 from toinflux.exceptions import ConfigError
 from toinflux.rules import RuleEvaluationError
-from toinflux.staging import bracket, build_ladder, cap_ladder, plan_window
+from toinflux.staging import Dwell, Stage, bracket, build_ladder, cap_ladder, delivered_level, plan_window
 
 # The design note's worked example: two independently switchable heaters.
 CONSERVATORY = [
@@ -330,3 +332,71 @@ class TestADeviceSetToAValueRatherThanSwitched:
         broken = build_ladder([{"level": 0, "set": {}}, {"level": 1000, "set": {"lamp": 100}}])
         plan = plan_window(broken, 500, 30, lambda _device: 1, self.DRIVEN)
         assert "lamp" not in plan[0].stage.states or plan[0].stage.states.get("lamp") is None
+
+
+class TestWhatAWindowDelivers:
+    """The level the devices were told to reach, read back from the plan.
+
+    Rung levels alone are right for switched devices and wrong for driven ones: a lamp on a
+    0 to 1000 ladder asked for 400 is planned as one dwell *at level 0* with the lamp at 40%,
+    so reading the rung would record 0 for a lamp that is plainly on.
+    """
+
+    SWITCHED = build_ladder([{"level": 0, "set": {"heater": False}}, {"level": 750, "set": {"heater": True}}])
+    LAMP = build_ladder([{"level": 0, "set": {"lamp": 0}}, {"level": 1000, "set": {"lamp": 100}}])
+    MIXED = build_ladder(
+        [
+            {"level": 0, "set": {"heater": False, "lamp": 0}},
+            {"level": 500, "set": {"heater": False, "lamp": 100}},
+            {"level": 1000, "set": {"heater": True, "lamp": 100}},
+        ]
+    )
+    DRIVEN = {"lamp": "brightness_pct"}
+
+    def test_switched_devices_deliver_the_time_weighted_rung_levels(self):
+        plan = plan_window(self.SWITCHED, 400, 300, _no_minimum)
+        assert [dwell.stage.level for dwell in plan] == [0.0, 750.0]
+        assert delivered_level(plan, self.SWITCHED) == pytest.approx(400)
+
+    def test_a_driven_device_delivers_the_level_its_value_stands_for(self):
+        plan = plan_window(self.LAMP, 400, 300, _no_minimum, self.DRIVEN)
+        assert [dwell.stage.level for dwell in plan] == [0.0], "the case this exists for has changed shape"
+        assert delivered_level(plan, self.LAMP, self.DRIVEN) == pytest.approx(400)
+
+    @pytest.mark.parametrize("demand", [0, 250, 500, 750, 1000])
+    def test_a_mixed_ladder_delivers_its_demand(self, demand):
+        plan = plan_window(self.MIXED, demand, 300, _no_minimum, self.DRIVEN)
+        assert delivered_level(plan, self.MIXED, self.DRIVEN) == pytest.approx(demand)
+
+    def test_a_driven_device_held_at_its_old_value_shows_the_hold(self):
+        """The gap between demand and delivered is what makes a held device visible, so the
+        held value has to be what is read back rather than the demand."""
+        held = (Dwell(stage=_with(self.LAMP[0], lamp=70.0), seconds=300.0),)
+        assert delivered_level(held, self.LAMP, self.DRIVEN) == pytest.approx(700)
+
+    def test_two_driven_devices_that_disagree_average(self):
+        pair = build_ladder([{"level": 0, "set": {"a": 0, "b": 0}}, {"level": 1000, "set": {"a": 100, "b": 100}}])
+        held = (Dwell(stage=_with(pair[0], a=20.0, b=60.0), seconds=60.0),)
+        assert delivered_level(held, pair, {"a": "brightness_pct", "b": "brightness_pct"}) == pytest.approx(400)
+
+    def test_states_the_curve_does_not_describe_fall_back_to_the_rung(self):
+        """A switched device in a state no stretch of the curve gives it: there is nothing to
+        read the driven value against, and the rung it was planned on is what is left."""
+        odd = (Dwell(stage=_with(self.MIXED[0], heater=True, lamp=50.0), seconds=60.0),)
+        assert delivered_level(odd, self.MIXED, self.DRIVEN) == 0.0
+
+    def test_a_plan_with_no_length_delivers_nothing(self):
+        assert delivered_level((), self.SWITCHED) is None
+
+
+def _with(stage, **states):
+    """Return a rung with some devices' states replaced, as `_hold` pins them.
+
+    Args:
+        stage (Stage): the rung
+        **states: device name to the state it is held at
+
+    Returns:
+        Stage: the rung as it would be commanded
+    """
+    return Stage(level=stage.level, declared=stage.declared, states=MappingProxyType({**stage.states, **states}))

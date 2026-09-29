@@ -38,6 +38,7 @@ isn't covered here, look in `architecture/`.
 │   ├── transitions.py      # when each device last moved and what the loop had learned, so
 │   │                       # min_transition_seconds and the PID integral survive a restart
 │   ├── inputs.py           # reading a control's inputs: InfluxDB first, live fetch past max_age
+│   ├── control_record.py   # each control's PID history, one point per cycle, and how readers see it
 │   ├── credentials.py      # systemd-creds substitution into loaded settings
 │   ├── credential_cli.py   # send-to-influx-set-credential
 │   ├── influx.py           # DataHandler base class - owns send_data() (line protocol + InfluxDB HTTP POST)

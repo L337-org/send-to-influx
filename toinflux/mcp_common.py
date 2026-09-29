@@ -18,6 +18,7 @@ import inspect
 
 from mcp.server.mcpserver.exceptions import ToolError
 
+from toinflux.control_record import RECORD_SOURCE, ControlRecord, record_destination
 from toinflux.exceptions import ConfigError, ToInfluxError, ToolParamError
 from toinflux.general import (
     INSTANCED_SOURCES,
@@ -156,6 +157,66 @@ def configured_sources(settings):
     return listed_sources(settings)
 
 
+def readable_sources(settings):
+    """Return the lowercased source names the MCP *read* tools expose.
+
+    The collected sources, plus the controls' own history where it is configured. That one
+    is written by the control processes rather than collected, so it is not in ``sources:``
+    and must not be: a collector named for it has nothing to poll. Kept apart from
+    :func:`configured_sources` for that reason - the write tools and the control tools
+    answer about what is collected, and the history is neither writable nor a control input.
+
+    Args:
+        settings (dict): parsed settings dict
+
+    Returns:
+        list: lowercased source names
+    """
+    sources = configured_sources(settings)
+    if record_destination(settings) and RECORD_SOURCE not in sources:
+        sources.append(RECORD_SOURCE)
+    return sources
+
+
+def _construct(source, settings_file, instance=None):
+    """Build the handler a source name means, for the read and write tools alike.
+
+    Args:
+        source (str): the source name, any case
+        settings_file (str or None): settings path, threaded to the handler's own load
+        instance (str or None): which instance of the source to construct for
+
+    Returns:
+        DataHandler: the constructed handler
+
+    Raises:
+        ConfigError: the name is unknown or its settings are unusable
+    """
+    if source.lower() == RECORD_SOURCE:
+        # Not through get_class, which knows only what can be collected - see readable_sources.
+        return ControlRecord(settings_file)
+    return get_class(source, settings_file, instance=instance)
+
+
+def _require_available(source, settings) -> None:
+    """Refuse a source name the tools do not expose.
+
+    Args:
+        source (object): the source name from a tool argument
+        settings (dict): parsed settings dict
+
+    Raises:
+        ToolParamError: the name is missing, not a string, or not exposed
+    """
+    if not isinstance(source, str) or not source.strip():
+        raise ToolParamError(f"source must be a non-empty string (got {source!r})")
+    available = readable_sources(settings)
+    if source.lower() not in available:
+        raise ToolParamError(
+            f"unknown source {source!r}; available sources: {render_values(available, empty='(none)')}"
+        )
+
+
 def resolve_handlers(source, settings, settings_file):
     """Construct one handler per *instance* of a configured source.
 
@@ -184,14 +245,9 @@ def resolve_handlers(source, settings, settings_file):
             target at all (a Hue install whose bridges have no tokens), which would otherwise return an empty result
             that looks like "no devices" rather than "not configured"
     """
-    if not isinstance(source, str) or not source.strip():
-        raise ToolParamError(f"source must be a non-empty string (got {source!r})")
-    available = configured_sources(settings)
-    if source.lower() not in available:
-        raise ToolParamError(
-            f"unknown source {source!r}; available sources: {render_values(available, empty='(none)')}"
-        )
-    units = expand_sources([source.lower()], settings)
+    _require_available(source, settings)
+    # The record is one handler reading every control, and expand_sources knows only collectors.
+    units = [(RECORD_SOURCE, None)] if source.lower() == RECORD_SOURCE else expand_sources([source.lower()], settings)
     if not units:
         raise ToolParamError(
             f"source {source!r} has no usable target configured - nothing to report on. "
@@ -200,7 +256,7 @@ def resolve_handlers(source, settings, settings_file):
     handlers = []
     try:
         for _, instance in units:
-            handlers.append((instance, get_class(source, settings_file, instance=instance)))
+            handlers.append((instance, _construct(source, settings_file, instance=instance)))
     except ConfigError as exc:
         for _, handler in handlers:
             close_session(handler.session)
@@ -228,13 +284,7 @@ def resolve_handler(source, settings, settings_file, instance=None):
     Raises:
         ToolParamError: source is missing/non-string, unknown, unusable, or named an instance that is not configured
     """
-    if not isinstance(source, str) or not source.strip():
-        raise ToolParamError(f"source must be a non-empty string (got {source!r})")
-    available = configured_sources(settings)
-    if source.lower() not in available:
-        raise ToolParamError(
-            f"unknown source {source!r}; available sources: {render_values(available, empty='(none)')}"
-        )
+    _require_available(source, settings)
     if instance is not None and source.lower() not in INSTANCED_SOURCES:
         # A single-target source ignores its instance entirely - mcp_tag_filters() does not
         # consult it - so without this the value is accepted, the read runs *unscoped*, and
@@ -247,7 +297,7 @@ def resolve_handler(source, settings, settings_file, instance=None):
             f"Sources with separate targets: {render_values(INSTANCED_SOURCES, empty='(none)')}"
         )
     try:
-        handler = get_class(source, settings_file, instance=instance)
+        handler = _construct(source, settings_file, instance=instance)
     except ConfigError as exc:
         raise ToolParamError(f"source {source!r} is not usable: {render_external(exc)}") from exc
 

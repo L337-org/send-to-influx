@@ -1127,7 +1127,12 @@ HANDLER_BUILDERS = frozenset({"get_class", "resolve_handler", "resolve_handlers"
 
 #: The modules that hold nothing but the handler machinery itself, where building one is the
 #: point, so the search for control modules does not follow imports into them.
-FACTORY_MODULES = frozenset({"general", "influx", "exceptions", "process", "mcp_common"})
+#:
+#: ``control_record`` is here because it subclasses ``DataHandler`` to reuse the buffered
+#: writer, and names no source: its handler is bound to the ``controls`` section by
+#: construction, so there is no ``sources:`` entry for the refusal to consult. Referencing the
+#: base class is what the search reports, and building one of these is not a second door.
+FACTORY_MODULES = frozenset({"general", "influx", "exceptions", "process", "mcp_common", "control_record"})
 
 
 def _handler_classes():

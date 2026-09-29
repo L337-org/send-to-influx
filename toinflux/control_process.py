@@ -28,6 +28,7 @@ import time
 
 import requests
 
+from toinflux.control_record import ACTIVE, FAIL_SAFE, ControlRecord, record_destination
 from toinflux.controller import Controller
 from toinflux.controls import (
     DEFAULT_CYCLE_SECONDS,
@@ -48,7 +49,7 @@ from toinflux.general import (
 )
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
-from toinflux.staging import build_ladder
+from toinflux.staging import build_ladder, delivered_level
 from toinflux.transitions import TransitionLog
 
 #: How many cycles old a stored loop memory may be and still describe the present. Five,
@@ -389,6 +390,9 @@ class ControlProcess:
         self._resume_the_loop()
         self._session = session or requests.Session()
         self._owns_session = session is None
+        # Built once, like the transition log, because it carries the write buffer an outage
+        # fills: rebuilt per cycle, a backlog would be discarded with each one.
+        self.record = ControlRecord(settings_file, instance=name) if record_destination(self.settings) else None
         self._bindings = None
         self.guard = DeviceGuard(
             name,
@@ -486,8 +490,13 @@ class ControlProcess:
         """
         self._bindings = None
         moment = moment or datetime.datetime.now(datetime.timezone.utc)
+        # Whether this cycle is one the record covers. Unknown until the gate answers, and a
+        # gate that raises has already found the control enabled and inside its active period,
+        # because `enable_when` - the only thing it reads - is checked after both.
+        operating = None
         try:
             decision = self.gate.decide(self._gather, moment)
+            operating = decision.actuating
             if decision.edge == "closed":
                 # Held, not merely stopped: an error measured against a setpoint nobody is
                 # chasing is not information, and integrating it means resuming with a
@@ -513,7 +522,7 @@ class ControlProcess:
                 # `set_auto_mode(True)` is a no-op while already automatic, so this costs
                 # nothing on the ordinary path.
                 self.controller.resume()
-                self._spend_window(dt, sleep)
+                self._spend_window(dt, sleep, moment)
             else:
                 # **Not acting means held, as an invariant rather than as a list of edges.**
                 # The closing edge above holds, and `_fail_safe` holds, and between them they
@@ -540,15 +549,21 @@ class ControlProcess:
             # one bad cycle is worse than one that skips it - so the devices go safe, the
             # reason is logged once here where it is handled, and the loop carries on.
             self._fail_safe(exc)
+            # Not where the failure was the closing edge's own command: that cycle is the first
+            # one outside the active period, and nothing is recorded there.
+            if operating is not False:
+                self._record(FAIL_SAFE, moment)
             sleep(self.cycle_seconds)
             return None
 
-    def _spend_window(self, dt, sleep) -> None:
+    def _spend_window(self, dt, sleep, moment=None) -> None:
         """Command each rung of this window's plan in turn, waiting out its dwell.
 
         Args:
             dt (float or None): seconds since the previous cycle
             sleep (callable): how to wait
+            moment (datetime.datetime or None): when the cycle began, which the record of it
+                is timestamped with
 
         Raises:
             ConfigError: where the window or the cap is unusable
@@ -618,6 +633,15 @@ class ControlProcess:
             )
             self._apply(dict(dwell.stage.states))
             sleep(dwell.seconds)
+        # **After the window, and stamped with its start.** Written first, an InfluxDB that
+        # takes its whole timeout to refuse would hold the devices' first command back by that
+        # long, every cycle of an outage; the start is the moment the terms describe. A window
+        # that failed part way is recorded by the fail-safe instead, which is what it became.
+        #
+        # From the plan as commanded, after `_hold`, so a device pinned by its minimum shows
+        # as what it was told rather than what the loop wanted.
+        terms = self.controller.last_step
+        self._record(ACTIVE, moment, terms, delivered_level(demand, terms.curve, self.controller.driven))
 
     def _resume_the_loop(self) -> None:
         """Put back the integral this control had built before it was last restarted.
@@ -693,6 +717,20 @@ class ControlProcess:
             for dwell in plan
         )
 
+    def _record(self, state, moment, terms=None, delivered=None) -> None:
+        """Write this cycle to the control's history, where there is one.
+
+        Args:
+            state (str): ``active`` or ``fail_safe``
+            moment (datetime.datetime or None): when the cycle began; now when None
+            terms (StepTerms or None): the step's terms, for an active cycle
+            delivered (float or None): the level the plan delivered, for an active cycle
+        """
+        if self.record is None:
+            return
+        stamp = (moment or datetime.datetime.now(datetime.timezone.utc)).timestamp()
+        self.record.write(state, terms, delivered, timestamp=int(stamp))
+
     def _fail_safe(self, reason) -> None:
         """Put the devices somewhere safe after a cycle that could not be completed.
 
@@ -745,6 +783,8 @@ class ControlProcess:
         """Release what this process opened."""
         if self._owns_session:
             self._session.close()
+        if self.record is not None:
+            self.record.session.close()
 
 
 def run_control(name, settings_file=None, heartbeat=None, cycles=None, sleep=time.sleep) -> None:

@@ -20,6 +20,7 @@ import toinflux
 from toinflux.general import enabled_sources, listed_sources, render_values
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
+from toinflux.control_record import log_record_destination
 from toinflux.controls import control_dir, controls_enabled, list_controls, validate_stored_controls
 from toinflux.control_process import heartbeat_writer, run_control
 from toinflux.supervision import DEFAULT_POLL_SECONDS, Supervisor
@@ -762,6 +763,9 @@ def _start_control_supervisor(settings, args):
                 render_values(stored),
             )
         return None
+    # Once, here, rather than in each control's process: the setting is the installation's,
+    # and a line per control saying the same thing would be the noise that hides it.
+    log_record_destination(settings)
     names = list_controls(args.settings)
     supervisor = Supervisor(names, settings_file=args.settings, enabled=enabled_sources(settings))
     supervised = list(supervisor.children)

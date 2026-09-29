@@ -324,6 +324,44 @@ running control. The control's InfluxDB settings do not: `ControlProcess` reads 
 once at start and queries through that copy, so a changed `influx` block needs the control
 restarted.
 
+## The controls' PID history (`toinflux/control_record.py`)
+
+Each control writes one point per cycle to the `control` measurement, tagged `control=<name>`,
+where `controls.db` or `controls.bucket` is set. CONTROLS.md has the fields and what they mean;
+this is how it is wired and what must not change.
+
+- **`ControlRecord` subclasses `DataHandler` to reuse the buffered writer, and is not a
+  collector.** It is not in `_source_classes()`, because a `sources:` entry naming it would pass
+  validation and then fail at its first collection, as the MyEnergi parent once did. Its
+  settings section is `controls`, so `resolve_db()` and `_build_write_request()` find `db` or
+  `bucket` there unchanged. It is exempt from the handler-build guard in
+  `tests/test_inputs.py` (listed in `FACTORY_MODULES`, with the reason): it names no source, so
+  there is no `sources:` entry for the refusal to consult.
+- **Written after the window, stamped with its start.** Before it, an InfluxDB that takes its
+  whole timeout to refuse would delay the first device command of every cycle by that long.
+- **`delivered` is computed from the plan as commanded**, after `_hold` pins held driven devices,
+  by `staging.delivered_level()` against the capped ladder the controller kept in
+  `last_step.curve`. **Rung levels alone are wrong for driven devices**, and that was the design's
+  first reading: a lamp on a 0 to 1000 ladder at demand 400 is planned as one dwell *at level
+  0* with the lamp at 40%, so the rung says 0. `dwell_level()` reads a dwell carrying driven
+  devices back off the curve instead. Two driven devices held at values that disagree about
+  where on the curve the window is are averaged - accepted.
+- **Which cycles are recorded is decided in `ControlProcess.cycle()`**: `active` after a window
+  was spent, `fail_safe` where the cycle failed while the gate had it operating. A gate that
+  raises counts as operating, because `enable_when` is only evaluated once the control is
+  enabled and inside its period. A failure of the *closing edge's* command also takes the
+  fail-safe path, and is not recorded: that cycle is the first outside the period.
+- **A write failure never reaches the cycle.** `ControlRecord.write()` swallows
+  `InfluxWriteError` once `send_data` has buffered the point. The base writer's own messages go
+  through `DataHandler._write_problem()`, which `ControlRecord` overrides to report through a
+  `RepeatingProblem`: a control writes every cycle and never backs off, so the collectors'
+  log-every-failure would flood an outage. A failed post and a failed flush share one key,
+  because the flush is what a post becomes once a backlog exists; keyed apart, the flush was
+  reported as a second new problem on the third cycle of every outage. A full buffer has its
+  own key, because dropping points is news.
+- **`i` is simple-pid's integral term**, in levels, not the accumulated error. That is what makes
+  it usable later as a starting output, and `TestTheTermsOfTheLastStep` holds it.
+
 ## The control rule language (`toinflux/rules.py`)
 
 A control's setpoint, cap and gate are expressions - hold the conservatory at the greater of the

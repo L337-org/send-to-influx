@@ -614,6 +614,79 @@ look like it is doing the opposite of what it was told - a demand of 150 command
 for the whole window is correct when the far heater may not switch off yet, and inexplicable
 without it.
 
+Recording the PID history
+-------------------------
+
+The `-v` line above is gone as soon as it scrolls. To keep it, give the controls somewhere to
+write in `settings.yaml`:
+
+```yaml
+controls:
+  enabled: true
+  db: "control_db"         # InfluxDB 1
+  # bucket: "controls"     # InfluxDB 2, in place of db
+```
+
+Resolved exactly as a source's `db` and `bucket` are. Leave both out and nothing is recorded;
+the service says so once at startup.
+
+Every control then writes one point per cycle to the `control` measurement, tagged
+`control=<name>`, stamped with the moment the cycle began:
+
+| Field | What it is |
+|---|---|
+| `input` | the `pid.input` rule as evaluated this cycle |
+| `setpoint` | the `pid.setpoint` rule as evaluated this cycle |
+| `demand` | what the PID asked for, on the ladder's level scale: `p + i + d`, limited to the ladder and any `max_level` |
+| `p`, `i`, `d` | each term's share of `demand`. `i` is the integral, in levels |
+| `kp`, `ki`, `kd` | the gains in effect for the cycle |
+| `delivered` | the level the devices were commanded to over the window |
+| `state` | `active`, or `fail_safe` - see below |
+
+**`delivered` is what was commanded, as a level.** For switched devices it is the rungs used,
+weighted by how long each was held: level 0 for 140s then level 750 for 160s delivers 400. A
+driven device is read off the ladder at the value it was set to, so a lamp at 40% on a 0 to
+1000 ladder delivers 400, even though its window was planned on the level-0 rung. Where two
+driven devices on one control are held at values that put the window at different places on
+the ladder, the average of the two is recorded. It is what the devices were *told*;
+whether they obeyed is for their own source's data to show.
+
+**`state` is `active`** for a cycle that ran the loop, and **`fail_safe`** for a cycle inside
+the active period that could not - an input too old or unreadable, a rule that could not be
+evaluated - and put the devices in their safe state instead. A `fail_safe` point carries
+`state` alone, because none of the rest was worked out. It is recorded so that a dip in the
+history is explained rather than read as the loop misbehaving. Not `held`, which already means
+a device inside its `min_transition_seconds`.
+
+**Nothing is written while a control is not acting**: disabled, outside its active period, or
+gated off by `enable_when`. Which of those it was can be read from the document, and points
+while nothing is happening would say nothing.
+
+**Recording never affects control.** A write that fails is buffered and sent with the next one
+that gets through, the failure is logged once for the outage rather than every cycle, and the
+cycle carries on regardless.
+
+### Using it to tune
+
+Plot `input` against `setpoint`, and below it `demand` split into `p`, `i` and `d`, with
+`delivered` beside `demand`. The MCP server's `suggest_dashboard_panels` produces the queries
+for source `controls`, one series per control. An assistant connected over MCP reads the same
+history with `list_fields` and `query_history`, scoped to one control with `instance`, and
+`list_fields` with `detail` gives it what each field means.
+
+* **`p` swinging from side to side cycle after cycle**: `kp` is too high - see *Choosing the
+  gains* above.
+* **`i` creeping for an hour while `input` sits below `setpoint`**: `ki` is too low.
+* **`i` pinned at the top of the ladder**: the devices cannot deliver what is asked. That is
+  capacity, not tuning, and no gain fixes it.
+* **`delivered` apart from `demand`**: the ladder could not do what was asked this window - a
+  device held by `min_transition_seconds`, a window too short to split between two rungs, or
+  a `max_level` cap.
+* **Once `input` sits on `setpoint`, `i` is the level it takes to hold it there** under the
+  conditions of the moment. Watch it across a few days and it shows how much that varies.
+* **A step in `kp`, `ki` or `kd`** marks a retune. The gains are written on every point, so
+  any window of the history says which tuning produced it.
+
 What a control remembers
 ------------------------
 

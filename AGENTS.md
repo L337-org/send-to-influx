@@ -29,7 +29,7 @@ background.
 | any collector under `toinflux/` (not the MCP modules) | [architecture/collectors.md](architecture/collectors.md) |
 | reading from InfluxDB, or any query construction | `toinflux/influx.py`'s read half, and [architecture/collectors.md](architecture/collectors.md) |
 | `sendtoinflux.py`, `toinflux/general.py`, `toinflux/process.py`, `toinflux/controls.py`, `toinflux/rules.py` | [architecture/runtime.md](architecture/runtime.md) |
-| the control loop: `toinflux/supervision.py`, `control_process.py`, `controller.py`, `gating.py`, `schedule.py`, `staging.py`, `transitions.py`, `inputs.py` | [CONTROLS.md](CONTROLS.md) for the document format, [architecture/runtime.md](architecture/runtime.md) for how it runs |
+| the control loop: `toinflux/supervision.py`, `control_process.py`, `controller.py`, `gating.py`, `schedule.py`, `staging.py`, `transitions.py`, `inputs.py`, `control_record.py` | [CONTROLS.md](CONTROLS.md) for the document format, [architecture/runtime.md](architecture/runtime.md) for how it runs |
 | running an external command from anywhere | `toinflux.process.run_command`, and [architecture/runtime.md](architecture/runtime.md) |
 | `packaging/`, `toinflux/credentials.py`, `toinflux/credential_cli.py`, or adding a settings section | [architecture/packaging.md](architecture/packaging.md) |
 | adding a data source | the checklist in [CONTRIBUTING.md](CONTRIBUTING.md) |
@@ -182,6 +182,10 @@ disabled capability is not registered at all rather than registered-and-refusing
 - **A new tool or resource needs a test for what it says when it fails**, not only for what it
   returns when it works. `tests/test_mcp_surface.py` fails any registration that bypasses the
   registrars, because a bypass returns the right payload and passes every behaviour test.
+- **The controls' PID history is readable and is not a source.** `readable_sources()` adds
+  `controls` to `configured_sources()` for the read tools only, and `_construct()` builds its
+  `ControlRecord`; it is not in `_source_classes()`, so nothing can collect it. Its `control`
+  measurement and field keys are emitted data like any other.
 - **Grafana vocabulary stays in `toinflux/mcp_dashboards.py`.** `mcp_read` does not import it, so the
   leak is structurally impossible rather than merely avoided.
 - **The injection defence is split, and the split is the thing to get right.** Query construction

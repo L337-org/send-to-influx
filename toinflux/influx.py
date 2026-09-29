@@ -643,7 +643,9 @@ class DataHandler:
                 self._post_line("\n".join(entry[0] for entry in chunk), url, kwargs)
             except InfluxWriteError as exc:
                 if not _is_point_rejection(exc.status_code):
-                    logging.warning(
+                    self._write_problem(
+                        "flush",
+                        logging.WARNING,
                         "Flushing %d buffered point(s) for worker '%s' failed; will retry next cycle",
                         len(buffer),
                         self.worker_label,
@@ -739,10 +741,28 @@ class DataHandler:
                 response = self.session.post(url, data=line, **kwargs)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            logging.error("Error sending data to InfluxDB - %s", e)
+            self._write_problem("post", logging.ERROR, "Error sending data to InfluxDB - %s", e)
             exc = InfluxWriteError(str(e))
             exc.status_code = getattr(e.response, "status_code", None)
             raise exc from e
+
+    def _write_problem(self, kind, level, message, *args) -> None:
+        """Say that writing to InfluxDB went wrong, in the way this writer wants it said.
+
+        Straight to the log for a collector, whose worker writes once per ``interval`` and
+        backs off when it fails. A writer that must keep going at its own pace instead - a
+        control records a point every cycle and never backs off, because the cycle is for the
+        devices rather than for the record - overrides this so an outage is said once rather
+        than on every point.
+
+        Args:
+            kind (str): which failure this is - ``"post"``, ``"flush"`` or ``"full"`` - so an
+                override can tell a lost point from a delayed one
+            level (int): the logging level
+            message (str): a %-style format string
+            *args: its arguments
+        """
+        logging.log(level, message, *args)
 
     def _buffer_point(self, buffer, line) -> None:
         """Append a failed point to a source's write buffer.
@@ -762,7 +782,9 @@ class DataHandler:
             logging.debug("Point already buffered for worker '%s'; not buffering a duplicate copy", self.worker_label)
             return
         if len(buffer) >= buffer.maxlen:
-            logging.warning(
+            self._write_problem(
+                "full",
+                logging.WARNING,
                 "InfluxDB write buffer for worker '%s' is full (%d points); dropping the oldest buffered point",
                 self.worker_label,
                 buffer.maxlen,

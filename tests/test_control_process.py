@@ -1363,3 +1363,221 @@ class TestADisabledSource:
         state_directory.set_sources("openmeteo", "carbonintensity")
         control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
         assert any(state for state in bridge.energised().values()), "the cycle read nothing and did not heat"
+
+
+@pytest.fixture
+def recorded(state_directory):
+    """Yield the example conservatory with its history recorded, and no active period.
+
+    No period, so every cycle is one the record covers unless a test gates it off; the
+    period's own edges are exercised by `recorded_overnight`.
+
+    Yields:
+        ControlProcess: the control, closed afterwards
+    """
+    installation = state_directory
+    installation.set_settings("controls", db="control_db")
+    document = conservatory()
+    document.pop("active_period")
+    installation.write_control(document)
+    process = ControlProcess("conservatory", settings_file=installation.settings_file)
+    try:
+        yield process
+    finally:
+        process.guard.close()
+        process.close()
+
+
+@pytest.fixture
+def recorded_overnight(state_directory):
+    """Yield the example conservatory, active period and all, with its history recorded.
+
+    Yields:
+        ControlProcess: the control, closed afterwards
+    """
+    installation = state_directory
+    installation.set_settings("controls", db="control_db")
+    installation.write_control(conservatory())
+    process = ControlProcess("conservatory", settings_file=installation.settings_file)
+    try:
+        yield process
+    finally:
+        process.guard.close()
+        process.close()
+
+
+def _recorded_points(influx):
+    """Return every point written to the ``control`` measurement, as its lines.
+
+    Args:
+        influx (StubInflux): the database the control wrote to
+
+    Returns:
+        list: one line-protocol string per point
+    """
+    lines = []
+    for body in influx.writes:
+        text = body.decode() if isinstance(body, bytes) else body
+        lines.extend(line for line in text.splitlines() if line.startswith("control,"))
+    return lines
+
+
+def _fields(line):
+    """Return a line-protocol point's fields, values left as written.
+
+    Args:
+        line (str): one point
+
+    Returns:
+        dict: field key to its written value
+    """
+    _series, fields, _stamp = line.rsplit(" ", 2)
+    return dict(pair.split("=", 1) for pair in fields.split(","))
+
+
+class TestTheRecordOfEachCycle:
+    """One point per cycle the loop runs, carrying what a tuning argument is had in.
+
+    Checked against what the stub InfluxDB received, which the control does not write, and
+    against the controller's own terms rather than against numbers worked out here.
+    """
+
+    def test_a_cycle_that_runs_writes_one_point_with_every_term(self, recorded, influx):
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        (point,) = _recorded_points(influx)
+        assert point.startswith("control,control=conservatory ")
+        fields = _fields(point)
+        assert set(fields) == {"input", "setpoint", "demand", "p", "i", "d", "kp", "ki", "kd", "delivered", "state"}
+        assert fields["state"] == '"active"'
+        terms = recorded.controller.last_step
+        assert float(fields["demand"]) == pytest.approx(terms.demand)
+        assert float(fields["i"]) == pytest.approx(terms.i)
+        assert (float(fields["kp"]), float(fields["ki"])) == (200.0, 0.5)
+
+    def test_it_is_stamped_with_the_cycle_s_start(self, recorded, influx):
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        (point,) = _recorded_points(influx)
+        assert point.rsplit(" ", 1)[1] == str(int(NIGHT.timestamp()))
+
+    def test_delivered_is_what_the_plan_commanded_not_what_was_asked(self, recorded, influx, bridge):
+        """The first cycle asks for 460. Splitting a 60s window between 0 and 750 for that
+        leaves 23s at 0, under the 30s minimum, so the window collapses onto 750 - and the
+        record says 750 was delivered against a demand of 460. That gap is what the field is
+        for: without it the history shows a loop asking for less than it got, and no reason."""
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        fields = _fields(_recorded_points(influx)[0])
+        assert float(fields["demand"]) == pytest.approx(460.0)
+        assert float(fields["delivered"]) == pytest.approx(750.0)
+        assert bridge.energised() == {"far": True, "near": False}
+
+    def test_every_cycle_writes_its_own_point(self, recorded, influx):
+        for _ in range(3):
+            recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert len(_recorded_points(influx)) == 3
+
+    def test_a_fail_safe_cycle_writes_its_state_and_nothing_else(self, recorded, influx):
+        """Recorded because it explains a dip in the history that would otherwise read as the
+        loop misbehaving; and with no terms, because none were computed."""
+        recorded.gate._enable_when = _unevaluable_rule()
+        assert recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+        (point,) = _recorded_points(influx)
+        assert _fields(point) == {"state": '"fail_safe"'}
+
+    def test_an_unreadable_input_is_a_fail_safe_point_too(self, recorded, influx, bridge):
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        influx.age_reading("conservatory_temperature", 86400)
+        with faults.frozen(influx), faults.unreachable(bridge):
+            assert recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+        assert [_fields(point)["state"] for point in _recorded_points(influx)] == ['"active"', '"fail_safe"']
+
+
+class TestNothingIsRecordedWhileOff:
+    def test_outside_the_active_period_nothing_is_written(self, recorded_overnight, influx):
+        recorded_overnight.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        assert _recorded_points(influx) == []
+
+    def test_the_cycle_the_window_closes_on_writes_nothing(self, recorded_overnight, influx):
+        recorded_overnight.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        recorded_overnight.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        assert len(_recorded_points(influx)) == 1
+
+    def test_nor_where_the_closing_command_itself_failed(self, recorded_overnight, influx, bridge):
+        """That failure takes the fail-safe path, and it happens on the first cycle outside
+        the window: a `fail_safe` point there would claim a cycle the record does not cover."""
+        recorded_overnight.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        with faults.unreachable(bridge):
+            assert recorded_overnight.cycle(dt=60, moment=DAY, sleep=_never_sleep) is None
+        assert len(_recorded_points(influx)) == 1
+
+    def test_a_disabled_control_writes_nothing(self, recorded, influx):
+        recorded.gate.enabled = False
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert _recorded_points(influx) == []
+
+    def test_gated_off_by_enable_when_writes_nothing(self, recorded, influx):
+        recorded.gate._enable_when = parse_rule("1 > 2")
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert _recorded_points(influx) == []
+
+
+class TestWithNoRecordConfigured:
+    def test_nothing_is_written(self, control, influx):
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert control.record is None
+        assert _recorded_points(influx) == []
+
+
+class TestARecordThatCannotBeWritten:
+    """The history is for tuning, and the cycle is for the devices. A write that fails must
+    not reach the cycle, and must not say so every cycle for the length of an outage."""
+
+    @pytest.fixture
+    def refusing(self, recorded, monkeypatch):
+        """Make the record's writes fail while every read still works.
+
+        Only the record's own session, so the fault is the history's alone: a real outage
+        fails the reads as well, and that is the fail-safe tested above.
+
+        The refusal is `requests.exceptions.ConnectionError`, what requests raises for a
+        refused connection and the `RequestException` subclass `_post_line` catches. Checked
+        against a real InfluxDB 1.8 paused mid-run, which failed the same path with
+        `ReadTimeout` and delivered the buffered points once it resumed.
+
+        Returns:
+            list: the bodies that would have been sent, for the recovery check
+        """
+        real = recorded.record.session.post
+        attempts = []
+
+        def refuse(url, data=None, **kwargs):
+            attempts.append(data)
+            if refuse.down:
+                raise requests.exceptions.ConnectionError("connection refused")
+            return real(url, data=data, **kwargs)
+
+        refuse.down = True
+        monkeypatch.setattr(recorded.record.session, "post", refuse)
+        return refuse
+
+    def test_the_cycle_still_runs_and_commands_the_devices(self, recorded, refusing, bridge):
+        decision = recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert decision is not None and decision.actuating
+        assert any(bridge.energised().values())
+
+    def test_the_failure_is_said_once_for_the_outage(self, recorded, refusing, caplog):
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(3):
+                recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        levels = [r.levelno for r in caplog.records if "could not record its cycle" in r.getMessage()]
+        assert levels[0] == logging.ERROR
+        assert logging.ERROR not in levels[1:] and logging.WARNING not in levels[1:], levels
+
+    def test_the_points_arrive_once_it_recovers_and_that_is_said(self, recorded, refusing, influx, caplog):
+        for _ in range(2):
+            recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert _recorded_points(influx) == []
+        refusing.down = False
+        with caplog.at_level(logging.INFO):
+            recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert len(_recorded_points(influx)) == 3
+        assert "recording its cycles to InfluxDB again" in caplog.text

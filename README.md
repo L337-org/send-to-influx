@@ -871,11 +871,16 @@ watches a heartbeat from each, and restarts one that dies or stops beating with 
 Every death is followed by the parent putting that control's devices into their safe state itself -
 a child that was killed or lost power did not get the chance.
 
+**Each control's PID history can be kept for tuning.** Set `controls.db` (or `controls.bucket` on
+InfluxDB 2) and every cycle writes its input, setpoint, demand and P, I and D terms to the `control`
+measurement, readable through the MCP read tools as source `controls`. CONTROLS.md says what each
+field means and how to read it.
+
 **[CONTROLS.md](CONTROLS.md) is the reference**: the document format key by key, the rule language
 and the things about it that bite, safe states and the active period, the stage ladder, a worked
-example, and what `--check-config` checks. The same reference is available at runtime from the
-`get_control_schema` MCP tool, built from the same constants, so a connected model composing a
-control is not guessing.
+example, recording the PID history, and what `--check-config` checks. The same reference is
+available at runtime from the `get_control_schema` MCP tool, built from the same constants, so a
+connected model composing a control is not guessing.
 
 Usage
 -----

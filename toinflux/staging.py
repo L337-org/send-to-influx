@@ -404,3 +404,129 @@ def _minimum_transition(lower, upper, min_transition_for, driven):
     """
     changing = [name for name, state in upper.states.items() if name not in driven and lower.states.get(name) != state]
     return max((float(min_transition_for(name)) for name in changing), default=0.0)
+
+
+#: How far a driven device's value may sit outside a stretch of the curve and still be read as
+#: lying on it. Commanded values are interpolated in floating point, so a value exactly at a
+#: rung can come back a rounding error beyond it.
+_ON_CURVE = 1e-9
+
+
+def delivered_level(plan, curve, driven=None):
+    """Return the level a window's plan actually delivers, averaged over the window.
+
+    **What the devices were told to do, read back as a level.** For a switched device that
+    is the rung's own level, weighted by how long it is held, so ``level 0 for 140s, level
+    750 for 160s`` delivers 400. A driven device is different: it holds one value for the
+    whole window on a rung whose level says nothing about it - a lamp on a 0 to 1000 ladder
+    asked for 400 is planned as one dwell *at level 0* with the lamp at 40% - so a dwell
+    carrying driven devices is read off the curve at the level its values correspond to.
+
+    That also makes a device held by ``min_transition_seconds`` visible. Its held value is
+    what is read back, so a lamp pinned at 70% while the loop asks for 400 delivers 700, and
+    the gap between the two is the hold.
+
+    What was **commanded**, not what happened: whether a device obeyed is its own
+    collector's to say.
+
+    Args:
+        plan (tuple): Dwell, as it is about to be commanded
+        curve (tuple): Stage in ladder order, capped, that driven values were read off
+        driven (dict or None): device name -> its parameter, for devices set to a value
+
+    Returns:
+        float or None: the time-weighted mean level, or None for a plan with no length
+    """
+    total = sum(dwell.seconds for dwell in plan)
+    if not total:
+        return None
+    return sum(dwell_level(dwell.stage, curve, driven) * dwell.seconds for dwell in plan) / total
+
+
+def dwell_level(stage, curve, driven=None):
+    """Return the level one dwell's states stand for on the curve.
+
+    The rung's own level unless a driven device is involved. Then every rung and every
+    stretch between two adjacent rungs is a candidate: it fits where each switched device
+    is in the state the dwell gives it at both ends, and the driven devices' values place
+    the dwell along it. Of the levels that fit, the one nearest the rung the dwell was
+    planned on wins, which only matters where the curve is flat - two rungs commanding the
+    same thing - and any level along a flat stretch is as true as another.
+
+    **Several driven devices held at values that disagree** have no one level that
+    describes them, because each would put the dwell somewhere different along the curve.
+    The mean of their positions is taken. Accepted: the case needs two dimmers on one
+    control, each held by its own minimum, at once.
+
+    Args:
+        stage (Stage): the rung as it is about to be commanded
+        curve (tuple): Stage in ladder order
+        driven (dict or None): device name -> its parameter
+
+    Returns:
+        float: the level
+    """
+    if not driven or not any(device in driven for device in stage.states):
+        return stage.level
+    fits = []
+    for rung in curve:
+        if all(_same_state(state, rung.states.get(device)) for device, state in stage.states.items()):
+            fits.append(rung.level)
+    for lower, upper in zip(curve, curve[1:]):
+        level = _level_along(stage, lower, upper, driven)
+        if level is not None:
+            fits.append(level)
+    if not fits:
+        # The states match nothing the curve describes - a document edited under a held
+        # value, say. The rung it was planned on is the only honest answer left.
+        return stage.level
+    return min(fits, key=lambda level: abs(level - stage.level))
+
+
+def _same_state(commanded, declared):
+    """Return whether a commanded state is the one a rung declares.
+
+    Args:
+        commanded (object): the state in the dwell
+        declared (object): the state the rung gives the same device
+
+    Returns:
+        bool: True where they are the same, numbers compared to within rounding
+    """
+    if isinstance(commanded, bool) or isinstance(declared, bool):
+        return commanded == declared
+    if isinstance(commanded, (int, float)) and isinstance(declared, (int, float)):
+        return math.isclose(commanded, declared, rel_tol=0.0, abs_tol=_ON_CURVE)
+    return commanded == declared
+
+
+def _level_along(stage, lower, upper, driven):
+    """Return where a dwell sits between two adjacent rungs, or None where it does not fit.
+
+    Args:
+        stage (Stage): the rung as it is about to be commanded
+        lower (Stage): the rung below
+        upper (Stage): the rung above
+        driven (dict): device name -> its parameter
+
+    Returns:
+        float or None: the level, or None where a switched device rules this stretch out
+        or no driven device moves along it
+    """
+    shares = []
+    for device, state in stage.states.items():
+        low, high = lower.states.get(device), upper.states.get(device)
+        if device not in driven:
+            if not (_same_state(state, low) and _same_state(state, high)):
+                return None
+            continue
+        numeric = all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (state, low, high))
+        if not numeric or high == low:
+            continue
+        share = (state - low) / (high - low)
+        if not -_ON_CURVE <= share <= 1 + _ON_CURVE:
+            return None
+        shares.append(min(max(share, 0.0), 1.0))
+    if not shares or upper.level == lower.level:
+        return None
+    return lower.level + (upper.level - lower.level) * sum(shares) / len(shares)

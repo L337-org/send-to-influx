@@ -744,3 +744,40 @@ class TestABriefHoldDoesNotCostTheLoopWhatItLearned:
         before = controller.pid._integral
         controller.resume()
         assert controller.pid._integral == pytest.approx(before)
+
+
+class TestTheTermsOfTheLastStep:
+    """What the record of a cycle is built from. Kept on the controller because the terms only
+    exist inside the PID, and read by the loop after the plan so the record describes a step
+    that actually produced one."""
+
+    def test_they_are_the_pid_s_own_terms_and_gains(self):
+        controller = Controller(_document())
+        controller.step({"inside": 16.0, "target": 18.0}, dt=CYCLE)
+        terms = controller.last_step
+        assert (terms.input, terms.setpoint) == (16.0, 18.0)
+        assert (terms.p, terms.i, terms.d) == controller.pid.components
+        assert (terms.kp, terms.ki, terms.kd) == (60.0, 0.02, 0.0)
+        assert terms.demand == pytest.approx(terms.p + terms.i + terms.d)
+
+    def test_the_integral_is_on_the_level_scale(self):
+        """What a later starting output would be read from: `i` has to be the integral term's
+        contribution to the demand, not the raw accumulated error, or it could not be set as
+        a level."""
+        controller = Controller(_document())
+        for _ in range(3):
+            controller.step({"inside": 16.0, "target": 18.0}, dt=CYCLE)
+        assert controller.last_step.i == pytest.approx(0.02 * 2.0 * CYCLE * 3)
+
+    def test_the_curve_is_the_capped_ladder(self):
+        controller = Controller(_document(output={"max_level": "750"}))
+        controller.step({"inside": 10.0, "target": 18.0}, dt=CYCLE)
+        assert [rung.level for rung in controller.last_step.curve] == [0.0, 750.0]
+
+    def test_a_step_that_raised_leaves_the_previous_terms(self):
+        controller = Controller(_document())
+        controller.step({"inside": 16.0, "target": 18.0}, dt=CYCLE)
+        before = controller.last_step
+        with pytest.raises(RuleEvaluationError):
+            controller.step({"inside": math.nan, "target": 18.0}, dt=CYCLE)
+        assert controller.last_step is before
