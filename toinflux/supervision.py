@@ -133,7 +133,7 @@ class Child:
         return self.process is not None
 
 
-def _usable_control(name, settings_file, settings=None):
+def _usable_control(name, settings_file, settings):
     """Read one control document and refuse it unless it is structurally sound.
 
     Checked here rather than defended against at each use. A document that parses as YAML
@@ -145,8 +145,10 @@ def _usable_control(name, settings_file, settings=None):
 
     Args:
         name (str): the control to read
-        settings_file (str or None): the settings path the process was started with
-        settings (dict or None): settings already read, or None to read them from the file
+        settings_file (str or None): the settings path the process was started with, which is
+            also what locates the control store
+        settings (dict): the settings, already read. Required, so each caller reads the file
+            once and decides for itself what an unreadable one means
 
     Returns:
         dict: the validated document
@@ -155,7 +157,7 @@ def _usable_control(name, settings_file, settings=None):
         ConfigError: where it cannot be read or is not structurally valid
     """
     document = load_control(name, settings_file)
-    errors = validate_control(name, document, load_settings(settings_file) if settings is None else settings)
+    errors = validate_control(name, document, settings)
     if errors:
         raise ConfigError(f"control {name!r} is not valid:\n  " + "\n  ".join(errors))
     return document
@@ -354,12 +356,25 @@ class Supervisor:
         # the *same* one each time is not, because an operator watching a heater needs the
         # answer to hold still while they fix it.
         claimed: list = []
-        for name in sorted(names):
+        names = sorted(names)
+        settings: dict = {}
+        if names:
+            # Only where there is something to check against them: an empty store needs no
+            # settings, and an installation starting with none is not a fault.
+            try:
+                settings = load_settings(settings_file)
+            except ConfigError as exc:
+                # Every control's problem at once, so said once. The service read this file a
+                # moment ago to get here, so this is an edit landing in between, and the reload
+                # that follows the fix takes each control on.
+                logging.error("No control can be supervised, because the settings cannot be read: %r", exc)
+                names = []
+        for name in names:
             # Read now rather than at each start: a control that cannot be read is a
             # configuration fault, and finding that out per restart would turn it into a
             # respawn loop that logs the same message for ever.
             try:
-                document = _usable_control(name, settings_file)
+                document = _usable_control(name, settings_file, settings)
             except ConfigError as exc:
                 # That control's problem, not everybody's. Refusing to supervise anything
                 # because one stored document is corrupt would stop the heating over a file
@@ -660,7 +675,7 @@ class Supervisor:
             # Read here both to decide whether to stop what is running and to see whether it
             # is still enabled. An unusable document must not cost a working control its
             # process.
-            document = _usable_control(name, self.settings_file)
+            document = self._read_stored(name)
         except ConfigError as exc:
             # Two different situations, and telling an operator the wrong one sends them
             # looking in the wrong place. Where a control *is* running, refusing to kill it
@@ -675,7 +690,8 @@ class Supervisor:
                     "Control %r was not reloaded and is still running the document it started with: %r", name, exc
                 )
             else:
-                logging.error("Control %r is still not running: the stored document is not valid: %r", name, exc)
+                # The reason names the file: the control's own document, or the settings.
+                logging.error("Control %r is still not running: %r", name, exc)
             self._record("reload-failed", name, repr(exc))
             return
         if not control_is_enabled(document):
@@ -997,6 +1013,25 @@ class Supervisor:
                 # call site.
                 logging.exception("Could not make control %r safe, and the reason was unexpected: %r", name, exc)
 
+    def _read_stored(self, name):
+        """Read the settings, then one stored control against them.
+
+        Args:
+            name (str): the control to read
+
+        Returns:
+            dict: the validated document
+
+        Raises:
+            ConfigError: where either cannot be used. A settings file that cannot be read says
+                so first, because the operator then has a different file to go and look at
+        """
+        try:
+            settings = load_settings(self.settings_file)
+        except ConfigError as exc:
+            raise ConfigError(f"the settings cannot be read: {render_external(exc)}") from exc
+        return _usable_control(name, self.settings_file, settings)
+
     def _documents_for(self, name):
         """Return every document worth making this control's devices safe against.
 
@@ -1039,7 +1074,7 @@ class Supervisor:
                 )
             return documents
         try:
-            current = _usable_control(name, self.settings_file)
+            current = self._read_stored(name)
         except ConfigError as exc:
             # The file is there and cannot be used, which is a fault. Said rather than
             # passed over: nothing is stranded, because the copy this process was started

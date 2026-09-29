@@ -1534,6 +1534,39 @@ class TestADisabledSource:
         assert "was not started because its settings cannot be read" in caplog.text
         assert "could not be re-read before starting it" not in caplog.text
 
+    def test_unreadable_settings_at_construction_are_said_once(self, state_directory, caplog):
+        installation = state_directory
+        names = _two_controls(installation)
+        enabled = _enabled(installation)
+        with open(installation.settings_file, "w", encoding="utf-8") as handle:
+            handle.write("sources: [unclosed\n")
+        with caplog.at_level(logging.ERROR):
+            running = Supervisor(names, settings_file=installation.settings_file, enabled=enabled)
+        assert running.children == {}
+        assert caplog.text.count("No control can be supervised, because the settings cannot be read") == 1
+
+    def test_a_reload_names_the_settings_when_they_are_what_cannot_be_read(self, supervisor, state_directory, caplog):
+        with open(state_directory.settings_file, "w", encoding="utf-8") as handle:
+            handle.write("sources: [unclosed\n")
+        with caplog.at_level(logging.ERROR):
+            supervisor._reload("conservatory")
+        assert [event.kind for event in supervisor.events] == ["reload-failed"]
+        assert "Control 'conservatory' is still not running" in caplog.text
+        assert "the settings cannot be read" in caplog.text
+
+    def test_unreadable_settings_fall_back_to_the_started_from_document(self, supervisor, state_directory, caplog):
+        """As for a document that will not read, and said as the settings so the operator looks
+        at the right file. Commanding the devices still needs the settings - the bridge's
+        credentials are in them - so this is about which document is used, not about the
+        command getting through."""
+        started = supervisor.children["conservatory"].document
+        with open(state_directory.settings_file, "w", encoding="utf-8") as handle:
+            handle.write("sources: [unclosed\n")
+        with caplog.at_level(logging.WARNING):
+            assert supervisor._documents_for("conservatory") == [started]
+        assert "made safe from the document it was started with" in caplog.text
+        assert "the settings cannot be read" in caplog.text
+
     def test_the_service_s_own_list_is_the_one_used(self, state_directory, bridge):
         """Passed in by the service rather than read here, and honoured when it is."""
         installation = state_directory
