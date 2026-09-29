@@ -41,7 +41,8 @@ isn't covered here, look in `architecture/`.
 │   ├── control_record.py   # each control's PID history, one point per cycle, and how readers see it
 │   ├── credentials.py      # systemd-creds substitution into loaded settings
 │   ├── credential_cli.py   # send-to-influx-set-credential
-│   ├── influx.py           # DataHandler base class - owns send_data() (line protocol + InfluxDB HTTP POST)
+│   ├── influx.py           # DataHandler base class - owns send_data() (line protocol, handed to the writer)
+│   ├── writer.py           # the disk spool and the thread that posts it - the only thing that writes to InfluxDB
 │   ├── mcpserver.py        # MCP server lifecycle, OAuth state, bind address
 │   ├── mcp_*.py            # the MCP surface: common registrars, read, write, resources, prompts, dashboards
 │   ├── mqtt.py             # MqttDataHandler - MQTT transport for interrupt-driven sources

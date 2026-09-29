@@ -1046,6 +1046,12 @@ def _validate_influx_block(influx):
             errors.append("influx.org is required when using token authentication (v2)")
     elif not (influx.get("user") and influx.get("password")):
         errors.append("influx requires either token+org (v2) or user+password (v1)")
+    # Here rather than at the top: the writer imports this module.
+    from toinflux.writer import buffer_mb_problem
+
+    problem = buffer_mb_problem(influx)
+    if problem:
+        errors.append(problem)
     return errors
 
 

@@ -661,9 +661,10 @@ a device inside its `min_transition_seconds`.
 gated off by `enable_when`. Which of those it was can be read from the document, and points
 while nothing is happening would say nothing.
 
-**Recording never affects control.** A write that fails is buffered and sent with the next one
-that gets through, the failure is logged once for the outage rather than every cycle, and the
-cycle carries on regardless.
+**Recording never affects control.** Each control process writes its points to a buffer on disk
+of its own and sends them from a separate thread, so a slow or unreachable InfluxDB delays neither
+the devices nor the next cycle, and the points are sent once it is back - see the README on the
+InfluxDB buffer.
 
 ### Using it to tune
 

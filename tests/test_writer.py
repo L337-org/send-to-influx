@@ -1,0 +1,578 @@
+"""Tests for the writer: the spool, the thread that drains it, and what survives what.
+
+Most drive an ``InfluxWriter`` directly against a scripted HTTP post, calling
+``run_until_idle()`` where the service's thread would, so each step is deterministic. The last
+class runs the real thread against a post that hangs, because the property that matters most -
+a caller never waits on InfluxDB - only exists with a thread in it.
+
+The scripted post raises what ``requests`` raises: ``ConnectionError`` for no connection, and a
+response whose ``raise_for_status()`` raises ``HTTPError`` carrying ``response.status_code`` for
+a refusal. That is the shape ``requests.Response.raise_for_status`` has in requests 2.x, which is
+what ``InfluxWriter._post`` reads.
+"""
+
+__author__ = "Gavin Lucas"
+__copyright__ = "Copyright (C) 2026 Gavin Lucas"
+__license__ = "MIT"
+
+import json
+import logging
+import os
+import threading
+import time
+from unittest.mock import MagicMock
+
+import pytest
+import requests
+
+from toinflux import writer as writer_module
+from toinflux.writer import InfluxWriter, buffer_mb_problem
+
+DESTINATION = ("http://influx/write?db=hue_db&precision=s", {"timeout": 5})
+
+
+class ScriptedPost:
+    """An HTTP post that answers from a script, and records every body it was sent.
+
+    Attributes:
+        bodies (list): (url, body) for every post, in order
+        answer (callable): body -> True for accepted, an int status for refused, or None for
+            no connection; accepts everything by default
+    """
+
+    def __init__(self):
+        self.bodies = []
+        self.answer = lambda body: True
+
+    def __call__(self, url, data=None, **kwargs):
+        self.bodies.append((url, data))
+        outcome = self.answer(data)
+        if outcome is None:
+            raise requests.exceptions.ConnectionError("connection refused")
+        response = MagicMock()
+        if outcome is True:
+            response.raise_for_status = MagicMock()
+        else:
+            error = requests.exceptions.HTTPError(f"{outcome} refused")
+            error.response = MagicMock(status_code=outcome)
+            response.raise_for_status = MagicMock(side_effect=error)
+        return response
+
+    def lines(self):
+        """Return every line accepted or attempted, flattened from the bodies.
+
+        Returns:
+            list: line-protocol points
+        """
+        return [line for _url, body in self.bodies for line in body.split("\n")]
+
+
+@pytest.fixture
+def post():
+    return ScriptedPost()
+
+
+def _writer(tmp_path, post, name="collectors", buffer_mb=1, settings=None, **kwargs):
+    """Return a writer whose posts go to ``post``, with ``hue`` pointed at DESTINATION.
+
+    Returns:
+        InfluxWriter: the writer, not yet closed
+    """
+    writer = InfluxWriter(name, str(tmp_path / "spool"), settings or {}, buffer_mb=buffer_mb, **kwargs)
+    writer._session.post = post
+    writer.set_destination("hue", *DESTINATION)
+    return writer
+
+
+def _spooled(writer):
+    """Return every line the spool directory holds, sent or not, oldest segment first.
+
+    Returns:
+        list: line-protocol points
+    """
+    lines = []
+    for name in sorted(os.listdir(writer.directory)):
+        if name.endswith(".jsonl"):
+            with open(os.path.join(writer.directory, name), encoding="utf-8") as handle:
+                lines.extend(json.loads(raw)["l"] for raw in handle if raw.endswith("\n"))
+    return lines
+
+
+class TestAPointIsCommittedBeforeTheCallReturns:
+    def test_it_is_on_disk_before_anything_is_posted(self, tmp_path, post):
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        writer.submit("hue", None, "hue x=1 1700000000")
+        assert _spooled(writer) == ["hue x=1 1700000000"]
+        assert post.bodies == []
+        writer.close(0)
+
+    def test_the_spool_is_readable_only_by_its_owner(self, tmp_path, post):
+        """It holds measurements, which are the owner's business, never credentials. Every
+        file, the pointer included - the live run found it created 0644."""
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        writer.submit("hue", None, "hue x=1 1700000000")
+        writer.run_until_idle()
+        assert os.stat(writer.directory).st_mode & 0o777 == 0o700
+        for name in os.listdir(writer.directory):
+            mode = os.stat(os.path.join(writer.directory, name)).st_mode & 0o777
+            assert mode == 0o600, f"{name} is {mode:o}"
+        segment = next(name for name in os.listdir(writer.directory) if name.endswith(".jsonl"))
+        with open(os.path.join(writer.directory, segment), encoding="utf-8") as handle:
+            assert "timeout" not in handle.read(), "a destination's settings reached the spool"
+        writer.close(0)
+
+    def test_sending_it_empties_the_backlog(self, tmp_path, post):
+        writer = _writer(tmp_path, post, inline=True)
+        writer.submit("hue", None, "hue x=1 1700000000")
+        assert post.lines() == ["hue x=1 1700000000"]
+        assert not writer.pending()
+        writer.close(0)
+
+
+class TestAnOutage:
+    def test_points_wait_and_are_sent_in_order_once_it_ends(self, tmp_path, post):
+        writer = _writer(tmp_path, post, inline=True)
+        post.answer = lambda body: None
+        for value in range(3):
+            writer.submit("hue", None, f"hue x={value} 170000000{value}")
+        assert writer.pending()
+        post.bodies.clear()
+        post.answer = lambda body: True
+        writer.run_until_idle()
+        assert post.lines() == ["hue x=0 1700000000", "hue x=1 1700000001", "hue x=2 1700000002"]
+        assert not writer.pending()
+        writer.close(0)
+
+    def test_it_is_said_once_and_its_end_is_said_once(self, tmp_path, post, caplog):
+        writer = _writer(tmp_path, post, inline=True)
+        post.answer = lambda body: None
+        with caplog.at_level(logging.INFO):
+            for value in range(4):
+                writer.submit("hue", None, f"hue x={value} 1700000000")
+            post.answer = lambda body: True
+            writer.run_until_idle()
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1, [r.getMessage() for r in errors]
+        assert "is not taking points" in errors[0].getMessage()
+        assert "http://influx/write" in errors[0].getMessage()
+        assert "db=hue_db" not in errors[0].getMessage(), "the query string reached the log"
+        assert sum("taking points from collectors again" in r.getMessage() for r in caplog.records) == 1
+        writer.close(0)
+
+    def test_the_thread_waits_for_its_timer_rather_than_trying_on_every_point(self, tmp_path, post):
+        """An outage costs one attempt per retry, not one per point: a new point during it
+        does not trigger a post."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        post.answer = lambda body: None
+        writer.submit("hue", None, "hue x=0 1700000000")
+        writer.run_until_idle(force=False)
+        attempts = len(post.bodies)
+        writer.submit("hue", None, "hue x=1 1700000001")
+        writer.run_until_idle(force=False)
+        assert len(post.bodies) == attempts, "a post was tried inside the retry wait"
+        now[0] += writer_module.RETRY_FIRST_SECONDS
+        writer.run_until_idle(force=False)
+        assert len(post.bodies) == attempts + 1
+        writer.close(0)
+
+
+class TestARestart:
+    """Nothing committed is lost to a restart, and not much is sent twice."""
+
+    def test_what_was_unsent_is_sent_by_the_next_process(self, tmp_path, post):
+        first = _writer(tmp_path, post, inline=True)
+        post.answer = lambda body: None
+        first.submit("hue", None, "hue x=1 1700000000")
+        first.close(0)
+        post.answer = lambda body: True
+        post.bodies.clear()
+        second = _writer(tmp_path, post)
+        second.run_until_idle()
+        assert post.lines() == ["hue x=1 1700000000"]
+        second.close(0)
+
+    def test_sending_resumes_from_the_pointer_not_the_start(self, tmp_path, post, monkeypatch):
+        """Two points sent, then InfluxDB went away: the next process sends the third only."""
+        monkeypatch.setattr(writer_module, "CHUNK_POINTS", 2)
+        first = _writer(tmp_path, post)
+        first._ensure_thread = lambda: None
+        for value in range(3):
+            first.submit("hue", None, f"hue x={value} 1700000000")
+        post.answer = lambda body: True if "x=2" not in body else None
+        first.run_until_idle()
+        first.close(0)
+        post.bodies.clear()
+        post.answer = lambda body: True
+        second = _writer(tmp_path, post)
+        second.run_until_idle()
+        assert post.lines() == ["hue x=2 1700000000"]
+        second.close(0)
+
+    def test_a_lost_pointer_costs_duplicates_not_points(self, tmp_path, post, monkeypatch):
+        monkeypatch.setattr(writer_module, "CHUNK_POINTS", 2)
+        first = _writer(tmp_path, post)
+        first._ensure_thread = lambda: None
+        for value in range(3):
+            first.submit("hue", None, f"hue x={value} 1700000000")
+        post.answer = lambda body: True if "x=2" not in body else None
+        first.run_until_idle()
+        first.close(0)
+        os.remove(os.path.join(first.directory, "pointer.json"))
+        post.bodies.clear()
+        post.answer = lambda body: True
+        second = _writer(tmp_path, post)
+        second.run_until_idle()
+        assert sorted(post.lines()) == ["hue x=0 1700000000", "hue x=1 1700000000", "hue x=2 1700000000"]
+        second.close(0)
+
+    def test_a_line_cut_off_by_a_power_cut_is_skipped(self, tmp_path, post):
+        first = _writer(tmp_path, post)
+        first._ensure_thread = lambda: None
+        first.submit("hue", None, "hue x=1 1700000000")
+        path = os.path.join(first.directory, f"{first._append_segment:012d}.jsonl")
+        first.close(0)
+        with open(path, "ab") as handle:
+            handle.write(b'{"s":"hue","i":null,"l":"hue x=2 17')
+        second = _writer(tmp_path, post)
+        second.run_until_idle()
+        assert post.lines() == ["hue x=1 1700000000"]
+        second.close(0)
+
+    def test_an_unreadable_line_is_skipped_and_said(self, tmp_path, post, caplog):
+        first = _writer(tmp_path, post)
+        first._ensure_thread = lambda: None
+        path = os.path.join(first.directory, f"{first._append_segment:012d}.jsonl")
+        first.close(0)
+        with open(path, "ab") as handle:
+            handle.write(b"not json\n")
+            handle.write(b'{"s":"hue","i":null,"l":"hue x=2 1700000000","r":0}\n')
+        with caplog.at_level(logging.WARNING):
+            second = _writer(tmp_path, post)
+            second.run_until_idle()
+        assert post.lines() == ["hue x=2 1700000000"]
+        assert "unreadable spooled point" in caplog.text
+        second.close(0)
+
+    def test_a_segment_that_cannot_be_read_is_set_aside(self, tmp_path, post, caplog):
+        first = _writer(tmp_path, post)
+        first._ensure_thread = lambda: None
+        first.submit("hue", None, "hue x=1 1700000000")
+        path = os.path.join(first.directory, f"{first._append_segment:012d}.jsonl")
+        first.close(0)
+        second = _writer(tmp_path, post)
+        real_open = open
+
+        def refusing(file, *args, **kwargs):
+            if file == path:
+                raise PermissionError("denied")
+            return real_open(file, *args, **kwargs)
+
+        with caplog.at_level(logging.WARNING):
+            import builtins
+
+            builtins.open, saved = refusing, builtins.open
+            try:
+                second.run_until_idle()
+            finally:
+                builtins.open = saved
+        assert os.path.exists(path + ".unreadable")
+        assert "Setting aside the unreadable spool segment" in caplog.text
+        second.close(0)
+
+
+class TestRefusals:
+    """Carried over from the in-memory buffer: only the server refusing the point counts."""
+
+    @pytest.mark.parametrize("status", [None, 408, 429, 500, 503])
+    def test_what_says_nothing_about_the_point_never_counts(self, tmp_path, post, status):
+        writer = _writer(tmp_path, post, inline=True)
+        post.answer = lambda body: status
+        writer.submit("hue", None, "hue x=1 1700000000")
+        for _ in range(writer_module.MAX_POINT_REJECTIONS + 2):
+            writer.run_until_idle()
+        post.answer = lambda body: True
+        writer.run_until_idle()
+        assert post.lines()[-1] == "hue x=1 1700000000"
+        writer.close(0)
+
+    def test_a_refused_point_does_not_hold_up_the_rest(self, tmp_path, post):
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        for value in range(3):
+            writer.submit("hue", None, f"hue x={value} 1700000000")
+        post.answer = lambda body: 400 if "x=0" in body else True
+        writer.run_until_idle()
+        accepted = [body for (_url, body), in zip(post.bodies) if "x=0" not in body]
+        assert "hue x=1 1700000000" in accepted and "hue x=2 1700000000" in accepted
+        writer.close(0)
+
+    def test_a_refusal_is_charged_once_per_attempt_however_many_points_arrive(self, tmp_path, post):
+        """Five locks' points arriving during a refusal must not spend a waiting point's five
+        attempts at once: the attempts are five *separate* ones, so a middlebox answering 4xx
+        for a briefly-down InfluxDB cannot discard the backlog. The in-memory buffer met this by
+        flushing once per cycle rather than once per lock; the writer meets it with its timer."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        writer.submit("nuki", None, "nuki,device=Gate stateValue=1 1700000000")
+        writer.set_destination("nuki", *DESTINATION)
+        post.answer = lambda body: 400
+        writer.run_until_idle(force=False)
+        for lock in range(5):
+            writer.submit("nuki", None, f"nuki,device=Lock{lock} stateValue=1 1700000000")
+            writer.run_until_idle(force=False)
+        with writer._lock:
+            waiting = writer._read_spool()
+        charged = [entry.rejections for entry in waiting if "Gate" in entry.line]
+        assert charged == [1], f"the waiting point was charged {charged} for one attempt"
+        writer.close(0)
+
+    @pytest.mark.parametrize("status", [400, 404, 422])
+    def test_a_point_refused_five_times_is_dropped_and_said(self, tmp_path, post, status, caplog):
+        writer = _writer(tmp_path, post, inline=True)
+        post.answer = lambda body: status
+        with caplog.at_level(logging.WARNING):
+            writer.submit("hue", None, "hue x=1 1700000000")
+            for _ in range(writer_module.MAX_POINT_REJECTIONS):
+                writer.run_until_idle()
+        assert not writer.pending()
+        assert sum("after 5 refusals" in r.getMessage() for r in caplog.records) == 1
+        assert f"HTTP {status}" in caplog.text
+        writer.close(0)
+
+
+class TestTheBound:
+    def test_the_oldest_points_go_first_and_it_is_said(self, tmp_path, post, monkeypatch, caplog):
+        monkeypatch.setattr(writer_module, "SEGMENT_BYTES", 200)
+        writer = _writer(tmp_path, post, inline=True)
+        writer.limit_bytes = 600
+        post.answer = lambda body: None
+        with caplog.at_level(logging.WARNING):
+            for value in range(20):
+                writer.submit("hue", None, f"hue x={value} 1700000000")
+        post.answer = lambda body: True
+        post.bodies.clear()
+        writer.run_until_idle()
+        sent = post.lines()
+        assert "hue x=19 1700000000" in sent, "the newest point was not kept"
+        assert "hue x=0 1700000000" not in sent, "the oldest point was not dropped"
+        assert sum("is full at influx.buffer_mb" in r.getMessage() for r in caplog.records) == 1
+        writer.close(0)
+
+    @pytest.mark.parametrize("value", [0, 1, 100, 1024])
+    def test_the_setting_accepts_its_range(self, value):
+        assert buffer_mb_problem({"buffer_mb": value}) is None
+
+    @pytest.mark.parametrize("value", [-1, 1025, 1.5, "100", True, None])
+    def test_the_setting_refuses_anything_else_and_names_itself(self, value):
+        assert buffer_mb_problem({"buffer_mb": value}).startswith("influx.buffer_mb must be")
+
+    def test_absent_is_the_default(self):
+        assert buffer_mb_problem({}) is None
+
+    def test_validation_reports_it(self):
+        from toinflux.general import _validate_influx_block
+
+        assert any(
+            "influx.buffer_mb" in error
+            for error in _validate_influx_block({"url": "u", "user": "a", "password": "b", "buffer_mb": 2048})
+        )
+
+
+class TestMemoryOnly:
+    def test_zero_holds_points_in_memory_and_says_so_at_startup(self, tmp_path, post, caplog):
+        with caplog.at_level(logging.INFO):
+            writer = _writer(tmp_path, post, buffer_mb=0, inline=True)
+        assert "held in memory only (influx.buffer_mb is 0)" in caplog.text
+        post.answer = lambda body: None
+        writer.submit("hue", None, "hue x=1 1700000000")
+        assert not os.path.exists(writer.directory), "memory mode created a spool"
+        post.answer = lambda body: True
+        writer.run_until_idle()
+        assert post.lines()[-1] == "hue x=1 1700000000"
+        writer.close(0)
+
+    def test_it_is_bounded_per_worker(self, tmp_path, post, monkeypatch, caplog):
+        monkeypatch.setattr(writer_module, "MEMORY_POINTS_PER_WORKER", 3)
+        writer = _writer(tmp_path, post, buffer_mb=0, inline=True)
+        post.answer = lambda body: None
+        with caplog.at_level(logging.WARNING):
+            for value in range(5):
+                writer.submit("hue", None, f"hue x={value} 1700000000")
+        post.answer = lambda body: True
+        post.bodies.clear()
+        writer.run_until_idle()
+        assert post.lines() == ["hue x=2 1700000000", "hue x=3 1700000000", "hue x=4 1700000000"]
+        assert "are being dropped, oldest first" in caplog.text
+        writer.close(0)
+
+    def test_it_does_not_survive_a_restart_as_documented(self, tmp_path, post):
+        first = _writer(tmp_path, post, buffer_mb=0, inline=True)
+        post.answer = lambda body: None
+        first.submit("hue", None, "hue x=1 1700000000")
+        first.close(0)
+        second = _writer(tmp_path, post, buffer_mb=0)
+        assert not second.pending()
+        second.close(0)
+
+
+class TestADiskThatFails:
+    def test_points_go_to_memory_and_it_is_said_once(self, tmp_path, post, caplog):
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        real = writer._write_entry
+
+        def failing(entry):
+            raise OSError(28, "No space left on device")
+
+        writer._write_entry = failing
+        with caplog.at_level(logging.WARNING):
+            writer.submit("hue", None, "hue x=1 1700000000")
+            writer.submit("hue", None, "hue x=2 1700000000")
+        assert sum("held in memory until they can be sent" in r.getMessage() for r in caplog.records) == 1
+        assert "No space left on device" in caplog.text
+        writer._write_entry = real
+        writer.run_until_idle()
+        assert post.lines() == ["hue x=1 1700000000", "hue x=2 1700000000"]
+        writer.close(0)
+
+    def test_when_it_recovers_memory_goes_into_the_spool_first(self, tmp_path, post, caplog):
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        real = writer._write_entry
+        writer._write_entry = MagicMock(side_effect=OSError(5, "Input/output error"))
+        writer.submit("hue", None, "hue x=1 1700000000")
+        writer._write_entry = real
+        with caplog.at_level(logging.INFO):
+            writer.submit("hue", None, "hue x=2 1700000000")
+        assert _spooled(writer) == ["hue x=1 1700000000", "hue x=2 1700000000"]
+        assert "being spooled to disk again" in caplog.text
+        writer.close(0)
+
+
+class TestOneSpoolPerProcess:
+    def test_a_second_process_on_the_same_spool_uses_memory_instead(self, tmp_path, post, caplog):
+        """A manual run beside the service would otherwise delete the service's segments."""
+        first = _writer(tmp_path, post)
+        with caplog.at_level(logging.WARNING):
+            second = _writer(tmp_path, post)
+        assert "another process is using the spool" in caplog.text
+        assert not second._disk
+        second.close(0)
+        first.close(0)
+
+
+class TestWhereAPointGoes:
+    def test_the_destination_is_the_one_current_when_it_is_sent(self, tmp_path, post):
+        """A database rebuilt under a new name gets the backlog too, not only new points."""
+        writer = _writer(tmp_path, post, inline=True)
+        post.answer = lambda body: None
+        writer.submit("hue", None, "hue x=1 1700000000")
+        writer.set_destination("hue", "http://influx/write?db=renamed&precision=s", {})
+        post.answer = lambda body: True
+        post.bodies.clear()
+        writer.run_until_idle()
+        assert post.bodies == [("http://influx/write?db=renamed&precision=s", "hue x=1 1700000000")]
+        writer.close(0)
+
+    def test_a_restarted_writer_finds_destinations_in_the_settings(self, tmp_path, post):
+        first = _writer(tmp_path, post, inline=True)
+        post.answer = lambda body: None
+        first.submit("hue", None, "hue x=1 1700000000")
+        first.close(0)
+        settings = {"influx": {"url": "http://influx", "user": "u", "password": "p"}, "hue": {"db": "hue_db"}}
+        second = InfluxWriter("collectors", str(tmp_path / "spool"), settings, buffer_mb=1)
+        second._session.post = post
+        post.answer = lambda body: True
+        post.bodies.clear()
+        second.run_until_idle()
+        assert post.bodies == [("http://influx/write?db=hue_db&precision=s", "hue x=1 1700000000")]
+        second.close(0)
+
+    def test_a_point_for_a_source_no_longer_configured_is_dropped_and_said(self, tmp_path, post, caplog):
+        writer = _writer(tmp_path, post, inline=True)
+        with caplog.at_level(logging.WARNING):
+            writer.submit("octopus", None, "octopus x=1 1700000000")
+        assert not writer.pending()
+        assert "Dropping unsent InfluxDB points for 'octopus'" in caplog.text
+        writer.close(0)
+
+
+class TestRepeatsAndLiveSignals:
+    def test_an_identical_reading_is_not_spooled_twice(self, tmp_path, post):
+        """Octopus re-serves one reading, timestamp and all, for about half an hour."""
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        for _ in range(3):
+            writer.submit("octopus", None, "octopus x=1 1700000000")
+        writer.submit("octopus", None, "octopus x=2 1700001800")
+        assert _spooled(writer) == ["octopus x=1 1700000000", "octopus x=2 1700001800"]
+        writer.close(0)
+
+    def test_a_live_signal_is_never_spooled(self, tmp_path, post):
+        writer = _writer(tmp_path, post, inline=True)
+        writer.submit("hue", None, "collector_status,source=hue ok=1 1700000000", buffered=False)
+        assert post.lines() == ["collector_status,source=hue ok=1 1700000000"]
+        assert _spooled(writer) == []
+        writer.close(0)
+
+    def test_a_live_signal_that_cannot_be_sent_is_dropped_not_kept(self, tmp_path, post):
+        writer = _writer(tmp_path, post, inline=True)
+        post.answer = lambda body: None
+        writer.submit("hue", None, "collector_status,source=hue ok=1 1700000000", buffered=False)
+        post.answer = lambda body: True
+        post.bodies.clear()
+        writer.run_until_idle()
+        assert post.bodies == []
+        writer.close(0)
+
+
+class TestNobodyWaits:
+    """The point of the whole design, with the real thread running."""
+
+    def test_a_caller_returns_while_influxdb_hangs(self, tmp_path):
+        release = threading.Event()
+        arrived = threading.Event()
+
+        def hanging(url, data=None, **kwargs):
+            arrived.set()
+            release.wait(10)
+            response = MagicMock()
+            response.raise_for_status = MagicMock()
+            return response
+
+        writer = InfluxWriter("collectors", str(tmp_path / "spool"), {}, buffer_mb=1)
+        writer._session.post = hanging
+        writer.set_destination("hue", *DESTINATION)
+        started = time.monotonic()
+        writer.submit("hue", None, "hue x=1 1700000000")
+        assert arrived.wait(5), "the thread never posted"
+        writer.submit("hue", None, "hue x=2 1700000000")
+        assert time.monotonic() - started < 1, "a caller waited on a hanging InfluxDB"
+        release.set()
+        deadline = time.monotonic() + 5
+        while writer.pending() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not writer.pending()
+        writer.close(1)
+
+    def test_stopping_does_not_wait_longer_than_its_deadline(self, tmp_path):
+        release = threading.Event()
+
+        def hanging(url, data=None, **kwargs):
+            release.wait(10)
+            raise requests.exceptions.ConnectionError("gave up")
+
+        writer = InfluxWriter("collectors", str(tmp_path / "spool"), {}, buffer_mb=1)
+        writer._session.post = hanging
+        writer.set_destination("hue", *DESTINATION)
+        writer.submit("hue", None, "hue x=1 1700000000")
+        started = time.monotonic()
+        writer.close(0.5)
+        assert time.monotonic() - started < 2
+        release.set()
+        assert _spooled(writer) == ["hue x=1 1700000000"], "an unsent point did not stay spooled"

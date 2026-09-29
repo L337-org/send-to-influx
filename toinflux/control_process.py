@@ -51,6 +51,7 @@ from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
 from toinflux.staging import build_ladder, delivered_level
 from toinflux.transitions import TransitionLog
+from toinflux import writer
 
 #: How many cycles old a stored loop memory may be and still describe the present. Five,
 #: because a restart to pick up an edit or a new build takes seconds and this covers it
@@ -810,6 +811,10 @@ def run_control(name, settings_file=None, heartbeat=None, cycles=None, sleep=tim
         ConfigError: where the control cannot run at all
     """
     control = ControlProcess(name, settings_file=settings_file)
+    # This process's own spool, named for the control, so no two processes ever share one.
+    # Its exit handler posts what it can and leaves the rest spooled, and runs after the
+    # guard's, so it can never stand between the devices and their safe state.
+    writer.configure(f"control-{name}", control.settings, settings_file)
     try:
         # The gate picks it, because only the gate knows whether this control is inside its
         # active period - and a control starting outside its window belongs in its end state

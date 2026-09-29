@@ -17,6 +17,7 @@ import threading
 import faulthandler
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
+import toinflux.writer
 from toinflux.general import enabled_sources, listed_sources, render_values
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
@@ -132,9 +133,9 @@ def stream_source_data(source, args, data_handler, should_stop, on_activity=None
     concurrently, serialised by the transport:
 
     - **Immediate:** each arriving message is decoded (``decode_stream_message``) and
-      its point written straight away. A write failure is buffered by ``send_data`` and
-      swallowed here - the transport would otherwise log a full traceback per message
-      during an InfluxDB outage, and the point is safely queued for the backlog flush.
+      its point handed to the writer straight away. ``send_data`` does not wait on InfluxDB
+      and raises only for a point that cannot be written at all, which is swallowed here:
+      one bad message must not tear the stream down.
     - **Periodic (the timer-based safety net + health probe):** once every ``interval``
       the source's normal full-state poll still runs, exactly as it did before streaming,
       so a missed message is caught up from retained state and the heartbeat keeps ticking
@@ -230,11 +231,11 @@ class _StreamSink:
         self._stamp_activity()
         try:
             self._write(data)
-        except InfluxWriteError:
-            # Already buffered by send_data (which logged the write error); a failed write
-            # is not a stream failure, so don't let it bubble up and be logged per message
-            # with a full traceback during an InfluxDB outage.
-            pass
+        except InfluxWriteError as exc:
+            # Not an outage - send_data hands those to the writer and returns - but a point
+            # that cannot be written at all, such as a lock name carrying a newline. One bad
+            # message is not a stream failure, so it is said and the stream carries on.
+            logging.warning("Could not write a message from '%s': %r", self.source, exc)
 
     def periodic(self):
         """Run the periodic tick once per interval.
@@ -266,11 +267,10 @@ class _StreamSink:
         else:
             try:
                 self._write(data)
-            except InfluxWriteError:
-                # Buffered by send_data; the source itself was reachable, so the probe
-                # succeeded - only the downstream InfluxDB write failed (surfaced by the
-                # heartbeat's own write failing / the gap it leaves, and the backlog flush).
-                pass
+            except InfluxWriteError as exc:
+                # A point that cannot be written at all; the source itself was reachable, so
+                # the probe succeeded. An InfluxDB outage never reaches here: the writer has it.
+                logging.warning("Could not write the snapshot from '%s': %r", self.source, exc)
         ok = probe_ok or self._message_since_tick
         self._consecutive_probe_failures = 0 if ok else self._consecutive_probe_failures + 1
         maybe_send_heartbeat(
@@ -290,12 +290,12 @@ def send_heartbeat(data_handler, source, ok, consecutive_failures) -> None:
     ``timestamp`` of "now": some handlers (e.g. Octopus) set ``self.timestamp`` to
     something other than the current time for their own writes, which send_data()
     would otherwise fall back to, making the heartbeat reflect a stale time rather
-    than when the collector was actually last checked. A heartbeat write failure
-    is logged and swallowed rather than counted as a source failure. Passes
-    ``use_buffer=False``: a heartbeat is a live signal with no replay value, so a
-    failed one is dropped rather than buffered - otherwise every failed cycle
-    during an InfluxDB outage would consume a buffer slot per heartbeat, evicting
-    real measurement points, and recovery would backfill stale ok=0 status lines.
+    than when the collector was actually last checked. A heartbeat that cannot be
+    built is logged and swallowed rather than counted as a source failure. Passes
+    ``use_buffer=False``: a heartbeat is a live signal with no replay value, so the
+    writer posts it once if it can and otherwise drops it - spooled, it would take
+    space from real measurement points during an outage, and recovery would
+    backfill status lines about the past.
 
     Args:
         data_handler (DataHandler or None): the source's DataHandler instance, or None if it hasn't been constructed yet
@@ -1036,6 +1036,10 @@ def main() -> None:
     # zero sources configured it would expose nothing anyway, so starting it would be a
     # brief bind/log-noise/state-file-write cycle on a path meant to be a clean early exit.
     _exit_if_nothing_to_collect(units, requested, settings, args)
+    if not (args.print or args.dump):
+        # Before anything can write: the collectors and the MCP server share this process's
+        # spool. --print and --dump never write, so they take no spool and leave none.
+        toinflux.writer.configure("main", settings, args.settings)
     supervisor = _start_control_supervisor(settings, args)
     maybe_start_mcp_server(settings, args, supervisor=supervisor)
     if args.dump:

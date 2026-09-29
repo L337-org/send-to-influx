@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from toinflux.nuki import Nuki
+from toinflux.writer import InfluxWriter
 
 # A typical retained-message set for one lock, as (topic, payload) pairs from the
 # shared transport (payloads already UTF-8 decoded).
@@ -492,7 +493,7 @@ class TestPerLockPoints:
         handler = self._handler(sample_settings)
         forged = "Gate\n2026-08-18 12:00:00 ERROR forged by an attacker"
         handler.data = {forged: {"stateValue": 1}}
-        with patch.object(Nuki.__mro__[2], "_post_line"):
+        with patch.object(InfluxWriter, "submit"):
             with pytest.raises(InfluxWriteError) as caught:
                 handler.send_data(timestamp=1700000000)
 
@@ -501,83 +502,6 @@ class TestPerLockPoints:
         # The name is still reported, just escaped - a failure has to stay diagnosable.
         assert "Gate" in message
         assert "forged by an attacker" in message
-
-    def test_the_override_accepts_and_honours_the_base_flush_parameter(self, sample_settings):
-        """The override must stay call-compatible with the base it replaces.
-
-        `flush` was added to DataHandler.send_data() for this very source, and the override
-        was left on the old signature - so `handler.send_data(..., flush=...)`, valid for
-        every other source, raised TypeError on this one alone. A generic caller iterating
-        handlers would break on exactly one of them.
-
-        Honoured rather than merely accepted: False means no flush at all, True (or omitted)
-        means once for the whole snapshot.
-        """
-        from collections import deque
-
-        from toinflux.influx import DataHandler, MAX_BUFFERED_POINTS
-
-        def flushes_for(**kwargs):
-            handler = self._handler(sample_settings)
-            DataHandler._write_buffers.clear()
-            buffer = DataHandler._write_buffers.setdefault(handler.worker_key, deque(maxlen=MAX_BUFFERED_POINTS))
-            buffer.append(["nuki,device=Old stateValue=9 1699999999", 0])
-            handler.data = {f"Lock{index}": {"stateValue": index} for index in range(5)}
-            counted = {"n": 0}
-            real = DataHandler._flush_buffer
-
-            def counting(self, buf, url, request_kwargs):
-                counted["n"] += 1
-                return real(self, buf, url, request_kwargs)
-
-            with patch.object(DataHandler, "_flush_buffer", counting), patch.object(DataHandler, "_post_line"):
-                handler.send_data(timestamp=1700000000, **kwargs)
-            return counted["n"]
-
-        assert flushes_for() == 1, "omitted should flush once for the snapshot"
-        assert flushes_for(flush=True) == 1
-        assert flushes_for(flush=False) == 0, "flush=False must be honoured, not merely accepted"
-        DataHandler._write_buffers.clear()
-
-    def test_the_backlog_is_flushed_once_per_cycle_not_once_per_lock(self, sample_settings):
-        """The write buffer is per *worker*, so flushing on every lock charged the head
-        buffered point one rejection per lock.
-
-        With MAX_POINT_REJECTIONS at 5, a five-lock install burned the whole allowance in a
-        single cycle and discarded the backlog after one cycle instead of five - defeating the
-        documented guarantee that a middlebox answering 4xx for a down InfluxDB cannot
-        mass-discard it. Measured before the fix: 1 lock charged 1, three charged 3, five
-        dropped the point outright.
-
-        Asserted as the count rather than as "it works", because the count *is* the property.
-        """
-        from collections import deque
-
-        from toinflux.influx import DataHandler, InfluxWriteError, MAX_BUFFERED_POINTS
-
-        def reject(line, url, kwargs):
-            exc = InfluxWriteError("400 Bad Request")
-            exc.status_code = 400
-            raise exc
-
-        for locks in (1, 3, 5, 10):
-            handler = self._handler(sample_settings)
-            DataHandler._write_buffers.clear()
-            buffer = DataHandler._write_buffers.setdefault(handler.worker_key, deque(maxlen=MAX_BUFFERED_POINTS))
-            buffer.append(["nuki,device=Old stateValue=9 1699999999", 0])
-            handler.data = {f"Lock{index}": {"stateValue": index} for index in range(locks)}
-
-            with patch.object(DataHandler, "_post_line", side_effect=reject):
-                with pytest.raises(InfluxWriteError):
-                    handler.send_data(timestamp=1700000000)
-
-            assert buffer, f"the backlog was discarded with {locks} lock(s) in one cycle"
-            assert buffer[0][1] == 1, (
-                f"{locks} lock(s) charged the head point {buffer[0][1]} rejections in one cycle, " f"expected 1"
-            )
-            # Every lock still buffers its own point - only the flush is done once.
-            assert len(buffer) == locks + 1
-        DataHandler._write_buffers.clear()
 
     def test_the_header_is_restored_after_writing(self, sample_settings):
         """send_data() swaps a per-lock header in for each write, and must put back what it

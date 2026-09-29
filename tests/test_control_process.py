@@ -1528,35 +1528,34 @@ class TestWithNoRecordConfigured:
 
 
 class TestARecordThatCannotBeWritten:
-    """The history is for tuning, and the cycle is for the devices. A write that fails must
-    not reach the cycle, and must not say so every cycle for the length of an outage."""
+    """The history is for tuning, and the cycle is for the devices. Nothing about InfluxDB -
+    down, refusing, or slow - reaches the cycle, and an outage is not said every cycle."""
 
     @pytest.fixture
     def refusing(self, recorded, monkeypatch):
-        """Make the record's writes fail while every read still works.
+        """Make every write fail while the control's reads still work.
 
-        Only the record's own session, so the fault is the history's alone: a real outage
+        The writer's own session only, so the fault is the history's alone: a real outage
         fails the reads as well, and that is the fail-safe tested above.
 
         The refusal is `requests.exceptions.ConnectionError`, what requests raises for a
-        refused connection and the `RequestException` subclass `_post_line` catches. Checked
-        against a real InfluxDB 1.8 paused mid-run, which failed the same path with
-        `ReadTimeout` and delivered the buffered points once it resumed.
+        refused connection. Checked against a real InfluxDB 1.8 paused mid-run, which failed
+        the same path with `ReadTimeout` and delivered every spooled point once it resumed.
 
         Returns:
-            list: the bodies that would have been sent, for the recovery check
+            callable: the patched post; set its ``down`` to False to let writes through
         """
-        real = recorded.record.session.post
-        attempts = []
+        from toinflux import writer
+
+        real = writer.current()._session.post
 
         def refuse(url, data=None, **kwargs):
-            attempts.append(data)
             if refuse.down:
                 raise requests.exceptions.ConnectionError("connection refused")
             return real(url, data=data, **kwargs)
 
         refuse.down = True
-        monkeypatch.setattr(recorded.record.session, "post", refuse)
+        monkeypatch.setattr(writer.current()._session, "post", refuse)
         return refuse
 
     def test_the_cycle_still_runs_and_commands_the_devices(self, recorded, refusing, bridge):
@@ -1564,20 +1563,49 @@ class TestARecordThatCannotBeWritten:
         assert decision is not None and decision.actuating
         assert any(bridge.energised().values())
 
-    def test_the_failure_is_said_once_for_the_outage(self, recorded, refusing, caplog):
+    def test_the_outage_is_said_once(self, recorded, refusing, caplog):
         with caplog.at_level(logging.DEBUG):
             for _ in range(3):
                 recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
-        levels = [r.levelno for r in caplog.records if "could not record its cycle" in r.getMessage()]
-        assert levels[0] == logging.ERROR
-        assert logging.ERROR not in levels[1:] and logging.WARNING not in levels[1:], levels
+        levels = [r.levelno for r in caplog.records if "is not taking points" in r.getMessage()]
+        assert levels and levels[0] == logging.ERROR
+        assert logging.ERROR not in levels[1:], levels
 
-    def test_the_points_arrive_once_it_recovers_and_that_is_said(self, recorded, refusing, influx, caplog):
+    def test_the_points_arrive_once_it_recovers(self, recorded, refusing, influx):
+        from toinflux import writer
+
         for _ in range(2):
             recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
         assert _recorded_points(influx) == []
         refusing.down = False
-        with caplog.at_level(logging.INFO):
+        writer.current().run_until_idle()
+        assert len(_recorded_points(influx)) == 2
+
+
+class TestASlowInfluxDBDoesNotDelayTheNextCycle:
+    """The guarantee the writer exists for, with its real thread running: a control whose
+    InfluxDB takes its whole timeout to answer a write starts its next cycle on time."""
+
+    def test_the_cycle_does_not_wait_for_the_write(self, recorded, state_directory, monkeypatch):
+        import threading
+        import time
+
+        from toinflux import writer
+
+        threaded = writer.configure("control-conservatory", recorded.settings, state_directory.settings_file)
+        release = threading.Event()
+        real = threaded._session.post
+
+        def hanging(url, data=None, **kwargs):
+            release.wait(10)
+            return real(url, data=data, **kwargs)
+
+        monkeypatch.setattr(threaded._session, "post", hanging)
+        try:
+            started = time.monotonic()
             recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
-        assert len(_recorded_points(influx)) == 3
-        assert "recording its cycles to InfluxDB again" in caplog.text
+            recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            assert time.monotonic() - started < 3, "a cycle waited on its InfluxDB write"
+        finally:
+            release.set()
+            threaded.close(2)

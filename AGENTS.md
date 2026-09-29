@@ -27,6 +27,7 @@ background.
 |---|---|
 | `toinflux/mcp*.py`, `toinflux/mcpserver.py` | [architecture/mcp-server.md](architecture/mcp-server.md) |
 | any collector under `toinflux/` (not the MCP modules) | [architecture/collectors.md](architecture/collectors.md) |
+| writing to InfluxDB: `toinflux/writer.py`, or `DataHandler.send_data()` | [architecture/collectors.md](architecture/collectors.md), "Writing to InfluxDB" |
 | reading from InfluxDB, or any query construction | `toinflux/influx.py`'s read half, and [architecture/collectors.md](architecture/collectors.md) |
 | `sendtoinflux.py`, `toinflux/general.py`, `toinflux/process.py`, `toinflux/controls.py`, `toinflux/rules.py` | [architecture/runtime.md](architecture/runtime.md) |
 | the control loop: `toinflux/supervision.py`, `control_process.py`, `controller.py`, `gating.py`, `schedule.py`, `staging.py`, `transitions.py`, `inputs.py`, `control_record.py` | [CONTROLS.md](CONTROLS.md) for the document format, [architecture/runtime.md](architecture/runtime.md) for how it runs |
@@ -63,7 +64,7 @@ Both InfluxDB v1 (user/password) and v2 (token/org/bucket) are supported.
 ### Class hierarchy
 
 ```
-DataHandler      (toinflux/influx.py)          - base; owns send_data() -> InfluxDB HTTP POST
+DataHandler      (toinflux/influx.py)          - base; owns send_data() -> the process's writer
 ├── CarbonIntensity(toinflux/carbonintensity.py)
 ├── Hue            (toinflux/philipshue.py)
 ├── OpenMeteo      (toinflux/openmeteo.py)
@@ -89,10 +90,19 @@ Break one of these and the failure is silent or data-destroying.
 
 - **A tag value is never normalised**, only escaped - rewriting one changes the series identity of an
   existing install.
-- **`DataHandler._write_buffers` is class-level, keyed by `worker_key`** (the `(source, instance)`
-  tuple). The worker loop discards and rebuilds the handler after every failure, so an instance
-  attribute would not survive to be flushed; keying by source name alone would race two instances of
-  one source against each other. `worker_label` is display-only and never a key or a tag value.
+- **Nothing that collects or controls posts to InfluxDB itself.** `send_data()` hands the point to
+  the process's `InfluxWriter` (`toinflux/writer.py`), which spools it to disk, syncs, and returns;
+  the writer's own thread posts it. A write path that posts from the caller brings back the outage
+  behaviour the writer removed: a collector backing off from its `interval`, a control's next cycle
+  starting late. `send_data()` raises only for a point that cannot be written at all.
+- **One spool per process, owned by that process alone.** The service is `main`, each control
+  process `control-<name>`, and the directory is locked, so a second process on the same state
+  directory falls back to memory rather than deleting the first one's segments. Only the writer's
+  thread posts, and it never holds the lock while it does.
+- **A spooled point's destination is resolved when it is sent**, from the latest settings a handler
+  for its source was built with, never pinned when it was queued.
+- `worker_key` (the `(source, instance)` tuple) is the worker's identity; `worker_label` is
+  display-only and never a key or a tag value.
 - **Every Hue bridge URL goes through `Hue._api_base()`**, and hosts through `_url_host()`, which
   brackets a bare IPv6 literal. The bug existed in two copies of one f-string, which is exactly how a
   second copy would reintroduce it.
@@ -123,7 +133,10 @@ keeps these names honest, and each guard's docstring carries the reasoning.
 - `tests/test_influx.py::TestDataHandler::test_send_data_escapes_field_keys`
 - `tests/test_octopus.py::TestOctopus::test_get_data_sets_timestamp_from_interval_start`
 - `tests/test_repo_hygiene.py::test_every_dynamic_tag_value_in_a_header_is_escaped`
-- `tests/test_nuki.py::TestPerLockPoints::test_the_backlog_is_flushed_once_per_cycle_not_once_per_lock`
+- `tests/test_writer.py::TestRefusals::test_a_refusal_is_charged_once_per_attempt_however_many_points_arrive`
+  - five locks' points arriving during a refusal must not spend a waiting point's five attempts at once
+- `tests/test_writer.py::TestNobodyWaits::test_a_caller_returns_while_influxdb_hangs`
+- `tests/test_control_process.py::TestASlowInfluxDBDoesNotDelayTheNextCycle::test_the_cycle_does_not_wait_for_the_write`
 - `tests/test_nuki.py::TestPerLockPoints::test_the_shape_discriminator` - `_is_per_device()` keys on
   every value being a mapping
 - `tests/test_mqtt.py::TestStreamMqttMessages::test_resubscribes_on_every_connect`
@@ -211,7 +224,7 @@ daemon thread each with a startup stagger. `SourceConnectionError` is retried wi
 (5 s base, 300 s max); `ConfigError` is never retried.
 
 - **`expand_sources()` serves `--source`, the supervisor and `--dump` alike**, so they cannot disagree
-  about what runs. All restart, stall and buffer bookkeeping is keyed by work unit, not source name.
+  about what runs. All restart and stall bookkeeping is keyed by work unit, not source name.
 - **Configuration faults are caught at validation, not at first collection.** A non-mapping source
   section and an uncollectable source name are both terminal errors from validation.
 - **`--check-config` prints OK only if validation passes *and* something is actually requested.** "OK"
@@ -301,8 +314,10 @@ Each has been raised before and declined with reasons recorded.
 - `sno` is written as a field on any install with no `fields` list configured.
 - `LIMIT` applies per series once a query groups by a tag; the read layer divides it and reports
   `limit_per_instance`.
-- The write buffer is not persisted across a restart, and flushes to whatever destination current
-  settings resolve to.
+- A spooled backlog is sent to whatever destination the current settings name, not the one it was
+  queued for: a rebuilt or renamed database receives it as well as new points.
+- A control deleted with unsent points leaves its spool (`spool/control-<name>`) until a control of
+  that name runs again.
 
 ## Docstrings
 

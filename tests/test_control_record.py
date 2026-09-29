@@ -116,30 +116,17 @@ class TestAPoint:
 
 
 class TestAFailedWrite:
-    def test_it_does_not_raise(self, record, monkeypatch):
-        monkeypatch.setattr(record.session, "post", _refuse)
-        record.write(ACTIVE, TERMS, delivered=750.0, timestamp=1700000000)
+    def test_it_does_not_raise_and_the_point_waits(self, record, influx, monkeypatch):
+        """An unreachable InfluxDB is the writer's: the cycle that recorded the point carries
+        on, and the point is sent once InfluxDB is back."""
+        from toinflux import writer
 
-    def test_the_point_is_kept_for_the_next_write(self, record, influx, monkeypatch):
-        real = record.session.post
-        monkeypatch.setattr(record.session, "post", _refuse)
+        monkeypatch.setattr(writer.current()._session, "post", _refuse)
         record.write(FAIL_SAFE, timestamp=1700000000)
-        monkeypatch.setattr(record.session, "post", real)
-        record.write(FAIL_SAFE, timestamp=1700000060)
-        assert "".join(_written(influx)).count("fail_safe") == 2
-
-    def test_a_full_buffer_is_reported_apart_from_the_outage(self, record, monkeypatch, caplog):
-        """Dropping points is news during an outage already being reported, so it must not
-        be swallowed as a repeat of it."""
-        monkeypatch.setattr(record.session, "post", _refuse)
-        monkeypatch.setattr("toinflux.influx.MAX_BUFFERED_POINTS", 2)
-        record._write_buffers.pop(record.worker_key, None)
-        with caplog.at_level(logging.WARNING):
-            for second in range(4):
-                record.write(FAIL_SAFE, timestamp=1700000000 + second)
-        messages = [r.getMessage() for r in caplog.records]
-        assert sum("could not record its cycle: Error sending" in m for m in messages) == 1
-        assert sum("buffer" in m and "full" in m for m in messages) == 1
+        assert writer.current().pending()
+        monkeypatch.undo()
+        writer.current().run_until_idle()
+        assert _written(influx) == ['control,control=back\\ room state="fail_safe" 1700000000']
 
 
 def _refuse(*_args, **_kwargs):

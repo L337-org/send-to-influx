@@ -217,9 +217,8 @@ class MqttDataHandler(DataHandler):
         and ACKs, and the broker would drop the connection - losing exactly the transient
         events the stream exists to capture. Because one consumer thread runs both write
         paths, they can't overlap, so no lock is needed. ``on_message`` errors are logged
-        and swallowed (one bad message must not tear the stream down; a buffered point
-        flushes on the next write); ``periodic`` errors propagate so the caller's error
-        handling and the worker's backoff apply.
+        and swallowed (one bad message must not tear the stream down); ``periodic`` errors
+        propagate so the caller's error handling and the worker's backoff apply.
 
         The initial CONNACK and subscribe are awaited up front and mapped to
         ``SourceConnectionError`` on failure/timeout - identical semantics to

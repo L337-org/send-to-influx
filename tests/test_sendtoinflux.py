@@ -11,11 +11,14 @@ import time
 from types import MethodType, SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 import pytest
+import requests
 import sendtoinflux
+import toinflux.writer
 from toinflux.controls import controls_enabled
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.speedtest import Speedtest
 from toinflux.influx import DataHandler, InfluxWriteError
+from toinflux.writer import InfluxWriter
 
 
 class TestSignalHandler:
@@ -525,6 +528,26 @@ class TestHelpers:
         handler.get_data.assert_called_once()
         handler.send_data.assert_called_once()
 
+    def test_an_influxdb_outage_does_not_cost_a_collector_its_interval(self, sample_settings, influx_posts):
+        """The failure this whole write path was rebuilt for. A write that could not reach
+        InfluxDB used to raise out of collect_source_data, and the worker treated it like a
+        device that could not be reached: it backed off from its interval to as long as 300s,
+        and the readings in between were never taken. Now the point is spooled and collection
+        returns the interval as though nothing had happened - which, for the collector, is
+        true."""
+        from toinflux.influx import DataHandler
+
+        with patch("toinflux.influx.load_settings", return_value=sample_settings):
+            handler = DataHandler(source="hue")
+        handler.influx_header = "hue "
+        handler.get_data = MagicMock(return_value={"x": 1})
+        handler.data = {"x": 1}
+        influx_posts.side_effect = requests.exceptions.ConnectionError("down")
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+
+        assert sendtoinflux.collect_source_data("hue", args, handler) == sample_settings["hue"]["interval"]
+        assert toinflux.writer.current().pending()
+
     def test_run_workers_coerces_invalid_stagger_to_zero(self):
         """run_workers falls back to zero stagger when value is invalid."""
         args = SimpleNamespace(print=False, dump=False, settings=None)
@@ -967,8 +990,9 @@ class TestSendHeartbeat:
             handler = source_class(name)(name)
         handler.session = MagicMock()
         posted = []
-        base = type(handler).__mro__[-2]  # DataHandler, wherever it sits in each source's chain
-        with patch.object(base, "_post_line", side_effect=lambda line, *a, **k: posted.append(line)):
+        with patch.object(
+            InfluxWriter, "submit", side_effect=lambda source, instance, line, buffered=True: posted.append(line)
+        ):
             sendtoinflux.send_heartbeat(handler, name, ok=True, consecutive_failures=0)
         return posted
 
@@ -1032,7 +1056,7 @@ class TestSendHeartbeat:
             # (e.g. Octopus using a delayed reading's interval_start).
             handler.timestamp = 1000000000
             with (
-                patch.object(handler.session, "post") as mock_post,
+                patch.object(toinflux.writer.current()._session, "post") as mock_post,
                 patch("sendtoinflux.time.time", return_value=2000000000.0),
             ):
                 mock_post.return_value.raise_for_status = MagicMock()

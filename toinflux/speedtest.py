@@ -8,7 +8,7 @@ import logging
 import threading
 from socket import gethostname
 import speedtest
-from toinflux.influx import DataHandler, InfluxWriteError, escape_key_or_tag_value
+from toinflux.influx import DataHandler, escape_key_or_tag_value
 from toinflux.general import flatten_dict, render_external
 from toinflux.exceptions import SourceConnectionError, ToolParamError
 
@@ -189,12 +189,12 @@ class Speedtest(DataHandler):
     def mcp_trigger_run(self, host=None):
         """Run a speed test now and return the result.
 
-        The MCP write action for this source, recording to InfluxDB like a scheduled run.
+        The MCP write action for this source, recorded to InfluxDB like a scheduled run: the
+        point is handed to the writer, which commits it and sends it, so the result is returned
+        without waiting on InfluxDB and nothing about the recording is reported here.
 
         ``get_data()`` enforces the one-run-at-a-time lock, so a run already in
         progress surfaces as ``SourceConnectionError`` rather than a second test.
-        Recording is best-effort: a failed write is reported in the result's
-        ``recorded`` flag, not raised, since the measurement itself succeeded.
 
         The result names the machine that ran it. With several hosts collecting into one
         database, "the speed test result" is meaningless without knowing whose connection
@@ -211,7 +211,7 @@ class Speedtest(DataHandler):
                 one. None runs it here without asserting.
 
         Returns:
-            dict: ``{"source", "host", "recorded", "result": {field: {"value"[, "unit"]}}}``
+            dict: ``{"source", "host", "result": {field: {"value"[, "unit"]}}}``
 
         Raises:
             ToolParamError: ``host`` names a machine other than this one
@@ -226,12 +226,7 @@ class Speedtest(DataHandler):
                 f"recorded history instead."
             )
         data = self.get_data()
-        recorded = True
-        try:
-            self.send_data()
-        except InfluxWriteError as exc:
-            recorded = False
-            logging.warning("Triggered Speedtest ran but recording it to InfluxDB failed: %r", exc)
+        self.send_data()
         result = {}
         for name, value in sorted((data or {}).items()):
             entry = {"value": value}
@@ -239,5 +234,5 @@ class Speedtest(DataHandler):
             if unit:
                 entry["unit"] = unit
             result[name] = entry
-        logging.info("MCP-triggered Speedtest run complete on %s (recorded=%s)", this_host, recorded)
-        return {"source": self.source, "host": this_host, "recorded": recorded, "result": result}
+        logging.info("MCP-triggered Speedtest run complete on %s", this_host)
+        return {"source": self.source, "host": this_host, "result": result}

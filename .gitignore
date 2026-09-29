@@ -14,6 +14,7 @@
 # was, in this file's absence.
 /locks/
 /controls/
+/spool/
 
 # Python
 __pycache__/

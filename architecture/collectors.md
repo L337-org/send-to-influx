@@ -3,7 +3,7 @@
 
 # Collector internals
 
-Deep detail behind the class hierarchy in [../AGENTS.md](../AGENTS.md): the write buffer,
+Deep detail behind the class hierarchy in [../AGENTS.md](../AGENTS.md): writing to InfluxDB,
 Hue bridge slots, the Nuki device-tag migration, MQTT streaming, and MyEnergi device
 selection. Read this before changing anything under `toinflux/` other than the MCP modules.
 
@@ -47,59 +47,77 @@ the allow-list: `load_settings` and `validate_settings` run before `configure_lo
 `main()` catches their `ConfigError` with a bare `sys.exit(1)`, so the log line there is the only
 account a misconfigured service gives of why it stopped.
 
-## The write buffer
+## Writing to InfluxDB
 
-A failed write buffers the point in memory rather than dropping it, and still raises
-`InfluxWriteError`, so the worker's backoff is unaffected.
+**Nothing that collects or controls waits on InfluxDB.** `DataHandler.send_data()` builds the
+line and hands it to the process's `InfluxWriter` (`toinflux/writer.py`), which appends it to a
+spool on disk, syncs, and returns. The point is committed at that moment. The writer's own thread
+posts it. The design record, with its rejected alternatives, is in the project wiki.
 
-`DataHandler._write_buffers` is a per-*worker* `deque(maxlen=MAX_BUFFERED_POINTS)` of
-`[line, rejection_count]` entries. Two properties are load-bearing:
+This replaced a synchronous post with an in-memory buffer, and the reason is the thing to keep in
+mind: the post raised on failure, and the worker's broad `except` treated that exactly like a
+device it could not reach. A collector on a 60-second interval backed off to one reading every
+five minutes for the length of an outage, and a control's next cycle started late by the write's
+timeout. The buffer kept the points that were collected; it could not stop fewer being collected.
 
-- **Class-level, not an instance attribute.** The worker loop in `sendtoinflux.py` discards and
-  reconstructs the `DataHandler` after every failure, so only a buffer outliving the instance
-  survives to be flushed.
-- **Keyed by `DataHandler.worker_key`**, the `(source, instance)` tuple, never by source name. A
-  source with several instances runs one worker each and they must not share a deque, because
-  `_flush_buffer`/`_flush_head` do read-then-`popleft` sequences that are not atomic across
-  threads. `instance` is `None` for single-target sources, so their key is `(source, None)`. The
-  `maxlen` bound is therefore per worker: N instances can hold N x `MAX_BUFFERED_POINTS` between
-  them.
-
-Keep `worker_key` a tuple rather than a joined `source@instance` string. An instance may be an
-IPv6 literal, so any delimiter is ambiguous to a later split, and callers needing the
-settings-block name back - the stall watchdog reads `settings[source]["interval"]` - must not
-re-parse it. `worker_label` (`source` or `source@instance`) is the display-only counterpart: use
-it in log messages, never as a key or an emitted tag value.
-
-Every buffered-path `send_data()` flushes the backlog first, including calls with no data of
-their own; only an empty buffer *and* empty data skips the HTTP round trip. Flushes go in
-newline-joined chunks of `FLUSH_CHUNK_SIZE` per POST, so a 500-point recovery costs about 5
-requests rather than 500. When a buffer fills, the oldest point is dropped with a warning. An
-identical line is never added twice, since Octopus re-serves the same reading for around 30
-minutes and flushing is an idempotent overwrite.
-
-Buffers are not persisted across a restart, and flush to whatever the *current* settings resolve
-to - editing `influx.url` or the bucket mid-backlog re-routes it. Accepted limitation, recorded in
-the `_write_buffers` comment.
+- **`send_data()` raises only for a point that cannot be written at all** - a key or tag value
+  containing a newline, which would split it in two. An outage, a refusal or a slow server is the
+  writer's, and never reaches the caller.
+- **One spool per process**: `<state directory>/spool/<process>/`, where the process is `main`
+  for the service and `control-<name>` for each control process. Configured by
+  `writer.configure()` in `main()` and `run_control()`; a process that writes without calling it
+  gets `main` on first use. The directory is locked with `flock`, so a second process on the same
+  state directory - a manual `--source` run beside the service - holds its points in memory
+  rather than deleting the first one's segments. Directory 0700, files 0600, measurements only.
+- **JSON Lines in fixed 128 KiB segments.** Appends always go to a new segment for the life of a
+  process, so a line a power cut interrupted stays the last line of a read-only file and is
+  skipped on the next start. Sent segments are deleted whole. How far sending has got is a
+  `pointer.json` rewritten by atomic rename after every successful post and **deliberately not
+  synced**: losing it costs at most one chunk (`CHUNK_POINTS`, 100) sent twice, and InfluxDB
+  overwrites a point with the same series, fields and timestamp.
+- **Bounded by `influx.buffer_mb`**, default 100, range 0-1024, per process, validated by
+  `buffer_mb_problem()`. When the spool is full the oldest segments are dropped first, said once.
+  `0`, a disk that cannot be written, and a spool another process holds all fall back to memory:
+  `MEMORY_POINTS_PER_WORKER` (500) per worker, lost on exit. The caller is not told which mode it
+  got, because nothing it could do would differ; the operator is told, once. When the disk comes
+  back, memory is spooled first so no worker's points go out of order.
+- **The destination is resolved when a point is sent.** Every `send_data()` refreshes its
+  source's destination from the settings its handler was built with, and a starting writer seeds
+  them from the settings, so a backlog left by a previous run can be sent before its source's
+  handler exists. A rebuilt or renamed database, or a move between InfluxDB versions, receives
+  the backlog as well as new points. A point whose source has no database any more is dropped,
+  said once per source.
+- **Dedup on append** against the same worker's last line: Octopus re-serves one reading,
+  timestamp and all, for around 30 minutes. After a restart the first repeat is spooled once
+  more, which InfluxDB absorbs.
+- **Live signals are never spooled.** `use_buffer=False` - the `collector_status` heartbeat and
+  Hue's device-class annotations - goes to a short queue the thread posts once and drops on
+  failure: a replayed heartbeat would say a collector was up at some past moment, which says
+  nothing about now.
+- **Failures are said once for the outage** through a `RepeatingProblem`: once when InfluxDB
+  stops taking points, naming the URL without its query string; once when it takes them again;
+  and separately for points dropped. After a failure the thread waits a retry timer (5 s doubling
+  to 60 s) rather than trying on every new point.
+- **Stopping gives the thread `CLOSE_SECONDS` to post what is waiting**; the rest stays spooled.
 
 ### Do not treat a status code as a verdict
 
-`InfluxWriteError.status_code` carries the HTTP status, or `None` for a connection failure.
-`_flush_buffer()`/`_flush_head()` count how often the server has *rejected* each specific point
-and drop it only after `MAX_POINT_REJECTIONS` separate rejections.
+Carried over unchanged from the in-memory buffer. `is_point_rejection()` counts only a
+non-transient 4xx: `TRANSIENT_CLIENT_ERRORS` excludes 408 and 429, because rate-limiting and
+timeouts say nothing about the point, and connection failures and 5xx never count either - so an
+arbitrarily long outage cannot age points out, and a middlebox transiently answering 4xx for a
+down InfluxDB cannot mass-discard a backlog. What is given up on, after `MAX_POINT_REJECTIONS`
+(5) separate refusals, is a point the server itself keeps refusing: malformed (400), outside the
+retention window (422 on InfluxDB 2), oversized (413).
 
-Only a non-transient 4xx counts: `TRANSIENT_CLIENT_ERRORS` excludes 408 and 429, because
-rate-limiting and timeouts say nothing about the point. Connection failures and 5xx never count
-either, so an arbitrarily long outage cannot age points out, and a middlebox transiently
-answering 4xx for a down InfluxDB cannot mass-discard a backlog. What is given up on is a point
-the server itself keeps refusing: malformed (400), outside the retention window (422 on InfluxDB
-v2), oversized (413).
-
-A rejected chunk falls back to per-point posting to isolate the offender. Heartbeat writes pass
-`use_buffer=False` - a heartbeat is a live signal with no replay value, so it neither consumes
-capacity nor triggers a second flush per failed cycle. `validate_settings()` rejects duplicate
-entries in `sources:` with a `ConfigError`, since two workers for one name would share and race
-on one buffer.
+A refused chunk falls back to posting point by point to isolate the offender, and a refused point
+goes to the back of the spool so the points behind it keep flowing. **A refusal waits for the
+retry timer like a failure does.** Without that, the same pass reads the refused point straight
+back and spends all five attempts in a moment - found while replacing the in-memory buffer's
+equivalent guard, and held by
+`tests/test_writer.py::TestRefusals::test_a_refusal_is_charged_once_per_attempt_however_many_points_arrive`.
+`validate_settings()` still rejects duplicate `sources:` entries, since two workers for one name
+would be one worker's identity twice.
 
 ## Hue
 
@@ -244,8 +262,8 @@ code with no documented meaning is written through unchanged. See UNITS.md for w
 `parse_nuki_data()`/`decode_stream_message()` return `{device: {field: value}}`, and
 `Nuki.send_data()` writes one point per lock tagged `device=<lock>` with bare field keys,
 delegating each to the base implementation with the header swapped in - the same idiom
-`send_heartbeat()` uses, so buffering, retry and the `InfluxWriteError` contract are untouched
-rather than reimplemented.
+`send_heartbeat()` uses, so spooling and the `InfluxWriteError` contract are the base's rather
+than reimplemented.
 
 - **Every lock in one cycle shares a timestamp.** Letting each call default independently would
   scatter one snapshot across a second or two, so "what was the state at time T" could see one lock
@@ -294,18 +312,14 @@ Sweep rather than patching the reported line - the same shape existed in `mcp_wr
 unreachable-bridge list and `mcp_read`'s all-instances-failed message, both of which reach a
 client. Report the name still, just escaped: a failure has to stay diagnosable from its output.
 
-### Flush the backlog once per cycle, not once per lock
+### A refusal is charged once per attempt, not once per lock
 
-The write buffer is keyed by worker, so calling the base `send_data()` per lock flushed it per lock
-too, charging the head buffered point one rejection each time. With `MAX_POINT_REJECTIONS` at 5, a
-five-lock install burned the whole allowance in one cycle and discarded the backlog after a single
-cycle instead of five - defeating the guarantee that a middlebox answering 4xx cannot mass-discard
-it.
-
-`DataHandler.send_data()` therefore takes `flush=`, and Nuki passes it only for its first lock.
-Every lock still buffers its own point on failure; only the flush is shared. Measured before and
-after - 1/3/3 charged with five dropped outright, now 1 at any lock count - and the test asserts
-the count, because the count *is* the property.
+With the in-memory buffer, calling the base `send_data()` per lock flushed the backlog per lock,
+charging a waiting point one refusal each time: a five-lock install spent all of
+`MAX_POINT_REJECTIONS` in one cycle. `send_data()` took a `flush=` for Nuki to pass for its first
+lock only. The writer posts from its own thread on its own timer, so writing a point no longer
+posts anything and `flush=` is gone; the property it protected is now the writer's, and its guard
+is named above.
 
 ## The Nuki device-tag migration
 

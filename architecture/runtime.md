@@ -12,7 +12,7 @@ Read this before changing `sendtoinflux.py` or `toinflux/general.py`.
 key everything off the unit, never the source name. A unit is `(source, instance)`, the same
 shape as `DataHandler.worker_key`. Most sources expand to one `(name, None)`; a source in
 `INSTANCED_SOURCES` (only `hue`) expands to one unit per configured bridge, so each bridge gets
-its own thread, backoff and write buffer and an unreachable bridge delays only itself.
+its own thread and backoff and an unreachable bridge delays only itself.
 
 One function serves `--source`, the supervisor and `--dump`, so they cannot disagree about what
 runs. Restart, stall and stopped bookkeeping is keyed by unit, so two workers on one source name
@@ -330,15 +330,17 @@ Each control writes one point per cycle to the `control` measurement, tagged `co
 where `controls.db` is set. CONTROLS.md has the fields and what they mean;
 this is how it is wired and what must not change.
 
-- **`ControlRecord` subclasses `DataHandler` to reuse the buffered writer, and is not a
+- **`ControlRecord` subclasses `DataHandler` to reuse `send_data()`, and is not a
   collector.** It is not in `_source_classes()`, because a `sources:` entry naming it would pass
   validation and then fail at its first collection, as the MyEnergi parent once did. Its
-  settings section is `controls`, so `resolve_db()` and `_build_write_request()` find `db` or
+  settings section is `controls`, so `resolve_db()` and `build_write_request()` find `db` or
   `bucket` there unchanged. It is exempt from the handler-build guard in
   `tests/test_inputs.py` (listed in `FACTORY_MODULES`, with the reason): it names no source, so
   there is no `sources:` entry for the refusal to consult.
-- **Written after the window, stamped with its start.** Before it, an InfluxDB that takes its
-  whole timeout to refuse would delay the first device command of every cycle by that long.
+- **Stamped with the cycle's start, and handed to the writer after the window.** The control
+  process has its own writer and spool (`control-<name>`, configured in `run_control()`), so
+  recording a cycle never waits on InfluxDB and a slow or absent one cannot delay the next cycle.
+  `TestASlowInfluxDBDoesNotDelayTheNextCycle` holds that with the writer's real thread running.
 - **`delivered` is computed from the plan as commanded**, after `_hold` pins held driven devices,
   by `staging.delivered_level()` against the capped ladder the controller kept in
   `last_step.curve`. **Rung levels alone are wrong for driven devices**, and that was the design's
@@ -351,14 +353,10 @@ this is how it is wired and what must not change.
   raises counts as operating, because `enable_when` is only evaluated once the control is
   enabled and inside its period. A failure of the *closing edge's* command also takes the
   fail-safe path, and is not recorded: that cycle is the first outside the period.
-- **A write failure never reaches the cycle.** `ControlRecord.write()` swallows
-  `InfluxWriteError` once `send_data` has buffered the point. The base writer's own messages go
-  through `DataHandler._write_problem()`, which `ControlRecord` overrides to report through a
-  `RepeatingProblem`: a control writes every cycle and never backs off, so the collectors'
-  log-every-failure would flood an outage. A failed post and a failed flush share one key,
-  because the flush is what a post becomes once a backlog exists; keyed apart, the flush was
-  reported as a second new problem on the third cycle of every outage. A full buffer has its
-  own key, because dropping points is news.
+- **A write failure never reaches the cycle**, because the writer owns it: see
+  "Writing to InfluxDB" in `architecture/collectors.md`. The writer's exit handler runs after the
+  guard's, so posting what it can on the way out never stands between the devices and their safe
+  state.
 - **`i` is simple-pid's integral term**, in levels, not the accumulated error. That is what makes
   it usable later as a starting output, and `TestTheTermsOfTheLastStep` holds it.
 

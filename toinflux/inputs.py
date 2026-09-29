@@ -916,17 +916,16 @@ def _live_reading(handler, source, field, instance, stored, now):
     # Write back every field the fetch returned, not just the one asked for: the round trip
     # has already been paid for, and another control reading a different field of this
     # source is the case the minimum interval exists to serve.
+    # Handed to the writer, which commits it and sends it without the cycle waiting. Until it
+    # lands - immediately, unless InfluxDB is down - another control reading this field does
+    # not see it and fetches its own, so the floor binds a moment late rather than not at all.
     try:
         handler.send_data(data, timestamp=written_at)
     except InfluxWriteError as exc:
-        # The value in hand is good; only the coordination failed. Raising here would throw
-        # away a fresh reading because a best-effort write missed, and the caller's response
-        # to a failed read is the safe state - so an InfluxDB hiccup would switch the heating
-        # off while the temperature it was holding was perfectly well known.
-        #
-        # What is lost is that other controls will not see this value and will each fetch
-        # their own, so the floor stops binding until a write succeeds. send_data buffers the
-        # point on failure, so it may still land on a later cycle.
+        # Not an outage, which never reaches here, but a point that cannot be written at all.
+        # The value in hand is still good, and the caller's response to a failed read is the
+        # safe state, so raising would switch the heating off over a record that could not
+        # be kept while the temperature it was holding was perfectly well known.
         logging.warning("Could not write back the live read of %r for %r: %r", source, field, exc)
     fields = _live_fields(handler, data, source, instance)
     if field not in fields:

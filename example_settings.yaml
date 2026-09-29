@@ -59,6 +59,10 @@ influx:
   timeout: 5
   # Uncomment the line below to skip TLS certificate verification (e.g. self-signed/internal certs)
   # insecure: true
+  # How much disk, in megabytes, may hold points waiting to be sent while InfluxDB is
+  # unreachable - per process, and each control runs in its own. 0 to 1024; 0 keeps them in
+  # memory only, where they are lost if the service stops. See the README.
+  # buffer_mb: 100
 
 # Shared MQTT broker settings, used by every MQTT-based source (currently: nuki).
 # Like the influx block above, this is per-install infrastructure rather than

@@ -20,8 +20,6 @@ import re
 import time
 import logging
 import warnings
-from collections import deque
-from itertools import islice
 import urllib3
 import requests
 from dataclasses import dataclass
@@ -42,47 +40,9 @@ class InfluxWriteError(ToInfluxError):
     status_code = None
 
 
-# Bound on how many failed points each source buffers in memory before the oldest is
-# dropped to make room for new ones - see DataHandler._write_buffers.
-MAX_BUFFERED_POINTS = 500
-
-# How many times a buffered point may be *rejected* by the server (a non-transient 4xx -
-# the server received it and said no) before it's dropped as unsendable. Connection
-# failures, 5xx responses, and the transient 4xxs below never count towards this, so an
-# ordinary outage - however long - can't age points out; only a point the server itself
-# keeps refusing (malformed, outside the retention window, oversized, or a misbehaving
-# middlebox answering for InfluxDB) is given up on, and even then only after this many
-# separate attempts, so one transient 4xx (e.g. a proxy hiccup) doesn't discard data
-# InfluxDB never saw.
-MAX_POINT_REJECTIONS = 5
-
-# 4xx statuses that describe a transient server/connection condition, not a verdict on
-# the submitted payload: 408 Request Timeout, 429 Too Many Requests. Counting these as
-# point rejections would age valid points out of the buffer during rate limiting.
-TRANSIENT_CLIENT_ERRORS = frozenset({408, 429})
-
-# How many buffered points are flushed per HTTP request. InfluxDB's write endpoints
-# natively accept multiple newline-separated points per body, so recovering from a long
-# outage costs a handful of requests instead of one per point; per-point posting is the
-# fallback used only to isolate the offender when a whole chunk is rejected.
-FLUSH_CHUNK_SIZE = 100
-
-
-def _is_point_rejection(status_code):
-    """True when a status code means the server received and rejected the *payload*.
-
-    A 4xx other than the transient 408/429, as opposed to a connection failure (None), a
-    server-side error (5xx), or a rate-limit or timeout condition that says nothing about
-    the point's validity.
-
-    Args:
-        status_code (int or None): the HTTP status the write returned, or None if the
-            connection failed before one arrived
-
-    Returns:
-        bool: True when the payload itself was rejected
-    """
-    return status_code is not None and 400 <= status_code < 500 and status_code not in TRANSIENT_CLIENT_ERRORS
+# Getting a point into InfluxDB - the spool, the retries, the reporting - belongs to the writer.
+# The rejection limit is named here too because collectors' tests and docs refer to it.
+from toinflux.writer import MAX_POINT_REJECTIONS, build_write_request, writer_for  # noqa: E402,F401
 
 
 def _format_field_value(value):
@@ -407,33 +367,6 @@ class DataHandler:
         """
         return self.MCP_WRITABLE and self.source_settings.get("mcp_read_write", False) is True
 
-    # Bounded per-worker buffer of points that failed to write, flushed on the next
-    # successful send. Each entry is a mutable [line, rejection_count] pair - the count
-    # tracks how many times the server has rejected (4xx) that specific point, so
-    # _flush_buffer can give up on it after MAX_POINT_REJECTIONS. Class-level (shared
-    # across instances/subclasses) rather than an instance attribute: the worker loop in
-    # sendtoinflux.py discards and reconstructs the DataHandler instance after every
-    # failure, so only a buffer that outlives the instance survives to be flushed later.
-    #
-    # Keyed by ``worker_key`` - (source, instance) - NOT by source name alone. A source
-    # with several instances (a Hue install with more than one bridge) runs one worker
-    # thread per instance, and they must not share a deque: _flush_buffer/_flush_head do
-    # read-then-popleft sequences that are not atomic across threads, so a shared buffer
-    # could double-post or lose points. validate_settings() refuses duplicate `sources:`
-    # entries for exactly that reason; per-instance keys are what make several workers on
-    # one source name safe. Mutating this dict from several threads is fine as it stands:
-    # a single dict.setdefault() is atomic under the GIL, and each worker only ever
-    # touches its own deque afterwards.
-    #
-    # deque(maxlen=...) evicts the oldest buffered point once a worker's buffer is full,
-    # so a very long outage degrades gracefully instead of growing memory without bound -
-    # note the bound is per worker, so N instances of a source can hold up to N *
-    # MAX_BUFFERED_POINTS between them. Buffered lines are flushed to whatever
-    # destination the *current* settings resolve to - an accepted limitation: editing
-    # influx.url/bucket/db while a backlog exists re-routes that backlog to the new
-    # destination.
-    _write_buffers: dict = {}
-
     def __init__(self, source=None, settings_file=None, instance=None):
         """Build a handler for one source, and optionally one instance of it.
 
@@ -447,11 +380,14 @@ class DataHandler:
             ConfigError: ``source`` names no section in the loaded settings
         """
         self.settings = load_settings(settings_file)
+        # Kept for the writer, which a process's first write creates and which finds its
+        # state directory from the settings path.
+        self.settings_file = settings_file
         self.source = source
         # Which instance of the source this handler serves, for a source that can have
         # more than one target behind a single settings block (currently only Hue, whose
         # instance is a bridge host). None for every single-target source, which keeps
-        # their worker_key/worker_label - and therefore their buffering, heartbeat and
+        # their worker_key/worker_label - and therefore their spooled points, heartbeat and
         # log output - exactly as they were before instances existed. Deliberately
         # separate from self.source rather than folded into it: self.source is also the
         # settings-block key, the get_class() lookup name, the heartbeat's `source` tag
@@ -498,205 +434,69 @@ class DataHandler:
         """
         return worker_label(self.source, self.instance)
 
-    def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True) -> None:
-        """Sends data to influxDB.
+    def send_data(self, data=None, timestamp=None, use_buffer=True) -> None:
+        """Hand one point to this process's writer, which commits it and sends it.
 
-        Before sending the new point, first tries to flush any points buffered from
-        earlier failed writes to this source (oldest first) - see ``_write_buffers``.
-        The flush happens even when this call has no data of its own, so a recovered
-        source with a legitimately-empty reading still delivers its backlog. If the
-        new point (or a buffered one) fails to send, it's appended to the buffer
-        instead of being dropped, so a brief InfluxDB outage delays data rather than
-        losing it. Either way, a failure still raises ``InfluxWriteError`` so the
-        existing worker backoff/retry behaviour is unaffected.
+        **Returns without waiting on InfluxDB, and never raises for an outage.** The point is
+        appended to the writer's spool on disk and synced before this returns, and the writer's
+        own thread posts it - so a collector keeps its ``interval`` and a control its cycle
+        however InfluxDB is doing. Where the spool is not available the point is held in
+        memory instead; the caller is not told, because nothing it could do would differ. See
+        ``toinflux/writer.py``.
 
         Args:
-            data (dict or None): data to send to InfluxDB
+            data (dict or None): data to send to InfluxDB; ``self.data`` when None
             timestamp (int or None): unix epoch seconds to write the point at (matching the ``precision=s`` write
-                parameter below). Defaults to ``self.timestamp`` (set by some handlers' ``get_data()`` to the time of
+                parameter). Defaults to ``self.timestamp`` (set by some handlers' ``get_data()`` to the time of
                 collection, e.g. a reading's own interval start) and falls back to the current time.
-            use_buffer (bool): when False, skip the backlog flush and don't buffer this point on failure - just POST it
-                and raise if that fails. Used for fire-and-forget writes with no replay value (the collector_status
-                heartbeat), which would otherwise consume buffer capacity that belongs to real measurements.
-            flush (bool): when False, post this point without first flushing the backlog. Exists for a source that
-                writes several points per collection cycle through this method - Nuki writes one per lock - because the
-                write buffer is per *worker*, not per point: flushing on every point charged the head buffered point one
-                rejection per point, so a five-lock install burned all of ``MAX_POINT_REJECTIONS`` in a single cycle and
-                discarded the backlog after one, instead of surviving five. Such a caller flushes on its first point and
-                passes False for the rest. Ignored when ``use_buffer`` is False, which skips the buffer entirely.
+            use_buffer (bool): when False, the point is a live signal with no replay value - the
+                ``collector_status`` heartbeat - posted once if it can be and otherwise dropped, rather than kept
+                taking space from real measurements and backfilled, stale, on recovery.
 
         Raises:
-            InfluxWriteError: if the write to InfluxDB fails
+            InfluxWriteError: the point cannot be written at all - a key or tag value containing a newline, which
+                would split it in two. The caller's bug rather than an outage, so it is said to the caller
         """
-        # if the data is not provided, use the data from the class
         if data is None:
             data = self.data
 
         if not data or not isinstance(data, dict):
-            data_to_send = None
-            if not self._log_missing_data(data, use_buffer):
-                return
-        else:
-            if timestamp is None:
-                timestamp = self.timestamp if self.timestamp is not None else int(time.time())
-            data_to_send = (
-                self.influx_header
-                + ",".join(
-                    f"{escape_key_or_tag_value(key)}={_format_field_value(value)}" for key, value in data.items()
-                )
-                + f" {timestamp}"
-            )
-
-        url, post_kwargs = self._build_write_request(self.settings["influx"])
-
-        if not use_buffer:
-            self._post_line(data_to_send, url, post_kwargs)
+            self._log_missing_data(data)
             return
+        if timestamp is None:
+            timestamp = self.timestamp if self.timestamp is not None else int(time.time())
+        line = (
+            self.influx_header
+            + ",".join(f"{escape_key_or_tag_value(key)}={_format_field_value(value)}" for key, value in data.items())
+            + f" {timestamp}"
+        )
+        writer = writer_for(self.settings, self.settings_file)
+        # Every write refreshes where this source's points go, so the writer always posts to the
+        # destination the latest-built handler's settings name - backlog included.
+        writer.set_destination(self.source, *self._build_write_request(self.settings["influx"]))
+        writer.submit(self.source, self.instance, line, buffered=use_buffer)
 
-        self._send_buffered(data_to_send, url, post_kwargs, flush)
+    def _log_missing_data(self, data) -> None:
+        """Say that a send_data() call had no usable data of its own.
 
-    def _send_buffered(self, data_to_send, url, post_kwargs, flush):
-        """Flush the backlog then post this point, buffering it if either fails.
-
-        Split out of ``send_data`` only to keep that method within the project's cyclomatic
-        complexity limit; the behaviour is unchanged.
-
-        Args:
-            data_to_send (str or None): the line protocol point, or None for a flush-only call
-            url (str): the write URL from _build_write_request
-            post_kwargs (dict): the request kwargs from _build_write_request
-            flush (bool): whether to flush the backlog first - see send_data
-
-        Raises:
-            InfluxWriteError: the flush or the post failed
-        """
-        buffer = self._write_buffers.setdefault(self.worker_key, deque(maxlen=MAX_BUFFERED_POINTS))
-        try:
-            if flush:
-                self._flush_buffer(buffer, url, post_kwargs)
-            if data_to_send is not None:
-                self._post_line(data_to_send, url, post_kwargs)
-        except InfluxWriteError:
-            if data_to_send is not None:
-                self._buffer_point(buffer, data_to_send)
-            raise
-
-    def _log_missing_data(self, data, use_buffer):
-        """Log appropriately for a send_data() call with no usable data of its own.
-
-        A truthy non-dict isn't an empty reading, it's a handler bug - it gets its own
-        explicit warning rather than hiding behind the no-data messages. An empty
-        reading only warrants a warning when there's also no backlog to flush; a cycle
-        that exists purely to drain the backlog logs at DEBUG.
+        A truthy non-dict is not an empty reading but a handler bug, so it gets its own
+        warning. An empty reading is only worth a warning where nothing else is on its way to
+        InfluxDB; with a backlog draining, the cycle is not the one that matters.
 
         Args:
-            data (dict or None): whatever the caller supplied (or self.data resolved to)
-            use_buffer (bool): the send_data() call's use_buffer flag
-
-        Returns:
-            bool: True when a backlog flush should still proceed, False when there is nothing at all for this call to do
+            data (object): whatever the caller supplied, or ``self.data`` resolved to
         """
-        has_backlog = bool(use_buffer and self._write_buffers.get(self.worker_key))
         if data and not isinstance(data, dict):
             logging.warning("Ignoring non-dict data (%s) from worker '%s'", type(data).__name__, self.worker_label)
-        elif not has_backlog:
+            return
+        writer = writer_for(self.settings, self.settings_file)
+        if writer.pending():
+            logging.debug("No new data for worker '%s'; the writer is still sending its backlog", self.worker_label)
+        else:
             logging.warning("No data to send to InfluxDB")
-        if not has_backlog:
-            return False
-        logging.debug("No new data for worker '%s'; flushing the buffered backlog only", self.worker_label)
-        return True
-
-    def _flush_buffer(self, buffer, url, kwargs):
-        """Flush a source's buffered points, oldest first.
-
-        Sends newline-joined chunks of FLUSH_CHUNK_SIZE per HTTP request. InfluxDB's write
-        endpoints accept multi-point bodies natively, so a large backlog costs a handful
-        of requests rather than one each.
-
-        A connection failure or 5xx stops the flush and re-raises, leaving everything
-        in the buffer to retry next cycle - those failures say nothing about the points
-        themselves, so they never count against them. A 4xx (the server received the
-        chunk and rejected it) triggers a per-point pass over that chunk to isolate the
-        offender(s): each rejected point's rejection count is incremented, and a point
-        is only dropped - with a warning - once the server has rejected it
-        MAX_POINT_REJECTIONS separate times, so neither a transiently-misbehaving
-        middlebox answering 4xx for a down InfluxDB nor one bad point can cause
-        unbounded loss or unbounded head-of-line blocking.
-
-        Args:
-            buffer (collections.deque): the source's buffer (from ``_write_buffers``)
-            url (str): destination InfluxDB write URL
-            kwargs (dict): extra requests.Session.post() kwargs (auth/headers/verify/timeout)
-
-        Raises:
-            InfluxWriteError: on a connection/5xx failure, or on a 4xx-rejected point that hasn't yet reached
-                MAX_POINT_REJECTIONS
-        """
-        while buffer:
-            # islice iterates the deque linearly - indexing a deque is O(n) per access,
-            # which would make building the chunk O(k^2).
-            chunk = list(islice(buffer, FLUSH_CHUNK_SIZE))
-            if len(chunk) == 1:
-                self._flush_head(buffer, url, kwargs)
-                continue
-            try:
-                self._post_line("\n".join(entry[0] for entry in chunk), url, kwargs)
-            except InfluxWriteError as exc:
-                if not _is_point_rejection(exc.status_code):
-                    self._write_problem(
-                        "flush",
-                        logging.WARNING,
-                        "Flushing %d buffered point(s) for worker '%s' failed; will retry next cycle",
-                        len(buffer),
-                        self.worker_label,
-                    )
-                    raise
-                # The server rejected the chunk - isolate the offending point(s).
-                for _ in chunk:
-                    self._flush_head(buffer, url, kwargs)
-                continue
-            for _ in chunk:
-                buffer.popleft()
-
-    def _flush_head(self, buffer, url, kwargs) -> None:
-        """POST the single point at the head of the buffer.
-
-        Removes it on success, or drops it with a warning after MAX_POINT_REJECTIONS
-        separate server rejections. Any other failure re-raises with the point left in
-        place.
-
-        Args:
-            buffer (collections.deque): the source's buffer (from ``_write_buffers``)
-            url (str): destination InfluxDB write URL
-            kwargs (dict): extra requests.Session.post() kwargs (auth/headers/verify/timeout)
-
-        Raises:
-            InfluxWriteError: on a connection/5xx failure, or a 4xx rejection below the MAX_POINT_REJECTIONS cap
-        """
-        entry = buffer[0]
-        try:
-            self._post_line(entry[0], url, kwargs)
-        except InfluxWriteError as exc:
-            if _is_point_rejection(exc.status_code):
-                entry[1] += 1
-                if entry[1] >= MAX_POINT_REJECTIONS:
-                    logging.warning(
-                        "Dropping buffered point for worker '%s' after %d server rejections: %s",
-                        self.worker_label,
-                        entry[1],
-                        exc,
-                    )
-                    buffer.popleft()
-                    return
-            raise
-        buffer.popleft()
 
     def _build_write_request(self, influx_settings):
-        """Build the URL and kwargs for POSTing line protocol to this source's InfluxDB.
-
-        Independent of any one point's content, so it is computed once per ``send_data()``
-        call and reused for every line posted during that call - any flushed backlog plus
-        the new point.
+        """Return the URL and request arguments for posting this source's points.
 
         Args:
             influx_settings (dict): the ``influx`` settings block
@@ -704,92 +504,7 @@ class DataHandler:
         Returns:
             tuple: (url, kwargs for requests.Session.post())
         """
-        timeout = influx_settings.get("timeout", 5)
-        if influx_settings.get("token"):
-            url = (
-                f'{influx_settings["url"]}/api/v2/write'
-                f'?org={influx_settings["org"]}'
-                f'&bucket={self.source_settings.get("bucket", self.source_settings.get("db"))}'
-                f"&precision=s"
-            )
-            headers = {"Authorization": f'Token {influx_settings["token"]}'}
-            kwargs = {"headers": headers}
-        else:
-            url = f'{influx_settings["url"]}/write?db={self.source_settings["db"]}&precision=s'
-            kwargs = {"auth": (influx_settings["user"], influx_settings["password"])}
-
-        kwargs["verify"] = not influx_settings.get("insecure", False)
-        kwargs["timeout"] = timeout
-        return url, kwargs
-
-    def _post_line(self, line, url, kwargs):
-        """POST a line-protocol body (one point, or several newline-joined) to InfluxDB.
-
-        Args:
-            line (str): line-protocol body to send
-            url (str): destination InfluxDB write URL
-            kwargs (dict): extra requests.Session.post() kwargs (auth/headers/verify/timeout)
-
-        Raises:
-            InfluxWriteError: if the write to InfluxDB fails; carries the response's HTTP status code (or None for a
-                connection failure) as ``status_code``
-        """
-        try:
-            with warnings.catch_warnings():
-                if not kwargs.get("verify", True):
-                    warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
-                response = self.session.post(url, data=line, **kwargs)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            self._write_problem("post", logging.ERROR, "Error sending data to InfluxDB - %s", e)
-            exc = InfluxWriteError(str(e))
-            exc.status_code = getattr(e.response, "status_code", None)
-            raise exc from e
-
-    def _write_problem(self, kind, level, message, *args) -> None:
-        """Say that writing to InfluxDB went wrong, in the way this writer wants it said.
-
-        Straight to the log for a collector, whose worker writes once per ``interval`` and
-        backs off when it fails. A writer that must keep going at its own pace instead - a
-        control records a point every cycle and never backs off, because the cycle is for the
-        devices rather than for the record - overrides this so an outage is said once rather
-        than on every point.
-
-        Args:
-            kind (str): which failure this is - ``"post"``, ``"flush"`` or ``"full"`` - so an
-                override can tell a lost point from a delayed one
-            level (int): the logging level
-            message (str): a %-style format string
-            *args: its arguments
-        """
-        logging.log(level, message, *args)
-
-    def _buffer_point(self, buffer, line) -> None:
-        """Append a failed point to a source's write buffer.
-
-        Added as a fresh ``[line, rejection_count]`` entry, warning if this evicts the
-        oldest buffered point because the buffer was already full. An identical line
-        already in the buffer is not added again - some sources (Octopus) re-serve the
-        same reading with the same timestamp for many collection cycles, and duplicate
-        copies would only waste capacity, since flushing them is an idempotent overwrite
-        anyway.
-
-        Args:
-            buffer (collections.deque): the source's buffer (from ``_write_buffers``)
-            line (str): line-protocol point that failed to send
-        """
-        if any(entry[0] == line for entry in buffer):
-            logging.debug("Point already buffered for worker '%s'; not buffering a duplicate copy", self.worker_label)
-            return
-        if len(buffer) >= buffer.maxlen:
-            self._write_problem(
-                "full",
-                logging.WARNING,
-                "InfluxDB write buffer for worker '%s' is full (%d points); dropping the oldest buffered point",
-                self.worker_label,
-                buffer.maxlen,
-            )
-        buffer.append([line, 0])
+        return build_write_request(self.source_settings, influx_settings)
 
 
 # --------------------------------------------------------------------------- #

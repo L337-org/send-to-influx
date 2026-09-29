@@ -16,9 +16,9 @@ them.
 way by ``resolve_db()``: on InfluxDB 2 it names the bucket unless ``bucket`` is set too. Unset
 means no record, which the control subsystem says once as it starts.
 
-**Recording never affects control.** Points go through the ordinary buffered writer, so an
-outage queues them rather than failing a cycle, and a failed write is said once for the
-outage rather than once per cycle.
+**Recording never affects control.** Points go through the process's writer, which spools
+them to disk and posts them from its own thread, so neither an outage nor a slow InfluxDB
+reaches the cycle - see ``toinflux/writer.py``.
 
 Not a collector, and deliberately not registered as one: there is nothing to poll, and a
 ``sources:`` entry naming it would pass validation and then fail at its first collection.
@@ -31,8 +31,7 @@ __license__ = "MIT"
 
 import logging
 
-from toinflux.general import RepeatingProblem
-from toinflux.influx import DataHandler, InfluxWriteError, escape_key_or_tag_value, resolve_db
+from toinflux.influx import DataHandler, escape_key_or_tag_value, resolve_db
 
 #: The settings section the record is configured in, and the name the MCP read tools know
 #: it by. The section already existed, holding the subsystem's own switches.
@@ -198,17 +197,13 @@ class ControlRecord(DataHandler):
             ConfigError: where the settings have no ``controls`` section
         """
         super().__init__(RECORD_SOURCE, settings_file=settings_file, instance=instance)
-        # For the life of the writer, which for a control is the life of its process: that is
-        # the span over which an outage repeats.
-        self._problems = RepeatingProblem()
 
     def write(self, state, terms=None, delivered=None, timestamp=None) -> None:
-        """Write one cycle's point, never raising for a failure to write it.
+        """Hand one cycle's point to the writer, which commits it and sends it.
 
-        **Returns whether or not the point reached InfluxDB**, because nothing the caller
-        could do with the answer would help: the point is buffered and sent with the next one
-        that gets through, and the failure has been said. What a control must not do is stop
-        controlling because its history could not be written.
+        Returns without waiting on InfluxDB and never raises for an outage: the point is
+        spooled and the writer's own thread posts it, so recording a cycle cannot delay the
+        next one. See ``toinflux/writer.py``.
 
         Args:
             state (str): :data:`ACTIVE` or :data:`FAIL_SAFE`
@@ -222,42 +217,10 @@ class ControlRecord(DataHandler):
             if delivered is not None:
                 fields["delivered"] = float(delivered)
         fields["state"] = state
+        # The control's name is the tag. Names are refused at the store if they could not be
+        # one, so the escape cannot raise here.
         self.influx_header = f"{RECORD_MEASUREMENT},{RECORD_TAG}={escape_key_or_tag_value(self.instance)} "
-        try:
-            self.send_data(fields, timestamp=timestamp)
-        except InfluxWriteError:
-            # Said already, once for the outage, by `_write_problem` below; and buffered by
-            # `send_data`, which is the handling. Re-raising would carry a history problem into
-            # the control's cycle, which is the one thing this must never do.
-            return
-        # "full" is left to repeat on its own schedule: a point already dropped stays dropped,
-        # and recovering does not un-say that.
-        self._problems.cleared("write", "Control %r is recording its cycles to InfluxDB again", self.instance)
-
-    def _write_problem(self, kind, level, message, *args) -> None:
-        """Say a write failure once for the outage rather than once per cycle.
-
-        Args:
-            kind (str): which failure this is
-            level (int): the logging level
-            message (str): a %-style format string
-            *args: its arguments
-        """
-        # A failed post and a failed flush are one outage seen from two places - the flush is
-        # what a post becomes once a backlog has built up - so they share a key, and the
-        # second is a repeat of the first rather than news. A buffer that has started dropping
-        # points *is* news during an outage already reported, so it has its own. The identity
-        # is the key alone: the messages carry an exception and a count, which change every
-        # cycle and would otherwise make every repeat look new.
-        key = "full" if kind == "full" else "write"
-        self._problems.report(
-            key,
-            level,
-            "Control %r could not record its cycle: " + message,
-            self.instance,
-            *args,
-            identity=key,
-        )
+        self.send_data(fields, timestamp=timestamp)
 
 
 def log_record_destination(settings) -> None:

@@ -3,6 +3,7 @@
 from socket import gethostname
 from unittest.mock import MagicMock, patch
 import pytest
+import requests
 from toinflux.speedtest import Speedtest
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToolParamError
 from toinflux.influx import InfluxWriteError
@@ -168,18 +169,19 @@ class TestSpeedtestTriggerAndLock:
             with patch.object(handler, "send_data") as send:
                 result = handler.mcp_trigger_run()
         send.assert_called_once()
-        assert result["source"] == "speedtest" and result["recorded"] is True
+        assert result["source"] == "speedtest"
         assert result["result"]["download"] == {"value": 111.0, "unit": "bits/s"}
         assert result["result"]["ping"] == {"value": 9.0, "unit": "ms"}
 
-    def test_mcp_trigger_run_recording_failure_is_best_effort(self, sample_settings):
-        from toinflux.influx import InfluxWriteError
-
+    def test_the_result_does_not_wait_on_influxdb(self, sample_settings, influx_posts):
+        """The run's own numbers are the answer, returned in the same call. Recording them is
+        the writer's, and an unreachable InfluxDB neither fails the call nor delays it; there is
+        no longer a flag saying how the write went, because the call does not wait to find out."""
         handler = self._handler(sample_settings)
+        influx_posts.side_effect = requests.exceptions.ConnectionError("down")
         with self._mock_run({"download": 1.0, "upload": 2.0, "ping": 3.0}):
-            with patch.object(handler, "send_data", side_effect=InfluxWriteError("nope")):
-                result = handler.mcp_trigger_run()
-        assert result["recorded"] is False
+            result = handler.mcp_trigger_run()
+        assert "recorded" not in result
         assert result["result"]["download"]["value"] == 1.0
 
 
