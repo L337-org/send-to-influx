@@ -55,7 +55,7 @@ from toinflux.controls import (
 )
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.gating import commands_for
-from toinflux.general import load_settings, render_external
+from toinflux.general import enabled_sources, load_settings, render_external
 from toinflux.process import TimeoutExpired, spawn
 from toinflux.transitions import forget_control
 
@@ -106,6 +106,9 @@ class Child:
         restart_at (float or None): when it may next be started, or None when it is running.
         stall_seconds (float): how long this control may be silent before it is killed,
             derived from its own cycle window.
+        enabled (frozenset): the sources enabled in the settings as the parent read them just
+            before this was last started - near enough what the process read for itself; see
+            ``Supervisor.start``.
     """
 
     name: str
@@ -118,6 +121,7 @@ class Child:
     failures: int = 0
     restart_at: "float | None" = None
     stall_seconds: float = MINIMUM_STALL_SECONDS
+    enabled: frozenset = frozenset()
 
     @property
     def running(self):
@@ -129,7 +133,7 @@ class Child:
         return self.process is not None
 
 
-def _usable_control(name, settings_file):
+def _usable_control(name, settings_file, settings):
     """Read one control document and refuse it unless it is structurally sound.
 
     Checked here rather than defended against at each use. A document that parses as YAML
@@ -141,7 +145,10 @@ def _usable_control(name, settings_file):
 
     Args:
         name (str): the control to read
-        settings_file (str or None): the settings path the process was started with
+        settings_file (str or None): the settings path the process was started with, which is
+            also what locates the control store
+        settings (dict): the settings, already read. Required, so a caller checking many
+            controls reads the file once rather than once per control
 
     Returns:
         dict: the validated document
@@ -150,7 +157,7 @@ def _usable_control(name, settings_file):
         ConfigError: where it cannot be read or is not structurally valid
     """
     document = load_control(name, settings_file)
-    errors = validate_control(name, document, load_settings(settings_file))
+    errors = validate_control(name, document, settings)
     if errors:
         raise ConfigError(f"control {name!r} is not valid:\n  " + "\n  ".join(errors))
     return document
@@ -300,7 +307,7 @@ class Supervisor:
     :meth:`poll` saw).
     """
 
-    def __init__(self, names, settings_file=None, argv_for=None, clock=time.monotonic, backoff=None):
+    def __init__(self, names, settings_file=None, argv_for=None, clock=time.monotonic, backoff=None, *, enabled):
         """Prepare to supervise a set of controls without starting them.
 
         Args:
@@ -311,12 +318,20 @@ class Supervisor:
             clock (callable): the monotonic clock, injectable so a backoff is a test rather
                 than a wait
             backoff (callable or None): failures -> seconds before a restart
+            enabled (frozenset): the sources the service started with enabled, from
+                ``general.enabled_sources``. Required, as it is for ``command_devices``,
+                because every caller has to decide it rather than inherit a file read here
 
         Raises:
             ConfigError: never for one unusable control - that one is logged and skipped -
                 but the signature keeps the type for a caller that passes nothing readable
         """
         self.settings_file = settings_file
+        # The service's, fixed for as long as it runs, and used for nothing but making devices
+        # safe. A restart that disables a source then still turns off what the stopping
+        # service's controls had switched on; the service that comes up refuses the control.
+        # Each child's own set is added to it at that point - see make_safe.
+        self.enabled = frozenset(enabled)
         self._clock = clock
         self._argv_for = argv_for or self._default_argv
         self._backoff = backoff or _default_backoff
@@ -341,12 +356,25 @@ class Supervisor:
         # the *same* one each time is not, because an operator watching a heater needs the
         # answer to hold still while they fix it.
         claimed: list = []
-        for name in sorted(names):
+        names = sorted(names)
+        settings: dict = {}
+        if names:
+            # Only where there is something to check against them: an empty store needs no
+            # settings, and an installation starting with none is not a fault.
+            try:
+                settings = load_settings(settings_file)
+            except ConfigError as exc:
+                # Every control's problem at once, so said once. The service read this file a
+                # moment ago to get here, so this is an edit landing in between, and the reload
+                # that follows the fix takes each control on.
+                logging.error("No control can be supervised, because the settings cannot be read: %r", exc)
+                names = []
+        for name in names:
             # Read now rather than at each start: a control that cannot be read is a
             # configuration fault, and finding that out per restart would turn it into a
             # respawn loop that logs the same message for ever.
             try:
-                document = _usable_control(name, settings_file)
+                document = _usable_control(name, settings_file, settings)
             except ConfigError as exc:
                 # That control's problem, not everybody's. Refusing to supervise anything
                 # because one stored document is corrupt would stop the heating over a file
@@ -427,12 +455,28 @@ class Supervisor:
             name (str): the control to start
 
         Raises:
-            ConfigError: where the process could not be started at all
+            ConfigError: where the process could not be started at all, including where the
+                settings it would read cannot be
         """
         child = self.children[name]
+        # Read once, first, and refused here if it cannot be: the child would fail on the same
+        # file, and saying so before spawning it is one clear line rather than a warning about
+        # a document followed by a process that dies.
+        try:
+            settings = load_settings(self.settings_file)
+        except ConfigError as exc:
+            raise ConfigError(
+                f"control {name!r} was not started because its settings cannot be read: {render_external(exc)}"
+            ) from exc
         # Before the spawn, because the child reads the same file for itself and the two
         # must agree from the first beat.
-        self._refresh(child)
+        self._refresh(child, settings)
+        # What the child is about to read for itself, near enough: it reads the file again a
+        # moment later, after its interpreter starts, and a source enabled in between is in
+        # neither set. Accepted - the window is a fraction of a second. A source enabled since
+        # the service started is one a control saved now may use, and the service's own set
+        # alone would refuse to make that control's devices safe after it dies.
+        child.enabled = enabled_sources(settings)
         try:
             read_fd, write_fd = os.pipe()
         except OSError as exc:
@@ -464,7 +508,7 @@ class Supervisor:
         self._selector.register(child.beats, selectors.EVENT_READ, child)
         self._record("started", name, f"pid {child.process.pid}")
 
-    def _refresh(self, child) -> None:
+    def _refresh(self, child, settings) -> None:
         """Re-read the document a control is about to be started from.
 
         The child reads its own document at startup, so anything the parent derived from an
@@ -475,10 +519,10 @@ class Supervisor:
         on its own, and the restart after that goes through here and nowhere else.
 
         A document that will not read keeps the previous copy rather than refusing to start.
-        The child reads the same file and will fail on it in its own process, where it is
-        one control's failure and the restart path already handles it; raising here would
-        put it on the path ``start_all`` takes, which runs before the loop that would clean
-        up after it.
+        The child reads the same file and fails on it in its own process, which the restart
+        path handles like any other death - and the parent keeps a description of the devices
+        that process may have energised. An unreadable settings file is different, and
+        ``start`` refuses it before this runs.
 
         There may be no previous copy to keep. A control taken on by a reload is built with
         none, and its document was readable a moment earlier when the reload decided to
@@ -488,9 +532,10 @@ class Supervisor:
 
         Args:
             child (Child): the control about to be started
+            settings (dict): the settings ``start`` has just read, so the file is read once
         """
         try:
-            document = _usable_control(child.name, self.settings_file)
+            document = _usable_control(child.name, self.settings_file, settings)
             window = stall_seconds(document)
         except ConfigError as exc:
             logging.warning(
@@ -630,7 +675,7 @@ class Supervisor:
             # Read here both to decide whether to stop what is running and to see whether it
             # is still enabled. An unusable document must not cost a working control its
             # process.
-            document = _usable_control(name, self.settings_file)
+            document = _usable_control(name, self.settings_file, load_settings(self.settings_file))
         except ConfigError as exc:
             # Two different situations, and telling an operator the wrong one sends them
             # looking in the wrong place. Where a control *is* running, refusing to kill it
@@ -645,7 +690,8 @@ class Supervisor:
                     "Control %r was not reloaded and is still running the document it started with: %r", name, exc
                 )
             else:
-                logging.error("Control %r is still not running: the stored document is not valid: %r", name, exc)
+                # The reason names the file: the control's own document, or the settings.
+                logging.error("Control %r is still not running: %r", name, exc)
             self._record("reload-failed", name, repr(exc))
             return
         if not control_is_enabled(document):
@@ -770,7 +816,7 @@ class Supervisor:
         except ConfigError as exc:
             child.failures += 1
             child.restart_at = self._clock() + self._backoff(child.failures)
-            logging.error("Control %r could not be restarted: %r. Trying again later", child.name, exc)
+            logging.error("Control %r could not be started: %r. Trying again later", child.name, exc)
             self._record("start-failed", child.name, repr(exc))
 
     def run(self, stop, poll_seconds=DEFAULT_POLL_SECONDS) -> None:
@@ -918,6 +964,10 @@ class Supervisor:
         Args:
             name (str): the control whose devices to make safe
         """
+        child = self.children.get(name)
+        # Either set, because turning a device off is never the thing to refuse: the service's
+        # covers a source disabled since it started, the child's one enabled since.
+        enabled = self.enabled | (child.enabled if child is not None else frozenset())
         for document in self._documents_for(name):
             try:
                 commands = commands_for(document.get("safe_state", "unenergised"), document.get("devices") or {})
@@ -927,7 +977,7 @@ class Supervisor:
                 # No log passed, so one is opened for this control and closed again. The
                 # child owning the other one is already dead by the time this runs - that is
                 # what "make its devices safe" is for - so the two never write at once.
-                command_devices(name, document, commands, self.settings_file, forced=True)
+                command_devices(name, document, commands, self.settings_file, forced=True, enabled=enabled)
             except (ConfigError, SourceConnectionError) as exc:
                 # Logged rather than raised: the supervisor's job is to keep going, and a
                 # bridge that cannot be reached now is one the next restart will try again.
@@ -1005,7 +1055,7 @@ class Supervisor:
                 )
             return documents
         try:
-            current = _usable_control(name, self.settings_file)
+            current = _usable_control(name, self.settings_file, load_settings(self.settings_file))
         except ConfigError as exc:
             # The file is there and cannot be used, which is a fault. Said rather than
             # passed over: nothing is stranded, because the copy this process was started

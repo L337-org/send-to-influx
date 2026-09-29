@@ -16,6 +16,7 @@ __license__ = "MIT"
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -30,7 +31,7 @@ class Census:
             count one larger for no information.
         threads (int or None): its threads, None where this platform was not readable.
         descriptors (int or None): its open file descriptors, None likewise.
-        skipped (tuple): what could not be counted, and why.
+        skipped (tuple): what could not be counted, or was counted only in part, and why.
     """
 
     processes: int
@@ -117,16 +118,16 @@ def _threads(pid):
                 if line.startswith("Threads:"):
                     return int(line.split()[1]), None
         return None, f"threads: {status} carried no Threads: line"
-    if sys.platform == "darwin":
-        try:
-            output = subprocess.run(
-                ["ps", "-M", "-p", str(pid)], capture_output=True, text=True, timeout=20, check=True
-            ).stdout
-        except (OSError, subprocess.SubprocessError) as exc:
-            return None, f"threads: ps -M failed: {exc}"
-        # A header line, then one line per thread.
-        lines = [line for line in output.splitlines() if line.strip()]
-        return (len(lines) - 1, None) if len(lines) > 1 else (None, "threads: ps -M listed none")
+    if sys.platform == "darwin" and pid == os.getpid():
+        # Python's own threads rather than the kernel's, because macOS adds native threads of
+        # its own that are not ours to leak. The first system proxy lookup in a process -
+        # which `requests` makes on every call with `trust_env` on - starts a libdispatch
+        # worker that then idles for the life of the process, so a count taken before the
+        # parent's first request and one taken after differed by one for a run that leaked
+        # nothing. Linux counts every thread from /proc, so CI still sees native ones.
+        return threading.active_count(), (
+            "threads: only Python's own were counted on darwin; a native thread is not seen"
+        )
     return None, f"threads: no count available on {sys.platform}"
 
 

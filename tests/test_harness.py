@@ -470,6 +470,16 @@ class TestTheCensus:
             if getattr(taken, name) is None:
                 assert any(name in reason for reason in taken.skipped), taken
 
+    def test_a_count_taken_only_in_part_says_so_in_the_verdict(self):
+        """On macOS threads are Python's own only, which a native leak passes. The invariant
+        passes that on as a skipped check, so a clean verdict there does not read as the
+        whole count."""
+        before = census.Census(processes=0, threads=3)
+        after = census.Census(processes=0, threads=3, skipped=("threads: only some were counted",))
+        report = invariants.nothing_leaked(before, after)
+        assert report.violations == []
+        assert "threads: only some were counted" in report.skipped
+
 
 class TestTheInvariantsCatchViolations:
     """Each one watched failing. An invariant checker that has only ever run against

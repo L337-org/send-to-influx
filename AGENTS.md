@@ -140,6 +140,9 @@ keeps these names honest, and each guard's docstring carries the reasoning.
 - `tests/test_controls.py::TestControlNames::test_refuses_anything_that_could_choose_a_different_file`
   - a control name becomes a filename and arrives from an MCP client
 - `tests/test_controls.py::TestTheStageLadder::test_a_stage_that_forgets_a_device_is_refused`
+- `tests/test_inputs.py::TestADisabledSourceIsNeverBuilt::test_no_control_module_builds_a_handler_any_other_way`
+  - every handler a control uses comes from `inputs.source_handler`, which refuses a source
+  left out of `sources:`
 - `tests/test_rules.py::TestTheLanguageHasNoWayOut` - a rule cannot reach an attribute, a
   string, an import or any call outside `FUNCTION_ARITY`
 

@@ -1070,7 +1070,7 @@ def validate_control_sources(document, settings=None):
     Returns:
         list: human-readable problems, empty where every source named can do its job
     """
-    from toinflux.general import source_block_problem, source_class
+    from toinflux.general import source_class
 
     errors = []
     for key, must_actuate in (("inputs", False), ("devices", True)):
@@ -1094,16 +1094,37 @@ def validate_control_sources(document, settings=None):
                 continue
             if must_actuate and _check_actuation(where, entry, source, handler, errors):
                 continue
-            # Knowing the class is not knowing the installation. Without this, a control
-            # naming `hue` on a machine whose settings have no `hue` block passed
-            # --check-config, started, and died on its first safe-state command - then
-            # again on every restart the backoff allowed, each time reporting a fault that
-            # was really a missing settings section. The same question settings validation
-            # already asks, asked with the same function so the two cannot drift.
-            unusable = source_block_problem(source.lower(), settings) if settings is not None else None
+            unusable = _installation_problem(source, settings) if settings is not None else None
             if unusable:
                 errors.append(f"{where}: {unusable}")
     return errors
+
+
+def _installation_problem(source, settings):
+    """Return why this installation cannot give a control this source, or None.
+
+    Args:
+        source (str): a source this build knows, any case
+        settings (dict): the parsed settings
+
+    Returns:
+        str or None: the one problem to report
+    """
+    from toinflux.general import disabled_source_problem, enabled_sources, source_block_problem
+
+    # Before the section, because a disabled source's section is not one to judge: an
+    # operator switches a source off by leaving it out of `sources:`, often with its section
+    # still in place, and "fix the section" would send them the wrong way.
+    disabled = disabled_source_problem(source, enabled_sources(settings))
+    if disabled:
+        return disabled
+    # Knowing the class is not knowing the installation. Without this, a control naming
+    # `hue` on a machine whose settings have no `hue` block passed --check-config, started,
+    # and died on its first safe-state command - then again on every restart the backoff
+    # allowed, each time reporting a fault that was really a missing settings section. The
+    # same question settings validation already asks, asked with the same function so the
+    # two cannot drift.
+    return source_block_problem(source.lower(), settings)
 
 
 def _check_actuation(where, entry, source, handler, errors):

@@ -26,6 +26,7 @@ from tests.harness import census, invariants
 from tests.harness.bridge import plug
 from tests.harness.chaos import SEEDS_THAT_FAILED, ChaosDriver
 from tests.harness.installation import conservatory
+from toinflux.general import enabled_sources
 from toinflux.supervision import Supervisor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -108,6 +109,7 @@ def _supervisor(installation, names):
     return Supervisor(
         names,
         settings_file=installation.settings_file,
+        enabled=enabled_sources(installation.settings),
         argv_for=argv_for,
         backoff=lambda failures: 0.1 * failures,
     )

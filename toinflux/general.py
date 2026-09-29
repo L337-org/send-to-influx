@@ -436,6 +436,63 @@ def known_sources():
     return sorted(name.lower() for name in _source_classes())
 
 
+def listed_sources(settings):
+    """Return the ``sources:`` list as lowercased names, in the order written.
+
+    The one reading of what that setting enables. The collectors run what it names, the MCP
+    tools expose it and a control may use only what it enables, and three readings of it had
+    been written that each lowercased, dropped a non-string entry and treated a non-list as
+    empty - which is three chances to disagree. ``validate_settings`` reads the list separately
+    and more strictly, because its job is to report those entries rather than skip them.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        list: lowercased source names; empty where the list is absent or not a list, which
+        validation reports separately
+    """
+    raw = settings.get("sources")
+    if not isinstance(raw, list):
+        return []
+    return [source.lower() for source in raw if isinstance(source, str)]
+
+
+def enabled_sources(settings):
+    """Return the sources the ``sources:`` list enables, for deciding what a control may use.
+
+    Leaving a source out of that list is how an operator switches it off, and a section left
+    in place for it - credentials and all - is not a request to use it. The collectors normally
+    run the same list; ``--source`` overrides it for collection only, and a control still
+    decides from the list.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        frozenset: lowercased source names; empty where the list is absent or not a list
+    """
+    return frozenset(listed_sources(settings))
+
+
+def disabled_source_problem(source, enabled):
+    """Return why a control may not use this source, or None where it may.
+
+    Args:
+        source (str): the source name, any case
+        enabled (frozenset): the lowercased source names enabled, from :func:`enabled_sources`
+
+    Returns:
+        str or None: the problem, naming the source and the setting that enables it
+    """
+    if source.lower() in enabled:
+        return None
+    return (
+        f"source {source!r} is disabled: it is not in the 'sources:' list in the settings file. "
+        f"Add it there to use it in a control"
+    )
+
+
 def shares_measurement(source):
     """Return True when any *other* known source writes to the same measurement.
 

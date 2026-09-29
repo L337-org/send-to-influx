@@ -9,7 +9,9 @@ enforce_permissions: true
 # The sources to collect. Nothing is enabled by default: send-to-influx logs that
 # plainly and exits rather than silently collecting nothing useful. Uncomment the ones
 # you want - each also needs its own settings section below filled in with real values
-# rather than the placeholders this file ships with.
+# rather than the placeholders this file ships with. A source left out of this list is
+# off for control loops too, even with its section filled in: a control that names it
+# is refused until it is listed here.
 sources:
   # - "hue"
   # - "speedtest"

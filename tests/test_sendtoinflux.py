@@ -361,12 +361,12 @@ class TestMain:
             patch("sendtoinflux.sys.argv", ["sendtoinflux", "--check-config"]),
             patch("sendtoinflux.sys.exit", side_effect=SystemExit(0)),
         ):
-            # Every source the example control names needs a section here, because that is
-            # now part of what makes a stored control valid - a control naming `hue` on a
-            # machine with no `hue` block used to pass this check and then die on its first
-            # command.
+            # Every source the example control names needs a section here, and to be listed
+            # in `sources:`, because both are now part of what makes a stored control valid -
+            # a control naming `hue` on a machine with no `hue` block used to pass this check
+            # and then die on its first command, and one naming a disabled source used it.
             mock_load_settings.return_value = {
-                "sources": ["hue"],
+                "sources": ["hue", "openmeteo", "carbonintensity"],
                 "hue": {"db": "hue_db", "interval": 300},
                 "openmeteo": {"db": "weather", "interval": 900},
                 "carbonintensity": {"db": "grid", "interval": 1800},
@@ -2133,9 +2133,10 @@ class TestTheControlSubsystemOptIn:
         started = {}
 
         class _Supervisor:
-            def __init__(self, names, settings_file=None):
+            def __init__(self, names, settings_file=None, enabled=None):
                 started["names"] = list(names)
                 started["settings_file"] = settings_file
+                started["enabled"] = enabled
                 # What the supervisor actually took on, which is what the banner counts.
                 self.children = {name: object() for name in names}
 
@@ -2158,9 +2159,14 @@ class TestTheControlSubsystemOptIn:
             patch("sendtoinflux.list_controls", return_value=["conservatory", "porch"]),
             patch("sendtoinflux.atexit.register") as register,
         ):
-            supervisor = sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)
+            supervisor = sendtoinflux._start_control_supervisor(
+                {"controls": {"enabled": True}, "sources": ["Hue", "openmeteo"]}, args
+            )
         assert started["names"] == ["conservatory", "porch"]
         assert started["settings_file"] == "/tmp/settings.yaml"
+        # The service's own list, decided here once: the supervisor keeps it for making devices
+        # safe after a restart that disables a source.
+        assert started["enabled"] == frozenset({"hue", "openmeteo"})
         # Registered, because a signal exits through sys.exit and the daemon thread simply
         # stops - so the last word on leaving devices safe has to run either way. It is
         # `_stop_supervising` rather than `stop_all` itself: the thread has to be brought
@@ -2198,7 +2204,7 @@ class TestTheSupervisorBanner:
         class _Supervisor:
             children = {"conservatory": object()}
 
-            def __init__(self, names, settings_file=None):
+            def __init__(self, names, settings_file=None, enabled=None):
                 """Accept the names and supervise only some of them.
 
                 Args:
@@ -2240,7 +2246,7 @@ class TestTheSupervisorBanner:
         class _Supervisor:
             children = {}
 
-            def __init__(self, names, settings_file=None):
+            def __init__(self, names, settings_file=None, enabled=None):
                 """Supervise nothing at all.
 
                 Args:
@@ -2277,7 +2283,7 @@ class TestTheSupervisorBanner:
         class _Supervisor:
             children = {}
 
-            def __init__(self, names, settings_file=None):
+            def __init__(self, names, settings_file=None, enabled=None):
                 """Supervise nothing at all.
 
                 Args:
@@ -2827,7 +2833,7 @@ class TestCheckConfigWarnsAboutStaleFeedback:
         document["inputs"][document["pid"]["input"]]["max_age"] = max_age
         save_control("conservatory", document)
         return {
-            "sources": ["hue"],
+            "sources": ["hue", "openmeteo", "carbonintensity"],
             "hue": {"db": "hue_db", "interval": 300},
             "openmeteo": {"db": "weather", "interval": 900},
             "carbonintensity": {"db": "grid", "interval": 1800},

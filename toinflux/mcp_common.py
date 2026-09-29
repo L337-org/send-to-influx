@@ -19,7 +19,15 @@ import inspect
 from mcp.server.mcpserver.exceptions import ToolError
 
 from toinflux.exceptions import ConfigError, ToInfluxError, ToolParamError
-from toinflux.general import INSTANCED_SOURCES, close_session, expand_sources, get_class, render_external, render_values
+from toinflux.general import (
+    INSTANCED_SOURCES,
+    close_session,
+    expand_sources,
+    get_class,
+    listed_sources,
+    render_external,
+    render_values,
+)
 
 # Every failure this project raises deliberately inherits ToInfluxError, and that base is what the
 # translation catches. It was a tuple of two types, and a tuple is a list that goes stale: ConfigError
@@ -136,8 +144,8 @@ def translate_failures(fn, error_cls):
 def configured_sources(settings):
     """Return the lowercased source names the MCP tools expose.
 
-    The same ``sources:`` list the collectors run, so the two cannot drift. Empty when
-    nothing is configured.
+    The same ``sources:`` list the collectors run, read by the same function, so the two
+    cannot drift. Empty when nothing is configured.
 
     Args:
         settings (dict): parsed settings dict
@@ -145,10 +153,7 @@ def configured_sources(settings):
     Returns:
         list: lowercased source names
     """
-    raw = settings.get("sources")
-    if isinstance(raw, list):
-        return [src.lower() for src in raw if isinstance(src, str)]
-    return []
+    return listed_sources(settings)
 
 
 def resolve_handlers(source, settings, settings_file):

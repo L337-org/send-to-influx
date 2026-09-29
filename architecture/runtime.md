@@ -79,6 +79,11 @@ After each cycle `maybe_send_heartbeat()` writes a `collector_status,source=<nam
   constructed handler, threading `settings_file` through to the handler's own `load_settings()`.
   `source_class()` returns the class uninstantiated. Both raise `ConfigError` for an unknown
   source, including the abstract `DataHandler` and `MyEnergi` bases.
+- `listed_sources()` - the one reading of what the `sources:` list enables, used by the
+  collectors (`_requested_sources()`), the MCP tools (`configured_sources()`) and controls.
+  `validate_settings()` reads the list separately and more strictly, to report bad entries.
+  `enabled_sources()` is the same as a set, and `disabled_source_problem()` is the message for
+  a control that names a source not in it. See "Control configuration" below.
 - `flatten_dict()` - used by Speedtest to flatten nested JSON.
 - `configure_logging(logfile=None, loglevel="INFO", log_max_bytes=..., log_backup_count=...)` -
   stderr logging plus an optional `RotatingFileHandler`. Raises `ConfigError` rather
@@ -270,6 +275,54 @@ twice.
 
 `--check-config` validates every stored control: they are configuration even though they do not
 live in `settings.yaml`, and that mode answers whether this installation would start cleanly.
+
+### A control never uses a disabled source
+
+A source left out of `sources:` is switched off for controls as for collection, whatever its
+section still holds. Two layers, the second covering what the first cannot:
+
+1. **Validation refuses it.** `validate_control_sources()` reports a disabled source before
+   judging its section, so the message names `sources:` rather than sending the operator to
+   configure something they switched off. That covers `--check-config`, saving over MCP, the
+   supervisor deciding what to start, and a control process starting.
+2. **`inputs.source_handler()` is the only way a control gets a handler**, and it refuses a
+   disabled source before building anything - which is what stops a path that never went
+   through validation. `tests/test_inputs.py::TestADisabledSourceIsNeverBuilt::test_no_control_module_builds_a_handler_any_other_way`
+   holds that: across the control modules, worked out from what `control_process` and
+   `supervision` import, it fails any reference to `get_class()` or the MCP handler helpers,
+   any collector class or import from a collector's module, and any construction from
+   `source_class()`, outside `source_handler`. It catches the shapes found so far; it is not a
+   proof there are no others.
+
+**Which sources are enabled is decided once, at start, and kept until the process stops**:
+`ControlProcess.enabled` for a control, `Supervisor.enabled` for the service. Decided per
+command instead, an edit disabling a source followed by a restart has the stopping process
+read the edited file and refuse its own safe state, leaving a heater on with nothing left to
+turn it off. `command_devices()` and `Supervisor` take it as a required keyword, so every
+caller decides it.
+
+**The supervisor makes a control safe with the union of two sets**: its own, and the one the
+child was started with (`Child.enabled`, read in `start()` just before the spawn). The first
+covers a source disabled since the service started. The second covers one enabled since - a
+control saved over MCP then starts on it without a restart, and the service's set alone would
+refuse to turn that control's devices off after it died. `Child.enabled` is the parent's read
+just before the spawn; the child reads the file again a moment later, and a source enabled in
+that fraction of a second is in neither set. Accepted.
+
+Two consequences worth knowing when reading a journal:
+
+- **A source disabled without a restart is still used to make devices safe.** A control on it
+  that then crashes is refused on each restart attempt, and each refusal ends with the
+  supervisor commanding its devices off through that source - once per backoff, for as long as
+  the control stays down. Turning a device off is never the thing to refuse.
+- **A source enabled after the service started and then disabled again** is in neither set
+  once a restart attempt has read the edited file, so each attempt after that logs `Could not
+  make control ... safe` at ERROR, although the refused child never energised anything.
+
+A handler still reads its own source's section afresh, so a credential rotated there reaches a
+running control. The control's InfluxDB settings do not: `ControlProcess` reads the settings
+once at start and queries through that copy, so a changed `influx` block needs the control
+restarted.
 
 ## The control rule language (`toinflux/rules.py`)
 

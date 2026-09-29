@@ -13,6 +13,9 @@ from toinflux.general import (
     IndentedFormatter,
     RepeatingProblem,
     configure_logging,
+    disabled_source_problem,
+    enabled_sources,
+    listed_sources,
     MCP_DEFAULT_BIND_ADDRESS,
     expand_sources,
     flatten_dict,
@@ -1419,3 +1422,46 @@ class TestRepeatingProblem:
         with caplog.at_level(logging.DEBUG):
             problem.cleared("cycle", "it works again")
         assert caplog.text == ""
+
+
+class TestWhichSourcesAreEnabled:
+    """The ``sources:`` list decides, for a control as for the collectors."""
+
+    def test_the_list_is_lowercased(self):
+        assert enabled_sources({"sources": ["Hue", "openmeteo"]}) == frozenset({"hue", "openmeteo"})
+
+    @pytest.mark.parametrize("settings", [{}, {"sources": None}, {"sources": "hue"}, {"sources": {"hue": 1}}])
+    def test_no_list_enables_nothing(self, settings):
+        """A scalar is not a list of one: validation reports it, and nothing here may read
+        ``"hue"`` character by character into a set of single letters."""
+        assert enabled_sources(settings) == frozenset()
+
+    def test_an_entry_that_is_not_a_name_is_skipped(self):
+        assert enabled_sources({"sources": ["hue", None, 7, {"x": 1}]}) == frozenset({"hue"})
+
+    def test_the_list_keeps_the_order_it_was_written_in(self):
+        """The collectors start in this order, staggered, so it is not the set's to decide."""
+        assert listed_sources({"sources": ["openmeteo", "Hue", 7, "zappi"]}) == ["openmeteo", "hue", "zappi"]
+
+    def test_every_reader_of_the_list_agrees(self):
+        """The MCP tools and the collectors import the same function a control reads it
+        through, and give the same answer."""
+        import sendtoinflux
+        import toinflux.mcp_common
+        from sendtoinflux import _requested_sources
+        from toinflux.mcp_common import configured_sources
+
+        assert sendtoinflux.listed_sources is toinflux.mcp_common.listed_sources is listed_sources
+
+        settings = {"sources": ["Hue", None, "openmeteo"]}
+        args = type("Args", (), {"source": None})()
+        assert configured_sources(settings) == _requested_sources(settings, args) == listed_sources(settings)
+        assert enabled_sources(settings) == frozenset(listed_sources(settings))
+
+    def test_the_problem_names_the_source_and_the_setting(self):
+        assert disabled_source_problem("hue", frozenset({"hue"})) is None
+        assert disabled_source_problem("Hue", frozenset({"hue"})) is None
+        assert disabled_source_problem("hue", frozenset()) == (
+            "source 'hue' is disabled: it is not in the 'sources:' list in the settings file. "
+            "Add it there to use it in a control"
+        )

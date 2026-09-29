@@ -1185,6 +1185,60 @@ class TestASourceThisInstallationHasNotConfigured:
         assert len(errors) == 1, f"one fault, {len(errors)} messages: {errors}"
 
 
+class TestASourceThisInstallationHasDisabled:
+    """A section is not a request to use a source; the ``sources:`` list is.
+
+    An operator switches a source off by leaving it out of that list, usually with its
+    section, credentials and all, still in place. A control naming it used the section anyway
+    and actuated devices that nothing was collecting.
+    """
+
+    @staticmethod
+    def _disabling(installation, source):
+        """Return the settings with one source left out of ``sources:`` and its section kept.
+
+        Args:
+            installation (Installation): the installation to read
+            source (str): the source to disable
+
+        Returns:
+            dict: settings with that source disabled
+        """
+        return {
+            **installation.settings,
+            "sources": [name for name in installation.settings["sources"] if name != source],
+        }
+
+    def test_a_device_source_that_is_disabled_is_refused(self, state_directory):
+        errors = validate_control("conservatory", a_valid_control(), self._disabling(state_directory, "hue"))
+        assert (
+            "devices['heater_far']: source 'hue' is disabled: it is not in the 'sources:' list in the "
+            "settings file. Add it there to use it in a control"
+        ) in errors
+
+    def test_an_input_source_that_is_disabled_is_refused(self, state_directory):
+        errors = validate_control("conservatory", a_valid_control(), self._disabling(state_directory, "openmeteo"))
+        assert any(error.startswith("inputs['dew']: source 'openmeteo' is disabled") for error in errors), errors
+
+    def test_the_list_is_matched_ignoring_case(self, state_directory):
+        settings = {**state_directory.settings, "sources": ["HUE", "OpenMeteo", "carbonintensity"]}
+        assert validate_control("conservatory", a_valid_control(), settings) == []
+
+    def test_a_disabled_source_is_not_also_judged_on_its_section(self, state_directory):
+        """Disabled and sectionless together says disabled only: "add a section" would send
+        the operator to configure something they had switched off on purpose."""
+        settings = {key: value for key, value in self._disabling(state_directory, "hue").items() if key != "hue"}
+        errors = [error for error in validate_control("conservatory", a_valid_control(), settings) if "'hue'" in error]
+        assert errors and all("is disabled" in error for error in errors), errors
+
+    def test_check_config_actually_applies_it(self, state_directory):
+        """Through `validate_stored_controls` with settings, which is how --check-config calls
+        it, and how the service decides whether to start a control."""
+        state_directory.write_control(a_valid_control(), name="conservatory")
+        with pytest.raises(ConfigError, match="source 'hue' is disabled"):
+            validate_stored_controls(state_directory.settings_file, self._disabling(state_directory, "hue"))
+
+
 class TestEveryShippedExample:
     """Each scenario document is handed to a client that will copy it, so each one is held
     to the same bar as the canonical example rather than only the one tests are built on.

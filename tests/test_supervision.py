@@ -26,6 +26,7 @@ from tests.harness import census, faults, invariants
 from tests.harness.bridge import plug
 from tests.harness.installation import conservatory
 from toinflux.exceptions import ConfigError
+from toinflux.general import enabled_sources
 from toinflux.transitions import transition_path
 from toinflux.supervision import (
     KILL_GRACE_SECONDS,
@@ -36,6 +37,18 @@ from toinflux.supervision import (
 )
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _enabled(installation):
+    """Return the sources an installation's settings enable, as the service would pass them.
+
+    Args:
+        installation (Installation): the installation
+
+    Returns:
+        frozenset: the enabled source names
+    """
+    return enabled_sources(installation.settings)
 
 
 def _refuse_to_spawn(*_args, **_kwargs):
@@ -135,6 +148,7 @@ def supervisor(state_directory):
     running = Supervisor(
         names,
         settings_file=installation.settings_file,
+        enabled=_enabled(installation),
         argv_for=argv_for,
         # A real backoff would make every test a minute long; what matters is that it grows,
         # which has its own test against the real one.
@@ -511,7 +525,10 @@ class TestADocumentThatChanged:
         names = _two_controls(installation)
         _bend(installation, "conservatory")
         running = Supervisor(
-            names, settings_file=installation.settings_file, argv_for=lambda name: [sys.executable, "-c", "pass"]
+            names,
+            settings_file=installation.settings_file,
+            enabled=_enabled(installation),
+            argv_for=lambda name: [sys.executable, "-c", "pass"],
         )
         try:
             assert "conservatory" not in running.children, "an unreadable document is skipped at construction"
@@ -741,6 +758,7 @@ class TestTheRestartDecisionItself:
         return Supervisor(
             ["conservatory"],
             settings_file=state_directory.settings_file,
+            enabled=_enabled(state_directory),
             argv_for=lambda name: ["/bin/true"],
             clock=clock,
             backoff=lambda failures: 10.0 * failures,
@@ -865,7 +883,11 @@ class TestOneBadControlDocument:
     def test_a_control_that_cannot_be_read_is_skipped_rather_than_fatal(self, state_directory, caplog):
         _two_controls(state_directory)
         with caplog.at_level(logging.ERROR):
-            supervisor = Supervisor(["conservatory", "nosuchcontrol"], settings_file=state_directory.settings_file)
+            supervisor = Supervisor(
+                ["conservatory", "nosuchcontrol"],
+                settings_file=state_directory.settings_file,
+                enabled=_enabled(state_directory),
+            )
         assert list(supervisor.children) == ["conservatory"]
         assert "nosuchcontrol" in caplog.text and "skipped" in caplog.text
 
@@ -890,7 +912,9 @@ class TestADocumentThatIsNotTheRightShape:
         with open(path, "w", encoding="utf-8") as handle:
             yaml.safe_dump(document, handle)
         with caplog.at_level(logging.ERROR):
-            supervisor = Supervisor(["conservatory", "bent"], settings_file=state_directory.settings_file)
+            supervisor = Supervisor(
+                ["conservatory", "bent"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory)
+            )
         assert list(supervisor.children) == ["conservatory"]
         assert "bent" in caplog.text
 
@@ -901,7 +925,9 @@ class TestADocumentThatIsNotTheRightShape:
         how it still knows about the ones that were there all along. A bent file leaves only
         the second, and a heater is not left on because a YAML document lost its shape."""
         _two_controls(state_directory)
-        supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
+        supervisor = Supervisor(
+            ["conservatory"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory)
+        )
         path = os.path.join(state_directory.state_dir, "controls", "conservatory.yaml")
         with open(path, "w", encoding="utf-8") as handle:
             yaml.safe_dump(dict(conservatory(), devices=["far"]), handle)
@@ -917,7 +943,7 @@ class TestADocumentThatIsNotTheRightShape:
         """No supervised child means no started-from copy, so the file is the only
         description there was and there is now nothing to command."""
         _two_controls(state_directory)
-        supervisor = Supervisor([], settings_file=state_directory.settings_file)
+        supervisor = Supervisor([], settings_file=state_directory.settings_file, enabled=_enabled(state_directory))
         path = os.path.join(state_directory.state_dir, "controls", "conservatory.yaml")
         with open(path, "w", encoding="utf-8") as handle:
             yaml.safe_dump(dict(conservatory(), devices=["far"]), handle)
@@ -941,7 +967,9 @@ class TestFindingTheConsoleScript:
         script.touch()
         monkeypatch.setattr("toinflux.supervision.sys.executable", str(interpreter))
         _two_controls(state_directory)
-        supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
+        supervisor = Supervisor(
+            ["conservatory"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory)
+        )
         assert supervisor._default_argv("conservatory")[0] == str(script)
 
     def test_it_falls_back_to_the_path_where_there_is_no_such_script(self, state_directory, tmp_path, monkeypatch):
@@ -952,7 +980,9 @@ class TestFindingTheConsoleScript:
         interpreter.touch()
         monkeypatch.setattr("toinflux.supervision.sys.executable", str(interpreter))
         _two_controls(state_directory)
-        supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
+        supervisor = Supervisor(
+            ["conservatory"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory)
+        )
         assert supervisor._default_argv("conservatory")[0] == "send-to-influx"
 
 
@@ -984,7 +1014,9 @@ class TestTheStatusSnapshot:
         """`silent_for` is None rather than the age of the process: a control that has not
         started has not been silent, it has not been asked."""
         _two_controls(state_directory)
-        supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
+        supervisor = Supervisor(
+            ["conservatory"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory)
+        )
         (status,) = supervisor.status()
         assert status.name == "conservatory"
         assert status.running is False
@@ -996,7 +1028,9 @@ class TestTheStatusSnapshot:
         would describe a moment that never existed, because the supervisor's own thread
         rewrites it between one attribute read and the next."""
         _two_controls(state_directory)
-        supervisor = Supervisor(["conservatory"], settings_file=state_directory.settings_file)
+        supervisor = Supervisor(
+            ["conservatory"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory)
+        )
         (status,) = supervisor.status()
         supervisor.children["conservatory"].failures = 7
         assert status.failures == 0
@@ -1009,7 +1043,9 @@ class TestTheStatusSnapshot:
         path = os.path.join(state_directory.state_dir, "controls", "bent.yaml")
         with open(path, "w", encoding="utf-8") as handle:
             yaml.safe_dump({"name": "bent"}, handle)
-        supervisor = Supervisor(["bent"], settings_file=state_directory.settings_file)
+        supervisor = Supervisor(
+            ["bent"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory)
+        )
         assert supervisor.status() == ()
 
     def test_every_field_is_read_once(self):
@@ -1133,7 +1169,11 @@ class TestAnInstallationWithNoControlsYet:
             ]
 
         running = Supervisor(
-            [], settings_file=installation.settings_file, argv_for=argv_for, backoff=lambda failures: 0.05 * failures
+            [],
+            settings_file=installation.settings_file,
+            enabled=_enabled(installation),
+            argv_for=argv_for,
+            backoff=lambda failures: 0.05 * failures,
         )
         try:
             yield running, installation
@@ -1183,21 +1223,23 @@ class TestTwoEnabledControlsClaimingOneActuator:
     def test_only_one_is_supervised(self, state_directory, caplog):
         installation = self._install(state_directory)
         with caplog.at_level(logging.ERROR):
-            supervisor = Supervisor(["bbb", "aaa"], settings_file=installation.settings_file)
+            supervisor = Supervisor(
+                ["bbb", "aaa"], settings_file=installation.settings_file, enabled=_enabled(installation)
+            )
         assert sorted(supervisor.children) == ["aaa"]
         assert "is not being started" in caplog.text
 
     def test_the_message_names_the_control_that_holds_it(self, state_directory, caplog):
         installation = self._install(state_directory)
         with caplog.at_level(logging.ERROR):
-            Supervisor(["bbb", "aaa"], settings_file=installation.settings_file)
+            Supervisor(["bbb", "aaa"], settings_file=installation.settings_file, enabled=_enabled(installation))
         assert "'aaa' is already enabled" in caplog.text
 
     def test_which_one_wins_does_not_depend_on_listing_order(self, state_directory):
         """An operator watching a heater needs the answer to hold still while they fix it."""
         installation = self._install(state_directory)
-        forwards = Supervisor(["aaa", "bbb"], settings_file=installation.settings_file)
-        backwards = Supervisor(["bbb", "aaa"], settings_file=installation.settings_file)
+        forwards = Supervisor(["aaa", "bbb"], settings_file=installation.settings_file, enabled=_enabled(installation))
+        backwards = Supervisor(["bbb", "aaa"], settings_file=installation.settings_file, enabled=_enabled(installation))
         assert sorted(forwards.children) == sorted(backwards.children) == ["aaa"]
 
     def test_a_disabled_duplicate_is_not_started_at_all(self, state_directory):
@@ -1211,7 +1253,9 @@ class TestTwoEnabledControlsClaimingOneActuator:
         heater the moment it arrived.
         """
         installation = self._install(state_directory, second_enabled=False)
-        supervisor = Supervisor(["aaa", "bbb"], settings_file=installation.settings_file)
+        supervisor = Supervisor(
+            ["aaa", "bbb"], settings_file=installation.settings_file, enabled=_enabled(installation)
+        )
         assert sorted(supervisor.children) == ["aaa"]
 
     def test_a_disabled_control_commands_nothing_at_all(self, state_directory):
@@ -1227,7 +1271,9 @@ class TestTwoEnabledControlsClaimingOneActuator:
         state_directory.write_control(
             _quick("bbb", {"porch": {"source": "hue", "device": "porch-heater"}}, enabled=False)
         )
-        supervisor = Supervisor(["aaa", "bbb"], settings_file=state_directory.settings_file)
+        supervisor = Supervisor(
+            ["aaa", "bbb"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory)
+        )
         try:
             state_directory.bridge.clear()
             supervisor.start_all()
@@ -1244,7 +1290,7 @@ class TestTwoEnabledControlsClaimingOneActuator:
         installation = self._install(state_directory, second_enabled=False)
         state_directory.write_control(_quick("bbb", {"porch": {"source": "hue", "device": "porch-heater"}}))
         state_directory.bridge.lights["9"] = plug("porch-heater")
-        supervisor = Supervisor(["aaa"], settings_file=installation.settings_file)
+        supervisor = Supervisor(["aaa"], settings_file=installation.settings_file, enabled=_enabled(installation))
         try:
             supervisor.start_all()
             supervisor.request_reload("bbb")
@@ -1257,7 +1303,7 @@ class TestTwoEnabledControlsClaimingOneActuator:
         """The other half. Disabling one is what it means to let go of the heaters, so a
         control disabled while it is running must not leave one on."""
         installation = self._install(state_directory, second_enabled=False)
-        supervisor = Supervisor(["aaa"], settings_file=installation.settings_file)
+        supervisor = Supervisor(["aaa"], settings_file=installation.settings_file, enabled=_enabled(installation))
         try:
             supervisor.start_all()
             _wait_for(supervisor, "beat", "aaa")
@@ -1275,7 +1321,9 @@ class TestTwoEnabledControlsClaimingOneActuator:
         state_directory.bridge.lights["9"] = plug("porch-heater")
         state_directory.write_control(_quick("aaa", {"far": {"source": "hue", "device": "far"}}))
         state_directory.write_control(_quick("bbb", {"porch": {"source": "hue", "device": "porch-heater"}}))
-        supervisor = Supervisor(["aaa", "bbb"], settings_file=state_directory.settings_file)
+        supervisor = Supervisor(
+            ["aaa", "bbb"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory)
+        )
         assert sorted(supervisor.children) == ["aaa", "bbb"]
 
 
@@ -1336,7 +1384,9 @@ class TestAnOmittedInstanceStillCounts:
             _quick("bbb", {"far": {"source": "hue", "device": "far", "instance": state_directory.bridge.host}})
         )
         with caplog.at_level(logging.ERROR):
-            supervisor = Supervisor(["aaa", "bbb"], settings_file=state_directory.settings_file)
+            supervisor = Supervisor(
+                ["aaa", "bbb"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory)
+            )
         assert sorted(supervisor.children) == ["aaa"]
         assert "is not being started" in caplog.text
 
@@ -1393,19 +1443,114 @@ class TestHowLongATeardownIsAllowed:
     def test_it_grows_with_the_number_of_controls(self, state_directory):
         state_directory.bridge.lights["9"] = plug("porch-heater")
         state_directory.write_control(_quick("aaa", {"far": {"source": "hue", "device": "far"}}))
-        one = Supervisor(["aaa"], settings_file=state_directory.settings_file)
+        one = Supervisor(["aaa"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory))
         state_directory.write_control(_quick("bbb", {"porch": {"source": "hue", "device": "porch-heater"}}))
-        two = Supervisor(["aaa", "bbb"], settings_file=state_directory.settings_file)
+        two = Supervisor(["aaa", "bbb"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory))
         assert two.teardown_seconds() == 2 * one.teardown_seconds()
 
     def test_it_budgets_the_safe_state_command_and_not_only_the_kill(self, state_directory):
         """The walk kills the child *and then* commands its devices safe. Counting only the
         kill made this an underestimate on exactly the installations it was added for."""
         state_directory.write_control(_quick("aaa", {"far": {"source": "hue", "device": "far"}}))
-        supervisor = Supervisor(["aaa"], settings_file=state_directory.settings_file)
+        supervisor = Supervisor(["aaa"], settings_file=state_directory.settings_file, enabled=_enabled(state_directory))
         assert supervisor.teardown_seconds() > KILL_GRACE_SECONDS, "the safe-state command is not budgeted for"
         assert supervisor.teardown_seconds() == KILL_GRACE_SECONDS + SAFE_STATE_GRACE_SECONDS
 
     def test_an_empty_supervisor_still_gets_a_sensible_bound(self, state_directory):
         """A join of zero would report every shutdown as a timeout."""
-        assert Supervisor([], settings_file=state_directory.settings_file).teardown_seconds() > 0
+        assert (
+            Supervisor(
+                [], settings_file=state_directory.settings_file, enabled=_enabled(state_directory)
+            ).teardown_seconds()
+            > 0
+        )
+
+
+class TestADisabledSource:
+    """A source left out of ``sources:`` is switched off, even with its section in place."""
+
+    def test_a_control_naming_one_is_not_started_and_the_others_are(self, state_directory, caplog):
+        installation = state_directory
+        names = _two_controls(installation)
+        grid = _quick("grid", {"lamp": {"source": "hue", "device": "near"}})
+        grid["inputs"]["grid_co2"] = {"source": "carbonintensity", "field": "intensity_actual"}
+        installation.write_control(grid)
+        installation.set_sources("hue", "openmeteo")
+        with caplog.at_level(logging.ERROR):
+            running = Supervisor(
+                [*names, "grid"], settings_file=installation.settings_file, enabled=_enabled(installation)
+            )
+        assert sorted(running.children) == ["conservatory", "porch"]
+        assert "Control 'grid' cannot be supervised" in caplog.text
+        assert "source 'carbonintensity' is disabled" in caplog.text
+
+    def test_a_restart_that_disables_it_still_makes_the_devices_safe(self, supervisor, state_directory, bridge):
+        """The supervisor keeps the sources the service started with. Deciding afresh, it
+        would refuse the safe state of the control it is stopping, and a heater switched on
+        before the edit would stay on with no control left to turn it off."""
+        state_directory.set_sources("openmeteo", "carbonintensity")
+        bridge.lights[bridge.id_of("far")]["state"]["on"] = True
+        bridge.clear()
+        supervisor.make_safe("conservatory")
+        assert [command.name for command in bridge.commanded()] == ["far"]
+        assert bridge.energised()["far"] is False
+
+    def test_a_source_enabled_since_the_service_started_is_still_made_safe(self, state_directory, bridge):
+        """The other direction. Enabling a source needs no restart for a control saved over
+        MCP to start on it, so the service's own set, taken before the edit, would refuse to
+        make that control's devices safe once it died - leaving a heater on after a crash."""
+        installation = state_directory
+        installation.set_sources("openmeteo", "carbonintensity")
+        running = Supervisor(
+            [],
+            settings_file=installation.settings_file,
+            enabled=_enabled(installation),
+            argv_for=lambda name: [sys.executable, "-c", "import time; time.sleep(30)"],
+        )
+        try:
+            installation.set_sources("hue", "openmeteo", "carbonintensity")
+            installation.write_control(_quick("conservatory", {"far": {"source": "hue", "device": "far"}}))
+            running.request_reload("conservatory")
+            _wait_for(running, "started", "conservatory")
+            bridge.lights[bridge.id_of("far")]["state"]["on"] = True
+            bridge.clear()
+            running.make_safe("conservatory")
+            assert [command.name for command in bridge.commanded()] == ["far"]
+            assert bridge.energised()["far"] is False
+        finally:
+            running.stop_all()
+
+    def test_settings_that_cannot_be_read_stop_the_start_with_one_clear_reason(
+        self, supervisor, state_directory, caplog
+    ):
+        """Refused before the spawn, and said once: not a warning about re-reading a document
+        followed by a start that never happens."""
+        with open(state_directory.settings_file, "w", encoding="utf-8") as handle:
+            handle.write("sources: [unclosed\n")
+        with caplog.at_level(logging.WARNING):
+            supervisor.start_all()
+        assert {event.kind for event in supervisor.events} == {"start-failed"}
+        assert all(child.process is None for child in supervisor.children.values())
+        assert "was not started because its settings cannot be read" in caplog.text
+        assert "could not be re-read before starting it" not in caplog.text
+
+    def test_unreadable_settings_at_construction_are_said_once(self, state_directory, caplog):
+        installation = state_directory
+        names = _two_controls(installation)
+        enabled = _enabled(installation)
+        with open(installation.settings_file, "w", encoding="utf-8") as handle:
+            handle.write("sources: [unclosed\n")
+        with caplog.at_level(logging.ERROR):
+            running = Supervisor(names, settings_file=installation.settings_file, enabled=enabled)
+        assert running.children == {}
+        assert caplog.text.count("No control can be supervised, because the settings cannot be read") == 1
+
+    def test_the_service_s_own_list_is_the_one_used(self, state_directory, bridge):
+        """Passed in by the service rather than read here, and honoured when it is."""
+        installation = state_directory
+        names = _two_controls(installation)
+        running = Supervisor(names, settings_file=installation.settings_file, enabled=frozenset({"openmeteo"}))
+        bridge.lights[bridge.id_of("far")]["state"]["on"] = True
+        bridge.clear()
+        running.make_safe("conservatory")
+        assert bridge.commanded() == []

@@ -118,7 +118,8 @@ class Installation:
             root (str): a directory to build the installation in
             bridge (StubBridge or None): the Hue bridge to point ``hue`` at
             influx (StubInflux or None): the InfluxDB to read and write through
-            sources (list or None): the ``sources`` list; hue and openmeteo when None
+            sources (list or None): the ``sources`` list; hue, openmeteo and carbonintensity
+                when None, which is every source with a section below
         """
         self.root = str(root)
         self.bridge = bridge
@@ -127,7 +128,9 @@ class Installation:
         os.makedirs(os.path.join(self.state_dir, CONTROL_DIR_NAME), exist_ok=True)
         self.settings_file = os.path.join(self.root, "settings.yaml")
         self._settings = {
-            "sources": list(sources) if sources is not None else ["hue", "openmeteo"],
+            # Every source with a section here, because a control refuses one that is not
+            # listed: a section alone no longer makes a source usable.
+            "sources": list(sources) if sources is not None else ["hue", "openmeteo", "carbonintensity"],
             # The shipped control example reads grid carbon intensity, and a control's
             # inputs are read through a source handler - which resolves the database from
             # that source's own settings block. An installation running that example has
@@ -180,6 +183,17 @@ class Installation:
             **values: the keys to set within it
         """
         self._settings.setdefault(section, {}).update(values)
+        self._write_settings()
+
+    def set_sources(self, *names) -> None:
+        """Replace the ``sources`` list and rewrite the file, leaving every section in place.
+
+        Which is how an operator disables a source: the section, credentials and all, stays.
+
+        Args:
+            *names: the sources to leave enabled
+        """
+        self._settings["sources"] = list(names)
         self._write_settings()
 
     def write_control(self, document, name=None):

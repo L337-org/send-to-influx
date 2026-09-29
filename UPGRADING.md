@@ -4,6 +4,27 @@ Version-specific steps needed when moving between releases. Anything not listed 
 with no action: `settings.yaml` is never rewritten by an upgrade, and new configuration is
 optional with a safe default.
 
+## 6.0 to 6.1
+
+### A control no longer uses a source that is not in `sources:`
+
+**Who this affects:** anyone running controls (`controls.enabled: true`) where a control reads
+an input from, or switches a device through, a source that has a settings section but is not
+listed in `sources:`. If every source your controls name is in that list, skip this section.
+
+In 6.0 a control used any source with a settings section, whether or not it was enabled. From
+6.1 a source left out of `sources:` is switched off for controls too, as it always was for
+collection.
+
+**What happens if you do nothing:** `--check-config` reports the control as invalid, naming
+the source (`source 'hue' is disabled: it is not in the 'sources:' list in the settings file`),
+and the service does not start that control. Everything else starts and runs as before. A
+control that was running when you upgrade still puts its devices into their safe state as the
+old version stops.
+
+**What to do:** add the source to `sources:` and restart the service. That also starts
+collecting from it, which is what makes the devices a control switches visible in Grafana.
+
 ## 5.2 to 5.3
 
 Two changes affect data already in InfluxDB. Only the Nuki one needs anything done, and only

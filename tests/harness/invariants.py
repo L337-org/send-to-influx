@@ -259,6 +259,9 @@ def nothing_leaked(before, after, allowance=0):
             continue
         if end > start + allowance:
             report.violations.append(f"{field_name} grew from {start} to {end}")
+        # A count taken only in part is still a count, and says so rather than passing as
+        # the whole: see census._threads on darwin.
+        report.skipped.extend(reason for reason in after.skipped if reason.startswith(f"{field_name}:"))
     return report
 
 
