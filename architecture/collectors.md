@@ -104,6 +104,14 @@ timeout. The buffer kept the points that were collected; it could not stop fewer
   stops taking points, naming the URL without its query string; once when it takes them again;
   and separately for points dropped. After a failure the thread waits a retry timer (5 s doubling
   to 60 s) rather than trying on every new point.
+- **A segment's file and its recorded size always agree.** A failed write or sync is cut back off
+  the file (segments are opened unbuffered so a close cannot flush it back) and appends move to a
+  fresh segment. A failed sync once left its bytes uncounted, the reader ran ahead of the size, and
+  a point appended afterwards could be retired with its segment unsent - found in review.
+- **The writer's thread outlives its own bugs.** An unexpected exception is logged at ERROR with
+  its traceback, once while it repeats, and the thread carries on after the retry delay;
+  `_ensure_thread()` also starts again a thread that has died. Either alone would have kept every
+  later point waiting on disk until the process restarted, which is what happened before.
 - **Every process says at startup where it buffers and how much**, and whether it is resuming a
   backlog, so a spool in the wrong place - a checkout rather than `/var/lib` - is visible the
   first time rather than when somebody goes looking.

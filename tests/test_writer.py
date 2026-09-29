@@ -372,6 +372,65 @@ class TestARestart:
         assert post.lines() == ["hue n=2 2"]
         writer.close(0)
 
+    def test_and_where_no_new_segment_can_be_made_writing_carries_on_in_memory(self, tmp_path, post, monkeypatch):
+        """Found in review, after the fix above. Where the fresh segment could not be created
+        either, only the disk flag was cleared: the removed segment stayed named and the lock
+        held, so the next append tried the disk again and raised the same KeyError."""
+        import builtins
+
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        writer.submit("hue", None, "hue n=1 1")
+        path = writer._segment_path(writer._append_segment)
+        real_open, real_os_open = builtins.open, writer_module.os.open
+
+        def refusing(file, *args, **kwargs):
+            if file == path:
+                raise PermissionError("denied")
+            return real_open(file, *args, **kwargs)
+
+        def no_new_segment(file, *args, **kwargs):
+            if str(file).endswith(".jsonl"):
+                raise OSError(5, "Input/output error")
+            return real_os_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", refusing)
+        monkeypatch.setattr(writer_module.os, "open", no_new_segment)
+        writer.run_until_idle()
+        monkeypatch.undo()
+        post.bodies.clear()
+        writer.submit("hue", None, "hue n=2 2")
+        writer.run_until_idle()
+        assert not writer._disk
+        assert post.lines() == ["hue n=2 2"]
+        writer.close(0)
+
+    def test_a_failed_write_leaves_the_file_and_its_size_in_agreement(self, tmp_path, post, monkeypatch):
+        """Found in review. A failed sync left its bytes in the file uncounted, so the reader
+        ran ahead of the size, and a point appended afterwards could read as already sent and
+        be retired with its segment unsent. The failed write is cut back off, and each point is
+        sent once."""
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        real_fsync = writer_module.os.fsync
+        calls = []
+
+        def flaky(descriptor):
+            calls.append(descriptor)
+            if len(calls) == 2:
+                raise OSError(5, "Input/output error")
+            return real_fsync(descriptor)
+
+        monkeypatch.setattr(writer_module.os, "fsync", flaky)
+        for n in range(1, 4):
+            writer.submit("hue", None, f"hue n={n} {n}")
+        monkeypatch.undo()
+        for segment in writer._segments:
+            assert writer._sizes[segment] == os.path.getsize(writer._segment_path(segment)), f"segment {segment}"
+        writer.run_until_idle()
+        assert post.lines() == ["hue n=1 1", "hue n=2 2", "hue n=3 3"]
+        writer.close(0)
+
 
 class TestRefusals:
     """Carried over from the in-memory buffer: only the server refusing the point counts."""
@@ -709,6 +768,51 @@ class TestNobodyWaits:
         writer._session.post = accepted
         writer.close(3)
         assert accepted.lines() == ["hue x=1 1700000000"]
+
+    def test_an_unexpected_error_does_not_end_the_thread(self, tmp_path, caplog, monkeypatch):
+        """Found in review. An exception reaching the top of the thread ended it, and every
+        later point waited on disk until the process restarted. It is a bug, so it is said in
+        full at ERROR - and the writer carries on."""
+        monkeypatch.setattr(writer_module, "RETRY_FIRST_SECONDS", 0.2)
+        writer = InfluxWriter("collectors", str(tmp_path / "spool"), {}, buffer_mb=1)
+        writer.set_destination("hue", *DESTINATION)
+        accepted = ScriptedPost()
+        writer._session.post = accepted
+        real = writer._post_next_chunk
+        failures = []
+
+        def once():
+            if not failures:
+                failures.append(True)
+                raise ValueError("a bug in the writer")
+            return real()
+
+        writer._post_next_chunk = once
+        with caplog.at_level(logging.ERROR):
+            writer.submit("hue", None, "hue x=1 1700000000")
+            deadline = time.monotonic() + 5
+            while writer.pending() and time.monotonic() < deadline:
+                time.sleep(0.05)
+        assert accepted.lines() == ["hue x=1 1700000000"], "the point was never sent after the error"
+        assert writer._thread.is_alive()
+        assert "hit an unexpected error" in caplog.text and "ValueError: a bug in the writer" in caplog.text
+        writer.close(1)
+
+    def test_a_thread_that_has_died_is_started_again(self, tmp_path):
+        writer = InfluxWriter("collectors", str(tmp_path / "spool"), {}, buffer_mb=1)
+        writer.set_destination("hue", *DESTINATION)
+        accepted = ScriptedPost()
+        writer._session.post = accepted
+        dead = threading.Thread(target=lambda: None)
+        dead.start()
+        dead.join()
+        writer._thread = dead
+        writer.submit("hue", None, "hue x=1 1700000000")
+        deadline = time.monotonic() + 5
+        while writer.pending() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert accepted.lines() == ["hue x=1 1700000000"]
+        writer.close(1)
 
     def test_stopping_does_not_wait_longer_than_its_deadline(self, tmp_path):
         release = threading.Event()

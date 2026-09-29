@@ -33,12 +33,14 @@ __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
 import atexit
+import errno
 import fcntl
 import json
 import logging
 import os
 import threading
 import time
+import traceback
 import warnings
 from collections import deque
 from dataclasses import dataclass
@@ -443,7 +445,9 @@ class InfluxWriter:
         segment = 1 + max(self._segments + [self._pointer[0] if self._pointer else 0, self._stale_segment])
         path = self._segment_path(segment)
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        self._append_file = os.fdopen(descriptor, "ab")
+        # Unbuffered, so a write that fails leaves nothing in a buffer for the close to flush
+        # back into the file after the failed write has been cut off it.
+        self._append_file = os.fdopen(descriptor, "ab", buffering=0)
         self._segments.append(segment)
         self._sizes[segment] = 0
         self._append_segment = segment
@@ -538,14 +542,49 @@ class InfluxWriter:
         Raises:
             OSError: where the spool cannot be written
         """
-        if self._sizes[self._append_segment] >= SEGMENT_BYTES:
+        if self._append_file is None or self._sizes[self._append_segment] >= SEGMENT_BYTES:
             self._start_segment()
         data = entry.encoded()
-        self._append_file.write(data)
-        self._append_file.flush()
-        os.fsync(self._append_file.fileno())
-        self._sizes[self._append_segment] += len(data)
+        segment = self._append_segment
+        try:
+            if self._append_file.write(data) != len(data):
+                raise OSError(errno.EIO, f"a short write to spool segment {segment}")
+            os.fsync(self._append_file.fileno())
+        except OSError:
+            self._abandon_segment(segment)
+            raise
+        self._sizes[segment] += len(data)
         self._enforce_limit()
+
+    def _abandon_segment(self, segment) -> None:
+        """Stop appending to a segment a write failed in, leaving its size true.
+
+        **The file and its recorded size must agree.** A failed write or sync left its bytes in
+        the file uncounted, so the reader's position ran ahead of the size, a point appended
+        afterwards could read as already sent, and the segment was retired with it unsent. The
+        failed write is cut back off where the file allows it, and appends move to a fresh
+        segment either way: where the cut fails, the last line is a partial one, which a
+        segment nothing more is appended to reads as cut off and skips.
+
+        Args:
+            segment (int): the segment the write failed in
+        """
+        try:
+            os.ftruncate(self._append_file.fileno(), self._sizes[segment])
+        except OSError as exc:
+            logging.warning("Could not cut a failed write back off spool segment %d: %r", segment, exc)
+        try:
+            self._append_file.close()
+        except OSError:
+            # The file is being given up on either way, and its failure is already on its way
+            # to the caller.
+            pass
+        self._append_file = None
+        try:
+            self._sizes[segment] = os.path.getsize(self._segment_path(segment))
+        except OSError:
+            # Unreadable too, then; the reader sets it aside when it gets there.
+            pass
 
     def _enforce_limit(self) -> None:
         """Drop the oldest segments until the spool fits its bound, saying how many points went."""
@@ -623,9 +662,11 @@ class InfluxWriter:
     # ------------------------------------------------------------------ sending
 
     def _ensure_thread(self) -> None:
-        """Start the writer's thread, once."""
+        """Start the writer's thread, or start it again where it has died."""
         with self._lock:
-            if self._thread is None and not self._stopping:
+            # is_alive() as well as None: a thread that had died stayed dead, and every point
+            # after it waited on disk for a restart of the process.
+            if (self._thread is None or not self._thread.is_alive()) and not self._stopping:
                 self._thread = threading.Thread(target=self._run, name=f"influx-writer-{self.name}", daemon=True)
                 self._thread.start()
 
@@ -635,7 +676,23 @@ class InfluxWriter:
             closing = self._closing
             # The pass that closing wakes the thread for ignores the retry timer: the process
             # is going, so waiting for the timer would mean not trying at all.
-            self.run_until_idle(force=closing)
+            try:
+                self.run_until_idle(force=closing)
+            except Exception as exc:
+                # Deliberately broad, because this is the top of the thread: anything reaching
+                # here is a bug in the writer, and letting it end the thread stopped every later
+                # point being sent while the process lived. Handled by saying it in full, with
+                # its traceback, once for as long as it repeats, and trying again on the timer.
+                self._problems.report(
+                    "unexpected",
+                    logging.ERROR,
+                    "The InfluxDB writer for %s hit an unexpected error and carries on; this is a bug:\n%s",
+                    self.name,
+                    traceback.format_exc(),
+                    identity=repr(exc),
+                )
+                self._retry_at = self._clock() + self._retry_delay
+                self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
             if closing:
                 return
             with self._lock:
@@ -777,6 +834,10 @@ class InfluxWriter:
             list: _Entry, each carrying where it ends
         """
         while True:
+            if self._pointer is None:
+                # The spool was abandoned part-way through this read - setting aside the segment
+                # being appended to, with no new one to be had - so there is no spool left to read.
+                return []
             segment, offset = self._pointer
             if segment not in self._sizes:
                 # The segment the pointer was in has gone - dropped by the size bound while its
@@ -941,6 +1002,11 @@ class InfluxWriter:
             try:
                 self._start_segment()
             except OSError as error:
+                # All the way to memory, as a spool that cannot be opened is. Setting only
+                # _disk left the removed segment named and the lock held, so the next append
+                # tried the disk again, looked that segment's size up, and raised the same
+                # KeyError. What is already spooled stays on disk for the next start.
+                self._abandon_spool()
                 self._disk = False
                 self._memory_mode_problem(f"a new segment in {self.directory!r} could not be created: {error!r}")
 
