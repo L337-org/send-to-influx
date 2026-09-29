@@ -267,6 +267,7 @@ class InfluxWriter:
         self._append_segment = None
         self._append_file = None
         self._pointer = None
+        self._stale_segment = 0
         self._lock_file = None
         self._disk = False
         if self.limit_bytes:
@@ -290,6 +291,7 @@ class InfluxWriter:
             self._lock_file = open(os.path.join(self.directory, "lock"), "a", encoding="utf-8")
             os.chmod(self._lock_file.name, 0o600)
             fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._load_spool()
         except BlockingIOError:
             # Another process has this spool: a manual `--source` run beside the service, say.
             # Sharing it would have two processes deleting each other's segments.
@@ -297,9 +299,29 @@ class InfluxWriter:
             self._memory_mode_problem(f"another process is using the spool in {self.directory!r}")
             return
         except OSError as exc:
-            self._close_lock_file()
+            # Anywhere in the opening, not only the directory and the lock: a disk that is full
+            # when the first segment is created raised out of the constructor and stopped the
+            # service from starting at all, where the design promises the memory fallback.
+            self._abandon_spool()
             self._memory_mode_problem(f"the spool in {self.directory!r} could not be opened: {exc!r}")
             return
+        waiting = sum(self._sizes.values()) - self._sizes.get(self._append_segment, 0)
+        # Said once for every process, so a spool that is not where the operator expects - the
+        # wrong state directory, a checkout rather than /var/lib - is visible the first time.
+        logging.info(
+            "InfluxDB points for %s are buffered on disk in %r, up to influx.buffer_mb (%d MB)%s",
+            self.name,
+            self.directory,
+            self.limit_bytes // (1024 * 1024),
+            ", resuming the unsent points already there" if waiting else "",
+        )
+
+    def _load_spool(self) -> None:
+        """Read what a previous run left, and open a segment of this run's own.
+
+        Raises:
+            OSError: where the spool cannot be read or a segment cannot be created
+        """
         self._segments = sorted(
             int(entry[: -len(".jsonl")])
             for entry in os.listdir(self.directory)
@@ -313,21 +335,25 @@ class InfluxWriter:
             os.remove(self._segment_path(segment))
             self._segments.remove(segment)
             del self._sizes[segment]
-        self._pointer = self._read_pointer()
-        self._disk = True
+        self._pointer, self._stale_segment = self._read_pointer()
         # Appends always start a segment of their own: whatever a previous run left is read-only,
         # so a line it was cut off in the middle of stays the last line of its file.
         self._start_segment()
-        waiting = sum(self._sizes.values()) - self._sizes.get(self._append_segment, 0)
-        # Said once for every process, so a spool that is not where the operator expects - the
-        # wrong state directory, a checkout rather than /var/lib - is visible the first time.
-        logging.info(
-            "InfluxDB points for %s are buffered on disk in %r, up to influx.buffer_mb (%d MB)%s",
-            self.name,
-            self.directory,
-            self.limit_bytes // (1024 * 1024),
-            ", resuming the unsent points already there" if waiting else "",
-        )
+        self._disk = True
+
+    def _abandon_spool(self) -> None:
+        """Let go of a spool that could not be opened, so nothing half-open is used."""
+        if self._append_file is not None:
+            try:
+                self._append_file.close()
+            except OSError:
+                # Closing a file that could not be written can fail the same way; it is being
+                # abandoned either way, and the reason is already on its way to the log.
+                pass
+            self._append_file = None
+        self._close_lock_file()
+        self._segments, self._sizes = [], {}
+        self._append_segment, self._pointer = None, None
 
     def _close_lock_file(self) -> None:
         """Close the lock file, if one was opened."""
@@ -347,13 +373,18 @@ class InfluxWriter:
         return os.path.join(self.directory, f"{segment:012d}.jsonl")
 
     def _read_pointer(self):
-        """Return where sending should resume, as (segment, offset).
+        """Return where sending should resume, and the segment a stored pointer named.
 
         A missing or unreadable pointer resumes from the oldest segment, which re-sends what
-        that segment holds; InfluxDB absorbs the duplicates.
+        that segment holds; InfluxDB absorbs the duplicates. So does one naming an offset past
+        the end of its segment, which no pointer this writer wrote can do.
+
+        The stored segment is returned whatever happens to it, so that no segment created from
+        here on is given that number: a pointer left naming a segment that has gone would
+        otherwise be trusted by the next run that reused the number, and skip what it held.
 
         Returns:
-            tuple: (segment, offset)
+            tuple: ((segment, offset) to resume from, the stored pointer's segment or 0)
         """
         oldest = (self._segments[0], 0) if self._segments else (0, 0)
         try:
@@ -361,17 +392,19 @@ class InfluxWriter:
                 stored = json.load(handle)
             segment, offset = int(stored["segment"]), int(stored["offset"])
         except FileNotFoundError:
-            return oldest
+            return oldest, 0
         except (OSError, ValueError, TypeError, KeyError) as exc:
             logging.warning(
                 "The spool pointer in %r is unreadable, so sending resumes from its oldest point: %r",
                 self.directory,
                 exc,
             )
-            return oldest
+            return oldest, 0
         if segment not in self._sizes:
-            return oldest
-        return segment, offset
+            return oldest, segment
+        if not 0 <= offset <= self._sizes[segment]:
+            return (segment, 0), segment
+        return (segment, offset), segment
 
     def _write_pointer(self) -> None:
         """Record how far sending has got. Not synced, deliberately: see the module docstring."""
@@ -404,7 +437,9 @@ class InfluxWriter:
         if self._append_file is not None:
             self._append_file.close()
             self._append_file = None
-        segment = (self._segments[-1] + 1) if self._segments else 1
+        # Above every number in use, the pointer's and a stale stored pointer's included, so no
+        # pointer can ever come to name a segment it was not written for.
+        segment = 1 + max(self._segments + [self._pointer[0] if self._pointer else 0, self._stale_segment])
         path = self._segment_path(segment)
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         self._append_file = os.fdopen(descriptor, "ab")
@@ -836,9 +871,12 @@ class InfluxWriter:
         if not done:
             return
         if done[0].end is None:
+            # By identity, not by count. The queue is only ever trimmed from the front, but a
+            # point arriving while this chunk was out may have evicted some of it for the bound
+            # already, and removing len(done) from the front then took points never posted.
             queue = self._memory.get((done[0].source, done[0].instance))
-            for _ in done:
-                if queue:
+            for entry in done:
+                if queue and queue[0] is entry:
                     queue.popleft()
             return
         segment, offset = done[-1].end
@@ -866,6 +904,9 @@ class InfluxWriter:
         self._segments.remove(segment)
         del self._sizes[segment]
         self._pointer = (self._segments[0], 0) if self._segments else (segment + 1, 0)
+        # Recorded now rather than at the next successful post: a run that retires segments and
+        # never posts would otherwise leave the stored pointer naming a segment that has gone.
+        self._write_pointer()
 
     def _set_aside(self, segment, exc) -> None:
         """Rename a segment that cannot be read, so the rest of the spool can carry on.
@@ -883,6 +924,7 @@ class InfluxWriter:
         self._segments.remove(segment)
         del self._sizes[segment]
         self._pointer = (self._segments[0], 0) if self._segments else (segment + 1, 0)
+        self._write_pointer()
 
     def _refused(self, entry, status) -> None:
         """Count a refusal, and put the point at the back or give up on it.

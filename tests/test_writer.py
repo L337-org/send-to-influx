@@ -251,6 +251,45 @@ class TestARestart:
         assert sorted(post.lines()) == ["hue x=0 1700000000", "hue x=1 1700000000", "hue x=2 1700000000"]
         second.close(0)
 
+    def test_a_segment_number_is_never_reused_under_an_old_pointer(self, tmp_path, post):
+        """Found in review. A run that sent everything left the pointer naming segment 1; the
+        next retired it without rewriting the pointer and left an empty segment behind; the one
+        after removed that, found no segments, and numbered its own 1 again - so the old
+        pointer was trusted against a new file, and the first point committed to it was
+        skipped for good."""
+        first = _writer(tmp_path, post, inline=True)
+        first.submit("hue", None, "hue n=1 1")
+        first.close(0)
+        second = _writer(tmp_path, post)
+        second.run_until_idle()
+        second.close(0)
+        post.answer = lambda body: None
+        third = _writer(tmp_path, post, inline=True)
+        for n in range(2, 6):
+            third.submit("hue", None, f"hue n={n} {n}")
+        third.close(0)
+        post.answer = lambda body: True
+        post.bodies.clear()
+        fourth = _writer(tmp_path, post)
+        fourth.run_until_idle()
+        assert post.lines() == [f"hue n={n} {n}" for n in range(2, 6)]
+        fourth.close(0)
+
+    def test_a_pointer_past_the_end_of_its_segment_resumes_from_its_start(self, tmp_path, post):
+        """No pointer this writer wrote can do that, so the pointer is what is wrong, and the
+        cost of not trusting it is at most a segment sent twice rather than points skipped."""
+        first = _writer(tmp_path, post)
+        first._ensure_thread = lambda: None
+        first.submit("hue", None, "hue n=1 1")
+        segment = first._append_segment
+        first.close(0)
+        with open(os.path.join(first.directory, "pointer.json"), "w", encoding="utf-8") as handle:
+            json.dump({"segment": segment, "offset": 10**6}, handle)
+        second = _writer(tmp_path, post)
+        second.run_until_idle()
+        assert post.lines() == ["hue n=1 1"]
+        second.close(0)
+
     def test_a_line_cut_off_by_a_power_cut_is_skipped(self, tmp_path, post):
         first = _writer(tmp_path, post)
         first._ensure_thread = lambda: None
@@ -432,6 +471,27 @@ class TestMemoryOnly:
         assert "are being dropped, oldest first" in caplog.text
         writer.close(0)
 
+    def test_a_point_arriving_while_a_chunk_is_out_is_not_lost(self, tmp_path, post, monkeypatch):
+        """Found in review. At the bound, the new point evicted one already in the chunk being
+        posted; counting the chunk off the front afterwards then removed the new point, which
+        had never been sent."""
+        monkeypatch.setattr(writer_module, "MEMORY_POINTS_PER_WORKER", 3)
+        writer = _writer(tmp_path, post, buffer_mb=0)
+        writer._ensure_thread = lambda: None
+        for n in (1, 2, 3):
+            writer.submit("hue", None, f"hue n={n} {n}")
+
+        def arriving(body):
+            if len(post.bodies) == 1:
+                writer.submit("hue", None, "hue n=4 4")
+            return True
+
+        post.answer = arriving
+        writer.run_until_idle()
+        assert "hue n=4 4" in post.lines()
+        assert not writer.pending()
+        writer.close(0)
+
     def test_it_does_not_survive_a_restart_as_documented(self, tmp_path, post):
         first = _writer(tmp_path, post, buffer_mb=0, inline=True)
         post.answer = lambda body: None
@@ -473,6 +533,29 @@ class TestADiskThatFails:
             writer.submit("hue", None, "hue x=2 1700000000")
         assert _spooled(writer) == ["hue x=1 1700000000", "hue x=2 1700000000"]
         assert "being spooled to disk again" in caplog.text
+        writer.close(0)
+
+
+class TestASpoolThatCannotBeOpened:
+    def test_a_full_disk_at_startup_falls_back_to_memory(self, tmp_path, post, monkeypatch, caplog):
+        """Found in review. Only the directory and the lock were under the fallback, so a disk
+        that was full when the first segment was created raised out of the constructor, and
+        the service would not start at all."""
+        real = os.open
+
+        def full(path, *args, **kwargs):
+            if str(path).endswith(".jsonl"):
+                raise OSError(28, "No space left on device")
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(writer_module.os, "open", full)
+        with caplog.at_level(logging.WARNING):
+            writer = _writer(tmp_path, post, inline=True)
+        assert not writer._disk
+        assert "could not be opened" in caplog.text and "No space left on device" in caplog.text
+        monkeypatch.setattr(writer_module.os, "open", real)
+        writer.submit("hue", None, "hue n=1 1")
+        assert post.lines() == ["hue n=1 1"]
         writer.close(0)
 
 

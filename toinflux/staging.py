@@ -521,7 +521,15 @@ def _level_along(stage, lower, upper, driven):
                 return None
             continue
         numeric = all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (state, low, high))
-        if not numeric or high == low:
+        if not numeric:
+            continue
+        if high == low:
+            # Constant along this stretch, so it places the dwell nowhere on it - but it can
+            # still rule it out. Skipped outright, two dimmers ramped one after the other fitted
+            # the first one's stretch too, and the tie went to the planned rung: B at 50% on a
+            # 0/500/1000 ladder read as 500 rather than 750.
+            if not _same_state(state, low):
+                return None
             continue
         share = (state - low) / (high - low)
         if not -_ON_CURVE <= share <= 1 + _ON_CURVE:

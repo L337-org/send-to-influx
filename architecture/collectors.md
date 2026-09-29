@@ -75,6 +75,12 @@ timeout. The buffer kept the points that were collected; it could not stop fewer
   `pointer.json` rewritten by atomic rename after every successful post and **deliberately not
   synced**: losing it costs at most one chunk (`CHUNK_POINTS`, 100) sent twice, and InfluxDB
   overwrites a point with the same series, fields and timestamp.
+- **A segment number is never reused.** The next is always above every number in use, including
+  the one a stored pointer names, and the pointer is rewritten whenever a segment is retired or
+  set aside. Numbering once restarted at 1 when a run found the spool empty, and a pointer left
+  naming a segment that had gone was then trusted against the new file of that number - found in
+  review, and it skipped committed points for good. A pointer naming an offset past the end of its
+  segment resumes from the segment's start instead.
 - **Bounded by `influx.buffer_mb`**, default 100, range 0-1024, per process, validated by
   `buffer_mb_problem()`. When the spool is full the oldest segments are dropped first, said once.
   `0`, a disk that cannot be written, and a spool another process holds all fall back to memory:

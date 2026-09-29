@@ -368,6 +368,23 @@ class TestWhatAWindowDelivers:
         plan = plan_window(self.MIXED, demand, 300, _no_minimum, self.DRIVEN)
         assert delivered_level(plan, self.MIXED, self.DRIVEN) == pytest.approx(demand)
 
+    @pytest.mark.parametrize("demand", [250, 750])
+    def test_two_dimmers_ramped_one_after_the_other(self, demand):
+        """Found in review. On the upper stretch the first dimmer is at 100 at both ends, and
+        on the lower the second is at 0 at both ends; a device constant along a stretch was
+        skipped rather than allowed to rule it out, so at 750 the lower stretch fitted too and
+        the tie went to the planned rung, reading 500."""
+        ladder = build_ladder(
+            [
+                {"level": 0, "set": {"a": 0, "b": 0}},
+                {"level": 500, "set": {"a": 100, "b": 0}},
+                {"level": 1000, "set": {"a": 100, "b": 100}},
+            ]
+        )
+        driven = {"a": "brightness_pct", "b": "brightness_pct"}
+        plan = plan_window(ladder, demand, 300, _no_minimum, driven)
+        assert delivered_level(plan, ladder, driven) == pytest.approx(demand)
+
     def test_a_driven_device_held_at_its_old_value_shows_the_hold(self):
         """The gap between demand and delivered is what makes a held device visible, so the
         held value has to be what is read back rather than the demand."""
