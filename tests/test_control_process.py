@@ -1609,3 +1609,26 @@ class TestASlowInfluxDBDoesNotDelayTheNextCycle:
         finally:
             release.set()
             threaded.close(2)
+
+
+class TestWhatStartingSays:
+    def test_a_control_names_the_file_it_started_from(self, state_directory, caplog):
+        """The file is what an operator edits, and a state directory that is not the one they
+        expect is otherwise invisible until they go looking."""
+        from toinflux.controls import control_path
+
+        state_directory.write_control(conservatory())
+        with caplog.at_level(logging.INFO):
+            run_control("conservatory", settings_file=state_directory.settings_file, cycles=0, sleep=_never_sleep)
+        expected = control_path("conservatory", state_directory.settings_file)
+        assert f"Control 'conservatory' started from {expected!r}" in caplog.text
+
+    def test_its_writer_says_where_it_buffers(self, state_directory, caplog):
+        """Its own spool, named for the control, in the installation's state directory."""
+        import os
+
+        state_directory.write_control(conservatory())
+        with caplog.at_level(logging.INFO):
+            run_control("conservatory", settings_file=state_directory.settings_file, cycles=0, sleep=_never_sleep)
+        spool = os.path.join(state_directory.state_dir, "spool", "control-conservatory")
+        assert f"InfluxDB points for control-conservatory are buffered on disk in {spool!r}" in caplog.text

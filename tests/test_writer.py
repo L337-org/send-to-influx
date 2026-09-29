@@ -131,6 +131,25 @@ class TestAPointIsCommittedBeforeTheCallReturns:
         writer.close(0)
 
 
+class TestWhatStartingSays:
+    def test_a_writer_says_where_it_buffers_and_how_much(self, tmp_path, post, caplog):
+        with caplog.at_level(logging.INFO):
+            writer = _writer(tmp_path, post, buffer_mb=7)
+        assert f"are buffered on disk in {writer.directory!r}, up to influx.buffer_mb (7 MB)" in caplog.text
+        assert "resuming" not in caplog.text
+        writer.close(0)
+
+    def test_it_says_when_it_is_resuming_a_backlog(self, tmp_path, post, caplog):
+        first = _writer(tmp_path, post, inline=True)
+        post.answer = lambda body: None
+        first.submit("hue", None, "hue x=1 1700000000")
+        first.close(0)
+        with caplog.at_level(logging.INFO):
+            second = _writer(tmp_path, post)
+        assert "resuming the unsent points already there" in caplog.text
+        second.close(0)
+
+
 class TestAnOutage:
     def test_points_wait_and_are_sent_in_order_once_it_ends(self, tmp_path, post):
         writer = _writer(tmp_path, post, inline=True)

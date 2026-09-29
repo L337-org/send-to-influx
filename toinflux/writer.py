@@ -316,8 +316,15 @@ class InfluxWriter:
         # so a line it was cut off in the middle of stays the last line of its file.
         self._start_segment()
         waiting = sum(self._sizes.values()) - self._sizes.get(self._append_segment, 0)
-        if waiting:
-            logging.info("Resuming %s's unsent InfluxDB points from %r", self.name, self.directory)
+        # Said once for every process, so a spool that is not where the operator expects - the
+        # wrong state directory, a checkout rather than /var/lib - is visible the first time.
+        logging.info(
+            "InfluxDB points for %s are buffered on disk in %r, up to influx.buffer_mb (%d MB)%s",
+            self.name,
+            self.directory,
+            self.limit_bytes // (1024 * 1024),
+            ", resuming the unsent points already there" if waiting else "",
+        )
 
     def _close_lock_file(self) -> None:
         """Close the lock file, if one was opened."""

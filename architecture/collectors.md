@@ -98,6 +98,9 @@ timeout. The buffer kept the points that were collected; it could not stop fewer
   stops taking points, naming the URL without its query string; once when it takes them again;
   and separately for points dropped. After a failure the thread waits a retry timer (5 s doubling
   to 60 s) rather than trying on every new point.
+- **Every process says at startup where it buffers and how much**, and whether it is resuming a
+  backlog, so a spool in the wrong place - a checkout rather than `/var/lib` - is visible the
+  first time rather than when somebody goes looking.
 - **Stopping gives the thread `CLOSE_SECONDS` to post what is waiting**; the rest stays spooled.
 
 ### Do not treat a status code as a verdict

@@ -32,6 +32,7 @@ from toinflux.control_record import ACTIVE, FAIL_SAFE, ControlRecord, record_des
 from toinflux.controller import Controller
 from toinflux.controls import (
     DEFAULT_CYCLE_SECONDS,
+    control_path,
     device_identity,
     holdable_value,
     load_control,
@@ -821,7 +822,14 @@ def run_control(name, settings_file=None, heartbeat=None, cycles=None, sleep=tim
         # rather than its safe state. Clock only: nothing is read from a sensor before the
         # devices are in a known condition.
         control.guard.assert_starting_state(control.gate.starting_state(datetime.datetime.now(datetime.timezone.utc)))
-        logging.info("Control %r started, cycling every %.0fs", name, control.cycle_seconds)
+        # The file as well as the name: it is what an operator edits, and a state directory
+        # that is not the one they expect is otherwise invisible until they go looking.
+        logging.info(
+            "Control %r started from %r, cycling every %.0fs",
+            name,
+            control_path(name, settings_file),
+            control.cycle_seconds,
+        )
         completed = 0
         while cycles is None or completed < cycles:
             control.cycle(sleep=sleep)
