@@ -626,8 +626,9 @@ controls:
   db: "control_db"
 ```
 
-The same `db` every source has, including the per-source `bucket` on InfluxDB 2 described in the
-README. Leave it out and nothing is recorded; the service says so once at startup.
+The same `db` every source has. On InfluxDB 2 it names the bucket, unless a `bucket` key is also
+set, which takes precedence, exactly as for a source. Leave it out and nothing is recorded; the
+service says so once at startup.
 
 Every control then writes one point per cycle to the `control` measurement, tagged
 `control=<name>`, stamped with the moment the cycle began:

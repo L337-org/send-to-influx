@@ -13,8 +13,8 @@ and report per control without a tool of their own, and a Grafana variable selec
 them.
 
 **Configured once, as ``controls.db``**, the same setting every source has and resolved the same
-way, per-source ``bucket`` on InfluxDB 2 included. Unset means no record, which the control
-subsystem says once as it starts.
+way by ``resolve_db()``: on InfluxDB 2 it names the bucket unless ``bucket`` is set too. Unset
+means no record, which the control subsystem says once as it starts.
 
 **Recording never affects control.** Points go through the ordinary buffered writer, so an
 outage queues them rather than failing a cycle, and a failed write is said once for the

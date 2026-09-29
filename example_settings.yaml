@@ -46,7 +46,8 @@ influx:
   # For InfluxDB v1, use user/password and per-source db:
   user: "your_influx_user"
   password: "your_influx_password"
-  # For InfluxDB v2, use token/org instead and per-source bucket: instead of db. Leave
+  # For InfluxDB v2, use token/org instead; each source's db: then names its bucket
+  # (an optional per-source bucket: takes precedence over db: where both are set). Leave
   # both blank (as shipped) for v1 - an empty token is falsy, so it's correctly
   # ignored rather than mistaken for real v2 config. token/org are shipped here as
   # real, empty keys rather than commented out specifically so the packaged
