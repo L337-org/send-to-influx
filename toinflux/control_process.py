@@ -811,11 +811,14 @@ def run_control(name, settings_file=None, heartbeat=None, cycles=None, sleep=tim
     Raises:
         ConfigError: where the control cannot run at all
     """
-    control = ControlProcess(name, settings_file=settings_file)
     # This process's own spool, named for the control, so no two processes ever share one.
-    # Its exit handler posts what it can and leaves the rest spooled, and runs after the
-    # guard's, so it can never stand between the devices and their safe state.
-    writer.configure(f"control-{name}", control.settings, settings_file)
+    # **Configured before the control is built, and that order is the point.** Its exit
+    # handler posts what it can and leaves the rest spooled, and must run after the device
+    # guard's so it never stands between the devices and their safe state; atexit runs
+    # handlers last-registered-first, and the guard registers its own as the control is built.
+    # Configured afterwards, as it first was, the writer's ran first.
+    writer.configure(f"control-{name}", load_settings(settings_file), settings_file)
+    control = ControlProcess(name, settings_file=settings_file)
     try:
         # The gate picks it, because only the gate knows whether this control is inside its
         # active period - and a control starting outside its window belongs in its end state

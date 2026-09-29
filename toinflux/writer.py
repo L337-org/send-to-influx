@@ -252,6 +252,7 @@ class InfluxWriter:
         self._lock = threading.RLock()
         self._wake = threading.Event()
         self._stopping = False
+        self._closing = False
         self._thread = None
         self._problems = RepeatingProblem()
         self._destinations = dict(_destinations(settings))
@@ -631,7 +632,12 @@ class InfluxWriter:
     def _run(self) -> None:
         """Post whatever is waiting, then wait for more or for the retry timer."""
         while not self._stopping:
-            self.run_until_idle(force=False)
+            closing = self._closing
+            # The pass that closing wakes the thread for ignores the retry timer: the process
+            # is going, so waiting for the timer would mean not trying at all.
+            self.run_until_idle(force=closing)
+            if closing:
+                return
             with self._lock:
                 waiting = self.pending()
             timeout = max(0.1, self._retry_at - self._clock()) if waiting else None
@@ -925,6 +931,18 @@ class InfluxWriter:
         del self._sizes[segment]
         self._pointer = (self._segments[0], 0) if self._segments else (segment + 1, 0)
         self._write_pointer()
+        if segment == self._append_segment:
+            # The segment appends were going to has gone with it. Left in place, the next
+            # append looked up its size, found none, and raised KeyError out of send_data -
+            # which the memory fallback does not catch, so every later write failed and a
+            # control process died on it. Appends move to a fresh segment, or to memory.
+            self._append_file.close()
+            self._append_file = None
+            try:
+                self._start_segment()
+            except OSError as error:
+                self._disk = False
+                self._memory_mode_problem(f"a new segment in {self.directory!r} could not be created: {error!r}")
 
     def _refused(self, entry, status) -> None:
         """Count a refusal, and put the point at the back or give up on it.
@@ -999,14 +1017,18 @@ class InfluxWriter:
             seconds (float): how long the thread may keep posting
         """
         with self._lock:
-            if self._stopping:
+            if self._stopping or self._closing:
                 return
-            self._stopping = True
             thread = self._thread
+            # Closing first and stopping only afterwards. Setting _stopping straight away, as
+            # this did, meant a thread woken to post simply saw it and left, so nothing waiting
+            # was posted - lost outright in memory mode, which is exactly when it matters.
+            self._closing = True
         self._wake.set()
         if thread is not None:
             thread.join(seconds)
         with self._lock:
+            self._stopping = True
             if self._append_file is not None:
                 self._append_file.close()
                 self._append_file = None

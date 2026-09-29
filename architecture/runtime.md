@@ -356,7 +356,10 @@ this is how it is wired and what must not change.
 - **A write failure never reaches the cycle**, because the writer owns it: see
   "Writing to InfluxDB" in `architecture/collectors.md`. The writer's exit handler runs after the
   guard's, so posting what it can on the way out never stands between the devices and their safe
-  state.
+  state. **That depends on the order `run_control()` sets them up in**: `atexit` runs handlers
+  last-registered-first and the guard registers its own as the control is built, so the writer is
+  configured before the control. It was configured after at first, and so ran first -
+  `TestTheExitHandlersRunInTheRightOrder` now holds it.
 - **`i` is simple-pid's integral term**, in levels, not the accumulated error. That is what makes
   it usable later as a starting output, and `TestTheTermsOfTheLastStep` holds it.
 

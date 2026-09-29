@@ -344,6 +344,34 @@ class TestARestart:
         assert "Setting aside the unreadable spool segment" in caplog.text
         second.close(0)
 
+    def test_the_segment_being_appended_to_can_be_set_aside_and_writing_carries_on(self, tmp_path, post, monkeypatch):
+        """Found in review. Setting aside the segment appends were going to left the writer
+        pointing at a segment it no longer knew the size of, and the next append raised
+        KeyError out of send_data - every write after it, for the life of the process."""
+        import builtins
+
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        writer.submit("hue", None, "hue n=1 1")
+        path = writer._segment_path(writer._append_segment)
+        real = builtins.open
+
+        def refusing(file, *args, **kwargs):
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if file == path and "r" in mode:
+                raise PermissionError("denied")
+            return real(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", refusing)
+        writer.run_until_idle()
+        monkeypatch.setattr(builtins, "open", real)
+        assert os.path.exists(path + ".unreadable")
+        post.bodies.clear()
+        writer.submit("hue", None, "hue n=2 2")
+        writer.run_until_idle()
+        assert post.lines() == ["hue n=2 2"]
+        writer.close(0)
+
 
 class TestRefusals:
     """Carried over from the in-memory buffer: only the server refusing the point counts."""
@@ -664,6 +692,23 @@ class TestNobodyWaits:
             time.sleep(0.05)
         assert not writer.pending()
         writer.close(1)
+
+    @pytest.mark.parametrize("buffer_mb", [1, 0])
+    def test_closing_posts_what_is_waiting(self, tmp_path, buffer_mb):
+        """Found in review. close() stopped the thread before it could post, so points waiting
+        on the retry timer were not tried at all - spooled for the next start on disk, but lost
+        outright in memory, where the process's exit is the end of them."""
+        writer = InfluxWriter("collectors", str(tmp_path / "spool"), {}, buffer_mb=buffer_mb)
+        writer.set_destination("hue", *DESTINATION)
+        writer._session.post = MagicMock(side_effect=requests.exceptions.ConnectionError("down"))
+        writer.submit("hue", None, "hue x=1 1700000000")
+        deadline = time.monotonic() + 5
+        while writer._session.post.call_count == 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        accepted = ScriptedPost()
+        writer._session.post = accepted
+        writer.close(3)
+        assert accepted.lines() == ["hue x=1 1700000000"]
 
     def test_stopping_does_not_wait_longer_than_its_deadline(self, tmp_path):
         release = threading.Event()

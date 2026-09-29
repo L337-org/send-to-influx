@@ -1611,6 +1611,29 @@ class TestASlowInfluxDBDoesNotDelayTheNextCycle:
             threaded.close(2)
 
 
+class TestTheExitHandlersRunInTheRightOrder:
+    def test_the_guard_s_handler_runs_before_the_writer_s(self, state_directory, monkeypatch):
+        """Found in review. atexit runs handlers last-registered-first, and the writer used to be
+        configured after the control was built - so its handler, which may spend seconds posting,
+        ran before the guard's, which makes the devices safe. The guard's must be registered
+        last."""
+        import atexit
+
+        registered = []
+        real = atexit.register
+
+        def recording(function, *args, **kwargs):
+            registered.append(getattr(function, "__qualname__", repr(function)))
+            return real(function, *args, **kwargs)
+
+        monkeypatch.setattr(atexit, "register", recording)
+        state_directory.write_control(conservatory())
+        run_control("conservatory", settings_file=state_directory.settings_file, cycles=0, sleep=_never_sleep)
+        writer_at = registered.index("InfluxWriter.close")
+        guard_at = registered.index("DeviceGuard._at_exit")
+        assert guard_at > writer_at, f"registered in the order {registered}"
+
+
 class TestWhatStartingSays:
     def test_a_control_names_the_file_it_started_from(self, state_directory, caplog):
         """The file is what an operator edits, and a state directory that is not the one they
