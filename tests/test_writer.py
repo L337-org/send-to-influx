@@ -115,6 +115,9 @@ class TestAPointIsCommittedBeforeTheCallReturns:
         writer.submit("hue", None, "hue x=1 1700000000")
         writer.run_until_idle()
         assert os.stat(writer.directory).st_mode & 0o777 == 0o700
+        # The directory every process's spool shares, as well as this one's: created by the
+        # writer, it was left 0755 before the mode was applied to it explicitly.
+        assert os.stat(os.path.dirname(writer.directory)).st_mode & 0o777 == 0o700
         for name in os.listdir(writer.directory):
             mode = os.stat(os.path.join(writer.directory, name)).st_mode & 0o777
             assert mode == 0o600, f"{name} is {mode:o}"

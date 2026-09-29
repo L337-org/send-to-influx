@@ -283,6 +283,9 @@ class InfluxWriter:
     def _open_spool(self) -> None:
         """Take this process's spool directory, or fall back to memory, saying why."""
         try:
+            # The shared parent too, and first: makedirs applies its mode to the last directory
+            # only, so the parent was left at the default 0755 by the call below on its own.
+            os.makedirs(os.path.dirname(self.directory), mode=0o700, exist_ok=True)
             os.makedirs(self.directory, mode=0o700, exist_ok=True)
             self._lock_file = open(os.path.join(self.directory, "lock"), "a", encoding="utf-8")
             os.chmod(self._lock_file.name, 0o600)
