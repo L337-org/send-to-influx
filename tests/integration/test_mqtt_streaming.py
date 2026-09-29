@@ -26,6 +26,7 @@ from paho.mqtt import client as mqtt_client
 
 import sendtoinflux
 from toinflux.nuki import Nuki
+from toinflux import writer
 
 pytestmark = pytest.mark.integration
 
@@ -98,7 +99,11 @@ def broker():
 def streaming_nuki(broker, sample_settings):
     """A real Nuki handler pointed at the test broker, with InfluxDB stubbed at the
     requests layer so writes are captured instead of sent. Returns (handler, posts) where
-    posts is the list of line-protocol bodies that would have gone to InfluxDB."""
+    posts is the list of line-protocol bodies that would have gone to InfluxDB.
+
+    The stub is on the writer's session, not the handler's: the handler hands each point to
+    the process's writer, and the writer is what posts it. Stubbing the handler's session
+    captured nothing once that changed, and let the writer try the real sample host."""
     settings = {**sample_settings}
     settings["mqtt"] = {"broker_host": BROKER_HOST, "broker_port": BROKER_PORT}
     # A long interval so the periodic snapshot can't fire during the test - any write we
@@ -110,8 +115,9 @@ def streaming_nuki(broker, sample_settings):
     posts = []
     ok_response = MagicMock(status_code=204, text="")
     ok_response.raise_for_status = MagicMock()
-    handler.session = MagicMock()
-    handler.session.post.side_effect = lambda url, data=None, **kwargs: (posts.append(data), ok_response)[1]
+    writer.current()._session.post = MagicMock(
+        side_effect=lambda url, data=None, **kwargs: (posts.append(data), ok_response)[1]
+    )
     return handler, posts
 
 
