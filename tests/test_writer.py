@@ -646,6 +646,18 @@ class TestASpoolThatCannotBeOpened:
         writer.close(0)
 
 
+class TestConfiguringAgain:
+    def test_a_second_configure_with_the_same_name_keeps_the_spool(self, tmp_path, caplog):
+        """Found in review. The new writer was built while the old one still held the spool's
+        lock, so it said another process had the spool and fell back to memory."""
+        root = str(tmp_path / "spool")
+        writer_module.configure("main", {}, spool_root=root)
+        with caplog.at_level(logging.WARNING):
+            second = writer_module.configure("main", {}, spool_root=root)
+        assert second._disk
+        assert "another process is using the spool" not in caplog.text
+
+
 class TestOneSpoolPerProcess:
     def test_a_second_process_on_the_same_spool_uses_memory_instead(self, tmp_path, post, caplog):
         """A manual run beside the service would otherwise delete the service's segments."""
@@ -710,6 +722,43 @@ class TestRepeatsAndLiveSignals:
         writer.submit("hue", None, "collector_status,source=hue ok=1 1700000000", buffered=False)
         assert post.lines() == ["collector_status,source=hue ok=1 1700000000"]
         assert _spooled(writer) == []
+        writer.close(0)
+
+    def test_live_signals_are_not_posted_while_waiting_on_the_retry_timer(self, tmp_path, post):
+        """Found in review. They were posted before the timer was looked at, so during an outage
+        every heartbeat cost the whole of influx.timeout against a server that drops
+        connections. They are dropped instead, and posted again once the timer has run."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        post.answer = lambda body: None
+        writer.submit("hue", None, "hue x=1 1700000000")
+        writer.run_until_idle(force=False)
+        attempts = len(post.bodies)
+        for n in range(3):
+            writer.submit("hue", None, f"collector_status,source=hue ok=1 {n}", buffered=False)
+            writer.run_until_idle(force=False)
+        assert len(post.bodies) == attempts, "a live point was posted inside the retry wait"
+        now[0] += writer_module.RETRY_FIRST_SECONDS
+        post.answer = lambda body: True
+        post.bodies.clear()
+        writer.submit("hue", None, "collector_status,source=hue ok=1 9", buffered=False)
+        writer.run_until_idle(force=False)
+        assert "collector_status,source=hue ok=1 9" in post.lines()
+        writer.close(0)
+
+    def test_a_live_post_that_fails_starts_the_retry_timer(self, tmp_path, post):
+        """With no backlog, a heartbeat is the only thing that discovers an outage; without
+        this, each one after it paid the full timeout too."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        post.answer = lambda body: None
+        writer.submit("hue", None, "collector_status,source=hue ok=1 1", buffered=False)
+        writer.run_until_idle(force=False)
+        writer.submit("hue", None, "collector_status,source=hue ok=1 2", buffered=False)
+        writer.run_until_idle(force=False)
+        assert len(post.bodies) == 1
         writer.close(0)
 
     def test_a_live_signal_that_cannot_be_sent_is_dropped_not_kept(self, tmp_path, post):

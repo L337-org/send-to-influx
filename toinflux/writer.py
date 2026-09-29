@@ -728,20 +728,41 @@ class InfluxWriter:
             self._retry_at = 0.0
 
     def _post_live(self) -> None:
-        """Post each live signal once, dropping any that cannot be sent."""
+        """Post each live signal once, dropping any that cannot be sent.
+
+        **Not while waiting on the retry timer.** InfluxDB has just failed a post, so these would
+        almost certainly fail too, and each would cost the whole of ``influx.timeout`` against a
+        server that drops connections - during an outage the thread spent its time on doomed
+        heartbeats, and one queued at shutdown took the whole of ``CLOSE_SECONDS``. They are
+        dropped instead, which is what a live point that cannot be sent always was: holding them
+        for the timer would post them late, describing the past, all at once.
+
+        A live post that fails for want of InfluxDB starts the timer like any other, so that an
+        outage with no backlog to discover it is still an outage.
+        """
         while True:
             with self._lock:
                 if not self._live:
+                    return
+                if self._clock() < self._retry_at:
+                    dropped = len(self._live)
+                    self._live.clear()
+                    logging.debug("Dropped %d live InfluxDB point(s) for %s during an outage", dropped, self.name)
                     return
                 entry = self._live.popleft()
                 destination = self._destinations.get(entry.source)
             if destination is None:
                 continue
             status = self._post(entry.line, destination)
-            if status is not True:
-                # Dropped, as a heartbeat always was: replaying one would record that the
-                # collector was up at some past moment, which says nothing about now.
-                logging.debug("Dropped a live InfluxDB point for %s: the post failed", entry.label)
+            if status is True:
+                continue
+            # Dropped, as a heartbeat always was: replaying one would record that the collector
+            # was up at some past moment, which says nothing about now.
+            logging.debug("Dropped a live InfluxDB point for %s: the post failed", entry.label)
+            if not is_point_rejection(status):
+                self._report_outage(destination, status)
+                self._retry_at = self._clock() + self._retry_delay
+                self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
 
     def _post_next_chunk(self):
         """Post the next chunk of waiting points.
@@ -1162,11 +1183,17 @@ def configure(name, settings, settings_file=None, spool_root=None, inline=False)
     buffer_mb = (settings.get("influx") or {}).get("buffer_mb", BUFFER_MB_DEFAULT)
     if buffer_mb_problem(settings.get("influx") or {}):
         buffer_mb = BUFFER_MB_DEFAULT
+    # The previous writer is closed before the new one is built, not after: it holds the spool's
+    # lock, and a writer built beside it on the same name found the lock taken, said another
+    # process had the spool, and fell back to memory. Nothing configures twice in a running
+    # service, so the moment with no writer is not one anything writes in.
     with _WRITER_LOCK:
-        previous, _WRITER = _WRITER, InfluxWriter(name, root, settings, buffer_mb=buffer_mb, inline=inline)
-        writer = _WRITER
+        previous, _WRITER = _WRITER, None
     if previous is not None:
         previous.close(0)
+    writer = InfluxWriter(name, root, settings, buffer_mb=buffer_mb, inline=inline)
+    with _WRITER_LOCK:
+        _WRITER = writer
     atexit.register(writer.close)
     return writer
 

@@ -99,7 +99,9 @@ timeout. The buffer kept the points that were collected; it could not stop fewer
 - **Live signals are never spooled.** `use_buffer=False` - the `collector_status` heartbeat and
   Hue's device-class annotations - goes to a short queue the thread posts once and drops on
   failure: a replayed heartbeat would say a collector was up at some past moment, which says
-  nothing about now.
+  nothing about now. **While the retry timer is running they are dropped unposted**, and a live
+  post that fails starts the timer: posted regardless, every heartbeat during an outage cost the
+  whole of `influx.timeout` against a server that drops connections (found in review).
 - **Failures are said once for the outage** through a `RepeatingProblem`: once when InfluxDB
   stops taking points, naming the URL without its query string; once when it takes them again;
   and separately for points dropped. After a failure the thread waits a retry timer (5 s doubling
