@@ -871,8 +871,8 @@ watches a heartbeat from each, and restarts one that dies or stops beating with 
 Every death is followed by the parent putting that control's devices into their safe state itself -
 a child that was killed or lost power did not get the chance.
 
-**Each control's PID history can be kept for tuning.** Set `controls.db` (or `controls.bucket` on
-InfluxDB 2) and every cycle writes its input, setpoint, demand and P, I and D terms to the `control`
+**Each control's PID history can be kept for tuning.** Set `controls.db`, as for any source, and
+every cycle writes its input, setpoint, demand and P, I and D terms to the `control`
 measurement, readable through the MCP read tools as source `controls`. CONTROLS.md says what each
 field means and how to read it.
 

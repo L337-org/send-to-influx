@@ -377,7 +377,7 @@ in step. `ReadSchema`/`build_schema()` combine those with a live field set.
 ### The controls' history is read like a source, without being one
 
 `readable_sources()` in `mcp_common.py` is `configured_sources()` plus `controls` where
-`controls.db` or `controls.bucket` is set, and it is what the read tools, the resources and
+`controls.db` is set, and it is what the read tools, the resources and
 `resolve_handler(s)` check a name against. `_construct()` builds a `ControlRecord` for that name,
 since `get_class()` knows only collectors. The write tools and `get_control_schema` keep
 `configured_sources()`: the history is neither writable nor a control input.

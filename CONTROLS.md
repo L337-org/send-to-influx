@@ -623,12 +623,11 @@ write in `settings.yaml`:
 ```yaml
 controls:
   enabled: true
-  db: "control_db"         # InfluxDB 1
-  # bucket: "controls"     # InfluxDB 2, in place of db
+  db: "control_db"
 ```
 
-Resolved exactly as a source's `db` and `bucket` are. Leave both out and nothing is recorded;
-the service says so once at startup.
+The same `db` every source has, including the per-source `bucket` on InfluxDB 2 described in the
+README. Leave it out and nothing is recorded; the service says so once at startup.
 
 Every control then writes one point per cycle to the `control` measurement, tagged
 `control=<name>`, stamped with the moment the cycle began:

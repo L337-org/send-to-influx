@@ -12,9 +12,9 @@ the measurement's instance axis, so the existing read tools list the controls, s
 and report per control without a tool of their own, and a Grafana variable selects between
 them.
 
-**Configured once, as ``controls.db`` or ``controls.bucket``**, and resolved exactly as every
-source's database is. Neither set means no record, which the control subsystem says once as
-it starts.
+**Configured once, as ``controls.db``**, the same setting every source has and resolved the same
+way, per-source ``bucket`` on InfluxDB 2 included. Unset means no record, which the control
+subsystem says once as it starts.
 
 **Recording never affects control.** Points go through the ordinary buffered writer, so an
 outage queues them rather than failing a cycle, and a failed write is said once for the
@@ -269,9 +269,7 @@ def log_record_destination(settings) -> None:
     destination = record_destination(settings)
     if destination is None:
         logging.info(
-            "Controls are not recording their PID history: set %s.db (InfluxDB 1) or %s.bucket (InfluxDB 2) "
-            "to keep it for tuning",
-            RECORD_SOURCE,
+            "Controls are not recording their PID history: set %s.db to keep it for tuning",
             RECORD_SOURCE,
         )
     else:

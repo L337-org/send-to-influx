@@ -151,7 +151,7 @@ class TestSayingWhereItGoes:
         with caplog.at_level(logging.INFO):
             log_record_destination({"influx": V1, "controls": {"enabled": True}})
         assert "not recording their PID history" in caplog.text
-        assert "controls.db" in caplog.text and "controls.bucket" in caplog.text
+        assert "controls.db" in caplog.text
 
     def test_present_names_the_database(self, caplog):
         with caplog.at_level(logging.INFO):

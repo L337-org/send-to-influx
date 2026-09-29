@@ -327,7 +327,7 @@ restarted.
 ## The controls' PID history (`toinflux/control_record.py`)
 
 Each control writes one point per cycle to the `control` measurement, tagged `control=<name>`,
-where `controls.db` or `controls.bucket` is set. CONTROLS.md has the fields and what they mean;
+where `controls.db` is set. CONTROLS.md has the fields and what they mean;
 this is how it is wired and what must not change.
 
 - **`ControlRecord` subclasses `DataHandler` to reuse the buffered writer, and is not a

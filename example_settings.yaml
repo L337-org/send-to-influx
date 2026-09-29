@@ -133,12 +133,10 @@ controls:
   # actuates devices unattended for as long as it exists. Has no effect unless the MCP
   # server is enabled (see the mcp block above) and "enabled" above is true.
   mcp_write: false
-  # Where the controls record their PID history, one point per cycle, for tuning: the
-  # "control" measurement, tagged with each control's name. "db" for InfluxDB 1, "bucket" for
-  # InfluxDB 2, as for any source. Leave both out and nothing is recorded. See CONTROLS.md,
-  # "Recording the PID history", for what each field means and how to use it.
+  # The database the controls record their PID history to, one point per cycle, for tuning:
+  # the "control" measurement, tagged with each control's name. Leave it out and nothing is
+  # recorded. See CONTROLS.md, "Recording the PID history", for what each field means.
   # db: "control_db"
-  # bucket: "controls"
 
 # Hue bridge settings
 hue:

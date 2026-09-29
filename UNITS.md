@@ -228,7 +228,7 @@ that change, it sits in an untagged series and cannot be attributed to a host.
 ## Control loop history (`controls`)
 
 Written by the control loops themselves rather than collected, one point per cycle to the `control`
-measurement, tagged `control=<name>`, where `controls.db` or `controls.bucket` is set. See
+measurement, tagged `control=<name>`, where `controls.db` is set. See
 [CONTROLS.md](CONTROLS.md#recording-the-pid-history) for when points are written and how to use them
 for tuning.
 
