@@ -28,16 +28,11 @@ from toinflux.general import load_settings, render_external
 
 
 class InfluxWriteError(ToInfluxError):
-    """Raised when a write to InfluxDB fails.
+    """Raised when a point cannot be written at all - a key or tag value containing a newline.
 
-    Attributes:
-        status_code (int or None): the HTTP status code of the failed write, or None when no response was received at
-            all (connection error/timeout). Defaults to None via a class-level fallback and is set as an instance
-            attribute after construction (see _post_line) rather than via a custom __init__, so the exception's
-            args/str() stay a plain single message.
+    Not for an outage: the writer (toinflux/writer.py) takes those, and ``send_data()`` never
+    raises for one. This is the caller's bug, raised where the caller can see it.
     """
-
-    status_code = None
 
 
 # Getting a point into InfluxDB - the spool, the retries, the reporting - belongs to the writer.

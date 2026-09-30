@@ -275,6 +275,47 @@ class TestARestart:
         assert post.lines() == [f"hue n={n} {n}" for n in range(2, 6)]
         fourth.close(0)
 
+    def test_a_stale_pointer_is_never_trusted_against_a_new_segment(self, tmp_path, post):
+        """Numbering on its own, without the pointer rewrite that also guards this: a pointer
+        left naming a segment that has gone - a crash between retiring it and recording that,
+        say, since the pointer is not synced - must not come to name a new file of that number."""
+        spool = tmp_path / "spool" / "collectors"
+        spool.mkdir(parents=True)
+        (spool / "pointer.json").write_text(json.dumps({"segment": 1, "offset": 43}))
+        first = _writer(tmp_path, post, inline=True)
+        post.answer = lambda body: None
+        for n in range(1, 4):
+            first.submit("hue", None, f"hue n={n} {n}")
+        first.close(0)
+        post.answer = lambda body: True
+        post.bodies.clear()
+        second = _writer(tmp_path, post)
+        second.run_until_idle()
+        assert post.lines() == ["hue n=1 1", "hue n=2 2", "hue n=3 3"]
+        second.close(0)
+
+    def test_retiring_a_segment_records_the_pointer(self, tmp_path, post):
+        """The other guard on its own: a run that retires a segment without posting anything
+        still leaves the stored pointer naming a segment that exists."""
+        first = _writer(tmp_path, post, inline=True)
+        first.submit("hue", None, "hue n=1 1")
+        first.close(0)
+        second = _writer(tmp_path, post)
+        second.run_until_idle()
+        stored = json.loads((tmp_path / "spool" / "collectors" / "pointer.json").read_text())
+        assert stored["segment"] in second._segments, f"the pointer names {stored}, segments are {second._segments}"
+        second.close(0)
+
+    def test_empty_segments_left_by_earlier_runs_are_removed_at_start(self, tmp_path, post):
+        """Every start opens a segment of its own, so a process that never wrote leaves one
+        behind; without this they would pile up, one per restart."""
+        for _ in range(3):
+            _writer(tmp_path, post).close(0)
+        writer = _writer(tmp_path, post)
+        segments = [name for name in os.listdir(writer.directory) if name.endswith(".jsonl")]
+        assert segments == [f"{writer._append_segment:012d}.jsonl"]
+        writer.close(0)
+
     def test_a_pointer_past_the_end_of_its_segment_resumes_from_its_start(self, tmp_path, post):
         """No pointer this writer wrote can do that, so the pointer is what is wrong, and the
         cost of not trusting it is at most a segment sent twice rather than points skipped."""
@@ -508,8 +549,11 @@ class TestRefusals:
         for _ in range(writer_module.MAX_POINT_REJECTIONS + 2):
             writer.run_until_idle()
         post.answer = lambda body: True
+        post.bodies.clear()
         writer.run_until_idle()
-        assert post.lines()[-1] == "hue x=1 1700000000"
+        # Delivered after the failures, not merely attempted: the last attempted body was this
+        # point whether or not it had been dropped, so checking that passed either way.
+        assert post.lines() == ["hue x=1 1700000000"]
         writer.close(0)
 
     def test_a_refused_point_does_not_hold_up_the_rest(self, tmp_path, post):

@@ -230,17 +230,17 @@ class Nuki(MqttDataHandler):
 
         ``self.data`` is ``{device: {field: value}}``, so this walks it and delegates each
         entry to the base implementation with that lock's header swapped in - the same
-        header-swap idiom ``send_heartbeat()`` uses, which keeps buffering, retry and the
-        InfluxWriteError contract exactly as they are rather than reimplementing them.
+        header-swap idiom ``send_heartbeat()`` uses, which keeps the hand-off to the writer
+        and the InfluxWriteError contract exactly as they are rather than reimplementing them.
 
         Every lock in one cycle shares a single timestamp. Letting each call default
         independently would scatter one snapshot across a second or two, so a query asking
         "what was the state at time T" could see one lock's reading and not another's.
 
         A failure on one lock does not stop the rest: each is attempted, and one
-        InfluxWriteError is raised at the end if any failed, so the worker still backs off.
-        That covers a lock whose *name* cannot be used as well as one whose write fails - see
-        the loop below, where building the header is deliberately inside the guarded block.
+        InfluxWriteError is raised at the end if any failed. The failure is a lock whose *name*
+        cannot be used - an outage never raises here, the writer holds those points - which is
+        why building the header is deliberately inside the guarded block below.
         Points are idempotent - same measurement, tag set and timestamp overwrite - so the
         retry re-writing a lock that already succeeded is harmless.
 

@@ -664,8 +664,8 @@ class Hue(DataHandler):
         """Write the readings, then describe the devices they came from.
 
         The data write is unchanged and its contract is untouched: it happens first, and
-        an ``InfluxWriteError`` from it propagates exactly as before so the worker still
-        backs off and buffers.
+        an ``InfluxWriteError`` from it - a point that cannot be written at all - propagates
+        exactly as before.
 
         The description that follows is best-effort and can never fail a collection. It
         carries no reading, so there is nothing to replay and nothing to lose - the same

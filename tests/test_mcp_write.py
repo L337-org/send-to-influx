@@ -531,7 +531,7 @@ class TestWriteToolRegistration:
 
     def test_speedtest_run_result_dispatches_and_closes_session(self):
         handler = make_speedtest(True)
-        handler.mcp_trigger_run = MagicMock(return_value={"source": "speedtest", "recorded": True, "result": {}})
+        handler.mcp_trigger_run = MagicMock(return_value={"source": "speedtest", "result": {}})
         with patch("toinflux.mcp_write.resolve_handler", return_value=handler):
             result = _speedtest_run_result(self._speedtest_settings(), None)
         assert result["source"] == "speedtest"

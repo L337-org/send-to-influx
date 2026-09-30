@@ -369,9 +369,8 @@ class TestPerLockPoints:
         assert written[0][0] == "nuki,device=odd\\ label\\,x "
 
     def test_one_failing_lock_does_not_stop_the_others(self, sample_settings):
-        """And the worker still backs off, because an InfluxWriteError is raised at the end.
-        Points are idempotent, so the retry re-writing a lock that already succeeded is
-        harmless."""
+        """And one InfluxWriteError is raised at the end, naming the lock. What fails is a lock
+        whose point cannot be written at all; an outage never raises, the writer holds those."""
         from toinflux.influx import InfluxWriteError
 
         handler = self._handler(sample_settings)
@@ -520,7 +519,7 @@ class TestPerLockPoints:
 
     def test_the_header_is_restored_even_when_a_write_fails(self, sample_settings):
         """The restore is in a finally for this case: a failing lock must not leave the header
-        dirty either, or one InfluxDB outage permanently mislabels the handler."""
+        dirty either, or one unwritable lock name permanently mislabels the handler."""
         handler = self._handler(sample_settings)
         handler.data = {"Front_Door": {"stateValue": 1}, "Back_Door": {"stateValue": 3}}
         before = handler.influx_header

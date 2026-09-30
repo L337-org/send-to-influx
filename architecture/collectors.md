@@ -302,8 +302,8 @@ than reimplemented.
   scatter one snapshot across a second or two, so "what was the state at time T" could see one lock
   and not another.
 - **A failure on one lock does not stop the rest.** Each is attempted and one error raised at the
-  end, so the worker still backs off, and re-writing a lock that already succeeded is harmless
-  because points are idempotent.
+  end. The failure is a lock name that cannot be written - a newline in it - since an outage never
+  raises: the writer holds those points.
 - `MCP_INSTANCE_TAG = "device"`, and `MCP_LIVE_STATE_COVERS_ALL_INSTANCES = True` because Nuki is
   the only source whose one live read covers every producer - a single retained-state subscription
   returns all locks, unlike Hue where each bridge needs its own handler.

@@ -1531,15 +1531,18 @@ class TestStreamSink:
         mock_print.assert_called_once_with("nuki", {"x": 1})
         handler.send_data.assert_not_called()
 
-    def test_on_message_swallows_influx_write_error(self):
-        """A failed InfluxDB write is buffered by send_data, not a stream failure - it must
-        not propagate out of the network callback (activity is already stamped)."""
+    def test_on_message_swallows_influx_write_error(self, caplog):
+        """A point that cannot be written at all is not a stream failure - it must not
+        propagate out of the network callback (activity is already stamped) - but it is said.
+        An outage never raises here; the writer holds those points."""
         activity = []
         sink, handler, _ = self._sink(on_activity=lambda: activity.append(1))
         handler.decode_stream_message.return_value = {"x": 1}
-        handler.send_data.side_effect = InfluxWriteError("influx down")
-        sink.on_message("nuki/A/state", "3")  # must not raise
+        handler.send_data.side_effect = InfluxWriteError("cannot contain a newline")
+        with caplog.at_level(logging.WARNING):
+            sink.on_message("nuki/A/state", "3")  # must not raise
         assert activity == [1]
+        assert "Could not write a message from" in caplog.text
 
     # --- periodic (the safety-net probe + heartbeat) ---
 
@@ -1601,15 +1604,16 @@ class TestStreamSink:
         assert [c.kwargs["ok"] for c in heartbeat.call_args_list] == [False, False, True]
         assert [c.kwargs["consecutive_failures"] for c in heartbeat.call_args_list] == [1, 2, 0]
 
-    def test_periodic_influx_write_error_still_counts_the_probe_as_reachable(self):
-        """A failed InfluxDB write isn't a probe failure - the source was reachable, so the
-        heartbeat stays healthy and the point is left to the buffer."""
+    def test_periodic_influx_write_error_still_counts_the_probe_as_reachable(self, caplog):
+        """A point that cannot be written isn't a probe failure - the source was reachable, so
+        the heartbeat stays healthy - but it is said. An outage never raises here."""
         sink, handler, args = self._sink()
         handler.get_data.return_value = {"x": 1}
-        handler.send_data.side_effect = InfluxWriteError("influx down")
-        with patch("sendtoinflux.maybe_send_heartbeat") as heartbeat:
+        handler.send_data.side_effect = InfluxWriteError("cannot contain a newline")
+        with patch("sendtoinflux.maybe_send_heartbeat") as heartbeat, caplog.at_level(logging.WARNING):
             sink.periodic()  # must not raise
         heartbeat.assert_called_once_with(args, handler, "nuki", ok=True, consecutive_failures=0)
+        assert "Could not write the snapshot from" in caplog.text
 
 
 class TestShouldStream:
