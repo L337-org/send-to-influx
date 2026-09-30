@@ -1158,6 +1158,8 @@ class TestReportingWhatAControlHasWorkedOut:
         assert _control_state_result(name, state_directory.settings_file)["history"] == {
             "source": "controls",
             "instance": name,
+            "loop": "query_history",
+            "devices": "get_control_devices",
         }
 
     def test_it_names_the_setting_when_nothing_is_recorded(self, state_directory, bridge):
@@ -1325,7 +1327,11 @@ class TestSummarisingAControlsDevices:
             },
         ]
         answers["held"] = [
-            {"tags": {"device": "near", "parameter": ""}, "columns": ["time", "held"], "values": [[0, 25]]}
+            {
+                "tags": {"device": "near", "parameter": ""},
+                "columns": ["time", "held", "changes"],
+                "values": [[0, 25, 3]],
+            }
         ]
         result = _control_devices_result("conservatory", "-24h", "now", state_directory.settings_file)
         lamp, near = result["devices"]
@@ -1338,11 +1344,13 @@ class TestSummarisingAControlsDevices:
             "changes": 20,
             "changes_per_active_hour": 12.0,
             "held_share": 0.25,
+            "changes_while_held": 3,
         }
         assert lamp["kind"] == "driven"
         assert lamp["parameter"] == "brightness_pct"
         assert lamp["value"] == {"mean": 40.0, "min": 5.0, "max": 100.0}
         assert lamp["held_share"] == 0.0
+        assert lamp["changes_while_held"] == 0
         assert "note" not in result
 
     def test_it_queries_the_record_s_database_for_that_control(self, state_directory, answers):

@@ -59,7 +59,7 @@ from toinflux.controls import (
     REQUIRED_CONTROL_KEYS,
     control_dir,
     device_identity,
-    holdable_value,
+    held_by_minimum,
     parameter_devices,
     control_writes_enabled,
     controls_enabled,
@@ -555,13 +555,7 @@ def _control_state_result(name, settings_file=None, supervisor=None):
         else set()
     )
     driven = parameter_devices(declared)
-    entry["held_by_minimum"] = sorted(
-        # And, for a driven device, a value it could actually be pinned to - the other half of
-        # what `_hold` requires of it.
-        device
-        for device in held
-        if device not in driven or holdable_value(record_of(log, device))
-    )
+    entry["held_by_minimum"] = sorted(held_by_minimum(held, driven, log.states()))
     entry["history"] = _history_of(name, settings_file)
     return entry
 
@@ -596,7 +590,8 @@ def _register_device_summary(server, settings, settings_file):
             """Summarise what each of a control's devices was commanded to over a period: for a
             switched device the share of active time it was on, for a driven one the mean, lowest
             and highest value it was set to, and for every device how often it changed and how
-            often `min_transition_seconds` held it.
+            often `min_transition_seconds` held it - did not allow it to change. Changes while held
+            mean no rung kept it still, so it was moved anyway.
 
             For tuning the ladder rather than the gains: which device does the work, whether one
             switches too often, whether a value sits at the end of its range. The loop's terms over
@@ -667,14 +662,18 @@ def _control_devices_result(name, start, end, settings_file=None):
             f"{source} {group}",
         )
         # A second query because InfluxQL cannot aggregate a boolean: counting the held cycles
-        # is a filter on the field rather than a function of it.
+        # is a filter on the field rather than a function of it. The changes inside it are the
+        # minimum overridden, which the totals cannot separate from ordinary changes.
         held = run_query(
-            handler.session, influx, database, f'SELECT count("seconds") AS held {source} AND "held" = true {group}'
+            handler.session,
+            influx,
+            database,
+            f'SELECT count("seconds") AS held, sum("changes") AS changes {source} AND "held" = true {group}',
         )
     finally:
         close_session(handler.session)
-    held_by = {_series_key(series): _first_row(series).get("held") or 0 for series in held}
-    devices = [_device_summary(series, held_by.get(_series_key(series), 0)) for series in totals]
+    held_by = {_series_key(series): _first_row(series) for series in held}
+    devices = [_device_summary(series, held_by.get(_series_key(series), {})) for series in totals]
     result = {
         "control": name,
         "start": _rfc3339(start_at),
@@ -717,12 +716,13 @@ def _first_row(series):
     return dict(zip(series.columns, series.values[0]))
 
 
-def _device_summary(series, held_cycles):
+def _device_summary(series, held):
     """Shape one device's aggregates into what a caller tuning the ladder reads.
 
     Args:
         series (QuerySeries): the device's row of totals
-        held_cycles (int): how many of its cycles were held by its minimum
+        held (dict): ``held``, its cycles its minimum held, and ``changes``, the changes made
+            in them; empty where it was never held
 
     Returns:
         dict: the device's summary
@@ -743,7 +743,9 @@ def _device_summary(series, held_cycles):
         entry.update(kind="switched", on_share=_ratio(row.get("on_seconds"), seconds))
     entry["changes"] = changes
     entry["changes_per_active_hour"] = _ratio(changes * 3600, seconds)
-    entry["held_share"] = _ratio(held_cycles, cycles)
+    entry["held_share"] = _ratio(held.get("held") or 0, cycles)
+    # Changes made while the minimum said not to: the ladder had no rung that kept it still.
+    entry["changes_while_held"] = held.get("changes") or 0
     return entry
 
 
@@ -776,25 +778,20 @@ def _history_of(name, settings_file):
         settings_file (str or None): the settings path the process was started with
 
     Returns:
-        dict: ``source`` and ``instance`` where recorded, else ``recorded: false`` and the
-        setting that would turn it on
+        dict: ``source`` and ``instance`` where recorded, with the tools that read the loop's
+        history and summarise each device, else ``recorded: false`` and the setting that would
+        turn it on
     """
     if record_destination(load_settings(settings_file)):
-        return {"source": RECORD_SOURCE, "instance": name}
+        # The two tools named rather than left to be found: the loop's terms and each device's
+        # share are separate questions, answered by separate tools.
+        return {
+            "source": RECORD_SOURCE,
+            "instance": name,
+            "loop": "query_history",
+            "devices": "get_control_devices",
+        }
     return {"recorded": False, "setting": f"{RECORD_SOURCE}.db"}
-
-
-def record_of(log, device):
-    """Return what a device was last commanded to, or None where nothing was.
-
-    Args:
-        log (TransitionLog): the control's log
-        device (str): the device name
-
-    Returns:
-        object: the recorded state
-    """
-    return (log.entries.get(device) or {}).get("state")
 
 
 def _age(at, now):

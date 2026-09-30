@@ -34,6 +34,7 @@ from toinflux.controls import (
     DEFAULT_CYCLE_SECONDS,
     control_path,
     device_identity,
+    held_by_minimum,
     holdable_value,
     load_control,
     validate_control,
@@ -647,10 +648,9 @@ class ControlProcess:
         self._record(ACTIVE, moment, terms, delivered_level(demand, terms.curve, driven))
         if self.record is not None:
             windows = device_windows(demand, before, driven)
-            # Held means the minimum actually kept it: a frozen device the ladder could not keep
-            # still - no rung matched the states it was in - moved, and says so in `changes`.
-            held = {device for device in frozen if device in windows and windows[device].changes == 0}
-            self.record.write_devices(windows, held, driven, timestamp=self._stamp(moment))
+            self.record.write_devices(
+                windows, held_by_minimum(frozen, driven, before), driven, timestamp=self._stamp(moment)
+            )
 
     def _resume_the_loop(self) -> None:
         """Put back the integral this control had built before it was last restarted.

@@ -129,7 +129,7 @@ class ControlRecord(DataHandler):
     MCP_DESCRIPTION = (
         "Each control loop's PID history, one point per cycle while it is acting: input against "
         "setpoint, the demand split into its P, I and D terms, the gains, and the level delivered. "
-        "Use it to tune a control."
+        "Use it to tune a control's gains; get_control_devices summarises each device, for tuning its ladder."
     )
     # Every field carries a description, because none of them is self-describing to somebody
     # who has not read CONTROLS.md, and the agent tuning a loop is exactly that somebody. No
@@ -184,8 +184,8 @@ class ControlRecord(DataHandler):
             "at the value it was set to. Apart from demand where the ladder could not reach it, a "
             "switched device was held, or a dimmable one that sets the level on its own was held by "
             "min_transition_seconds; a dimmable one held while switched devices share the window does "
-            "not show here. What was commanded, not confirmed; the device's own source shows whether "
-            "it switched.",
+            "not show here, and get_control_devices shows each device's holds and share. What was "
+            "commanded, not confirmed; the device's own source shows whether it switched.",
         },
         "state": {
             "kind": "state",
@@ -244,7 +244,8 @@ class ControlRecord(DataHandler):
 
         Args:
             windows (dict): device name -> DeviceWindow for this cycle
-            held (set): devices whose ``min_transition_seconds`` kept them where they were
+            held (set): devices whose ``min_transition_seconds`` had not run out, so were not
+                allowed to change - see ``controls.held_by_minimum``
             driven (dict): device name -> its parameter, for devices set to a value
             timestamp (int or None): the cycle's own time, in epoch seconds, the same as its
                 ``control`` point

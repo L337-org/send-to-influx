@@ -1533,17 +1533,18 @@ class TestTheRecordOfEachDevice:
         assert (second["far"]["held"], second["near"]["held"]) == ("true", "true")
         assert (second["far"]["changes"], second["near"]["changes"]) == ("0", "0")
 
-    def test_a_frozen_device_the_ladder_could_not_keep_still_is_not_held(self, recorded, influx):
+    def test_a_frozen_device_the_ladder_could_not_keep_still_is_held_and_moved(self, recorded, influx):
         """Near on and far off is a combination no rung describes, so there is no keeping them
-        where they are: the whole ladder is used and both move. Held would describe a
-        restraint that did not happen."""
+        where they are: the whole ladder is used and both move. Held says the minimum was
+        running, and the changes beside it say it was overridden - which is what an agent
+        tuning the ladder needs to see, rather than a cycle that looks unconstrained."""
         record_command(recorded.transitions, recorded.document, {"far": False, "near": True})
         frozen = recorded.transitions.frozen(recorded.controller.min_transition_for, ("far", "near"))
         assert frozen == {"far", "near"}, "the case this exists for has changed shape"
         recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
         points = dict(_device_points(influx))
         assert (points["far"]["changes"], points["near"]["changes"]) == ("1", "1")
-        assert (points["far"]["held"], points["near"]["held"]) == ("false", "false")
+        assert (points["far"]["held"], points["near"]["held"]) == ("true", "true")
 
     def test_they_share_the_cycle_s_timestamp(self, recorded, influx):
         """So a device's point and the loop's point for one cycle line up on one time axis."""

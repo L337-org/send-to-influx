@@ -198,11 +198,17 @@ WRITE_EFFECT_PHRASES = {
 # advertised them. Setting it, which `get_control_devices` now needs to register at all, added
 # their 633 bytes, already being sent - the ceiling had not been holding what it claimed, as
 # with the write tools above.
-MAX_TOOL_BYTES = 20_850
+# Raised 20,850 -> 20,950 (total 23,700 -> 23,800) for what `held` means in the device summary,
+# and for the controls source naming `get_control_devices`. "Held" reads as "kept still", and
+# the summary means "not allowed to change" - the difference is the case where no rung could
+# keep a device still and it moved anyway, which is the thing worth finding. The pointer is
+# for an agent reading the controls history, which otherwise never learns the summary exists.
+# A deliberate choice of less friction for the tuning agent over the bytes.
+MAX_TOOL_BYTES = 20_950
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 23_700
+MAX_TOTAL_BYTES = 23_800
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],

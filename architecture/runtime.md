@@ -361,9 +361,11 @@ this is how it is wired and what must not change.
   `ControlRecord.write_devices()` from `staging.device_windows()` over the same plan as
   commanded, with the cycle's timestamp. `changes` counts against the states read once before the
   step, so the first command of a window compares with what the device was last set to. **`held`
-  is a frozen device that did not change**, not merely a frozen one: where no rung matches the
-  states a frozen device is in, `reachable_ladder()` hands back the whole ladder and the device
-  may move, and calling that held would describe a restraint that did not happen. A device key
+  is whether the device was allowed to change, not whether it did**, decided by
+  `controls.held_by_minimum()`, the same function behind `get_control_state`'s
+  `held_by_minimum`. Where no rung matches the states a frozen device is in,
+  `reachable_ladder()` hands back the whole ladder and the device may move: it is then held with
+  `changes` above 0, which is how an overridden minimum shows. A device key
   with a line break is skipped and said once per process, because the store does not constrain
   device keys and a tag cannot hold one.
 - **Which cycles are recorded is decided in `ControlProcess.cycle()`**: `active` after a window

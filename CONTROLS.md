@@ -684,7 +684,7 @@ The same cycles also write one point per device to the `control_device` measurem
 | `on_seconds` | a switched device: how long it was commanded on |
 | `value` | a driven device: the value it was commanded to, averaged over the window, on its `parameter`'s scale |
 | `changes` | commands in the window that changed its state, counting the first against what it was last set to |
-| `held` | whether its `min_transition_seconds` kept it where it was |
+| `held` | whether its `min_transition_seconds` had not yet run out, so it was not allowed to change; with `changes` above 0 as well, the ladder had no rung that kept it still and moved it anyway |
 
 This is what tuning the ladder needs and `delivered` folds away: which device did the work, how
 often each switched, and whether a minimum kept one still. The devices' own sources show what
@@ -716,8 +716,10 @@ history with `list_fields` and `query_history`, scoped to one control with `inst
   conditions of the moment. Watch it across a few days and it shows how much that varies.
 * **For the ladder rather than the gains**, `get_control_devices` over MCP summarises each
   device over a period: a switched one's share of active time on, a driven one's mean, lowest
-  and highest value, and for each how many times it changed, how many times an hour, and the
-  share of cycles its minimum held it. A heater beside the sensor doing all the work while the
+  and highest value, and for each how many times it changed, how many times an hour, the
+  share of cycles its minimum held it, and how many changes it was given while held. That last
+  is the ladder moving a device its minimum said not to, because no rung kept it where it was:
+  the stages do not describe a combination the devices keep ending up in. A heater beside the sensor doing all the work while the
   far one never comes on is a ladder whose equal-level rungs are in the wrong order; one
   changing many times an hour wants a longer `min_transition_seconds` or a longer
   `cycle_seconds`; a driven value that sits at its highest is a device at the end of its
@@ -766,7 +768,8 @@ held by their `min_transition_seconds`. That is the tool to reach for when an ou
 against its input, because the integral is the usual explanation and is invisible from the
 device side.  Where `controls.db` is set it also names where the control's cycles are recorded,
 as a `source` and `instance` for `query_history`, so a caller tuning the gains can read the loop
-over time rather than only as it stands; where it is not, it names that setting.
+over time rather than only as it stands, and names `get_control_devices` for each device's
+share; where it is not, it names that setting.
 
 What is checked, and when
 -------------------------

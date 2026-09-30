@@ -65,7 +65,8 @@ def test_three_cycles_summarise_to_what_was_written(installation):
     driven = {"lamp": "brightness_pct"}
     cycles = [
         ({"near": DeviceWindow(300.0, 120.0, None, 1), "lamp": DeviceWindow(300.0, None, 20.0, 1)}, set()),
-        ({"near": DeviceWindow(300.0, 300.0, None, 0), "lamp": DeviceWindow(300.0, None, 20.0, 0)}, {"near", "lamp"}),
+        # Held, and near moved anyway: the minimum overridden.
+        ({"near": DeviceWindow(300.0, 300.0, None, 1), "lamp": DeviceWindow(300.0, None, 20.0, 0)}, {"near", "lamp"}),
         ({"near": DeviceWindow(300.0, 0.0, None, 1), "lamp": DeviceWindow(300.0, None, 80.0, 1)}, set()),
     ]
     try:
@@ -85,13 +86,15 @@ def test_three_cycles_summarise_to_what_was_written(installation):
         "active_seconds": 900,
         "kind": "switched",
         "on_share": 0.4667,
-        "changes": 2,
-        "changes_per_active_hour": 8.0,
+        "changes": 3,
+        "changes_per_active_hour": 12.0,
         "held_share": 0.3333,
+        "changes_while_held": 1,
     }
     assert lamp["parameter"] == "brightness_pct"
     assert lamp["value"] == {"mean": 40, "min": 20, "max": 80}
     assert lamp["held_share"] == 0.3333
+    assert lamp["changes_while_held"] == 0
 
 
 def test_another_control_and_another_period_are_not_counted(installation):
