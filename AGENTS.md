@@ -123,7 +123,8 @@ Break one of these and the failure is silent or data-destroying.
 - **Changing a measurement, tag set or field key means sweeping `tests/integration/` too.** Those
   tests are deselected by default and `pytest -m integration` without a broker skips cleanly, so a
   green local run proves nothing about them. Grep for the old names, run the suite against a real
-  broker, then mutate the product back and confirm the test fails.
+  broker and both real InfluxDB servers (1.8 and 2.7; the variables that point at them are in
+  `tests/integration/conftest.py`), then mutate the product back and confirm the test fails.
 
 **Guarded, so not review items** - `tests/test_repo_hygiene.py::test_every_named_guard_exists`
 keeps these names honest, and each guard's docstring carries the reasoning.

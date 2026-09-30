@@ -167,9 +167,9 @@ jobs:
           docker logs mosquitto-ci 2>&1 | tail -20 >&2
           exit 1
 
-      # For tests/integration/test_writer_influxdb.py and test_control_devices_influxdb.py.
-      # InfluxDB 1.8 with authentication off,
-      # started the same way as the broker and for the same reasons.
+      # For the integration tests that write to and read from InfluxDB, which run once per server
+      # (tests/integration/conftest.py). InfluxDB 1.8 with authentication off, started the same
+      # way as the broker and for the same reasons.
       - name: Start a local InfluxDB
         timeout-minutes: 5
         run: |
@@ -184,12 +184,46 @@ jobs:
           docker logs influxdb-ci 2>&1 | tail -20 >&2
           exit 1
 
+      # And InfluxDB 2.7, because the two versions take different paths through the code: 2.x
+      # writes to /api/v2/write with a token and answers reads through its v1-compatible /query.
+      # The token and password are generated for this run and masked, never written into the
+      # repository; the token reaches the tests through the job environment.
+      - name: Start a local InfluxDB 2
+        timeout-minutes: 5
+        run: |
+          token=$(openssl rand -hex 32)
+          password=$(openssl rand -hex 16)
+          echo "::add-mask::$token"
+          echo "::add-mask::$password"
+          docker run -d --name influxdb2-ci -p 8087:8086 \
+            -e DOCKER_INFLUXDB_INIT_MODE=setup \
+            -e DOCKER_INFLUXDB_INIT_USERNAME=ci \
+            -e DOCKER_INFLUXDB_INIT_PASSWORD="$password" \
+            -e DOCKER_INFLUXDB_INIT_ORG=ci \
+            -e DOCKER_INFLUXDB_INIT_BUCKET=ci \
+            -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN="$token" \
+            influxdb:2.7
+          for i in $(seq 1 60); do
+            # Asked with the token, not /health: the server reports healthy before its first-run
+            # setup has made the org and the token, and a test starting then fails on auth.
+            if curl -sf -H "Authorization: Token $token" "http://localhost:8087/api/v2/orgs?org=ci" | grep -q '"name": *"ci"'; then
+              echo "INFLUX2_TEST_TOKEN=$token" >> "$GITHUB_ENV"
+              echo "InfluxDB 2 up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "InfluxDB 2 did not come up on localhost:8087" >&2
+          docker logs influxdb2-ci 2>&1 | tail -20 >&2
+          exit 1
+
       - name: Run integration tests
         timeout-minutes: 10
         env:
           MQTT_TEST_BROKER_HOST: localhost
           MQTT_TEST_BROKER_PORT: "1883"
           INFLUX_TEST_URL: http://localhost:8086
+          INFLUX2_TEST_URL: http://localhost:8087
+          INFLUX2_TEST_ORG: ci
         run: pytest -m integration -v
 
   flake8-run:
