@@ -96,12 +96,15 @@ timeout. The buffer kept the points that were collected; it could not stop fewer
 - **Dedup on append** against the same worker's last line: Octopus re-serves one reading,
   timestamp and all, for around 30 minutes. After a restart the first repeat is spooled once
   more, which InfluxDB absorbs.
-- **Live signals are never spooled.** `use_buffer=False` - the `collector_status` heartbeat and
-  Hue's device-class annotations - goes to a short queue the thread posts once and drops on
-  failure: a replayed heartbeat would say a collector was up at some past moment, which says
-  nothing about now. **While the retry timer is running they are dropped unposted**, and a live
-  post that fails starts the timer: posted regardless, every heartbeat during an outage cost the
-  whole of `influx.timeout` against a server that drops connections (found in review).
+- **Live signals are never spooled, and take the same path as everything else.**
+  `use_buffer=False` - the `collector_status` heartbeat and Hue's device-class annotations -
+  makes an entry marked live, in a short queue of its own. The send path takes that queue first,
+  so a heartbeat never waits behind a backlog and arrives describing the past, and drops a live
+  entry wherever it would keep another: a failed post, a refusal, or the retry timer running.
+  The timer, the outage report and the reset on success are the one set of code for both, so a
+  failed heartbeat shows an outage and a successful one clears it. They were two paths at first,
+  and the live one ignored the timer until a copy of its handling was added, which took the
+  failure half and not the success half (found in review).
 - **Failures are said once for the outage** through a `RepeatingProblem`: once when InfluxDB
   stops taking points, naming the URL without its query string; once when it takes them again;
   and separately for points dropped. After a failure the thread waits a retry timer (5 s doubling

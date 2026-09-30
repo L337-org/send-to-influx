@@ -761,6 +761,47 @@ class TestRepeatsAndLiveSignals:
         assert len(post.bodies) == 1
         writer.close(0)
 
+    def test_a_live_signal_goes_ahead_of_a_backlog(self, tmp_path, post):
+        """Behind the backlog it would be posted after it, however long that took, and arrive
+        describing the past."""
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        for n in range(5):
+            writer.submit("hue", None, f"hue n={n} {n}")
+        writer.submit("hue", None, "collector_status,source=hue ok=1 9", buffered=False)
+        writer.run_until_idle()
+        assert post.bodies[0][1] == "collector_status,source=hue ok=1 9"
+        assert post.lines()[1:] == [f"hue n={n} {n}" for n in range(5)]
+        writer.close(0)
+
+    def test_a_live_post_that_succeeds_clears_the_back_off(self, tmp_path, post):
+        """The same evidence as a data post that succeeds, and handled by the same code: with
+        no backlog, a heartbeat was the only thing that could show InfluxDB was back, and the
+        back-off an outage had grown stayed grown."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        post.answer = lambda body: None
+        for _ in range(3):
+            writer.submit("hue", None, "collector_status,source=hue ok=1 1", buffered=False)
+            writer.run_until_idle(force=True)
+        assert writer._retry_delay > writer_module.RETRY_FIRST_SECONDS
+        post.answer = lambda body: True
+        now[0] = writer._retry_at
+        writer.submit("hue", None, "collector_status,source=hue ok=1 2", buffered=False)
+        writer.run_until_idle(force=False)
+        assert writer._retry_delay == writer_module.RETRY_FIRST_SECONDS
+        assert writer._retry_at == 0.0
+        writer.close(0)
+
+    def test_a_refused_live_signal_is_not_kept_or_counted(self, tmp_path, post):
+        writer = _writer(tmp_path, post, inline=True)
+        post.answer = lambda body: 400
+        writer.submit("hue", None, "collector_status,source=hue ok=1 1", buffered=False)
+        assert not writer.pending()
+        assert _spooled(writer) == []
+        writer.close(0)
+
     def test_a_live_signal_that_cannot_be_sent_is_dropped_not_kept(self, tmp_path, post):
         writer = _writer(tmp_path, post, inline=True)
         post.answer = lambda body: None

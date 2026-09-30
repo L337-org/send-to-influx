@@ -198,6 +198,8 @@ class _Entry:
         line (str): the line-protocol point
         rejections (int): how many times the server has refused it
         end (tuple or None): where it ends in the spool, as (segment, offset); None in memory
+        live (bool): a live signal - a heartbeat - which is dropped where anything else would be
+            kept, because sent late it would describe the past
     """
 
     source: str
@@ -205,6 +207,7 @@ class _Entry:
     line: str
     rejections: int = 0
     end: "tuple | None" = None
+    live: bool = False
 
     def encoded(self):
         """Return this entry as one spool line.
@@ -471,7 +474,7 @@ class InfluxWriter:
         """
         with self._lock:
             if not buffered:
-                self._live.append(_Entry(source, instance, line))
+                self._live.append(_Entry(source, instance, line, live=True))
             elif self._last_line.get((source, instance)) == line:
                 # Octopus re-serves one reading, timestamp and all, for about half an hour;
                 # a second copy would only take space, since posting it again changes nothing.
@@ -691,8 +694,7 @@ class InfluxWriter:
                     traceback.format_exc(),
                     identity=repr(exc),
                 )
-                self._retry_at = self._clock() + self._retry_delay
-                self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
+                self._note_failure()
             if closing:
                 return
             with self._lock:
@@ -704,12 +706,21 @@ class InfluxWriter:
     def run_until_idle(self, force=True) -> None:
         """Post until nothing is waiting or a post fails for want of InfluxDB.
 
+        **One path for every point.** A live one differs only in being taken first - see
+        :meth:`_read_chunk` - and in being dropped wherever another would be kept, so the timer,
+        the outage report and the reset on success apply to both alike. They used to be two
+        paths, and the live one ignored the timer until a copy of its handling was added, which
+        then took the failure half and not the success half.
+
         Args:
             force (bool): ignore the retry timer. Tests pass True; the thread passes False, so
                 an outage costs one attempt per retry rather than one per point
         """
-        self._post_live()
         if not force and self._clock() < self._retry_at:
+            # Live points are not kept for the timer: InfluxDB has just failed a post, each would
+            # cost the whole of influx.timeout against a server that drops connections, and held
+            # until the timer ran they would be posted late, describing the past, all at once.
+            self._drop_live()
             return
         while True:
             outcome = self._post_next_chunk()
@@ -721,48 +732,26 @@ class InfluxWriter:
                 # spend all five of its attempts in a moment - the guarantee is five *separate*
                 # attempts, so a middlebox answering 4xx for a briefly-down InfluxDB cannot
                 # discard what it holds.
-                self._retry_at = self._clock() + self._retry_delay
-                self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
+                self._note_failure()
                 return
-            self._retry_delay = RETRY_FIRST_SECONDS
-            self._retry_at = 0.0
+            self._note_success()
 
-    def _post_live(self) -> None:
-        """Post each live signal once, dropping any that cannot be sent.
+    def _note_failure(self) -> None:
+        """Start the retry timer, or lengthen it while failures continue."""
+        self._retry_at = self._clock() + self._retry_delay
+        self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
 
-        **Not while waiting on the retry timer.** InfluxDB has just failed a post, so these would
-        almost certainly fail too, and each would cost the whole of ``influx.timeout`` against a
-        server that drops connections - during an outage the thread spent its time on doomed
-        heartbeats, and one queued at shutdown took the whole of ``CLOSE_SECONDS``. They are
-        dropped instead, which is what a live point that cannot be sent always was: holding them
-        for the timer would post them late, describing the past, all at once.
+    def _note_success(self) -> None:
+        """Clear the retry timer: whatever was posted, InfluxDB is taking points."""
+        self._retry_delay = RETRY_FIRST_SECONDS
+        self._retry_at = 0.0
 
-        A live post that fails for want of InfluxDB starts the timer like any other, so that an
-        outage with no backlog to discover it is still an outage.
-        """
-        while True:
-            with self._lock:
-                if not self._live:
-                    return
-                if self._clock() < self._retry_at:
-                    dropped = len(self._live)
-                    self._live.clear()
-                    logging.debug("Dropped %d live InfluxDB point(s) for %s during an outage", dropped, self.name)
-                    return
-                entry = self._live.popleft()
-                destination = self._destinations.get(entry.source)
-            if destination is None:
-                continue
-            status = self._post(entry.line, destination)
-            if status is True:
-                continue
-            # Dropped, as a heartbeat always was: replaying one would record that the collector
-            # was up at some past moment, which says nothing about now.
-            logging.debug("Dropped a live InfluxDB point for %s: the post failed", entry.label)
-            if not is_point_rejection(status):
-                self._report_outage(destination, status)
-                self._retry_at = self._clock() + self._retry_delay
-                self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
+    def _drop_live(self) -> None:
+        """Drop the live points waiting, which are not kept for the retry timer."""
+        with self._lock:
+            if self._live:
+                logging.debug("Dropped %d live InfluxDB point(s) for %s during an outage", len(self._live), self.name)
+                self._live.clear()
 
     def _post_next_chunk(self):
         """Post the next chunk of waiting points.
@@ -785,6 +774,10 @@ class InfluxWriter:
                 break
             if result == "refused":
                 outcome = "refused"
+        if outcome == "failed" and chunk[0].live:
+            # A chunk is all live or none of it. A live one is dropped whole rather than kept for
+            # the retry, which is the whole of what makes a heartbeat different on this path.
+            done = chunk
         with self._lock:
             self._consume(done)
         if outcome != "failed":
@@ -834,11 +827,17 @@ class InfluxWriter:
         return "refused"
 
     def _read_chunk(self):
-        """Return up to a chunk of the oldest waiting points, spool first, then memory.
+        """Return up to a chunk of waiting points: live ones first, then the spool, then memory.
+
+        Live first because a heartbeat behind a backlog would be posted after it, however long
+        that took, and arrive describing the past. Each chunk comes from one queue, so it is all
+        live or none of it.
 
         Returns:
             list: _Entry, oldest first
         """
+        if self._live:
+            return list(self._live)[:CHUNK_POINTS]
         if self._disk or self._segments:
             chunk = self._read_spool()
             if chunk:
@@ -962,7 +961,7 @@ class InfluxWriter:
             # By identity, not by count. The queue is only ever trimmed from the front, but a
             # point arriving while this chunk was out may have evicted some of it for the bound
             # already, and removing len(done) from the front then took points never posted.
-            queue = self._memory.get((done[0].source, done[0].instance))
+            queue = self._live if done[0].live else self._memory.get((done[0].source, done[0].instance))
             for entry in done:
                 if queue and queue[0] is entry:
                     queue.popleft()
@@ -1038,6 +1037,9 @@ class InfluxWriter:
             entry (_Entry): the refused point
             status (int): the status it was refused with
         """
+        if entry.live:
+            logging.debug("Dropped a live InfluxDB point for %s: refused with HTTP %s", entry.label, status)
+            return
         entry.rejections += 1
         if entry.rejections >= MAX_POINT_REJECTIONS:
             logging.warning(
