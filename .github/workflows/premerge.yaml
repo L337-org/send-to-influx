@@ -118,10 +118,11 @@ jobs:
     # on main's ruleset (a failure blocks merging), so the streaming path and the writer are
     # exercised against the real things on every PR.
     #
-    # The name still says MQTT broker: it is the required status check's name in the ruleset,
-    # and renaming a required check means changing the ruleset in the same change.
+    # The name says nothing about which services, so adding one does not make it wrong. It is a
+    # required status check in main's ruleset, which names it: renaming it means changing the
+    # ruleset too.
     runs-on: [ubuntu-latest]
-    name: Run integration tests (MQTT broker)
+    name: Run integration tests
     # 148s observed max with the broker alone; the InfluxDB image pull adds to that.
     timeout-minutes: 20
     steps:

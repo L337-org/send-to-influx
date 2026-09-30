@@ -45,7 +45,7 @@ target-version = ["py310"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Integration tests (tests/integration/, marked `integration`) are excluded from the
-# default run - they need a real external dependency (an MQTT broker) and are run
+# default run - they need a real external dependency (an MQTT broker, an InfluxDB) and are run
 # explicitly with `pytest -m integration`. They also skip cleanly when the dependency is
 # absent, so an explicit run without a broker is a skip, not a failure.
 # Chaos runs (tests/chaos/, marked `chaos`) are excluded for a different reason from the
