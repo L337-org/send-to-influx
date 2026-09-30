@@ -20,8 +20,20 @@ so the operator is told instead, once.
 
 **What is carried over from the in-memory buffer this replaces:** a connection failure, a 5xx,
 a 408 or a 429 says nothing about the point and never counts against it; a non-transient 4xx is
-the server refusing the point, and a point refused ``MAX_POINT_REJECTIONS`` times is dropped. A
-refused point goes to the back of the spool rather than blocking the points behind it.
+the server refusing the point, and a point refused ``MAX_POINT_REJECTIONS`` times is dropped.
+
+**A refused point waits for its own next attempt, in ``retry.jsonl`` beside the segments.** A
+refusal means InfluxDB answered and took the rest of the chunk - a missing database, a field type
+conflict - so nothing is down and the other sources carry on. The refused point is written to the
+retry file, with when it is due, before the spool moves past it, so a kill loses nothing; when it
+is due it is appended to the spool again. Its attempts are 5, 10, 20 and 40 seconds apart. A
+retry file rather than the spool itself, because the spool is read strictly in order, and a point
+there that is not yet due would hold up everything behind it.
+
+**The shared retry timer is for an outage**: no answer, or a 5xx, when every post fails and each
+costs a timeout. A pass the far end refused in its entirety starts it too, since that looks like
+something in front of InfluxDB refusing everything, and five quick attempts would then discard the
+backlog; but InfluxDB answered, so heartbeats are still posted while it runs.
 
 **The destination is resolved when a point is sent**, from the latest settings a handler for its
 source was built with, so a rebuilt database or a move between InfluxDB versions receives the
@@ -76,6 +88,9 @@ LIVE_POINTS = 200
 
 #: How many times the server may refuse one point before it is given up on.
 MAX_POINT_REJECTIONS = 5
+
+#: Where refused points wait for their next attempt, in the spool's own directory.
+RETRY_FILE_NAME = "retry.jsonl"
 
 #: 4xx statuses that describe the connection or the server's state rather than the point:
 #: 408 Request Timeout and 429 Too Many Requests. Counting them would age valid points out of the
@@ -267,6 +282,12 @@ class InfluxWriter:
         self._live = deque(maxlen=LIVE_POINTS)
         self._retry_at = 0.0
         self._retry_delay = RETRY_FIRST_SECONDS
+        # Why the timer is running: an outage drops live points, a refusal of everything does not.
+        self._refusing = False
+        # Refused points waiting for their next attempt, as (due on self._clock, _Entry), and
+        # whether that has changed since the retry file was last written.
+        self._waiting = []
+        self._waiting_changed = False
         self._last_error = None
         self._session = requests.Session()
         self._segments = []
@@ -343,6 +364,7 @@ class InfluxWriter:
             self._segments.remove(segment)
             del self._sizes[segment]
         self._pointer, self._stale_segment = self._read_pointer()
+        self._waiting = self._read_retry_file()
         # Appends always start a segment of their own: whatever a previous run left is read-only,
         # so a line it was cut off in the middle of stays the last line of its file.
         self._start_segment()
@@ -434,6 +456,99 @@ class InfluxWriter:
                 exc,
                 identity="pointer",
             )
+
+    def _read_retry_file(self):
+        """Return the refused points a previous run left waiting, each with when it is due.
+
+        Due times are stored as wall-clock time, since the monotonic clock does not survive a
+        restart, and turned back into this run's clock here. A line that cannot be read is
+        stepped past, said.
+
+        Returns:
+            list: (due, _Entry), oldest first
+        """
+        path = os.path.join(self.directory, RETRY_FILE_NAME)
+        waiting = []
+        try:
+            with open(path, "rb") as handle:
+                lines = handle.readlines()
+        except FileNotFoundError:
+            return waiting
+        wall, now = time.time(), self._clock()
+        for raw in lines:
+            try:
+                record = json.loads(raw)
+                entry = _Entry(str(record["s"]), record.get("i"), str(record["l"]), int(record.get("r", 0)))
+                due = now + max(0.0, float(record["d"]) - wall)
+            except (ValueError, TypeError, KeyError) as exc:
+                logging.warning("Skipped an unreadable point in %r: %r", path, exc)
+                continue
+            waiting.append((due, entry))
+        return waiting
+
+    def _write_retry_file(self) -> None:
+        """Record the refused points waiting, synced, so a kill does not lose them.
+
+        Rewritten whole, by atomic rename, because it holds only the points currently waiting -
+        a handful - and each changes it. Removed when nothing is waiting. In memory mode there is
+        nowhere to write it, and the points wait in memory like everything else.
+        """
+        if not self._disk or not self._waiting_changed:
+            return
+        self._waiting_changed = False
+        path = os.path.join(self.directory, RETRY_FILE_NAME)
+        try:
+            if not self._waiting:
+                if os.path.exists(path):
+                    os.remove(path)
+                return
+            wall, now = time.time(), self._clock()
+            temporary = path + ".tmp"
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                for due, entry in self._waiting:
+                    record = {"s": entry.source, "i": entry.instance, "l": entry.line, "r": entry.rejections}
+                    record["d"] = wall + (due - now)
+                    handle.write((json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except OSError as exc:
+            # Tolerated: the points are still waiting in memory and are retried while the
+            # process lives. What is lost is only their surviving a kill, which is said.
+            self._problems.report(
+                "retry-file",
+                logging.WARNING,
+                "Could not record the refused points waiting to be retried in %r, so they are lost if "
+                "the process is killed: %r",
+                path,
+                exc,
+                identity="retry-file",
+            )
+
+    def _release_due(self) -> None:
+        """Put refused points whose next attempt is due back into the spool.
+
+        Appended first and removed from the retry file afterwards, so a kill between the two
+        costs an extra attempt rather than the point.
+        """
+        now = self._clock()
+        due = [entry for when, entry in self._waiting if when <= now]
+        if not due:
+            return
+        for entry in due:
+            self._append(entry)
+        self._waiting = [(when, entry) for when, entry in self._waiting if when > now]
+        self._waiting_changed = True
+        self._write_retry_file()
+
+    def _next_due(self):
+        """Return when the next refused point is due, or None where none is waiting.
+
+        Returns:
+            float or None: on this writer's clock
+        """
+        return min((when for when, _entry in self._waiting), default=None)
 
     def _start_segment(self) -> None:
         """Close the segment being appended to and start the next.
@@ -649,6 +764,9 @@ class InfluxWriter:
     def pending(self):
         """Return whether any buffered point is still waiting to be sent.
 
+        Not a refused point waiting for its next attempt: that is not waiting to be sent now, and
+        counting it would have the thread poll, and a drain wait for, a retry up to 40 s away.
+
         Returns:
             bool: True where the spool or memory holds something unsent
         """
@@ -699,8 +817,14 @@ class InfluxWriter:
             if closing:
                 return
             with self._lock:
-                waiting = self.pending()
-            timeout = max(0.1, self._retry_at - self._clock()) if waiting else None
+                waiting = self.pending() or bool(self._live)
+                due = self._next_due()
+            timeouts = []
+            if waiting:
+                timeouts.append(max(0.1, self._retry_at - self._clock()))
+            if due is not None:
+                timeouts.append(max(0.1, due - self._clock()))
+            timeout = min(timeouts) if timeouts else None
             self._wake.wait(timeout)
             self._wake.clear()
 
@@ -717,7 +841,14 @@ class InfluxWriter:
             force (bool): ignore the retry timer. Tests pass True; the thread passes False, so
                 an outage costs one attempt per retry rather than one per point
         """
+        with self._lock:
+            self._release_due()
         if not force and self._clock() < self._retry_at:
+            if self._refusing:
+                # The far end refused everything, but it answered: a heartbeat costs no timeout,
+                # and dropping them made every collector look dead for as long as it went on.
+                self._post_live_only()
+                return
             # Live points are not kept for the timer: InfluxDB has just failed a post, each would
             # cost the whole of influx.timeout against a server that drops connections, and held
             # until the timer ran they would be posted late, describing the past, all at once.
@@ -727,25 +858,51 @@ class InfluxWriter:
             outcome = self._post_next_chunk()
             if outcome == "idle":
                 return
-            if outcome in ("failed", "refused"):
-                # A refusal waits for the timer too. The refused point has gone to the back of
-                # the spool, and without the wait this same pass would read it straight back and
-                # spend all five of its attempts in a moment - the guarantee is five *separate*
-                # attempts, so a middlebox answering 4xx for a briefly-down InfluxDB cannot
-                # discard what it holds.
+            if outcome == "failed":
                 self._note_failure()
                 return
+            if outcome == "refused_all":
+                # Nothing in the pass was taken, which looks like something in front of InfluxDB
+                # refusing everything. Each refused point waits for its own retry, but without
+                # this the pass would carry on through the backlog, sending all of it to wait
+                # and spending its attempts in minutes; the timer holds that to a chunk a period.
+                self._note_failure(refusing=True)
+                return
+            # "sent" or "refused": InfluxDB answered and took points, so it is not down. A point
+            # it refused is waiting for its own retry, not in the spool, so the pass cannot read
+            # it straight back.
             self._note_success()
 
-    def _note_failure(self) -> None:
-        """Start the retry timer, or lengthen it while failures continue."""
+    def _note_failure(self, refusing=False) -> None:
+        """Start the retry timer, or lengthen it while failures continue.
+
+        Args:
+            refusing (bool): True where the far end answered and refused everything, rather than
+                not answering, so live points are still posted while the timer runs
+        """
         self._retry_at = self._clock() + self._retry_delay
         self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
+        self._refusing = refusing
 
     def _note_success(self) -> None:
         """Clear the retry timer: whatever was posted, InfluxDB is taking points."""
         self._retry_delay = RETRY_FIRST_SECONDS
         self._retry_at = 0.0
+        self._refusing = False
+
+    def _post_live_only(self) -> None:
+        """Post the live points waiting, and nothing else, while a refusal holds the spool back."""
+        while True:
+            with self._lock:
+                if not self._live:
+                    return
+            outcome = self._post_next_chunk(live_only=True)
+            if outcome == "failed":
+                # Not answering now: an outage after all, which the timer is for.
+                self._note_failure()
+                return
+            if outcome == "idle":
+                return
 
     def _drop_live(self) -> None:
         """Drop the live points waiting, which are not kept for the retry timer."""
@@ -754,27 +911,38 @@ class InfluxWriter:
                 logging.debug("Dropped %d live InfluxDB point(s) for %s during an outage", len(self._live), self.name)
                 self._live.clear()
 
-    def _post_next_chunk(self):
+    def _post_next_chunk(self, live_only=False):
         """Post the next chunk of waiting points.
+
+        Args:
+            live_only (bool): take only live points, leaving the spool and memory alone
 
         Returns:
             str: "idle" where nothing was waiting, "sent" where the chunk was dealt with,
-            "refused" where it was dealt with but the server refused a point in it, and
-            "failed" where InfluxDB could not be reached, leaving the rest of it where it was
+            "refused" where it was dealt with but the server refused a point in it,
+            "refused_all" where it refused every point, and "failed" where InfluxDB could not be
+            reached, leaving the rest of it where it was
         """
         with self._lock:
-            chunk = self._read_chunk()
+            chunk = self._read_chunk(live_only)
         if not chunk:
             return "idle"
         done = []
         outcome = "sent"
+        accepted = []
         for group in _by_database(chunk):
-            result = self._send_run(group, done)
+            result = self._send_run(group, done, accepted)
             if result == "failed":
                 outcome = "failed"
                 break
             if result == "refused":
                 outcome = "refused"
+        if outcome == "refused" and not accepted:
+            outcome = "refused_all"
+        with self._lock:
+            # Before the spool moves past the refused points, so a kill in between leaves each
+            # in both places - one attempt too many - rather than in neither.
+            self._write_retry_file()
         if outcome == "failed" and chunk[0].live:
             # A chunk is all live or none of it. A live one is dropped whole rather than kept for
             # the retry, which is the whole of what makes a heartbeat different on this path.
@@ -803,16 +971,17 @@ class InfluxWriter:
                 identity="stuck",
             )
             return "failed"
-        if outcome != "failed":
+        if outcome not in ("failed", "refused_all"):
             self._problems.cleared("write", "InfluxDB is taking points from %s again", self.name)
         return outcome
 
-    def _send_run(self, run, done):
+    def _send_run(self, run, done, accepted):
         """Post a run of points bound for one database, adding each one dealt with to ``done``.
 
         Args:
             run (list): _Entry, all for the same source
             done (list): filled in, in order, with every entry sent, refused or dropped
+            accepted (list): filled in with every entry the server took
 
         Returns:
             str: "sent", "refused" where the server refused at least one point, or "failed"
@@ -833,6 +1002,7 @@ class InfluxWriter:
         status = self._post("\n".join(entry.line for entry in run), destination)
         if status is True:
             done.extend(run)
+            accepted.extend(run)
             return "sent"
         if not is_point_rejection(status):
             self._report_outage(destination, status)
@@ -846,20 +1016,25 @@ class InfluxWriter:
                 return "failed"
             if single is not True:
                 self._refused(entry, single)
+            else:
+                accepted.append(entry)
             done.append(entry)
         return "refused"
 
-    def _read_chunk(self):
+    def _read_chunk(self, live_only=False):
         """Return up to a chunk of waiting points: live ones first, then the spool, then memory.
 
         Live first because a heartbeat behind a backlog would be posted after it, however long
         that took, and arrive describing the past. Each chunk comes from one queue, so it is all
         live or none of it.
 
+        Args:
+            live_only (bool): return live points or nothing
+
         Returns:
             list: _Entry, oldest first
         """
-        if self._live:
+        if self._live or live_only:
             return list(self._live)[:CHUNK_POINTS]
         if self._disk or self._segments:
             chunk = self._read_spool()
@@ -993,6 +1168,11 @@ class InfluxWriter:
                 if queue and queue[0] is entry:
                     queue.popleft()
                     removed += 1
+                elif not any(queued is entry for queued in queue or ()):
+                    # Evicted for the bound while it was out being posted: dealt with and gone,
+                    # which is progress. Not counting it made a pass whose whole chunk was
+                    # evicted report itself stuck - a false "this is a bug" and a started timer.
+                    removed += 1
             return removed
         segment, offset = done[-1].end
         if segment not in self._sizes:
@@ -1047,8 +1227,11 @@ class InfluxWriter:
             # append looked up its size, found none, and raised KeyError out of send_data -
             # which the memory fallback does not catch, so every later write failed and a
             # control process died on it. Appends move to a fresh segment, or to memory.
-            self._append_file.close()
-            self._append_file = None
+            # Already closed and cleared where a failed write gave the segment up, which is how it
+            # usually comes to be unreadable.
+            if self._append_file is not None:
+                self._append_file.close()
+                self._append_file = None
             try:
                 self._start_segment()
             except OSError as error:
@@ -1079,8 +1262,12 @@ class InfluxWriter:
                 status,
             )
             return
+        delay = min(RETRY_FIRST_SECONDS * 2 ** (entry.rejections - 1), RETRY_MAX_SECONDS)
         with self._lock:
-            self._append(_Entry(entry.source, entry.instance, entry.line, entry.rejections))
+            self._waiting_changed = True
+            self._waiting.append(
+                (self._clock() + delay, _Entry(entry.source, entry.instance, entry.line, entry.rejections))
+            )
 
     def _report_outage(self, destination, status) -> None:
         """Say once for the outage that InfluxDB is not taking points.

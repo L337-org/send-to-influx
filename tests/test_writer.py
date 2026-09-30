@@ -18,6 +18,7 @@ __license__ = "MIT"
 import json
 import logging
 import os
+import stat
 import threading
 import time
 from unittest.mock import MagicMock
@@ -571,34 +572,155 @@ class TestRefusals:
         """Five locks' points arriving during a refusal must not spend a waiting point's five
         attempts at once: the attempts are five *separate* ones, so a middlebox answering 4xx
         for a briefly-down InfluxDB cannot discard the backlog. The in-memory buffer met this by
-        flushing once per cycle rather than once per lock; the writer meets it with its timer."""
+        flushing once per cycle rather than once per lock; the writer meets it by holding a
+        refused point in the retry file until its next attempt is due."""
         now = [1000.0]
         writer = _writer(tmp_path, post, clock=lambda: now[0])
         writer._ensure_thread = lambda: None
-        writer.submit("nuki", None, "nuki,device=Gate stateValue=1 1700000000")
         writer.set_destination("nuki", *DESTINATION)
+        writer.submit("nuki", None, "nuki,device=Gate stateValue=1 1700000000")
         post.answer = lambda body: 400
         writer.run_until_idle(force=False)
         for lock in range(5):
             writer.submit("nuki", None, f"nuki,device=Lock{lock} stateValue=1 1700000000")
             writer.run_until_idle(force=False)
-        with writer._lock:
-            waiting = writer._read_spool()
-        charged = [entry.rejections for entry in waiting if "Gate" in entry.line]
+        charged = [entry.rejections for _due, entry in writer._waiting if "Gate" in entry.line]
         assert charged == [1], f"the waiting point was charged {charged} for one attempt"
         writer.close(0)
 
     @pytest.mark.parametrize("status", [400, 404, 422])
     def test_a_point_refused_five_times_is_dropped_and_said(self, tmp_path, post, status, caplog):
-        writer = _writer(tmp_path, post, inline=True)
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
         post.answer = lambda body: status
         with caplog.at_level(logging.WARNING):
             writer.submit("hue", None, "hue x=1 1700000000")
             for _ in range(writer_module.MAX_POINT_REJECTIONS):
-                writer.run_until_idle()
-        assert not writer.pending()
+                writer.run_until_idle(force=True)
+                now[0] += writer_module.RETRY_MAX_SECONDS
+        assert not writer.pending() and not writer._waiting
         assert sum("after 5 refusals" in r.getMessage() for r in caplog.records) == 1
         assert f"HTTP {status}" in caplog.text
+        writer.close(0)
+
+    def test_the_attempts_are_spaced_out_and_lengthen(self, tmp_path, post):
+        """5, 10, 20 and 40 seconds between a refused point's attempts. Posted the moment each
+        is due, and not before: a pass run in between leaves it waiting."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        post.answer = lambda body: 400
+        writer.submit("hue", None, "hue x=1 1700000000")
+        writer.run_until_idle(force=False)
+        attempts = [now[0]]
+        while writer._waiting:
+            due = writer._next_due()
+            now[0] = due - 0.01
+            before = len(post.bodies)
+            writer.run_until_idle(force=True)
+            assert len(post.bodies) == before, "a refused point was posted before it was due"
+            now[0] = due
+            writer.run_until_idle(force=True)
+            attempts.append(now[0])
+        gaps = [later - earlier for earlier, later in zip(attempts, attempts[1:])]
+        first = writer_module.RETRY_FIRST_SECONDS
+        assert gaps == pytest.approx([first, 2 * first, 4 * first, 8 * first])
+        writer.close(0)
+
+    def test_one_refusing_database_holds_up_no_other_source(self, tmp_path, post):
+        """Found in review, and the regression this layout exists to prevent. A source whose
+        database is missing is refused every write; with the refusal starting the shared timer,
+        a heartbeat arriving while it ran was dropped - 1 of 60 reached InfluxDB - and the
+        healthy source's points waited up to a minute behind it."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        writer.set_destination("bad", "http://influx/write?db=missing", {})
+        post.answer = lambda body: 404 if body.startswith("bad") else True
+        delivered = []
+        for tick in range(0, 600, 10):
+            now[0] = 1000.0 + tick
+            writer.submit("bad", None, f"bad v={tick}i {tick}")
+            writer.submit("hue", None, f"hue v={tick}i {tick}")
+            writer.submit("hue", None, f"collector_status,source=hue ok=1 {tick}", buffered=False)
+            before = len(post.bodies)
+            writer.run_until_idle(force=False)
+            delivered.extend(body for _url, body in post.bodies[before:] if not body.startswith("bad"))
+        lines = [line for body in delivered for line in body.split("\n")]
+        assert sum(line.startswith("collector_status") for line in lines) == 60
+        assert sum(line.startswith("hue v=") for line in lines) == 60
+        assert writer._retry_at == 0.0, "a refusal started the shared timer"
+        writer.close(0)
+
+    def test_a_refused_point_survives_a_kill(self, tmp_path, post):
+        """In the retry file before the spool's pointer moves past it, and read back by the next
+        start with the time it still has to wait."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        post.answer = lambda body: 400
+        writer.submit("hue", None, "hue x=1 1700000000")
+        writer.run_until_idle(force=False)
+        path = os.path.join(writer.directory, writer_module.RETRY_FILE_NAME)
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        assert not writer.pending(), "the point is still in the spool as well"
+        # A kill: nothing closed, the lock let go as the process's death would.
+        writer._close_lock_file()
+        again = _writer(tmp_path, post, clock=lambda: now[0])
+        again._ensure_thread = lambda: None
+        ((due, entry),) = again._waiting
+        assert (entry.line, entry.rejections) == ("hue x=1 1700000000", 1)
+        assert 0 < due - now[0] <= writer_module.RETRY_FIRST_SECONDS
+        post.answer = lambda body: True
+        post.bodies.clear()
+        now[0] = due
+        again.run_until_idle(force=False)
+        assert post.lines() == ["hue x=1 1700000000"]
+        assert not os.path.exists(path), "an empty retry file was left behind"
+        again.close(0)
+
+    def test_the_thread_wakes_for_a_retry_with_nothing_else_arriving(self, tmp_path, post, monkeypatch):
+        """With the real thread. A refused point is not pending - nothing is waiting to be sent
+        now - so a thread that waited only for new points or the outage timer slept through its
+        retry until something unrelated was written."""
+        monkeypatch.setattr(writer_module, "RETRY_FIRST_SECONDS", 0.2)
+        writer = _writer(tmp_path, post)
+        # Refused as a batch and again alone, which is how the refused point is found; then taken.
+        answers = iter([400, 400])
+        accepted = []
+
+        def answer(body):
+            outcome = next(answers, True)
+            if outcome is True:
+                accepted.append(body)
+            return outcome
+
+        post.answer = answer
+        writer.submit("hue", None, "hue x=1 1700000000")
+        deadline = time.monotonic() + 5
+        while not accepted and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert accepted == ["hue x=1 1700000000"], "the retry was never posted"
+        writer.close(1)
+
+    def test_everything_refused_backs_off_but_heartbeats_still_go(self, tmp_path, post):
+        """A pass refused in its entirety looks like something in front of InfluxDB refusing
+        everything, and without the back-off the whole backlog would be sent to wait and spend
+        its attempts in minutes. But the far end answered, so a heartbeat costs no timeout."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        post.answer = lambda body: True if body.startswith("collector_status") else 403
+        for n in range(3 * writer_module.CHUNK_POINTS):
+            writer.submit("hue", None, f"hue n={n}i {n}")
+        writer.run_until_idle(force=False)
+        assert writer._retry_at > now[0]
+        assert len(writer._waiting) == writer_module.CHUNK_POINTS, "more than a chunk went to wait"
+        writer.submit("hue", None, "collector_status,source=hue ok=1 1", buffered=False)
+        post.bodies.clear()
+        writer.run_until_idle(force=False)
+        assert post.lines() == ["collector_status,source=hue ok=1 1"]
         writer.close(0)
 
 
@@ -697,6 +819,28 @@ class TestMemoryOnly:
         assert not second.pending()
         second.close(0)
 
+    def test_a_chunk_evicted_whole_while_it_is_out_is_not_a_stuck_pass(self, tmp_path, post, caplog):
+        """Found in review. With the queue at its bound, more than a chunk arriving during one
+        post evicts every point of that chunk; those points were posted and are gone, which is
+        progress, but finding none of them at the front read as a pass that removed nothing - a
+        false "this is a bug" at ERROR and a started retry timer."""
+        writer = _writer(tmp_path, post, buffer_mb=0)
+        writer._ensure_thread = lambda: None
+        for n in range(writer_module.MEMORY_POINTS_PER_WORKER):
+            writer.submit("hue", None, f"hue n={n}i {n}")
+        arriving = iter(range(10_000, 10_000 + writer_module.CHUNK_POINTS + 5))
+
+        def busy(body):
+            for n in arriving:
+                writer.submit("hue", None, f"hue n={n}i {n}")
+            return True
+
+        post.answer = busy
+        with caplog.at_level(logging.ERROR):
+            assert writer._post_next_chunk() == "sent"
+        assert "this is a bug" not in caplog.text
+        writer.close(0)
+
 
 class TestADiskThatFails:
     def test_points_go_to_memory_and_it_is_said_once(self, tmp_path, post, caplog):
@@ -729,6 +873,22 @@ class TestADiskThatFails:
             writer.submit("hue", None, "hue x=2 1700000000")
         assert _spooled(writer) == ["hue x=1 1700000000", "hue x=2 1700000000"]
         assert "being spooled to disk again" in caplog.text
+        writer.close(0)
+
+    def test_the_segment_a_write_failed_in_can_be_set_aside_later(self, tmp_path, post, caplog):
+        """Found in review. A failed write gives the append segment up and closes its file; when
+        reading that segment later failed too, setting it aside closed the file again, and an
+        AttributeError on None reached the thread as a bug rather than the clean fall back."""
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        writer.submit("hue", None, "hue x=1 1700000000")
+        writer._append_file.write = MagicMock(side_effect=OSError(5, "Input/output error"))
+        writer.submit("hue", None, "hue x=2 1700000000")
+        assert writer._append_file is None, "the case this exists for has changed shape"
+        writer._read_segment = MagicMock(side_effect=OSError(5, "Input/output error"))
+        with caplog.at_level(logging.WARNING), writer._lock:
+            assert writer._read_spool() == []
+        assert "Setting aside the unreadable spool segment" in caplog.text
         writer.close(0)
 
 

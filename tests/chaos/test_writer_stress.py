@@ -1,9 +1,11 @@
 """The writer under load and random outages, with its real thread running.
 
 Several threads submit data and heartbeats at once while the post fails and recovers at random,
-the way a busy install sees an unreliable InfluxDB. What is checked is what matters and can be
-lost silently: every data point arrives, no heartbeat is posted long after it was submitted, the
-backlog drains in batches rather than a point at a time, and the writer's thread never dies.
+the way a busy install sees an unreliable InfluxDB. One more source writes to a database that
+refuses every point, as a missing one does, and must hold up none of the others. What is checked
+is what matters and can be lost silently: every data point arrives, no heartbeat is posted long
+after it was submitted, the backlog drains in batches rather than a point at a time, and the
+writer's thread never dies.
 
 Seeded like the chaos run: the seed is printed, and ``CHAOS_SEED`` repeats it.
 ``WRITER_STRESS_SECONDS`` sets how long it submits for - short on a pull request, long nightly
@@ -54,6 +56,12 @@ class _UnreliableInflux:
         time.sleep(delay)
         if self.down.is_set():
             raise requests.exceptions.ConnectionError("down")
+        if "db=refused" in url:
+            response = MagicMock()
+            error = requests.exceptions.HTTPError("404 database not found")
+            error.response = MagicMock(status_code=404)
+            response.raise_for_status = MagicMock(side_effect=error)
+            return response
         now = time.monotonic()
         lines = data.split("\n")
         with self._lock:
@@ -81,7 +89,7 @@ def test_the_writer_under_load_and_random_outages(tmp_path, monkeypatch, caplog)
     influx = _UnreliableInflux(random.Random(seed + 1))
     writer = InfluxWriter("stress", str(tmp_path / "spool"), {}, buffer_mb=100)
     writer._session.post = influx
-    for source in SOURCES:
+    for source in SOURCES + ("refused",):
         writer.set_destination(source, f"http://influx/write?db={source}", {})
     died = []
     monkeypatch.setattr(threading, "excepthook", lambda args: died.append(repr(args.exc_value)))
@@ -111,6 +119,7 @@ def test_the_writer_under_load_and_random_outages(tmp_path, monkeypatch, caplog)
     threads = [
         threading.Thread(target=feed, args=(source, random.Random(seed + i + 2))) for i, source in enumerate(SOURCES)
     ]
+    threads.append(threading.Thread(target=_feed_refused, args=(writer, stop)))
     threads.append(threading.Thread(target=outages))
     with caplog.at_level(logging.ERROR):
         for thread in threads:
@@ -126,6 +135,20 @@ def test_the_writer_under_load_and_random_outages(tmp_path, monkeypatch, caplog)
         writer.close(2)
 
     _assert_healthy(seed, died, alive, caplog, submitted, influx, drain_from)
+
+
+def _feed_refused(writer, stop) -> None:
+    """Submit points to the database that refuses every one, until the run ends.
+
+    Args:
+        writer (InfluxWriter): the writer under test
+        stop (float): the monotonic time to stop at
+    """
+    n = 0
+    while time.monotonic() < stop:
+        writer.submit("refused", None, f"refused n={n}i {n}")
+        n += 1
+        time.sleep(0.05)
 
 
 def _assert_healthy(seed, died, alive, caplog, submitted, influx, drain_from) -> None:

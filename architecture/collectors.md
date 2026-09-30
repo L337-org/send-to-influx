@@ -100,7 +100,7 @@ timeout. The buffer kept the points that were collected; it could not stop fewer
   `use_buffer=False` - the `collector_status` heartbeat and Hue's device-class annotations -
   makes an entry marked live, in a short queue of its own. The send path takes that queue first,
   so a heartbeat never waits behind a backlog and arrives describing the past, and drops a live
-  entry wherever it would keep another: a failed post, a refusal, or the retry timer running.
+  entry wherever it would keep another: a failed post, a refusal, or the outage timer running.
   The timer, the outage report and the reset on success are the one set of code for both, so a
   failed heartbeat shows an outage and a successful one clears it. They were two paths at first,
   and the live one ignored the timer until a copy of its handling was added, which took the
@@ -108,7 +108,8 @@ timeout. The buffer kept the points that were collected; it could not stop fewer
 - **Failures are said once for the outage** through a `RepeatingProblem`: once when InfluxDB
   stops taking points, naming the URL without its query string; once when it takes them again;
   and separately for points dropped. After a failure the thread waits a retry timer (5 s doubling
-  to 60 s) rather than trying on every new point.
+  to 60 s) rather than trying on every new point. **The timer is for an outage** - no answer, or
+  a 5xx - not for a refusal: see below.
 - **A segment's file and its recorded size always agree.** A failed write or sync is cut back off
   the file (segments are opened unbuffered so a close cannot flush it back) and appends move to a
   fresh segment. A failed sync once left its bytes uncounted, the reader ran ahead of the size, and
@@ -143,12 +144,26 @@ down InfluxDB cannot mass-discard a backlog. What is given up on, after `MAX_POI
 (5) separate refusals, is a point the server itself keeps refusing: malformed (400), outside the
 retention window (422 on InfluxDB 2), oversized (413).
 
-A refused chunk falls back to posting point by point to isolate the offender, and a refused point
-goes to the back of the spool so the points behind it keep flowing. **A refusal waits for the
-retry timer like a failure does.** Without that, the same pass reads the refused point straight
-back and spends all five attempts in a moment - found while replacing the in-memory buffer's
-equivalent guard, and held by
-`tests/test_writer.py::TestRefusals::test_a_refusal_is_charged_once_per_attempt_however_many_points_arrive`.
+A refused chunk falls back to posting point by point to isolate the offender. **A refused point
+waits for its own next attempt in `retry.jsonl`**, beside the segments, with when it is due: 5,
+10, 20 and 40 seconds apart. It is written there, synced, before the spool's pointer moves past it,
+so a kill costs at most one attempt too many; when due it is appended to the spool again. A
+separate file because the spool is read strictly in order, and a point there not yet due would
+hold up everything behind it. The file holds only the points currently waiting, so it is
+rewritten whole by atomic rename, and removed when empty. Due times are stored as wall-clock
+time, which survives a restart where the monotonic clock does not.
+
+**A refusal does not start the shared retry timer.** It did at first, so that the same pass
+could not read the refused point straight back and spend its five attempts in a moment. But the
+timer is shared, and a refusal means InfluxDB answered and took the rest: a source whose database
+is missing, refused every write, held the timer at 60 s, and every heartbeat arriving while it ran
+was dropped - 1 in 60 reached InfluxDB in a reproduction, and the stress run with such a source
+lost 10,904 of 24,584 points (found in review). The retry file is what stops the straight-back
+read now. **A pass refused in its entirety still backs off**, because that looks like something in
+front of InfluxDB refusing everything, and carrying on would send the whole backlog to wait and
+spend its attempts in minutes; the timer holds that to a chunk a period. It is marked as a
+refusal rather than an outage, so heartbeats are still posted while it runs. Held by
+`TestRefusals` in `tests/test_writer.py`, and by the stress run's always-refusing source.
 `validate_settings()` still rejects duplicate `sources:` entries, since two workers for one name
 would be one worker's identity twice.
 
@@ -351,8 +366,8 @@ With the in-memory buffer, calling the base `send_data()` per lock flushed the b
 charging a waiting point one refusal each time: a five-lock install spent all of
 `MAX_POINT_REJECTIONS` in one cycle. `send_data()` took a `flush=` for Nuki to pass for its first
 lock only. The writer posts from its own thread on its own timer, so writing a point no longer
-posts anything and `flush=` is gone; the property it protected is now the writer's, and its guard
-is named above.
+posts anything and `flush=` is gone; the property it protected is now the writer's retry file,
+held by `test_a_refusal_is_charged_once_per_attempt_however_many_points_arrive`.
 
 ## The Nuki device-tag migration
 
