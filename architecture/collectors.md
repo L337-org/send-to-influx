@@ -162,7 +162,9 @@ lost 10,904 of 24,584 points (found in review). The retry file is what stops the
 read now. **A pass refused in its entirety still backs off**, because that looks like something in
 front of InfluxDB refusing everything, and carrying on would send the whole backlog to wait and
 spend its attempts in minutes; the timer holds that to a chunk a period. It is marked as a
-refusal rather than an outage, so heartbeats are still posted while it runs. Held by
+refusal rather than an outage, so heartbeats are still posted while it runs. A chunk of heartbeats
+alone never counts as everything refused: the missing database's own heartbeat is refused on every
+collection, and in a live run backing off for it held the next data behind it. Held by
 `TestRefusals` in `tests/test_writer.py`, and by the stress run's always-refusing source.
 `validate_settings()` still rejects duplicate `sources:` entries, since two workers for one name
 would be one worker's identity twice.

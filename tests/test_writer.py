@@ -680,6 +680,21 @@ class TestRefusals:
         assert not os.path.exists(path), "an empty retry file was left behind"
         again.close(0)
 
+    def test_a_refused_heartbeat_alone_does_not_back_off(self, tmp_path, post):
+        """Found in a live run: the missing database's own heartbeat was refused, in a chunk of
+        its own, and counted as everything refused - so the next data waited out the back-off."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        writer.set_destination("gone", "http://influx/write?db=missing", {})
+        post.answer = lambda body: 404 if "gone" in body else True
+        writer.submit("gone", None, "collector_status,source=gone ok=1 1", buffered=False)
+        writer.submit("hue", None, "hue x=1 1700000000")
+        writer.run_until_idle(force=False)
+        assert writer._retry_at == 0.0
+        assert "hue x=1 1700000000" in post.lines()
+        writer.close(0)
+
     def test_the_thread_wakes_for_a_retry_with_nothing_else_arriving(self, tmp_path, post, monkeypatch):
         """With the real thread. A refused point is not pending - nothing is waiting to be sent
         now - so a thread that waited only for new points or the outage timer slept through its
@@ -703,6 +718,54 @@ class TestRefusals:
             time.sleep(0.02)
         assert accepted == ["hue x=1 1700000000"], "the retry was never posted"
         writer.close(1)
+
+    def test_an_unreadable_retry_file_line_is_skipped_and_said(self, tmp_path, post, caplog):
+        """A line cut off by a power cut, or garbage, costs that line and not the start."""
+        writer = _writer(tmp_path, post)
+        writer._close_lock_file()
+        good = {"s": "hue", "i": None, "l": "hue x=1 1700000000", "r": 2, "d": time.time() + 30}
+        with open(os.path.join(writer.directory, writer_module.RETRY_FILE_NAME), "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(good) + "\n" + "not json at all\n" + '{"s": "hue", "l": "cut')
+        with caplog.at_level(logging.WARNING):
+            again = _writer(tmp_path, post)
+        assert [(entry.line, entry.rejections) for _due, entry in again._waiting] == [("hue x=1 1700000000", 2)]
+        assert sum("Skipped an unreadable point" in r.getMessage() for r in caplog.records) == 2
+        again.close(0)
+
+    def test_in_memory_mode_a_refused_point_waits_in_memory(self, tmp_path, post):
+        """There is no spool to hold a retry file, so it paces in memory like everything else."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, buffer_mb=0, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        post.answer = lambda body: 400
+        writer.submit("hue", None, "hue x=1 1700000000")
+        writer.run_until_idle(force=False)
+        assert [entry.line for _due, entry in writer._waiting] == ["hue x=1 1700000000"]
+        assert not os.path.exists(writer.directory), "memory mode wrote a retry file"
+        post.answer = lambda body: True
+        now[0] = writer._next_due()
+        writer.run_until_idle(force=False)
+        assert post.lines()[-1] == "hue x=1 1700000000"
+        writer.close(0)
+
+    def test_a_point_refused_while_the_disk_was_away_is_recorded_when_it_comes_back(self, tmp_path, post):
+        """Refused during a disk failure, it waits in memory; the append that finds the disk
+        again writes the retry file, rather than leaving it to the next pass."""
+        now = [1000.0]
+        writer = _writer(tmp_path, post, clock=lambda: now[0])
+        writer._ensure_thread = lambda: None
+        real = writer._write_entry
+        writer._write_entry = MagicMock(side_effect=OSError(5, "Input/output error"))
+        post.answer = lambda body: 400
+        writer.submit("hue", None, "hue x=1 1700000000")
+        writer.run_until_idle(force=False)
+        path = os.path.join(writer.directory, writer_module.RETRY_FILE_NAME)
+        assert writer._waiting and not os.path.exists(path), "the case this exists for has changed shape"
+        writer._write_entry = real
+        writer.submit("hue", None, "hue x=2 1700000000")
+        with open(path, encoding="utf-8") as handle:
+            assert [json.loads(raw)["l"] for raw in handle] == ["hue x=1 1700000000"]
+        writer.close(0)
 
     def test_everything_refused_backs_off_but_heartbeats_still_go(self, tmp_path, post):
         """A pass refused in its entirety looks like something in front of InfluxDB refusing

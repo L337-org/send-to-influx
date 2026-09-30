@@ -178,3 +178,35 @@ def test_an_outage_loses_nothing_and_replays_no_heartbeat(database, proxy, tmp_p
     # Two databases' worth of interleaved points, so one post each per chunk rather than one
     # per point: the regression the stress run found.
     assert points / len(drained) >= 20, f"{points} points took {len(drained)} posts"
+
+
+def test_a_missing_database_holds_up_no_other_source(database, tmp_path, monkeypatch, caplog):
+    """A source whose database does not exist, against a real InfluxDB: it answers 404, which is
+    a refusal, and every point for it is given up on after five attempts while the healthy
+    source's points and heartbeats all arrive. Asserted against the server, not a script, because
+    the design rests on what the server answers - checked by hand for 1.8 and 2.7 as well."""
+    import logging
+
+    monkeypatch.setattr(writer_module, "RETRY_FIRST_SECONDS", 0.1)
+    monkeypatch.setattr(writer_module, "RETRY_MAX_SECONDS", 0.8)
+    writer = InfluxWriter("missing", str(tmp_path / "spool"), {}, buffer_mb=1)
+    writer.set_destination("hue", f"{INFLUX_URL}/write?db={database}&precision=s", {"timeout": 2})
+    writer.set_destination("gone", f"{INFLUX_URL}/write?db=no_such_database_{database}&precision=s", {"timeout": 2})
+    try:
+        with caplog.at_level(logging.WARNING):
+            for n in range(20):
+                writer.submit("gone", None, f"gone n={n}i {1700000000 + n}")
+                writer.submit("hue", None, f"hue n={n}i {1700000000 + n}")
+                writer.submit("hue", None, f"collector_status,source=hue ok=1 {1700001000 + n}", buffered=False)
+                time.sleep(0.05)
+            deadline = time.monotonic() + 30
+            while (getattr(writer, "_waiting", None) or writer.pending()) and time.monotonic() < deadline:
+                time.sleep(0.05)
+        waiting = getattr(writer, "_waiting", [])
+        assert not waiting, f"{len(waiting)} refused point(s) still waiting after 30s"
+    finally:
+        writer.close(2)
+    assert sorted(row[1] for row in _query(database, 'SELECT n FROM "hue"')) == list(range(20))
+    assert len(_query(database, 'SELECT ok FROM "collector_status"')) == 20, "a heartbeat was held up"
+    assert sum("after 5 refusals, the last with HTTP 404" in r.getMessage() for r in caplog.records) == 20
+    assert not os.path.exists(os.path.join(writer.directory, writer_module.RETRY_FILE_NAME))

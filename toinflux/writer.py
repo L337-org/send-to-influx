@@ -624,6 +624,10 @@ class InfluxWriter:
                 self._move_memory_to_spool()
                 self._write_entry(entry)
                 self._disk = True
+                # Points refused while the disk was away waited in memory only, and a kill lost
+                # them until the next pass wrote the file. Written now, as the disk comes back.
+                self._waiting_changed = True
+                self._write_retry_file()
                 self._problems.cleared("memory", "InfluxDB points for %s are being spooled to disk again", self.name)
                 return
             except OSError:
@@ -937,7 +941,10 @@ class InfluxWriter:
                 break
             if result == "refused":
                 outcome = "refused"
-        if outcome == "refused" and not accepted:
+        # Not for a live chunk: one refused heartbeat - from a source whose database is missing,
+        # say - says nothing about whether the far end refuses everything, and backing off for it
+        # held up the next data behind it (seen in a live run).
+        if outcome == "refused" and not accepted and not chunk[0].live:
             outcome = "refused_all"
         with self._lock:
             # Before the spool moves past the refused points, so a kill in between leaves each
