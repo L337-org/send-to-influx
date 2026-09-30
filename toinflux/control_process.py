@@ -50,7 +50,7 @@ from toinflux.general import (
 )
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
-from toinflux.staging import build_ladder, delivered_level
+from toinflux.staging import build_ladder, delivered_level, pinned_plan
 from toinflux.transitions import TransitionLog
 from toinflux import writer
 
@@ -679,10 +679,6 @@ class ControlProcess:
         """
         if not held:
             return plan
-        from types import MappingProxyType
-
-        from toinflux.staging import Dwell, Stage
-
         known = self.transitions.states()
         # **Only a value that still means what it meant when it was written.** The log
         # survives a document edit - a device plan change is logged, not erased - so it can
@@ -705,19 +701,7 @@ class ControlProcess:
         # What is left here is the value itself: a driven device holds a number, and a boolean
         # left over from when it was switched is a record of something that never happened.
         pinned = {device: known[device] for device in held if holdable_value(known.get(device))}
-        if not pinned:
-            return plan
-        return tuple(
-            Dwell(
-                stage=Stage(
-                    level=dwell.stage.level,
-                    declared=dwell.stage.declared,
-                    states=MappingProxyType({**dwell.stage.states, **pinned}),
-                ),
-                seconds=dwell.seconds,
-            )
-            for dwell in plan
-        )
+        return pinned_plan(plan, pinned, self.controller.last_step.curve, self.controller.driven)
 
     def _record(self, state, moment, terms=None, delivered=None) -> None:
         """Write this cycle to the control's history, where there is one.

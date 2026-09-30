@@ -345,9 +345,18 @@ this is how it is wired and what must not change.
   by `staging.delivered_level()` against the capped ladder the controller kept in
   `last_step.curve`. **Rung levels alone are wrong for driven devices**, and that was the design's
   first reading: a lamp on a 0 to 1000 ladder at demand 400 is planned as one dwell *at level
-  0* with the lamp at 40%, so the rung says 0. `dwell_level()` reads a dwell carrying driven
-  devices back off the curve instead. Two driven devices held at values that disagree about
-  where on the curve the window is are averaged - accepted.
+  0* with the lamp at 40%, so the rung says 0. **What each dwell stands for is set by
+  `plan_window()`, where it is known**, as `Dwell.level`: the rung's own for a window split
+  between rungs, and for a lone dwell the level its driven values sit at, found by
+  `dwell_level()` nearest the demand. Recovering it afterwards from the states alone was the
+  first implementation, and generated ladders in `TestDeliveredOverGeneratedLadders` showed it
+  wrong wherever a curve doubles back - a lamp that brightens then dims, two lamps crossfading -
+  because the states then fit in more than one place: a crossfade asked for 1043 recorded 181.
+  **`pinned_plan()` re-reads a dwell only where its driven values placed it**, which is where a
+  hold is visible in one number; a dwell placed by switched devices keeps its rung, so a hold
+  there does not show - accepted, and said in CONTROLS.md. Two driven devices held at values
+  that disagree about where the window is are averaged, and only where no stretch has them
+  agreeing - accepted.
 - **Which cycles are recorded is decided in `ControlProcess.cycle()`**: `active` after a window
   was spent, `fail_safe` where the cycle failed while the gate had it operating. A gate that
   raises counts as operating, because `enable_when` is only evaluated once the control is

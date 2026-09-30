@@ -650,6 +650,12 @@ driven devices on one control are held at values that put the window at differen
 the ladder, the average of the two is recorded. It is what the devices were *told*;
 whether they obeyed is for their own source's data to show.
 
+**A held driven device shows only where it is what places the window.** Where the window is
+split between two rungs, the switched devices are what move between them, and a lamp held at
+its old value changes neither rung: `delivered` still reads the demand. One number cannot say
+both where the switched devices put the window and where a held lamp would, so it says the
+first.
+
 **`state` is `active`** for a cycle that ran the loop, and **`fail_safe`** for a cycle inside
 the active period that could not - an input too old or unreadable, a rule that could not be
 evaluated - and put the devices in their safe state instead. A `fail_safe` point carries
@@ -681,7 +687,8 @@ history with `list_fields` and `query_history`, scoped to one control with `inst
   capacity, not tuning, and no gain fixes it.
 * **`delivered` apart from `demand`**: the ladder could not do what was asked this window - a
   device held by `min_transition_seconds`, a window too short to split between two rungs, or
-  a `max_level` cap.
+  a `max_level` cap. A held driven device shows here only where no switched device is moving
+  in the same window.
 * **Once `input` sits on `setpoint`, `i` is the level it takes to hold it there** under the
   conditions of the moment. Watch it across a few days and it shows how much that varies.
 * **A step in `kp`, `ki` or `kd`** marks a retune. The gains are written on every point, so

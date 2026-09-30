@@ -172,9 +172,11 @@ class ControlRecord(DataHandler):
             "kind": "gauge",
             "description": "The level the devices were commanded to over the cycle's window, on demand's scale: "
             "switched devices time-weighted across the stages used, a dimmable device read off the ladder "
-            "at the value it was set to. Below or above demand where a device was held by "
-            "min_transition_seconds or the ladder could not reach demand. What was commanded, not "
-            "confirmed; the device's own source shows whether it switched.",
+            "at the value it was set to. Apart from demand where the ladder could not reach it, a "
+            "switched device was held, or a dimmable one that sets the level on its own was held by "
+            "min_transition_seconds; a dimmable one held while switched devices share the window does "
+            "not show here. What was commanded, not confirmed; the device's own source shows whether "
+            "it switched.",
         },
         "state": {
             "kind": "state",
