@@ -726,7 +726,9 @@ evening.
 matches the document, what each device was last commanded to, and which devices are currently
 held by their `min_transition_seconds`. That is the tool to reach for when an output moves
 against its input, because the integral is the usual explanation and is invisible from the
-device side.
+device side.  Where `controls.db` is set it also names where the control's cycles are recorded,
+as a `source` and `instance` for `query_history`, so a caller tuning the gains can read the loop
+over time rather than only as it stands; where it is not, it names that setting.
 
 What is checked, and when
 -------------------------

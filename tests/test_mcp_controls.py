@@ -1144,6 +1144,22 @@ class TestReportingWhatAControlHasWorkedOut:
         assert lamp["age_seconds"] is not None
         assert lamp["forced"] is True, "the guard's exit command is a safe state"
 
+    def test_it_points_at_the_recorded_history(self, state_directory, bridge):
+        """The record is not a collected source, so nothing else here leads a caller to it."""
+        name = self._ran(state_directory)
+        state_directory.set_settings("controls", db="controls")
+        assert _control_state_result(name, state_directory.settings_file)["history"] == {
+            "source": "controls",
+            "instance": name,
+        }
+
+    def test_it_names_the_setting_when_nothing_is_recorded(self, state_directory, bridge):
+        name = self._ran(state_directory)
+        assert _control_state_result(name, state_directory.settings_file)["history"] == {
+            "recorded": False,
+            "setting": "controls.db",
+        }
+
     def test_it_names_devices_held_by_their_minimum(self, state_directory, bridge):
         """Which is the other thing that makes a control look like it is ignoring its input."""
         name = self._ran(state_directory, minimum=3600)

@@ -299,11 +299,11 @@ network-facing server.
 
 ## Control tools (`toinflux/mcp_controls.py`, `register_control_tools()`)
 
-Six tools in two tiers behind two switches.
+Seven tools in two tiers behind two switches.
 
 **`controls.enabled` registers the read tier**: `list_controls` for what is stored and what is
-running, `get_control` for one document as held on disk, and `get_control_schema` for the document
-format itself. **`controls.mcp_write` then adds the write tier**: `save_control`,
+running, `get_control` for one document as held on disk, `get_control_state` for what a running
+control has since worked out, and `get_control_schema` for the document format itself. **`controls.mcp_write` then adds the write tier**: `save_control`,
 `set_control_enabled` and `delete_control`.
 
 **Neither switch implies the other, and `control_writes_enabled()` requires both.** Running the loops
@@ -313,6 +313,13 @@ actuates devices unattended for as long as it exists - a larger grant than a col
 Both are read with a strict `is True`. The predicate checks both rather than only its own key: one
 that half-answers its own question is one a later call site gets wrong, in the direction of granting
 a capability.
+
+**`get_control_state` points at the record rather than repeating it.** Its `history` field
+names the `controls` source and the control as its instance where `controls.db` is set, and the
+setting where it is not. The record is written by the control processes, not collected, so it is
+absent from `sources:` and nothing else in a control's result would lead a caller to it; reading
+it is `query_history`'s job, which already carries the field meanings, so a second reader here
+would only be a second thing to keep in step.
 
 **Register each tier only where its switch is true.** A capability that is switched off should be
 absent from the advertised surface rather than present and refusing, because a tool a model can see

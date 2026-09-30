@@ -68,6 +68,7 @@ from toinflux.controls import (
 
 # Aliased on import: each of these shares a name with the tool that wraps it, and the tool
 # has to keep that name because it is the advertised surface.
+from toinflux.control_record import RECORD_SOURCE, record_destination
 from toinflux.controls import delete_control as remove_stored_control
 from toinflux.controls import list_controls as stored_control_names
 from toinflux.controls import save_control as store_control
@@ -262,6 +263,9 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
         `matches_document` is false once the control has been edited, when that memory stops
         meaning anything. `held_by_minimum` names devices still inside their
         `min_transition_seconds`, so they are being commanded what they already have.
+
+        `history` says where its cycles are recorded: `query_history` with that `source` and
+        `instance` returns the input, setpoint, demand and PID terms over time.
 
         Fails where there is no such control, naming it. Reads stored files and changes
         nothing. See `get_control` for the document and `list_controls` for what is running.
@@ -554,7 +558,30 @@ def _control_state_result(name, settings_file=None, supervisor=None):
         for device in held
         if device not in driven or holdable_value(record_of(log, device))
     )
+    entry["history"] = _history_of(name, settings_file)
     return entry
+
+
+def _history_of(name, settings_file):
+    """Say where a control's cycles can be read back, or that they are not being recorded.
+
+    **The pointer, rather than the history itself.** `query_history` already reads a source
+    over a window with its field meanings attached, so repeating that here would be a second
+    reader of the same data. What a caller lacks is the knowledge that the control's past is
+    queryable at all, and under which source and instance - the source is not in `sources:`,
+    so nothing else in this result would lead there.
+
+    Args:
+        name (str): the control, which is the record's instance
+        settings_file (str or None): the settings path the process was started with
+
+    Returns:
+        dict: ``source`` and ``instance`` where recorded, else ``recorded: false`` and the
+        setting that would turn it on
+    """
+    if record_destination(load_settings(settings_file)):
+        return {"source": RECORD_SOURCE, "instance": name}
+    return {"recorded": False, "setting": f"{RECORD_SOURCE}.db"}
 
 
 def record_of(log, device):

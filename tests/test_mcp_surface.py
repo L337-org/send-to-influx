@@ -179,11 +179,15 @@ WRITE_EFFECT_PHRASES = {
 # `get_control` naming it back, which the discrimination guard requires and is right to: the
 # two are precisely the pair a caller would otherwise confuse, one holding what the control
 # was told and the other what it has since learned.
-MAX_TOOL_BYTES = 19_900
+# Raised again, 19,900 -> 20,000 (and the total 22,100 -> 22,200), for one sentence in
+# `get_control_state` pointing at `query_history` for a control's recorded cycles. The
+# controls' history is not a collected source, so without it nothing a caller reads leads
+# there: the record would exist and a model tuning the gains would never find it.
+MAX_TOOL_BYTES = 20_000
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 22_100
+MAX_TOTAL_BYTES = 22_200
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],
