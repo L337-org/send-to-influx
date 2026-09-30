@@ -54,7 +54,7 @@ from toinflux.influx import (
 from toinflux.general import INSTANCED_SOURCES, expand_sources, shares_measurement, render_values
 from toinflux.mcp_common import (
     close_session,
-    configured_sources,
+    readable_sources,
     register_tool,
     resolve_handler,
     resolve_handlers,
@@ -1040,7 +1040,7 @@ def _list_sources_result(settings, settings_file):
         dict: the ``list_sources`` payload
     """
     out = []
-    for source in configured_sources(settings):
+    for source in readable_sources(settings):
         try:
             handler = resolve_handler(source, settings, settings_file)
         except ToolParamError:
@@ -1794,7 +1794,7 @@ def build_documentation(settings, settings_file):
         "per-device prefix (e.g. a Nuki lock's name); the meanings below are keyed by the base name.",
         "",
     ]
-    for source in configured_sources(settings):
+    for source in readable_sources(settings):
         try:
             handler = resolve_handler(source, settings, settings_file)
         except ToolParamError:

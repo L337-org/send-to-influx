@@ -28,10 +28,13 @@ import time
 
 import requests
 
+from toinflux.control_record import ACTIVE, FAIL_SAFE, ControlRecord, record_destination
 from toinflux.controller import Controller
 from toinflux.controls import (
     DEFAULT_CYCLE_SECONDS,
+    control_path,
     device_identity,
+    held_by_minimum,
     holdable_value,
     load_control,
     validate_control,
@@ -48,8 +51,9 @@ from toinflux.general import (
 )
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
-from toinflux.staging import build_ladder
+from toinflux.staging import build_ladder, delivered_level, device_windows, pinned_plan
 from toinflux.transitions import TransitionLog
+from toinflux import writer
 
 #: How many cycles old a stored loop memory may be and still describe the present. Five,
 #: because a restart to pick up an edit or a new build takes seconds and this covers it
@@ -389,6 +393,9 @@ class ControlProcess:
         self._resume_the_loop()
         self._session = session or requests.Session()
         self._owns_session = session is None
+        # Built once, like the transition log, because it carries the write buffer an outage
+        # fills: rebuilt per cycle, a backlog would be discarded with each one.
+        self.record = ControlRecord(settings_file, instance=name) if record_destination(self.settings) else None
         self._bindings = None
         self.guard = DeviceGuard(
             name,
@@ -486,8 +493,13 @@ class ControlProcess:
         """
         self._bindings = None
         moment = moment or datetime.datetime.now(datetime.timezone.utc)
+        # Whether this cycle is one the record covers. Unknown until the gate answers, and a
+        # gate that raises has already found the control enabled and inside its active period,
+        # because `enable_when` - the only thing it reads - is checked after both.
+        operating = None
         try:
             decision = self.gate.decide(self._gather, moment)
+            operating = decision.actuating
             if decision.edge == "closed":
                 # Held, not merely stopped: an error measured against a setpoint nobody is
                 # chasing is not information, and integrating it means resuming with a
@@ -513,7 +525,7 @@ class ControlProcess:
                 # `set_auto_mode(True)` is a no-op while already automatic, so this costs
                 # nothing on the ordinary path.
                 self.controller.resume()
-                self._spend_window(dt, sleep)
+                self._spend_window(dt, sleep, moment)
             else:
                 # **Not acting means held, as an invariant rather than as a list of edges.**
                 # The closing edge above holds, and `_fail_safe` holds, and between them they
@@ -540,15 +552,21 @@ class ControlProcess:
             # one bad cycle is worse than one that skips it - so the devices go safe, the
             # reason is logged once here where it is handled, and the loop carries on.
             self._fail_safe(exc)
+            # Not where the failure was the closing edge's own command: that cycle is the first
+            # one outside the active period, and nothing is recorded there.
+            if operating is not False:
+                self._record(FAIL_SAFE, moment)
             sleep(self.cycle_seconds)
             return None
 
-    def _spend_window(self, dt, sleep) -> None:
+    def _spend_window(self, dt, sleep, moment=None) -> None:
         """Command each rung of this window's plan in turn, waiting out its dwell.
 
         Args:
             dt (float or None): seconds since the previous cycle
             sleep (callable): how to wait
+            moment (datetime.datetime or None): when the cycle began, which the record of it
+                is timestamped with
 
         Raises:
             ConfigError: where the window or the cap is unusable
@@ -574,9 +592,10 @@ class ControlProcess:
         # already has, which is what `min_transition_seconds` means for a device that is
         # adjusted rather than switched: how often the adjustment is made.
         driven = self.controller.driven
-        demand = self.controller.step(
-            bindings, dt, frozen=frozenset(frozen - set(driven)), states=self.transitions.states()
-        )
+        # Read once, before anything is commanded: the step plans from it, and the record counts
+        # this window's changes against it.
+        before = self.transitions.states()
+        demand = self.controller.step(bindings, dt, frozen=frozenset(frozen - set(driven)), states=before)
         demand = self._hold(demand, frozen & set(driven))
         # After the step, so what is stored is what the loop actually knows now. Written every
         # cycle: the file is a few hundred bytes and the alternative is a memory that is
@@ -618,6 +637,20 @@ class ControlProcess:
             )
             self._apply(dict(dwell.stage.states))
             sleep(dwell.seconds)
+        # **After the window, and stamped with its start.** Written first, an InfluxDB that
+        # takes its whole timeout to refuse would hold the devices' first command back by that
+        # long, every cycle of an outage; the start is the moment the terms describe. A window
+        # that failed part way is recorded by the fail-safe instead, which is what it became.
+        #
+        # From the plan as commanded, after `_hold`, so a device pinned by its minimum shows
+        # as what it was told rather than what the loop wanted.
+        terms = self.controller.last_step
+        self._record(ACTIVE, moment, terms, delivered_level(demand, terms.curve, driven))
+        if self.record is not None:
+            windows = device_windows(demand, before, driven)
+            self.record.write_devices(
+                windows, held_by_minimum(frozen, driven, before), driven, timestamp=self._stamp(moment)
+            )
 
     def _resume_the_loop(self) -> None:
         """Put back the integral this control had built before it was last restarted.
@@ -653,10 +686,6 @@ class ControlProcess:
         """
         if not held:
             return plan
-        from types import MappingProxyType
-
-        from toinflux.staging import Dwell, Stage
-
         known = self.transitions.states()
         # **Only a value that still means what it meant when it was written.** The log
         # survives a document edit - a device plan change is logged, not erased - so it can
@@ -679,19 +708,32 @@ class ControlProcess:
         # What is left here is the value itself: a driven device holds a number, and a boolean
         # left over from when it was switched is a record of something that never happened.
         pinned = {device: known[device] for device in held if holdable_value(known.get(device))}
-        if not pinned:
-            return plan
-        return tuple(
-            Dwell(
-                stage=Stage(
-                    level=dwell.stage.level,
-                    declared=dwell.stage.declared,
-                    states=MappingProxyType({**dwell.stage.states, **pinned}),
-                ),
-                seconds=dwell.seconds,
-            )
-            for dwell in plan
-        )
+        return pinned_plan(plan, pinned, self.controller.last_step.curve, self.controller.driven)
+
+    def _record(self, state, moment, terms=None, delivered=None) -> None:
+        """Write this cycle to the control's history, where there is one.
+
+        Args:
+            state (str): ``active`` or ``fail_safe``
+            moment (datetime.datetime or None): when the cycle began; now when None
+            terms (StepTerms or None): the step's terms, for an active cycle
+            delivered (float or None): the level the plan delivered, for an active cycle
+        """
+        if self.record is None:
+            return
+        self.record.write(state, terms, delivered, timestamp=self._stamp(moment))
+
+    @staticmethod
+    def _stamp(moment) -> int:
+        """Return the epoch second a cycle's points are written at.
+
+        Args:
+            moment (datetime.datetime or None): when the cycle began; now when None
+
+        Returns:
+            int: epoch seconds
+        """
+        return int((moment or datetime.datetime.now(datetime.timezone.utc)).timestamp())
 
     def _fail_safe(self, reason) -> None:
         """Put the devices somewhere safe after a cycle that could not be completed.
@@ -745,6 +787,8 @@ class ControlProcess:
         """Release what this process opened."""
         if self._owns_session:
             self._session.close()
+        if self.record is not None:
+            self.record.session.close()
 
 
 def run_control(name, settings_file=None, heartbeat=None, cycles=None, sleep=time.sleep) -> None:
@@ -769,6 +813,13 @@ def run_control(name, settings_file=None, heartbeat=None, cycles=None, sleep=tim
     Raises:
         ConfigError: where the control cannot run at all
     """
+    # This process's own spool, named for the control, so no two processes ever share one.
+    # **Configured before the control is built, and that order is the point.** Its exit
+    # handler posts what it can and leaves the rest spooled, and must run after the device
+    # guard's so it never stands between the devices and their safe state; atexit runs
+    # handlers last-registered-first, and the guard registers its own as the control is built.
+    # Configured afterwards, as it first was, the writer's ran first.
+    writer.configure(f"control-{name}", load_settings(settings_file), settings_file)
     control = ControlProcess(name, settings_file=settings_file)
     try:
         # The gate picks it, because only the gate knows whether this control is inside its
@@ -776,7 +827,14 @@ def run_control(name, settings_file=None, heartbeat=None, cycles=None, sleep=tim
         # rather than its safe state. Clock only: nothing is read from a sensor before the
         # devices are in a known condition.
         control.guard.assert_starting_state(control.gate.starting_state(datetime.datetime.now(datetime.timezone.utc)))
-        logging.info("Control %r started, cycling every %.0fs", name, control.cycle_seconds)
+        # The file as well as the name: it is what an operator edits, and a state directory
+        # that is not the one they expect is otherwise invisible until they go looking.
+        logging.info(
+            "Control %r started from %r, cycling every %.0fs",
+            name,
+            control_path(name, settings_file),
+            control.cycle_seconds,
+        )
         completed = 0
         while cycles is None or completed < cycles:
             control.cycle(sleep=sleep)

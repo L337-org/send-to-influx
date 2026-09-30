@@ -225,22 +225,22 @@ class Nuki(MqttDataHandler):
         # anything, and changing broker should not change the data.
         return self.data
 
-    def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True) -> None:
+    def send_data(self, data=None, timestamp=None, use_buffer=True) -> None:
         """Write one point per lock, rather than one point carrying every lock's fields.
 
         ``self.data`` is ``{device: {field: value}}``, so this walks it and delegates each
         entry to the base implementation with that lock's header swapped in - the same
-        header-swap idiom ``send_heartbeat()`` uses, which keeps buffering, retry and the
-        InfluxWriteError contract exactly as they are rather than reimplementing them.
+        header-swap idiom ``send_heartbeat()`` uses, which keeps the hand-off to the writer
+        and the InfluxWriteError contract exactly as they are rather than reimplementing them.
 
         Every lock in one cycle shares a single timestamp. Letting each call default
         independently would scatter one snapshot across a second or two, so a query asking
         "what was the state at time T" could see one lock's reading and not another's.
 
         A failure on one lock does not stop the rest: each is attempted, and one
-        InfluxWriteError is raised at the end if any failed, so the worker still backs off.
-        That covers a lock whose *name* cannot be used as well as one whose write fails - see
-        the loop below, where building the header is deliberately inside the guarded block.
+        InfluxWriteError is raised at the end if any failed. The failure is a lock whose *name*
+        cannot be used - an outage never raises here, the writer holds those points - which is
+        why building the header is deliberately inside the guarded block below.
         Points are idempotent - same measurement, tag set and timestamp overwrite - so the
         retry re-writing a lock that already succeeded is harmless.
 
@@ -258,27 +258,23 @@ class Nuki(MqttDataHandler):
                 the caller's own header; defaults to ``self.data``
             timestamp (int or None): unix epoch seconds for every point in this snapshot
             use_buffer (bool): as the base implementation
-            flush (bool): as the base implementation. Accepted and honoured rather than merely tolerated: the signature
-                has to stay call-compatible with the base, or a generic caller doing ``handler.send_data(...,
-                flush=...)`` - valid for every other source - raises TypeError on this one alone. False means no flush
-                at all; True means once for the whole snapshot rather than once per lock (see the loop below).
 
         Raises:
-            InfluxWriteError: if any lock's write failed
+            InfluxWriteError: if any lock's point could not be written at all - a lock name carrying a newline
         """
         per_device = self.data if data is None else data
         if not _is_per_device(per_device):
-            # Either nothing collected - hand it to the base so the empty-reading logging and
-            # the buffer flush still happen exactly as for any other source - or a flat point
-            # from a caller that set its own header, which is the base's contract, not ours.
-            super().send_data(data=per_device, timestamp=timestamp, use_buffer=use_buffer, flush=flush)
+            # Either nothing collected - hand it to the base so the empty-reading logging
+            # happens exactly as for any other source - or a flat point from a caller that set
+            # its own header, which is the base's contract, not ours.
+            super().send_data(data=per_device, timestamp=timestamp, use_buffer=use_buffer)
             return
         if timestamp is None:
             timestamp = self.timestamp if self.timestamp is not None else int(time.time())
         original_header = self.influx_header
         failures = []
         try:
-            for index, (label, fields) in enumerate(sorted(per_device.items())):
+            for label, fields in sorted(per_device.items()):
                 try:
                     # Header construction is inside the try because it can fail: a lock name
                     # carrying a newline cannot be escaped (a newline is what separates points)
@@ -287,20 +283,7 @@ class Nuki(MqttDataHandler):
                     # promise two lines up. Lock names come from the retained MQTT `name` topic,
                     # so they are external input, not config.
                     self.influx_header = f"nuki,device={escape_key_or_tag_value(label)} "
-                    # Flush the shared backlog on the first lock only. The buffer is per
-                    # *worker*, so flushing once per lock charged the head buffered point one
-                    # rejection per lock - a five-lock install burned all of
-                    # MAX_POINT_REJECTIONS in one cycle and dropped the backlog after a single
-                    # cycle instead of five, defeating the guarantee that a middlebox answering
-                    # 4xx for a down InfluxDB cannot mass-discard it. Every lock still buffers
-                    # its own point on failure; only the flush is done once.
-                    # ...and not at all when the caller asked for no flush.
-                    super().send_data(
-                        data=fields,
-                        timestamp=timestamp,
-                        use_buffer=use_buffer,
-                        flush=flush and index == 0,
-                    )
+                    super().send_data(data=fields, timestamp=timestamp, use_buffer=use_buffer)
                 except InfluxWriteError as exc:
                     # label!r, never the raw label. A lock name comes from the retained MQTT
                     # `name` topic, and one containing a newline turned this message into two

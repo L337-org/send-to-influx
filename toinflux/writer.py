@@ -1,0 +1,1456 @@
+"""Writing to InfluxDB, off the caller's thread: a disk spool and the one thread that drains it.
+
+**Nothing that collects or controls waits on InfluxDB.** ``DataHandler.send_data()`` used to post
+in the caller's own thread, so an outage cost a collector its cadence - the failed write raised,
+the worker backed off from its ``interval`` to as long as 300 s, and the readings in between were
+never taken - and cost a control the start of its next cycle. Now ``send_data()`` hands the point
+to this process's :class:`InfluxWriter`, which appends it to a spool on disk, syncs, and returns.
+The point is committed at that moment, and a thread of the writer's own posts it.
+
+**The spool.** JSON Lines in ``<state directory>/spool/<process>/``, split into fixed-size
+segments so that sent points are removed by deleting a whole file rather than rewriting one. How
+far the thread has got is kept in a small pointer file, rewritten by atomic rename after every
+successful post and deliberately not synced: losing it in a crash costs at most one chunk sent
+twice, and InfluxDB overwrites a point with the same series, fields and timestamp.
+
+**Bounded by ``influx.buffer_mb``**, per process. When the spool is full the oldest segments go
+first. ``0`` - and a disk that cannot be written - holds points in memory instead, 500 per
+worker, lost on exit. The caller is never told which it got: nothing it could do would differ,
+so the operator is told instead, once.
+
+**What is carried over from the in-memory buffer this replaces:** a connection failure, a 5xx,
+a 408 or a 429 says nothing about the point and never counts against it; a non-transient 4xx is
+the server refusing the point, and a point refused ``MAX_POINT_REJECTIONS`` times is dropped.
+
+**A refused point waits for its own next attempt, in ``retry.jsonl`` beside the segments.** A
+refusal means InfluxDB answered and took the rest of the chunk - a missing database, a field type
+conflict - so nothing is down and the other sources carry on. The refused point is written to the
+retry file, with when it is due, before the spool moves past it, so a kill loses nothing; when it
+is due it is appended to the spool again. Its attempts are 5, 10, 20 and 40 seconds apart. A
+retry file rather than the spool itself, because the spool is read strictly in order, and a point
+there that is not yet due would hold up everything behind it.
+
+**The shared retry timer is for an outage**: no answer, or a 5xx, when every post fails and each
+costs a timeout. A pass the far end refused in its entirety starts it too, since that looks like
+something in front of InfluxDB refusing everything, and five quick attempts would then discard the
+backlog; but InfluxDB answered, so heartbeats are still posted while it runs.
+
+**The destination is resolved when a point is sent**, from the latest settings a handler for its
+source was built with, so a rebuilt database or a move between InfluxDB versions receives the
+backlog as well as new points. A point whose source is no longer configured is dropped, said.
+"""
+
+__author__ = "Gavin Lucas"
+__copyright__ = "Copyright (C) 2026 Gavin Lucas"
+__license__ = "MIT"
+
+import atexit
+import errno
+import fcntl
+import itertools
+import json
+import logging
+import os
+import threading
+import time
+import traceback
+import warnings
+from collections import deque
+from dataclasses import dataclass
+
+import requests
+import urllib3
+
+from toinflux.general import RepeatingProblem, resolve_state_dir
+
+#: Where every process's spool directory lives, under the state directory.
+SPOOL_DIR_NAME = "spool"
+
+#: The spool's size bound when ``influx.buffer_mb`` is not set, and its range.
+BUFFER_MB_DEFAULT = 100
+BUFFER_MB_MIN = 0
+BUFFER_MB_MAX = 1024
+
+#: How large a segment grows before appends move to a new one. Small enough that even the 1 MB
+#: minimum leaves eight segments to drop from, so the bound is kept to within an eighth.
+SEGMENT_BYTES = 128 * 1024
+
+#: How many points are posted per request. InfluxDB accepts newline-joined bodies, so draining a
+#: long backlog costs a handful of requests rather than one per point.
+CHUNK_POINTS = 100
+
+#: How many points each worker may hold in memory, where there is no spool to hold them.
+MEMORY_POINTS_PER_WORKER = 500
+
+#: How many unbuffered points - heartbeats, annotations - may wait for the thread. They are live
+#: signals with no replay value, so a full queue drops the oldest rather than growing.
+LIVE_POINTS = 200
+
+#: How many times the server may refuse one point before it is given up on.
+MAX_POINT_REJECTIONS = 5
+
+#: Where refused points wait for their next attempt, in the spool's own directory.
+RETRY_FILE_NAME = "retry.jsonl"
+
+#: 4xx statuses that describe the connection or the server's state rather than the point:
+#: 408 Request Timeout and 429 Too Many Requests. Counting them would age valid points out of the
+#: spool during rate limiting.
+TRANSIENT_CLIENT_ERRORS = frozenset({408, 429})
+
+#: The wait after a failed post, doubling to the ceiling while InfluxDB stays unreachable. The
+#: ceiling is short because a new point does not trigger a post during an outage - only this
+#: timer does - so it is also the longest a recovery goes unnoticed.
+RETRY_FIRST_SECONDS = 5.0
+RETRY_MAX_SECONDS = 60.0
+
+#: How long a stopping process gives the thread to post what is still waiting. Whatever is left
+#: stays spooled for the next start.
+CLOSE_SECONDS = 5.0
+
+
+def is_point_rejection(status_code):
+    """Return whether a status means the server received the point and refused it.
+
+    A 4xx other than 408 and 429, as opposed to a connection failure (None), a server error
+    (5xx) or a rate limit, none of which says anything about the point itself.
+
+    Args:
+        status_code (int or None): the status the post returned, or None where none arrived
+
+    Returns:
+        bool: True where the point itself was refused
+    """
+    return status_code is not None and 400 <= status_code < 500 and status_code not in TRANSIENT_CLIENT_ERRORS
+
+
+def build_write_request(source_settings, influx_settings):
+    """Return the URL and request arguments for posting a source's points.
+
+    ``bucket``, falling back to ``db``, on InfluxDB 2 (``influx.token`` set); ``db`` on InfluxDB 1.
+    The same choice ``influx.resolve_db()`` makes for reads, so reads and writes cannot disagree.
+
+    Args:
+        source_settings (dict): the source's own settings section
+        influx_settings (dict): the ``influx`` section
+
+    Returns:
+        tuple: (url, kwargs for ``requests.Session.post``)
+
+    Raises:
+        KeyError: where a key the write needs is missing, which validation refuses first
+    """
+    timeout = influx_settings.get("timeout", 5)
+    if influx_settings.get("token"):
+        url = (
+            f'{influx_settings["url"]}/api/v2/write'
+            f'?org={influx_settings["org"]}'
+            f'&bucket={source_settings.get("bucket", source_settings.get("db"))}'
+            f"&precision=s"
+        )
+        kwargs = {"headers": {"Authorization": f'Token {influx_settings["token"]}'}}
+    else:
+        url = f'{influx_settings["url"]}/write?db={source_settings["db"]}&precision=s'
+        kwargs = {"auth": (influx_settings["user"], influx_settings["password"])}
+    kwargs["verify"] = not influx_settings.get("insecure", False)
+    kwargs["timeout"] = timeout
+    return url, kwargs
+
+
+def buffer_mb_problem(influx_settings):
+    """Return why ``influx.buffer_mb`` is unusable, or None where it is usable or absent.
+
+    Args:
+        influx_settings (dict): the ``influx`` section
+
+    Returns:
+        str or None: the error, naming the setting
+    """
+    if "buffer_mb" not in influx_settings:
+        return None
+    value = influx_settings["buffer_mb"]
+    if isinstance(value, bool) or not isinstance(value, int) or not BUFFER_MB_MIN <= value <= BUFFER_MB_MAX:
+        return (
+            f"influx.buffer_mb must be a whole number of megabytes from {BUFFER_MB_MIN} to {BUFFER_MB_MAX} "
+            f"(got {value!r}); 0 holds unsent points in memory only"
+        )
+    return None
+
+
+def _destinations(settings):
+    """Return every settings section's write destination, keyed by section name.
+
+    Only sections that name a database. Used to seed a starting writer, so points spooled by a
+    previous run can be sent before their source's handler has been built this time.
+
+    Args:
+        settings (dict): the parsed settings document
+
+    Returns:
+        dict: section name to (url, kwargs)
+    """
+    influx_settings = settings.get("influx") or {}
+    found = {}
+    for name, section in settings.items():
+        if name == "influx" or not isinstance(section, dict):
+            continue
+        if not (section.get("db") or (influx_settings.get("token") and section.get("bucket"))):
+            continue
+        try:
+            found[name] = build_write_request(section, influx_settings)
+        except KeyError:
+            # Validation refuses an influx section missing a key the write needs, so only a
+            # process started without validating reaches here; its handlers fail loudly first.
+            continue
+    return found
+
+
+@dataclass(slots=True)
+class _Entry:
+    """One point waiting to be sent.
+
+    Attributes:
+        source (str): the source it belongs to, which is how its destination is found
+        instance (str or None): the instance that wrote it
+        line (str): the line-protocol point
+        rejections (int): how many times the server has refused it
+        end (tuple or None): where it ends in the spool, as (segment, offset); None in memory
+        live (bool): a live signal - a heartbeat - which is dropped where anything else would be
+            kept, because sent late it would describe the past
+    """
+
+    source: str
+    instance: "str | None"
+    line: str
+    rejections: int = 0
+    end: "tuple | None" = None
+    live: bool = False
+
+    def encoded(self):
+        """Return this entry as one spool line.
+
+        Returns:
+            bytes: the JSON object and its newline
+        """
+        record = {"s": self.source, "i": self.instance, "l": self.line, "r": self.rejections}
+        return (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
+
+    @property
+    def label(self):
+        """Return the worker this entry came from, for messages.
+
+        Returns:
+            str: ``source`` or ``source@instance``
+        """
+        return self.source if self.instance in (None, self.source) else f"{self.source}@{self.instance}"
+
+
+class InfluxWriter:
+    """This process's writer: the spool, the memory fallback, and the thread that posts both.
+
+    One per process, from :func:`writer_for`. Thread-safe: callers append from any thread, and
+    only the writer's own thread posts. The lock guards the spool's files and the queues, and is
+    never held while posting.
+    """
+
+    def __init__(self, name, spool_root, settings, buffer_mb=BUFFER_MB_DEFAULT, inline=False, clock=time.monotonic):
+        """Open this process's spool, or fall back to memory where it cannot be opened.
+
+        Args:
+            name (str): which process this is, and so which spool directory it owns
+            spool_root (str): the directory every process's spool lives under
+            settings (dict): the settings in effect, to seed destinations from
+            buffer_mb (int): the spool's bound in megabytes; 0 for memory only
+            inline (bool): post from the caller's thread as each point arrives, rather than
+                from the writer's own. Only for tests, which need to see a point's fate
+                before the call returns; everything else about the path is the same
+            clock (callable): monotonic seconds, for the retry timer
+        """
+        self.name = name
+        self.directory = os.path.join(spool_root, name)
+        self.limit_bytes = int(buffer_mb) * 1024 * 1024
+        self.inline = inline
+        self._clock = clock
+        self._lock = threading.RLock()
+        self._wake = threading.Event()
+        self._stopping = False
+        self._closing = False
+        self._thread = None
+        self._problems = RepeatingProblem()
+        self._destinations = dict(_destinations(settings))
+        self._last_line = {}
+        self._memory = {}
+        self._live = deque(maxlen=LIVE_POINTS)
+        self._retry_at = 0.0
+        self._retry_delay = RETRY_FIRST_SECONDS
+        # Why the timer is running: an outage drops live points, a refusal of everything does not.
+        self._refusing = False
+        # Refused points waiting for their next attempt, as (due on self._clock, _Entry), and
+        # whether that has changed since the retry file was last written.
+        self._waiting = []
+        self._waiting_changed = False
+        self._last_error = None
+        self._session = requests.Session()
+        self._segments = []
+        self._sizes = {}
+        self._append_segment = None
+        self._append_file = None
+        self._pointer = None
+        self._stale_segment = 0
+        self._lock_file = None
+        self._disk = False
+        if self.limit_bytes:
+            self._open_spool()
+        else:
+            logging.info(
+                "InfluxDB points waiting to be sent are held in memory only (influx.buffer_mb is 0), "
+                "so they are lost if %s stops before InfluxDB can take them",
+                name,
+            )
+
+    # ------------------------------------------------------------------ setup
+
+    def _open_spool(self) -> None:
+        """Take this process's spool directory, or fall back to memory, saying why."""
+        try:
+            # The shared parent too, and first: makedirs applies its mode to the last directory
+            # only, so the parent was left at the default 0755 by the call below on its own.
+            os.makedirs(os.path.dirname(self.directory), mode=0o700, exist_ok=True)
+            os.makedirs(self.directory, mode=0o700, exist_ok=True)
+            self._lock_file = open(os.path.join(self.directory, "lock"), "a", encoding="utf-8")
+            os.chmod(self._lock_file.name, 0o600)
+            fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._load_spool()
+        except BlockingIOError:
+            # Another process has this spool: a manual `--source` run beside the service, say.
+            # Sharing it would have two processes deleting each other's segments.
+            self._close_lock_file()
+            self._memory_mode_problem(f"another process is using the spool in {self.directory!r}")
+            return
+        except OSError as exc:
+            # Anywhere in the opening, not only the directory and the lock: a disk that is full
+            # when the first segment is created raised out of the constructor and stopped the
+            # service from starting at all, where the design promises the memory fallback.
+            self._abandon_spool()
+            self._memory_mode_problem(f"the spool in {self.directory!r} could not be opened: {exc!r}")
+            return
+        waiting = sum(self._sizes.values()) - self._sizes.get(self._append_segment, 0)
+        # Said once for every process, so a spool that is not where the operator expects - the
+        # wrong state directory, a checkout rather than /var/lib - is visible the first time.
+        logging.info(
+            "InfluxDB points for %s are buffered on disk in %r, up to influx.buffer_mb (%d MB)%s",
+            self.name,
+            self.directory,
+            self.limit_bytes // (1024 * 1024),
+            ", resuming the unsent points already there" if waiting else "",
+        )
+
+    def _load_spool(self) -> None:
+        """Read what a previous run left, and open a segment of this run's own.
+
+        Raises:
+            OSError: where the spool cannot be read or a segment cannot be created
+        """
+        self._segments = sorted(
+            int(entry[: -len(".jsonl")])
+            for entry in os.listdir(self.directory)
+            if entry.endswith(".jsonl") and entry[: -len(".jsonl")].isdigit()
+        )
+        self._sizes = {segment: os.path.getsize(self._segment_path(segment)) for segment in self._segments}
+        # Every start opens a segment of its own, so a process that never wrote leaves one
+        # behind empty. Removed here rather than left for the thread, which only looks when
+        # something is written.
+        for segment in [number for number, size in self._sizes.items() if not size]:
+            os.remove(self._segment_path(segment))
+            self._segments.remove(segment)
+            del self._sizes[segment]
+        self._pointer, self._stale_segment = self._read_pointer()
+        self._waiting = self._read_retry_file()
+        # Appends always start a segment of their own: whatever a previous run left is read-only,
+        # so a line it was cut off in the middle of stays the last line of its file.
+        self._start_segment()
+        self._disk = True
+
+    def _abandon_spool(self) -> None:
+        """Let go of a spool that could not be opened, so nothing half-open is used."""
+        if self._append_file is not None:
+            try:
+                self._append_file.close()
+            except OSError:
+                # Closing a file that could not be written can fail the same way; it is being
+                # abandoned either way, and the reason is already on its way to the log.
+                pass
+            self._append_file = None
+        self._close_lock_file()
+        self._segments, self._sizes = [], {}
+        self._append_segment, self._pointer = None, None
+
+    def _close_lock_file(self) -> None:
+        """Close the lock file, if one was opened."""
+        if self._lock_file is not None:
+            self._lock_file.close()
+            self._lock_file = None
+
+    def _segment_path(self, segment):
+        """Return a segment's path.
+
+        Args:
+            segment (int): the segment's number
+
+        Returns:
+            str: its path
+        """
+        return os.path.join(self.directory, f"{segment:012d}.jsonl")
+
+    def _read_pointer(self):
+        """Return where sending should resume, and the segment a stored pointer named.
+
+        A missing or unreadable pointer resumes from the oldest segment, which re-sends what
+        that segment holds; InfluxDB absorbs the duplicates. So does one naming an offset past
+        the end of its segment, which no pointer this writer wrote can do.
+
+        The stored segment is returned whatever happens to it, so that no segment created from
+        here on is given that number: a pointer left naming a segment that has gone would
+        otherwise be trusted by the next run that reused the number, and skip what it held.
+
+        Returns:
+            tuple: ((segment, offset) to resume from, the stored pointer's segment or 0)
+        """
+        oldest = (self._segments[0], 0) if self._segments else (0, 0)
+        try:
+            with open(os.path.join(self.directory, "pointer.json"), encoding="utf-8") as handle:
+                stored = json.load(handle)
+            segment, offset = int(stored["segment"]), int(stored["offset"])
+        except FileNotFoundError:
+            return oldest, 0
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            logging.warning(
+                "The spool pointer in %r is unreadable, so sending resumes from its oldest point: %r",
+                self.directory,
+                exc,
+            )
+            return oldest, 0
+        if segment not in self._sizes:
+            return oldest, segment
+        if not 0 <= offset <= self._sizes[segment]:
+            return (segment, 0), segment
+        return (segment, offset), segment
+
+    def _write_pointer(self) -> None:
+        """Record how far sending has got. Not synced, deliberately: see the module docstring."""
+        path = os.path.join(self.directory, "pointer.json")
+        temporary = path + ".tmp"
+        try:
+            # 0600 like every other file here, created so rather than chmod-ed afterwards, so it
+            # is never readable by anyone else even for a moment.
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump({"segment": self._pointer[0], "offset": self._pointer[1]}, handle)
+            os.replace(temporary, path)
+        except OSError as exc:
+            # Tolerated: the cost of a stale pointer is a chunk sent twice after a restart.
+            self._problems.report(
+                "pointer",
+                logging.WARNING,
+                "Could not record the spool pointer in %r: %r",
+                self.directory,
+                exc,
+                identity="pointer",
+            )
+
+    def _read_retry_file(self):
+        """Return the refused points a previous run left waiting, each with when it is due.
+
+        Due times are stored as wall-clock time, since the monotonic clock does not survive a
+        restart, and turned back into this run's clock here. A line that cannot be read is
+        stepped past, said.
+
+        Returns:
+            list: (due, _Entry), oldest first
+        """
+        path = os.path.join(self.directory, RETRY_FILE_NAME)
+        waiting = []
+        try:
+            with open(path, "rb") as handle:
+                lines = handle.readlines()
+        except FileNotFoundError:
+            return waiting
+        wall, now = time.time(), self._clock()
+        for raw in lines:
+            try:
+                record = json.loads(raw)
+                entry = _Entry(str(record["s"]), record.get("i"), str(record["l"]), int(record.get("r", 0)))
+                due = now + max(0.0, float(record["d"]) - wall)
+            except (ValueError, TypeError, KeyError) as exc:
+                logging.warning("Skipped an unreadable point in %r: %r", path, exc)
+                continue
+            waiting.append((due, entry))
+        return waiting
+
+    def _write_retry_file(self) -> None:
+        """Record the refused points waiting, synced, so a kill does not lose them.
+
+        Rewritten whole, by atomic rename, because it holds only the points currently waiting -
+        a handful - and each changes it. Removed when nothing is waiting. In memory mode there is
+        nowhere to write it, and the points wait in memory like everything else.
+        """
+        if not self._disk or not self._waiting_changed:
+            return
+        self._waiting_changed = False
+        path = os.path.join(self.directory, RETRY_FILE_NAME)
+        try:
+            if not self._waiting:
+                if os.path.exists(path):
+                    os.remove(path)
+                return
+            wall, now = time.time(), self._clock()
+            temporary = path + ".tmp"
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                for due, entry in self._waiting:
+                    record = {"s": entry.source, "i": entry.instance, "l": entry.line, "r": entry.rejections}
+                    record["d"] = wall + (due - now)
+                    handle.write((json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except OSError as exc:
+            # Tolerated: the points are still waiting in memory and are retried while the
+            # process lives. What is lost is only their surviving a kill, which is said.
+            self._problems.report(
+                "retry-file",
+                logging.WARNING,
+                "Could not record the refused points waiting to be retried in %r, so they are lost if "
+                "the process is killed: %r",
+                path,
+                exc,
+                identity="retry-file",
+            )
+
+    def _release_due(self) -> None:
+        """Put refused points whose next attempt is due back into the spool.
+
+        Appended first and removed from the retry file afterwards, so a kill between the two
+        costs an extra attempt rather than the point.
+        """
+        now = self._clock()
+        due = [entry for when, entry in self._waiting if when <= now]
+        if not due:
+            return
+        for entry in due:
+            self._append(entry)
+        self._waiting = [(when, entry) for when, entry in self._waiting if when > now]
+        self._waiting_changed = True
+        self._write_retry_file()
+
+    def _next_due(self):
+        """Return when the next refused point is due, or None where none is waiting.
+
+        Returns:
+            float or None: on this writer's clock
+        """
+        return min((when for when, _entry in self._waiting), default=None)
+
+    def _start_segment(self) -> None:
+        """Close the segment being appended to and start the next.
+
+        Raises:
+            OSError: where the new segment cannot be created
+        """
+        if self._append_file is not None:
+            self._append_file.close()
+            self._append_file = None
+        # Above every number in use, the pointer's and a stale stored pointer's included, so no
+        # pointer can ever come to name a segment it was not written for.
+        segment = 1 + max(self._segments + [self._pointer[0] if self._pointer else 0, self._stale_segment])
+        path = self._segment_path(segment)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        # Unbuffered, so a write that fails leaves nothing in a buffer for the close to flush
+        # back into the file after the failed write has been cut off it.
+        self._append_file = os.fdopen(descriptor, "ab", buffering=0)
+        self._segments.append(segment)
+        self._sizes[segment] = 0
+        self._append_segment = segment
+        if self._pointer is None or self._pointer[0] not in self._sizes:
+            self._pointer = (self._segments[0], 0)
+
+    # ---------------------------------------------------------------- appending
+
+    def submit(self, source, instance, line, buffered=True) -> None:
+        """Take one point, committed to the spool before this returns where there is one.
+
+        Never raises for InfluxDB, the disk or the network: the caller is collecting or
+        controlling, and nothing it could do about a write would help.
+
+        Args:
+            source (str): the source the point belongs to
+            instance (str or None): the instance that wrote it
+            line (str): the line-protocol point
+            buffered (bool): False for a live signal with no replay value - a heartbeat - which
+                is posted once if it can be and otherwise dropped
+        """
+        with self._lock:
+            if not buffered:
+                self._live.append(_Entry(source, instance, line, live=True))
+            elif self._last_line.get((source, instance)) == line:
+                # Octopus re-serves one reading, timestamp and all, for about half an hour;
+                # a second copy would only take space, since posting it again changes nothing.
+                return
+            else:
+                self._last_line[(source, instance)] = line
+                self._append(_Entry(source, instance, line))
+        if self.inline:
+            self.run_until_idle()
+        else:
+            self._ensure_thread()
+            self._wake.set()
+
+    def _append(self, entry) -> None:
+        """Append one entry to the spool, or to memory where the spool is not available.
+
+        Args:
+            entry (_Entry): the point
+        """
+        if self._disk:
+            try:
+                self._move_memory_to_spool()
+                self._write_entry(entry)
+                return
+            except OSError as exc:
+                self._disk = False
+                self._memory_mode_problem(f"the spool in {self.directory!r} could not be written: {exc!r}")
+        elif self._lock_file is not None:
+            # The spool failed earlier and may be back: try it before falling back again.
+            try:
+                self._move_memory_to_spool()
+                self._write_entry(entry)
+                self._disk = True
+                # Points refused while the disk was away waited in memory only, and a kill lost
+                # them until the next pass wrote the file. Written now, as the disk comes back.
+                self._waiting_changed = True
+                self._write_retry_file()
+                self._problems.cleared("memory", "InfluxDB points for %s are being spooled to disk again", self.name)
+                return
+            except OSError:
+                pass
+        queue = self._memory.setdefault((entry.source, entry.instance), deque())
+        if len(queue) >= MEMORY_POINTS_PER_WORKER:
+            queue.popleft()
+            self._problems.report(
+                "full",
+                logging.WARNING,
+                "InfluxDB points for %s are being dropped, oldest first: %d are held in memory per worker",
+                entry.label,
+                MEMORY_POINTS_PER_WORKER,
+                identity="full",
+            )
+        queue.append(entry)
+
+    def _move_memory_to_spool(self) -> None:
+        """Spool whatever memory is holding, first, so no worker's points go out of order.
+
+        Raises:
+            OSError: where the spool cannot be written
+        """
+        for queue in self._memory.values():
+            while queue:
+                self._write_entry(queue[0])
+                queue.popleft()
+
+    def _write_entry(self, entry) -> None:
+        """Append, sync, and keep the spool inside its bound.
+
+        Args:
+            entry (_Entry): the point
+
+        Raises:
+            OSError: where the spool cannot be written
+        """
+        if self._append_file is None or self._sizes[self._append_segment] >= SEGMENT_BYTES:
+            self._start_segment()
+        data = entry.encoded()
+        segment = self._append_segment
+        try:
+            if self._append_file.write(data) != len(data):
+                raise OSError(errno.EIO, f"a short write to spool segment {segment}")
+            os.fsync(self._append_file.fileno())
+        except OSError:
+            self._abandon_segment(segment)
+            raise
+        self._sizes[segment] += len(data)
+        self._enforce_limit()
+
+    def _abandon_segment(self, segment) -> None:
+        """Stop appending to a segment a write failed in, leaving its size true.
+
+        **The file and its recorded size must agree.** A failed write or sync left its bytes in
+        the file uncounted, so the reader's position ran ahead of the size, a point appended
+        afterwards could read as already sent, and the segment was retired with it unsent. The
+        failed write is cut back off where the file allows it, and appends move to a fresh
+        segment either way: where the cut fails, the last line is a partial one, which a
+        segment nothing more is appended to reads as cut off and skips.
+
+        Args:
+            segment (int): the segment the write failed in
+        """
+        try:
+            os.ftruncate(self._append_file.fileno(), self._sizes[segment])
+        except OSError as exc:
+            logging.warning("Could not cut a failed write back off spool segment %d: %r", segment, exc)
+        try:
+            self._append_file.close()
+        except OSError:
+            # The file is being given up on either way, and its failure is already on its way
+            # to the caller.
+            pass
+        self._append_file = None
+        try:
+            self._sizes[segment] = os.path.getsize(self._segment_path(segment))
+        except OSError:
+            # Unreadable too, then; the reader sets it aside when it gets there.
+            pass
+
+    def _enforce_limit(self) -> None:
+        """Drop the oldest segments until the spool fits its bound, saying how many points went."""
+        dropped = 0
+        while sum(self._sizes.values()) > self.limit_bytes and len(self._segments) > 1:
+            oldest = self._segments.pop(0)
+            path = self._segment_path(oldest)
+            skip = self._pointer[1] if self._pointer[0] == oldest else 0
+            try:
+                with open(path, "rb") as handle:
+                    handle.seek(skip)
+                    dropped += handle.read().count(b"\n")
+                os.remove(path)
+            except OSError as exc:
+                logging.warning("Could not remove the spool segment %r: %r", path, exc)
+            del self._sizes[oldest]
+            if self._pointer[0] == oldest:
+                self._pointer = (self._segments[0], 0)
+        if dropped:
+            self._problems.report(
+                "full",
+                logging.WARNING,
+                "The InfluxDB spool for %s is full at influx.buffer_mb (%d MB), so its oldest %d point(s) were dropped",
+                self.name,
+                self.limit_bytes // (1024 * 1024),
+                dropped,
+                identity="full",
+            )
+
+    def _memory_mode_problem(self, why) -> None:
+        """Say once that points are now held in memory, and why.
+
+        Args:
+            why (str): what went wrong with the spool
+        """
+        self._problems.report(
+            "memory",
+            logging.WARNING,
+            "InfluxDB points for %s are held in memory until they can be sent, and are lost if it stops: %s",
+            self.name,
+            why,
+            identity="memory",
+        )
+
+    # ------------------------------------------------------------ destinations
+
+    def set_destination(self, source, url, kwargs) -> None:
+        """Record where a source's points go now, from the settings its handler was built with.
+
+        Args:
+            source (str): the source
+            url (str): its write URL
+            kwargs (dict): its request arguments
+        """
+        with self._lock:
+            self._destinations[source] = (url, kwargs)
+
+    def pending(self):
+        """Return whether any buffered point is still waiting to be sent.
+
+        Not a refused point waiting for its next attempt: that is not waiting to be sent now, and
+        counting it would have the thread poll, and a drain wait for, a retry up to 40 s away.
+
+        Returns:
+            bool: True where the spool or memory holds something unsent
+        """
+        with self._lock:
+            if any(self._memory.values()):
+                return True
+            if not self._disk:
+                return False
+            segment, offset = self._pointer
+            return (
+                any(size for number, size in self._sizes.items() if number > segment)
+                or self._sizes.get(segment, 0) > offset
+            )
+
+    # ------------------------------------------------------------------ sending
+
+    def _ensure_thread(self) -> None:
+        """Start the writer's thread, or start it again where it has died."""
+        with self._lock:
+            # is_alive() as well as None: a thread that had died stayed dead, and every point
+            # after it waited on disk for a restart of the process.
+            if (self._thread is None or not self._thread.is_alive()) and not self._stopping:
+                self._thread = threading.Thread(target=self._run, name=f"influx-writer-{self.name}", daemon=True)
+                self._thread.start()
+
+    def _run(self) -> None:
+        """Post whatever is waiting, then wait for more or for the retry timer."""
+        while not self._stopping:
+            closing = self._closing
+            # The pass that closing wakes the thread for ignores the retry timer: the process
+            # is going, so waiting for the timer would mean not trying at all.
+            try:
+                self.run_until_idle(force=closing)
+            except Exception as exc:
+                # Deliberately broad, because this is the top of the thread: anything reaching
+                # here is a bug in the writer, and letting it end the thread stopped every later
+                # point being sent while the process lived. Handled by saying it in full, with
+                # its traceback, once for as long as it repeats, and trying again on the timer.
+                self._problems.report(
+                    "unexpected",
+                    logging.ERROR,
+                    "The InfluxDB writer for %s hit an unexpected error and carries on; this is a bug:\n%s",
+                    self.name,
+                    traceback.format_exc(),
+                    identity=repr(exc),
+                )
+                self._note_failure()
+            if closing:
+                return
+            with self._lock:
+                waiting = self.pending() or bool(self._live)
+                due = self._next_due()
+            timeouts = []
+            if waiting:
+                timeouts.append(max(0.1, self._retry_at - self._clock()))
+            if due is not None:
+                timeouts.append(max(0.1, due - self._clock()))
+            timeout = min(timeouts) if timeouts else None
+            self._wake.wait(timeout)
+            self._wake.clear()
+
+    def run_until_idle(self, force=True) -> None:
+        """Post until nothing is waiting or a post fails for want of InfluxDB.
+
+        **One path for every point.** A live one differs only in being taken first - see
+        :meth:`_read_chunk` - and in being dropped wherever another would be kept, so the timer,
+        the outage report and the reset on success apply to both alike. They used to be two
+        paths, and the live one ignored the timer until a copy of its handling was added, which
+        then took the failure half and not the success half.
+
+        Args:
+            force (bool): ignore the retry timer. Tests pass True; the thread passes False, so
+                an outage costs one attempt per retry rather than one per point
+        """
+        with self._lock:
+            self._release_due()
+        if not force and self._clock() < self._retry_at:
+            if self._refusing:
+                # The far end refused everything, but it answered: a heartbeat costs no timeout,
+                # and dropping them made every collector look dead for as long as it went on.
+                self._post_live_only()
+                return
+            # Live points are not kept for the timer: InfluxDB has just failed a post, each would
+            # cost the whole of influx.timeout against a server that drops connections, and held
+            # until the timer ran they would be posted late, describing the past, all at once.
+            self._drop_live()
+            return
+        while True:
+            outcome = self._post_next_chunk()
+            if outcome == "idle":
+                return
+            if outcome == "failed":
+                self._note_failure()
+                return
+            if outcome == "refused_all":
+                # Nothing in the pass was taken, which looks like something in front of InfluxDB
+                # refusing everything. Each refused point waits for its own retry, but without
+                # this the pass would carry on through the backlog, sending all of it to wait
+                # and spending its attempts in minutes; the timer holds that to a chunk a period.
+                self._note_failure(refusing=True)
+                return
+            # "sent" or "refused": InfluxDB answered and took points, so it is not down. A point
+            # it refused is waiting for its own retry, not in the spool, so the pass cannot read
+            # it straight back.
+            self._note_success()
+
+    def _note_failure(self, refusing=False) -> None:
+        """Start the retry timer, or lengthen it while failures continue.
+
+        Args:
+            refusing (bool): True where the far end answered and refused everything, rather than
+                not answering, so live points are still posted while the timer runs
+        """
+        self._retry_at = self._clock() + self._retry_delay
+        self._retry_delay = min(self._retry_delay * 2, RETRY_MAX_SECONDS)
+        self._refusing = refusing
+
+    def _note_success(self) -> None:
+        """Clear the retry timer: whatever was posted, InfluxDB is taking points."""
+        self._retry_delay = RETRY_FIRST_SECONDS
+        self._retry_at = 0.0
+        self._refusing = False
+
+    def _post_live_only(self) -> None:
+        """Post the live points waiting, and nothing else, while a refusal holds the spool back."""
+        while True:
+            with self._lock:
+                if not self._live:
+                    return
+            outcome = self._post_next_chunk(live_only=True)
+            if outcome == "failed":
+                # Not answering now: an outage after all, which the timer is for.
+                self._note_failure()
+                return
+            if outcome == "idle":
+                return
+
+    def _drop_live(self) -> None:
+        """Drop the live points waiting, which are not kept for the retry timer."""
+        with self._lock:
+            if self._live:
+                logging.debug("Dropped %d live InfluxDB point(s) for %s during an outage", len(self._live), self.name)
+                self._live.clear()
+
+    def _post_next_chunk(self, live_only=False):
+        """Post the next chunk of waiting points.
+
+        Args:
+            live_only (bool): take only live points, leaving the spool and memory alone
+
+        Returns:
+            str: "idle" where nothing was waiting, "sent" where the chunk was dealt with,
+            "refused" where it was dealt with but the server refused a point in it,
+            "refused_all" where it refused every point, and "failed" where InfluxDB could not be
+            reached, leaving the rest of it where it was
+        """
+        with self._lock:
+            chunk = self._read_chunk(live_only)
+        if not chunk:
+            return "idle"
+        done = []
+        outcome = "sent"
+        accepted = []
+        for group in _by_database(chunk):
+            result = self._send_run(group, done, accepted)
+            if result == "failed":
+                outcome = "failed"
+                break
+            if result == "refused":
+                outcome = "refused"
+        # Not for a live chunk: one refused heartbeat - from a source whose database is missing,
+        # say - says nothing about whether the far end refuses everything, and backing off for it
+        # held up the next data behind it (seen in a live run).
+        if outcome == "refused" and not accepted and not chunk[0].live:
+            outcome = "refused_all"
+        with self._lock:
+            # Before the spool moves past the refused points, so a kill in between leaves each
+            # in both places - one attempt too many - rather than in neither.
+            self._write_retry_file()
+        if outcome == "failed" and chunk[0].live:
+            # A chunk is all live or none of it. A live one is dropped whole rather than kept for
+            # the retry, which is the whole of what makes a heartbeat different on this path.
+            done = chunk
+        # Only the start of the chunk that was dealt with in full can be consumed, because the
+        # spool's pointer and the queues only move forward from their front. Grouping by database
+        # means what was dealt with need not be a start - one database's points sent, a later
+        # one's failed - and anything sent beyond that start is sent again next time, which
+        # InfluxDB absorbs.
+        handled = {id(entry) for entry in done}
+        start = list(itertools.takewhile(lambda entry: id(entry) in handled, chunk))
+        with self._lock:
+            removed = self._consume(start)
+        if start and not removed:
+            # **A pass that removes nothing it has dealt with would repeat for ever**, reposting
+            # the same chunk as fast as InfluxDB answers - two deliberately broken versions of
+            # the consume step both hung that way. It is a bug in the writer, so it is said as
+            # one, and the timer stands between attempts rather than a hot loop.
+            self._problems.report(
+                "stuck",
+                logging.ERROR,
+                "The InfluxDB writer for %s dealt with %d point(s) and could not remove them from its queue; "
+                "this is a bug, and it will try again on its retry timer",
+                self.name,
+                len(start),
+                identity="stuck",
+            )
+            return "failed"
+        if outcome not in ("failed", "refused_all"):
+            self._problems.cleared("write", "InfluxDB is taking points from %s again", self.name)
+        return outcome
+
+    def _send_run(self, run, done, accepted):
+        """Post a run of points bound for one database, adding each one dealt with to ``done``.
+
+        Args:
+            run (list): _Entry, all for the same source
+            done (list): filled in, in order, with every entry sent, refused or dropped
+            accepted (list): filled in with every entry the server took
+
+        Returns:
+            str: "sent", "refused" where the server refused at least one point, or "failed"
+            where InfluxDB could not be reached, so the caller stops
+        """
+        with self._lock:
+            destination = self._destinations.get(run[0].source)
+        if destination is None:
+            self._problems.report(
+                ("unconfigured", run[0].source),
+                logging.WARNING,
+                "Dropping unsent InfluxDB points for %r: it has no database configured any more",
+                run[0].source,
+                identity="unconfigured",
+            )
+            done.extend(run)
+            return "sent"
+        status = self._post("\n".join(entry.line for entry in run), destination)
+        if status is True:
+            done.extend(run)
+            accepted.extend(run)
+            return "sent"
+        if not is_point_rejection(status):
+            self._report_outage(destination, status)
+            return "failed"
+        # The server refused the run: find which point, one at a time, so one bad point cannot
+        # cost the rest.
+        for entry in run:
+            single = self._post(entry.line, destination)
+            if single is not True and not is_point_rejection(single):
+                self._report_outage(destination, single)
+                return "failed"
+            if single is not True:
+                self._refused(entry, single)
+            else:
+                accepted.append(entry)
+            done.append(entry)
+        return "refused"
+
+    def _read_chunk(self, live_only=False):
+        """Return up to a chunk of waiting points: live ones first, then the spool, then memory.
+
+        Live first because a heartbeat behind a backlog would be posted after it, however long
+        that took, and arrive describing the past. Each chunk comes from one queue, so it is all
+        live or none of it.
+
+        Args:
+            live_only (bool): return live points or nothing
+
+        Returns:
+            list: _Entry, oldest first
+        """
+        if self._live or live_only:
+            return list(self._live)[:CHUNK_POINTS]
+        if self._disk or self._segments:
+            chunk = self._read_spool()
+            if chunk:
+                return chunk
+        for queue in self._memory.values():
+            if queue:
+                return list(queue)[:CHUNK_POINTS]
+        return []
+
+    def _read_spool(self):
+        """Return up to a chunk of points from the spool, stepping past what cannot be read.
+
+        Returns:
+            list: _Entry, each carrying where it ends
+        """
+        while True:
+            if self._pointer is None:
+                # The spool was abandoned part-way through this read - setting aside the segment
+                # being appended to, with no new one to be had - so there is no spool left to read.
+                return []
+            segment, offset = self._pointer
+            if segment not in self._sizes:
+                # The segment the pointer was in has gone - dropped by the size bound while its
+                # points were out being posted - so sending carries on from the next one.
+                later = [number for number in self._segments if number > segment]
+                if not later:
+                    return []
+                self._pointer = (later[0], 0)
+                continue
+            if offset < self._sizes[segment]:
+                try:
+                    chunk = self._read_segment(segment, offset)
+                except OSError as exc:
+                    # A segment that cannot be read is set aside rather than retried for ever,
+                    # and the rest of the spool carries on.
+                    self._set_aside(segment, exc)
+                    continue
+                if chunk:
+                    return chunk
+            if segment == self._append_segment:
+                return []
+            self._retire(segment)
+
+    def _read_segment(self, segment, offset):
+        """Return up to a chunk of points from one segment, from an offset.
+
+        A line that cannot be decoded is stepped past: where it comes before any point, the
+        pointer is moved past it now, so it never has to point into the middle of it.
+
+        Args:
+            segment (int): the segment
+            offset (int): where to start
+
+        Returns:
+            list: _Entry, each carrying where it ends
+
+        Raises:
+            OSError: where the segment cannot be read
+        """
+        chunk = []
+        with open(self._segment_path(segment), "rb") as handle:
+            handle.seek(offset)
+            position = offset
+            while len(chunk) < CHUNK_POINTS:
+                raw = handle.readline()
+                if not raw:
+                    break
+                position += len(raw)
+                entry = self._decode(raw, segment)
+                if entry is None:
+                    if not chunk:
+                        self._pointer = (segment, position)
+                    continue
+                entry.end = (segment, position)
+                chunk.append(entry)
+        return chunk
+
+    def _decode(self, raw, segment):
+        """Return one spool line as an entry, or None where it cannot be one.
+
+        Args:
+            raw (bytes): the line as read
+            segment (int): its segment, for the message
+
+        Returns:
+            _Entry or None: the point, or None for a line cut off or unparseable
+        """
+        if not raw.endswith(b"\n"):
+            # The last line of a segment a power cut interrupted. Expected, and not a point.
+            self._problems.report(
+                "truncated",
+                logging.INFO,
+                "Skipped a spooled point cut off mid-write in segment %d",
+                segment,
+                identity="truncated",
+            )
+            return None
+        try:
+            record = json.loads(raw)
+            return _Entry(str(record["s"]), record.get("i"), str(record["l"]), int(record.get("r", 0)))
+        except (ValueError, TypeError, KeyError) as exc:
+            self._problems.report(
+                "corrupt",
+                logging.WARNING,
+                "Skipped an unreadable spooled point in segment %d: %r",
+                segment,
+                exc,
+                identity="corrupt",
+            )
+            return None
+
+    def _consume(self, done):
+        """Mark a prefix of the last chunk as dealt with.
+
+        Args:
+            done (list): _Entry, in the order they were read
+
+        Returns:
+            int: how many entries were removed from their queue or passed by the pointer
+        """
+        if not done:
+            return 0
+        if done[0].end is None:
+            # By identity, not by count. The queue is only ever trimmed from the front, but a
+            # point arriving while this chunk was out may have evicted some of it for the bound
+            # already, and removing len(done) from the front then took points never posted.
+            queue = self._live if done[0].live else self._memory.get((done[0].source, done[0].instance))
+            removed = 0
+            for entry in done:
+                if queue and queue[0] is entry:
+                    queue.popleft()
+                    removed += 1
+                elif not any(queued is entry for queued in queue or ()):
+                    # Gone from the queue while it was out being posted - evicted for the bound,
+                    # or moved into the spool by a disk that came back - so dealt with here, which
+                    # is progress (a moved one is posted again, which InfluxDB absorbs). Not
+                    # counting it made such a pass report itself stuck: a false "this is a bug"
+                    # and a started timer.
+                    removed += 1
+            return removed
+        segment, offset = done[-1].end
+        if segment not in self._sizes:
+            # Dropped by the size bound while this chunk was being posted: the pointer was
+            # already moved on past it, and must not be moved back. They are gone either way.
+            return len(done)
+        before = self._pointer
+        self._pointer = (segment, offset)
+        if offset >= self._sizes[segment] and segment != self._append_segment:
+            self._retire(segment)
+        self._write_pointer()
+        return len(done) if self._pointer != before else 0
+
+    def _retire(self, segment) -> None:
+        """Delete a segment that has been sent, and move the pointer to the next.
+
+        Args:
+            segment (int): the segment
+        """
+        try:
+            os.remove(self._segment_path(segment))
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logging.warning("Could not remove the sent spool segment %r: %r", self._segment_path(segment), exc)
+        self._segments.remove(segment)
+        del self._sizes[segment]
+        self._pointer = (self._segments[0], 0) if self._segments else (segment + 1, 0)
+        # Recorded now rather than at the next successful post: a run that retires segments and
+        # never posts would otherwise leave the stored pointer naming a segment that has gone.
+        self._write_pointer()
+
+    def _set_aside(self, segment, exc) -> None:
+        """Rename a segment that cannot be read, so the rest of the spool can carry on.
+
+        Args:
+            segment (int): the segment
+            exc (OSError): why it could not be read
+        """
+        path = self._segment_path(segment)
+        logging.warning("Setting aside the unreadable spool segment %r: %r", path, exc)
+        try:
+            os.replace(path, path + ".unreadable")
+        except OSError:
+            pass
+        self._segments.remove(segment)
+        del self._sizes[segment]
+        self._pointer = (self._segments[0], 0) if self._segments else (segment + 1, 0)
+        self._write_pointer()
+        if segment == self._append_segment:
+            # The segment appends were going to has gone with it. Left in place, the next
+            # append looked up its size, found none, and raised KeyError out of send_data -
+            # which the memory fallback does not catch, so every later write failed and a
+            # control process died on it. Appends move to a fresh segment, or to memory.
+            # Already closed and cleared where a failed write gave the segment up, which is how it
+            # usually comes to be unreadable.
+            if self._append_file is not None:
+                self._append_file.close()
+                self._append_file = None
+            try:
+                self._start_segment()
+            except OSError as error:
+                # All the way to memory, as a spool that cannot be opened is. Setting only
+                # _disk left the removed segment named and the lock held, so the next append
+                # tried the disk again, looked that segment's size up, and raised the same
+                # KeyError. What is already spooled stays on disk for the next start.
+                self._abandon_spool()
+                self._disk = False
+                self._memory_mode_problem(f"a new segment in {self.directory!r} could not be created: {error!r}")
+
+    def _refused(self, entry, status) -> None:
+        """Count a refusal, and put the point at the back or give up on it.
+
+        Args:
+            entry (_Entry): the refused point
+            status (int): the status it was refused with
+        """
+        if entry.live:
+            logging.debug("Dropped a live InfluxDB point for %s: refused with HTTP %s", entry.label, status)
+            return
+        entry.rejections += 1
+        if entry.rejections >= MAX_POINT_REJECTIONS:
+            logging.warning(
+                "Dropping an InfluxDB point for %s after %d refusals, the last with HTTP %s",
+                entry.label,
+                entry.rejections,
+                status,
+            )
+            return
+        delay = min(RETRY_FIRST_SECONDS * 2 ** (entry.rejections - 1), RETRY_MAX_SECONDS)
+        with self._lock:
+            self._waiting_changed = True
+            self._waiting.append(
+                (self._clock() + delay, _Entry(entry.source, entry.instance, entry.line, entry.rejections))
+            )
+
+    def _report_outage(self, destination, status) -> None:
+        """Say once for the outage that InfluxDB is not taking points.
+
+        Args:
+            destination (tuple): (url, kwargs) it was posting to
+            status (int or str or None): the status, or what went wrong where none arrived
+        """
+        self._problems.report(
+            "write",
+            logging.ERROR,
+            "InfluxDB at %s is not taking points from %s, which are kept until it does: %s",
+            _without_query(destination[0]),
+            self.name,
+            f"HTTP {status}" if status is not None else self._last_error,
+            identity="write",
+        )
+
+    def _post(self, body, destination):
+        """Post a body, and say how it went.
+
+        Args:
+            body (str): newline-joined line-protocol points
+            destination (tuple): (url, kwargs)
+
+        Returns:
+            True or int or None: True where it was accepted, the HTTP status where it was
+            refused, and None where no response arrived - kept, verbatim, for the message
+        """
+        url, kwargs = destination
+        try:
+            with warnings.catch_warnings():
+                if not kwargs.get("verify", True):
+                    warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+                response = self._session.post(url, data=body, **kwargs)
+            response.raise_for_status()
+            return True
+        except requests.exceptions.HTTPError as exc:
+            self._last_error = repr(exc)
+            return getattr(exc.response, "status_code", None)
+        except requests.exceptions.RequestException as exc:
+            self._last_error = repr(exc)
+            return None
+
+    # ----------------------------------------------------------------- stopping
+
+    def close(self, seconds=CLOSE_SECONDS) -> None:
+        """Give the thread a moment to post what is waiting, then stop; the rest stays spooled.
+
+        Idempotent, and safe to call from an exit handler.
+
+        Args:
+            seconds (float): how long the thread may keep posting
+        """
+        with self._lock:
+            if self._stopping or self._closing:
+                return
+            thread = self._thread
+            # Closing first and stopping only afterwards. Setting _stopping straight away, as
+            # this did, meant a thread woken to post simply saw it and left, so nothing waiting
+            # was posted - lost outright in memory mode, which is exactly when it matters.
+            self._closing = True
+        self._wake.set()
+        if thread is not None:
+            thread.join(seconds)
+        with self._lock:
+            self._stopping = True
+            if self._append_file is not None:
+                self._append_file.close()
+                self._append_file = None
+            # Anything submitted from here on is held in memory, and goes with the process.
+            self._disk = False
+            self._close_lock_file()
+        self._session.close()
+
+
+def _by_database(chunk):
+    """Split a chunk into one group per source's database, keeping each source's own order.
+
+    **One post per database, not one per consecutive run.** Every collector in a process writes
+    to its own database through the one spool, so their points interleave, and splitting on runs
+    of consecutive points gave nearly every post a single point: a stress run drained under 90
+    points a second, and a heartbeat waited behind a chunk of single-point posts. The order
+    between databases does not matter; within one, it is kept.
+
+    Args:
+        chunk (list): _Entry, in order
+
+    Returns:
+        list: lists of _Entry, in the order each source first appears
+    """
+    groups = {}
+    for entry in chunk:
+        groups.setdefault(entry.source, []).append(entry)
+    return list(groups.values())
+
+
+def _without_query(url):
+    """Return a write URL without its query string, which can carry an org and a bucket name.
+
+    Args:
+        url (str): the URL
+
+    Returns:
+        str: the URL up to the query
+    """
+    return url.split("?", 1)[0]
+
+
+# ---------------------------------------------------------------------- the process's writer
+
+_WRITER = None
+_WRITER_LOCK = threading.Lock()
+
+
+def configure(name, settings, settings_file=None, spool_root=None, inline=False):
+    """Create this process's writer, replacing any before it.
+
+    Called once, early, by each entry point that writes: the service as ``main``, and each
+    control process as ``control-<name>``. A process that writes without calling this gets a
+    ``main`` writer on first use.
+
+    Args:
+        name (str): which process this is, and so which spool it owns
+        settings (dict): the settings in effect
+        settings_file (str or None): the settings path, which decides the state directory
+        spool_root (str or None): where spools live; ``<state directory>/spool`` when None
+        inline (bool): post from the caller's thread, for tests
+
+    Returns:
+        InfluxWriter: the writer
+    """
+    global _WRITER
+    root = spool_root or os.path.join(resolve_state_dir(settings_file), SPOOL_DIR_NAME)
+    buffer_mb = (settings.get("influx") or {}).get("buffer_mb", BUFFER_MB_DEFAULT)
+    if buffer_mb_problem(settings.get("influx") or {}):
+        buffer_mb = BUFFER_MB_DEFAULT
+    # The previous writer is closed before the new one is built, not after: it holds the spool's
+    # lock, and a writer built beside it on the same name found the lock taken, said another
+    # process had the spool, and fell back to memory. Nothing configures twice in a running
+    # service, so the moment with no writer is not one anything writes in.
+    with _WRITER_LOCK:
+        previous, _WRITER = _WRITER, None
+    if previous is not None:
+        previous.close(0)
+    writer = InfluxWriter(name, root, settings, buffer_mb=buffer_mb, inline=inline)
+    with _WRITER_LOCK:
+        _WRITER = writer
+    atexit.register(writer.close)
+    return writer
+
+
+def writer_for(settings, settings_file=None):
+    """Return this process's writer, creating a ``main`` one on first use.
+
+    Args:
+        settings (dict): the settings in effect, used only where a writer must be created
+        settings_file (str or None): the settings path, likewise
+
+    Returns:
+        InfluxWriter: the writer
+    """
+    with _WRITER_LOCK:
+        writer = _WRITER
+    if writer is not None:
+        return writer
+    return configure("main", settings, settings_file)
+
+
+def current():
+    """Return this process's writer, or None where nothing has written yet.
+
+    Returns:
+        InfluxWriter or None: the writer
+    """
+    with _WRITER_LOCK:
+        return _WRITER

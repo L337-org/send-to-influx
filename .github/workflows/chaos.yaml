@@ -23,6 +23,11 @@ on:
         required: false
         default: '300'
         type: string
+      writer_seconds:
+        description: 'How long the writer stress run submits for, in seconds'
+        required: false
+        default: '20'
+        type: string
 
 # One group per pull request, so pull requests do not queue behind each other or cancel each
 # other: GitHub keeps only one pending run per group. A newer push supersedes a pull request's
@@ -36,9 +41,10 @@ jobs:
   chaos:
     runs-on: [ubuntu-latest]
     name: Seeded chaos run
-    # 300 ticks is about a minute of real processes and 3000 about eight to twelve; the ceiling is
-    # for a run that wedges rather than for one that is merely long.
-    timeout-minutes: 30
+    # 300 ticks is about a minute of real processes and 3000 about eight to twelve, and the writer
+    # stress run adds 20 seconds on a pull request and fifteen minutes nightly, plus its drain. The
+    # ceiling is for a run that wedges rather than for one that is merely long.
+    timeout-minutes: 60
     steps:
       - name: Check out source repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -58,6 +64,9 @@ jobs:
           CHAOS_SEED: ${{ inputs.seed }}
           # A dispatch says how long; a pull request gets the short run; the nightly run the long one.
           CHAOS_TICKS: ${{ inputs.ticks || (github.event_name == 'pull_request' && '300') || '3000' }}
+          # The writer under load and random outages (tests/chaos/test_writer_stress.py): long
+          # enough on a pull request to see several outages and recoveries, and long nightly.
+          WRITER_STRESS_SECONDS: ${{ inputs.writer_seconds || (github.event_name == 'pull_request' && '20') || '900' }}
         # -s so the seed is in the log of a run that passed as well as one that failed: the
         # seed of a run nobody can repeat is worth nothing, and a green run whose seed is
         # only in captured output is a run nobody can repeat.

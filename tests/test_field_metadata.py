@@ -43,6 +43,7 @@ import re
 
 import pytest
 
+from toinflux.control_record import RECORD_SOURCE, ControlRecord
 from toinflux.general import known_sources, source_class
 from toinflux.mcp_read import FIELD_KINDS
 from toinflux.philipshue import (
@@ -167,8 +168,11 @@ def _declared():
         list: ``(source, field, meta)`` triples, sorted for a stable failure order
     """
     out = []
-    for source in known_sources():
-        for field, meta in sorted(source_class(source).MCP_FIELD_METADATA.items()):
+    classes = [(source, source_class(source)) for source in known_sources()]
+    # The controls' history is read like a source and is not one, so known_sources() leaves it out.
+    classes.append((RECORD_SOURCE, ControlRecord))
+    for source, cls in classes:
+        for field, meta in sorted(cls.MCP_FIELD_METADATA.items()):
             out.append((source, field, meta))
     return out
 

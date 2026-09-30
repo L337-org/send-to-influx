@@ -11,11 +11,14 @@ import time
 from types import MethodType, SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 import pytest
+import requests
 import sendtoinflux
+import toinflux.writer
 from toinflux.controls import controls_enabled
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.speedtest import Speedtest
 from toinflux.influx import DataHandler, InfluxWriteError
+from toinflux.writer import InfluxWriter
 
 
 class TestSignalHandler:
@@ -525,6 +528,26 @@ class TestHelpers:
         handler.get_data.assert_called_once()
         handler.send_data.assert_called_once()
 
+    def test_an_influxdb_outage_does_not_cost_a_collector_its_interval(self, sample_settings, influx_posts):
+        """The failure this whole write path was rebuilt for. A write that could not reach
+        InfluxDB used to raise out of collect_source_data, and the worker treated it like a
+        device that could not be reached: it backed off from its interval to as long as 300s,
+        and the readings in between were never taken. Now the point is spooled and collection
+        returns the interval as though nothing had happened - which, for the collector, is
+        true."""
+        from toinflux.influx import DataHandler
+
+        with patch("toinflux.influx.load_settings", return_value=sample_settings):
+            handler = DataHandler(source="hue")
+        handler.influx_header = "hue "
+        handler.get_data = MagicMock(return_value={"x": 1})
+        handler.data = {"x": 1}
+        influx_posts.side_effect = requests.exceptions.ConnectionError("down")
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+
+        assert sendtoinflux.collect_source_data("hue", args, handler) == sample_settings["hue"]["interval"]
+        assert toinflux.writer.current().pending()
+
     def test_run_workers_coerces_invalid_stagger_to_zero(self):
         """run_workers falls back to zero stagger when value is invalid."""
         args = SimpleNamespace(print=False, dump=False, settings=None)
@@ -967,8 +990,9 @@ class TestSendHeartbeat:
             handler = source_class(name)(name)
         handler.session = MagicMock()
         posted = []
-        base = type(handler).__mro__[-2]  # DataHandler, wherever it sits in each source's chain
-        with patch.object(base, "_post_line", side_effect=lambda line, *a, **k: posted.append(line)):
+        with patch.object(
+            InfluxWriter, "submit", side_effect=lambda source, instance, line, buffered=True: posted.append(line)
+        ):
             sendtoinflux.send_heartbeat(handler, name, ok=True, consecutive_failures=0)
         return posted
 
@@ -1032,7 +1056,7 @@ class TestSendHeartbeat:
             # (e.g. Octopus using a delayed reading's interval_start).
             handler.timestamp = 1000000000
             with (
-                patch.object(handler.session, "post") as mock_post,
+                patch.object(toinflux.writer.current()._session, "post") as mock_post,
                 patch("sendtoinflux.time.time", return_value=2000000000.0),
             ):
                 mock_post.return_value.raise_for_status = MagicMock()
@@ -1507,15 +1531,18 @@ class TestStreamSink:
         mock_print.assert_called_once_with("nuki", {"x": 1})
         handler.send_data.assert_not_called()
 
-    def test_on_message_swallows_influx_write_error(self):
-        """A failed InfluxDB write is buffered by send_data, not a stream failure - it must
-        not propagate out of the network callback (activity is already stamped)."""
+    def test_on_message_swallows_influx_write_error(self, caplog):
+        """A point that cannot be written at all is not a stream failure - it must not
+        propagate out of the network callback (activity is already stamped) - but it is said.
+        An outage never raises here; the writer holds those points."""
         activity = []
         sink, handler, _ = self._sink(on_activity=lambda: activity.append(1))
         handler.decode_stream_message.return_value = {"x": 1}
-        handler.send_data.side_effect = InfluxWriteError("influx down")
-        sink.on_message("nuki/A/state", "3")  # must not raise
+        handler.send_data.side_effect = InfluxWriteError("cannot contain a newline")
+        with caplog.at_level(logging.WARNING):
+            sink.on_message("nuki/A/state", "3")  # must not raise
         assert activity == [1]
+        assert "Could not write a message from" in caplog.text
 
     # --- periodic (the safety-net probe + heartbeat) ---
 
@@ -1577,15 +1604,16 @@ class TestStreamSink:
         assert [c.kwargs["ok"] for c in heartbeat.call_args_list] == [False, False, True]
         assert [c.kwargs["consecutive_failures"] for c in heartbeat.call_args_list] == [1, 2, 0]
 
-    def test_periodic_influx_write_error_still_counts_the_probe_as_reachable(self):
-        """A failed InfluxDB write isn't a probe failure - the source was reachable, so the
-        heartbeat stays healthy and the point is left to the buffer."""
+    def test_periodic_influx_write_error_still_counts_the_probe_as_reachable(self, caplog):
+        """A point that cannot be written isn't a probe failure - the source was reachable, so
+        the heartbeat stays healthy - but it is said. An outage never raises here."""
         sink, handler, args = self._sink()
         handler.get_data.return_value = {"x": 1}
-        handler.send_data.side_effect = InfluxWriteError("influx down")
-        with patch("sendtoinflux.maybe_send_heartbeat") as heartbeat:
+        handler.send_data.side_effect = InfluxWriteError("cannot contain a newline")
+        with patch("sendtoinflux.maybe_send_heartbeat") as heartbeat, caplog.at_level(logging.WARNING):
             sink.periodic()  # must not raise
         heartbeat.assert_called_once_with(args, handler, "nuki", ok=True, consecutive_failures=0)
+        assert "Could not write the snapshot from" in caplog.text
 
 
 class TestShouldStream:

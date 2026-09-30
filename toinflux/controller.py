@@ -19,6 +19,7 @@ import logging
 
 import math
 import time
+from dataclasses import dataclass
 
 from simple_pid import PID
 
@@ -33,6 +34,36 @@ from toinflux.staging import build_ladder, cap_ladder, plan_window, reachable_la
 #: blip must not cost the loop what it learned, and last night's integral must not be handed
 #: to this evening. Generous against the first and far short of the second.
 RESUMABLE_HOLD_SECONDS = 1800.0
+
+
+@dataclass(frozen=True)
+class StepTerms:
+    """What one step of the loop worked from and arrived at, for the record of it.
+
+    Attributes:
+        input (float): the evaluated input rule
+        setpoint (float): the evaluated setpoint rule
+        demand (float): what the PID asked for, on the ladder's level scale
+        p (float): the proportional term's contribution to the demand
+        i (float): the integral, which is the integral term's contribution
+        d (float): the derivative term's contribution
+        kp (float): the proportional gain in effect
+        ki (float): the integral gain in effect
+        kd (float): the derivative gain in effect
+        curve (tuple): Stage, the ladder as capped for this step, which a driven device's
+            value was read off and which ``delivered`` is read back against
+    """
+
+    input: float
+    setpoint: float
+    demand: float
+    p: float
+    i: float
+    d: float
+    kp: float
+    ki: float
+    kd: float
+    curve: tuple
 
 
 #: What a control document says that does *not* change what the loop's memory means. The
@@ -121,6 +152,9 @@ class Controller:
         # somebody else's problem - `TransitionLog` covers that, in epoch seconds, on disk.
         self._clock = time_fn or time.monotonic
         self._held: "dict | None" = None
+        #: The terms of the last step that produced a plan, or None before the first. Kept so
+        #: the loop can record them without this module knowing anything is recorded.
+        self.last_step: "StepTerms | None" = None
         names = rule_names(document)
         self._setpoint_rule = _rule(document.get("pid", {}).get("setpoint"), names, "pid.setpoint")
         self._input_rule = _rule(document.get("pid", {}).get("input"), names, "pid.input")
@@ -214,6 +248,16 @@ class Controller:
                 "call resume() before step() after a hold or a resume_from()"
             )
         plan = plan_window(ladder, demand, self.cycle_seconds, self.min_transition_for, self.driven, curve=curve)
+        # After the plan, so a step that raised leaves the previous terms rather than terms for
+        # a demand nothing acted on.
+        self.last_step = StepTerms(
+            process_variable,
+            setpoint,
+            demand,
+            *self.pid.components,
+            *self.pid.tunings,
+            curve=curve,
+        )
         # **What the loop decided, once per cycle, at DEBUG.** Nothing in this subsystem said
         # anything during a healthy cycle: a control holding the wrong temperature produced a
         # temperature curve and no record of what it was thinking, so tuning it meant guessing

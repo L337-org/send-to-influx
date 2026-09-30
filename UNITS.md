@@ -224,3 +224,30 @@ The `collector_status` heartbeat for `speedtest` carries the same `host` tag, so
 `collector_status,source=speedtest` series and overwrote the others at second precision, so one
 collector dying looked exactly like a healthy estate - if you have heartbeat history from before
 that change, it sits in an untagged series and cannot be attributed to a host.
+
+## Control loop history (`controls`)
+
+Written by the control loops themselves rather than collected, one point per cycle to the `control`
+measurement, tagged `control=<name>`, where `controls.db` is set. See
+[CONTROLS.md](CONTROLS.md#recording-the-pid-history) for when points are written and how to use them
+for tuning.
+
+| Field | Unit | Notes |
+|---|---|---|
+| `input`, `setpoint` | - | In whatever units the control's `pid.input` and `pid.setpoint` rules produce |
+| `demand`, `delivered` | - | On the control's own level scale, the `level` of its stages |
+| `p`, `i`, `d` | - | Each term's share of `demand`, on the same level scale; `i` is the integral |
+| `kp` | - | Levels per unit of input error |
+| `ki` | - | Levels per unit of input error per second |
+| `kd` | - | Levels per unit of input change per second |
+
+Each cycle also writes one point per device to the `control_device` measurement, tagged `control`,
+`device` and, for a driven device, `parameter`:
+
+| Field | Unit | Notes |
+|---|---|---|
+| `seconds`, `on_seconds` | s | The window's length, and how long a switched device was commanded on |
+| `value` | - | A driven device's commanded value averaged over the window, on the scale its `parameter` tag names |
+| `changes` | count | Commands that changed the device's state this window |
+| `held` | bool | Whether `min_transition_seconds` had not run out, so it was not allowed to change |
+| `state` | - | `active` or `fail_safe`, as a string |

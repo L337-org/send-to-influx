@@ -660,12 +660,12 @@ class Hue(DataHandler):
             entry["unit"] = HUE_TEMPERATURE_UNITS.get(configured, HUE_DEFAULT_TEMPERATURE_UNIT)
         return entry
 
-    def send_data(self, data=None, timestamp=None, use_buffer=True, flush=True):
+    def send_data(self, data=None, timestamp=None, use_buffer=True):
         """Write the readings, then describe the devices they came from.
 
         The data write is unchanged and its contract is untouched: it happens first, and
-        an ``InfluxWriteError`` from it propagates exactly as before so the worker still
-        backs off and buffers.
+        an ``InfluxWriteError`` from it - a point that cannot be written at all - propagates
+        exactly as before.
 
         The description that follows is best-effort and can never fail a collection. It
         carries no reading, so there is nothing to replay and nothing to lose - the same
@@ -677,12 +677,11 @@ class Hue(DataHandler):
             data (dict or None): readings to write, defaulting to ``self.data``
             timestamp (int or None): unix-epoch seconds, defaulting to the base implementation's choice
             use_buffer (bool): buffer and retry the *data* point on failure
-            flush (bool): flush the backlog before writing
 
         Raises:
-            InfluxWriteError: the data write failed (never the description)
+            InfluxWriteError: the data point could not be written at all (never the description)
         """
-        super().send_data(data=data, timestamp=timestamp, use_buffer=use_buffer, flush=flush)
+        super().send_data(data=data, timestamp=timestamp, use_buffer=use_buffer)
         # Only when writing our *own* readings. `data is None` is what the collection path
         # passes (send_data() with no arguments, so the base writes self.data); every other
         # caller supplies its own, and the one that matters is send_heartbeat(), which
@@ -720,7 +719,7 @@ class Hue(DataHandler):
         try:
             for name, device_class in sorted(classes.items()):
                 self.influx_header = f"{SCHEMA_MEASUREMENT},host={host},device={escape_key_or_tag_value(name)} "
-                super().send_data(data={"class": device_class}, timestamp=timestamp, use_buffer=False, flush=False)
+                super().send_data(data={"class": device_class}, timestamp=timestamp, use_buffer=False)
         except Exception as exc:
             # Deliberately broad and deliberately swallowed: this is an annotation, and no
             # failure to write one should turn a successful collection into a failed one.

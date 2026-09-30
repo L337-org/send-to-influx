@@ -23,6 +23,7 @@ import pytest
 
 from toinflux.influx import _format_field_value
 from toinflux.nuki import KNOWN_STATE_FIELDS, STATE_VALUE_FIELDS, Nuki
+from toinflux.writer import InfluxWriter
 
 
 def _load_migration():
@@ -474,7 +475,9 @@ class TestEquivalenceWithTheCollector:
         with patch("toinflux.influx.load_settings", return_value=settings):
             handler = Nuki("nuki")
         written = []
-        with patch.object(Nuki.__mro__[2], "_post_line", side_effect=lambda line, *a, **k: written.append(line)):
+        with patch.object(
+            InfluxWriter, "submit", side_effect=lambda source, instance, line, buffered=True: written.append(line)
+        ):
             handler.send_data(data=per_device, timestamp=timestamp, use_buffer=False)
         return written
 

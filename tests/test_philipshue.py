@@ -1014,11 +1014,12 @@ class TestHueWritesDeviceClasses:
         assert "Could not record Hue device classes" in caplog.text
 
     def test_a_failed_data_write_still_raises(self, sample_settings):
-        # The other direction: the contract the worker relies on is untouched.
+        # The other direction: the contract the worker relies on is untouched. The failure is a
+        # point that cannot be written at all; an outage never raises, the writer holds those.
         from toinflux.influx import InfluxWriteError
 
         hue = self._collected(sample_settings)
-        with patch("toinflux.influx.DataHandler.send_data", side_effect=InfluxWriteError("down")):
+        with patch("toinflux.influx.DataHandler.send_data", side_effect=InfluxWriteError("cannot contain a newline")):
             with pytest.raises(InfluxWriteError):
                 hue.send_data()
 
@@ -1029,7 +1030,7 @@ class TestHueWritesDeviceClasses:
         hue = self._collected(sample_settings)
         written = []
 
-        def _record(self, data=None, timestamp=None, use_buffer=True, flush=True):
+        def _record(self, data=None, timestamp=None, use_buffer=True):
             written.append(self.influx_header.split(",")[0])
 
         with patch("toinflux.influx.DataHandler.send_data", _record):

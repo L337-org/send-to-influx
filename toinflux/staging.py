@@ -198,10 +198,15 @@ class Dwell:
     Attributes:
         stage (Stage): what the devices do for this stretch.
         seconds (float): how long it lasts.
+        level (float or None): the level this stretch stands for, as planned: the rung's own
+            where the window is time-proportioned between rungs, and where driven devices carry
+            the level, the one their values were read off the curve at. None for a dwell built
+            without a plan, whose level is then read back from its states.
     """
 
     stage: Stage
     seconds: float
+    level: "float | None" = None
 
 
 def interpolated(lower, upper, demand, driven):
@@ -360,15 +365,24 @@ def plan_window(ladder, demand, cycle_seconds, min_transition_for, driven=None, 
     # instruction about how hard the control may drive, so it does bound the driven value.
     lower_curve, upper_curve = bracket(curve, demand) if curve else (lower, upper)
     held = interpolated(lower_curve, upper_curve, demand, driven or {})
+    # **What each dwell stands for is decided here, where it is known.** Recovering it later
+    # from the states alone meant searching the whole curve for a stretch they fit, and a curve
+    # that doubles back - a lamp that brightens and then dims, two lamps crossfading - fits in
+    # more than one place: a crossfade asked for 1043 recorded 181.
     if lower is upper:
-        return (Dwell(stage=_holding(lower, held), seconds=float(cycle_seconds)),)
+        stage = _holding(lower, held)
+        return (
+            Dwell(stage=stage, seconds=float(cycle_seconds), level=dwell_level(stage, curve or ladder, driven, demand)),
+        )
     share = (demand - lower.level) / (upper.level - lower.level)
     upper_seconds = float(cycle_seconds) * share
     lower_seconds = float(cycle_seconds) - upper_seconds
     minimum = _minimum_transition(lower, upper, min_transition_for, driven or {})
     if lower_seconds < minimum or upper_seconds < minimum:
         nearer = upper if share >= 0.5 else lower
-        return (Dwell(stage=_holding(nearer, held), seconds=float(cycle_seconds)),)
+        # The rung, not the demand: the switched devices are what this collapse gives up, and
+        # the gap between the two is how the record shows it.
+        return (Dwell(stage=_holding(nearer, held), seconds=float(cycle_seconds), level=nearer.level),)
     # Both stretches have length: bracket() collapses an exact landing, so the demand is
     # strictly between these two rungs and the share is strictly between 0 and 1. A zero
     # dwell would be a state change that immediately reverses.
@@ -378,11 +392,132 @@ def plan_window(ladder, demand, cycle_seconds, min_transition_for, driven=None, 
     # interpolated value across the window, so splitting it issues the identical command
     # twice, logs it twice, and buys nothing. A lamp on its own is exactly that case.
     if dict(at_lower.states) == dict(at_upper.states):
-        return (Dwell(stage=at_lower, seconds=float(cycle_seconds)),)
+        return (
+            Dwell(
+                stage=at_lower,
+                seconds=float(cycle_seconds),
+                level=dwell_level(at_lower, curve or ladder, driven, demand),
+            ),
+        )
     return (
-        Dwell(stage=at_lower, seconds=lower_seconds),
-        Dwell(stage=at_upper, seconds=upper_seconds),
+        Dwell(stage=at_lower, seconds=lower_seconds, level=lower.level),
+        Dwell(stage=at_upper, seconds=upper_seconds, level=upper.level),
     )
+
+
+@dataclass(frozen=True)
+class DeviceWindow:
+    """What one device was commanded to over a cycle window.
+
+    Attributes:
+        seconds (float): the window's length.
+        on_seconds (float or None): for a switched device, how long it was commanded on;
+            None for a driven one.
+        value (float or None): for a driven device, the value it was commanded to, averaged
+            over the window; None for a switched one.
+        changes (int): commands in the window that changed its state from the one before,
+            counting the first against what it was last commanded to.
+    """
+
+    seconds: float
+    on_seconds: "float | None"
+    value: "float | None"
+    changes: int
+
+
+def device_windows(plan, before, driven):
+    """Return what each device was commanded to over a window, device by device.
+
+    **The detail `delivered` folds away.** One level says how much the ladder gave; tuning the
+    ladder is a question about which device gave it - the heater beside the sensor or the one
+    across the room - how often each switched, and whether a minimum kept one where it was.
+
+    Args:
+        plan (tuple): Dwell, as commanded
+        before (dict): device name -> the state it was last commanded to, before this window
+        driven (dict): device name -> its parameter, for devices set to a value
+
+    Returns:
+        dict: device name -> DeviceWindow, for every device the plan commands a usable state
+    """
+    total = float(sum(dwell.seconds for dwell in plan))
+    devices = sorted({device for dwell in plan for device in dwell.stage.states})
+    windows = {}
+    for device in devices:
+        states = [(dwell.stage.states.get(device), dwell.seconds) for dwell in plan]
+        if device in driven:
+            usable = all(isinstance(state, (int, float)) and not isinstance(state, bool) for state, _ in states)
+        else:
+            usable = all(isinstance(state, bool) for state, _ in states)
+        if not usable or not total:
+            # A state the validator refuses - a rung omitting the device, a number for a switch.
+            # Nothing true can be said about it, and the plan's own log line shows it.
+            continue
+        changes, previous = 0, before.get(device)
+        for state, _seconds in states:
+            if previous is None or not _same_state(state, previous):
+                changes += 1
+            previous = state
+        if device in driven:
+            windows[device] = DeviceWindow(
+                total, None, sum(float(state) * seconds for state, seconds in states) / total, changes
+            )
+        else:
+            windows[device] = DeviceWindow(
+                total, float(sum(seconds for state, seconds in states if state)), None, changes
+            )
+    return windows
+
+
+def pinned_plan(plan, pinned, curve, driven):
+    """Return a plan with some driven devices pinned to values they already hold.
+
+    **What a dwell stands for moves with the pin only where the driven values carried it.**
+    Where the window collapsed onto one rung and the lamp's value is what places it on the
+    curve, a lamp held at 70% while the loop asks for 400 stands for 700, and the gap is how a
+    hold shows. Where the window is time-proportioned between rungs, the switched devices place
+    each dwell and the driven values are not on the curve at either rung anyway, so the rung's
+    level stands: a hold there is not visible in one number.
+
+    Args:
+        plan (tuple): Dwell, as planned
+        pinned (dict): device name -> the value it keeps
+        curve (tuple): Stage in ladder order, capped, that driven values were read off
+        driven (dict): device name -> its parameter, for devices set to a value
+
+    Returns:
+        tuple: Dwell, with those devices pinned
+    """
+    if not pinned:
+        return plan
+    result = []
+    for dwell in plan:
+        stage = Stage(
+            level=dwell.stage.level,
+            declared=dwell.stage.declared,
+            states=MappingProxyType({**dwell.stage.states, **pinned}),
+        )
+        level = dwell.level
+        if level is not None and _carried(dwell.stage, curve, driven, level):
+            level = dwell_level(stage, curve, driven, level)
+        result.append(Dwell(stage=stage, seconds=dwell.seconds, level=level))
+    return tuple(result)
+
+
+def _carried(stage, curve, driven, level):
+    """Return whether a dwell's states are exactly what the curve gives at its level.
+
+    Args:
+        stage (Stage): the rung as planned
+        curve (tuple): Stage in ladder order
+        driven (dict): device name -> its parameter
+        level (float): the level the dwell was planned to stand for
+
+    Returns:
+        bool: True where the states sit on the curve at that level
+    """
+    exact, _approximate = _fits(stage, curve, driven)
+    return any(math.isclose(fit, level, rel_tol=1e-9, abs_tol=_ON_CURVE) for fit in exact)
 
 
 def _minimum_transition(lower, upper, min_transition_for, driven):
@@ -404,3 +539,172 @@ def _minimum_transition(lower, upper, min_transition_for, driven):
     """
     changing = [name for name, state in upper.states.items() if name not in driven and lower.states.get(name) != state]
     return max((float(min_transition_for(name)) for name in changing), default=0.0)
+
+
+#: How far a driven device's value may sit outside a stretch of the curve and still be read as
+#: lying on it. Commanded values are interpolated in floating point, so a value exactly at a
+#: rung can come back a rounding error beyond it.
+_ON_CURVE = 1e-9
+
+#: How far apart two driven devices' positions along a stretch may be and still be read as one
+#: position. Well above floating-point noise and well below any disagreement that matters.
+_SHARES_AGREE = 1e-6
+
+
+def delivered_level(plan, curve, driven=None):
+    """Return the level a window's plan actually delivers, averaged over the window.
+
+    **What the devices were told to do, read back as a level.** For a switched device that
+    is the rung's own level, weighted by how long it is held, so ``level 0 for 140s, level
+    750 for 160s`` delivers 400. A driven device is different: it holds one value for the
+    whole window on a rung whose level says nothing about it - a lamp on a 0 to 1000 ladder
+    asked for 400 is planned as one dwell *at level 0* with the lamp at 40% - so a dwell
+    carrying driven devices is read off the curve at the level its values correspond to.
+
+    That also makes a device held by ``min_transition_seconds`` visible. Its held value is
+    what is read back, so a lamp pinned at 70% while the loop asks for 400 delivers 700, and
+    the gap between the two is the hold.
+
+    What was **commanded**, not what happened: whether a device obeyed is its own
+    collector's to say.
+
+    Args:
+        plan (tuple): Dwell, as it is about to be commanded
+        curve (tuple): Stage in ladder order, capped, that driven values were read off
+        driven (dict or None): device name -> its parameter, for devices set to a value
+
+    Returns:
+        float or None: the time-weighted mean level, or None for a plan with no length
+    """
+    total = sum(dwell.seconds for dwell in plan)
+    if not total:
+        return None
+    return (
+        sum(
+            (dwell.level if dwell.level is not None else dwell_level(dwell.stage, curve, driven)) * dwell.seconds
+            for dwell in plan
+        )
+        / total
+    )
+
+
+def dwell_level(stage, curve, driven=None, near=None):
+    """Return the level one dwell's states stand for on the curve.
+
+    The rung's own level unless a driven device is involved. Then every rung and every
+    stretch between two adjacent rungs is a candidate: it fits where each switched device
+    is in the state the dwell gives it at both ends, and the driven devices' values place
+    the dwell along it. Of the levels that fit, the one nearest ``near`` wins. A curve that
+    doubles back fits in more than one place, which is why the planner passes the demand it
+    read the values at rather than leaving this to guess; along a flat stretch - two rungs
+    commanding the same thing - any level is as true as another.
+
+    **Several driven devices held at values that disagree** have no one level that
+    describes them, because each would put the dwell somewhere different along the curve.
+    A stretch where they agree is preferred wherever there is one; only where there is none
+    is the mean of their positions taken. Accepted: the case needs two dimmers on one
+    control, each held by its own minimum, at once.
+
+    Args:
+        stage (Stage): the rung as it is about to be commanded
+        curve (tuple): Stage in ladder order
+        driven (dict or None): device name -> its parameter
+        near (float or None): the level to prefer among several that fit, the rung's own
+            where None
+
+    Returns:
+        float: the level
+    """
+    if not driven or not any(device in driven for device in stage.states):
+        return stage.level
+    exact, approximate = _fits(stage, curve, driven)
+    fits = exact or approximate
+    if not fits:
+        # The states match nothing the curve describes - a document edited under a held
+        # value, say. The rung it was planned on is the only honest answer left.
+        return stage.level
+    reference = stage.level if near is None else near
+    return min(fits, key=lambda level: abs(level - reference))
+
+
+def _fits(stage, curve, driven):
+    """Return the levels on a curve that a dwell's states stand for.
+
+    Args:
+        stage (Stage): the rung as it is about to be commanded
+        curve (tuple): Stage in ladder order
+        driven (dict): device name -> its parameter
+
+    Returns:
+        tuple: ``(exact, approximate)`` lists of levels - exact where every driven device
+        agrees on the position, approximate where they disagree and their mean is taken
+    """
+    exact, approximate = [], []
+    for rung in curve:
+        if all(_same_state(state, rung.states.get(device)) for device, state in stage.states.items()):
+            exact.append(rung.level)
+    for lower, upper in zip(curve, curve[1:]):
+        along = _level_along(stage, lower, upper, driven)
+        if along is not None:
+            level, agreed = along
+            (exact if agreed else approximate).append(level)
+    return exact, approximate
+
+
+def _same_state(commanded, declared):
+    """Return whether a commanded state is the one a rung declares.
+
+    Args:
+        commanded (object): the state in the dwell
+        declared (object): the state the rung gives the same device
+
+    Returns:
+        bool: True where they are the same, numbers compared to within rounding
+    """
+    if isinstance(commanded, bool) or isinstance(declared, bool):
+        return commanded == declared
+    if isinstance(commanded, (int, float)) and isinstance(declared, (int, float)):
+        return math.isclose(commanded, declared, rel_tol=0.0, abs_tol=_ON_CURVE)
+    return commanded == declared
+
+
+def _level_along(stage, lower, upper, driven):
+    """Return where a dwell sits between two adjacent rungs, or None where it does not fit.
+
+    Args:
+        stage (Stage): the rung as it is about to be commanded
+        lower (Stage): the rung below
+        upper (Stage): the rung above
+        driven (dict): device name -> its parameter
+
+    Returns:
+        tuple or None: ``(level, agreed)``, agreed False where the driven devices would place
+        the dwell at different points and the level is their mean; None where a switched
+        device rules this stretch out or no driven device moves along it
+    """
+    shares = []
+    for device, state in stage.states.items():
+        low, high = lower.states.get(device), upper.states.get(device)
+        if device not in driven:
+            if not (_same_state(state, low) and _same_state(state, high)):
+                return None
+            continue
+        numeric = all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (state, low, high))
+        if not numeric:
+            continue
+        if high == low:
+            # Constant along this stretch, so it places the dwell nowhere on it - but it can
+            # still rule it out. Skipped outright, two dimmers ramped one after the other fitted
+            # the first one's stretch too, and the tie went to the planned rung: B at 50% on a
+            # 0/500/1000 ladder read as 500 rather than 750.
+            if not _same_state(state, low):
+                return None
+            continue
+        share = (state - low) / (high - low)
+        if not -_ON_CURVE <= share <= 1 + _ON_CURVE:
+            return None
+        shares.append(min(max(share, 0.0), 1.0))
+    if not shares or upper.level == lower.level:
+        return None
+    agreed = max(shares) - min(shares) <= _SHARES_AGREE
+    return lower.level + (upper.level - lower.level) * sum(shares) / len(shares), agreed

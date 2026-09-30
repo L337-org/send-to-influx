@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import logging
 
 import pytest
-from toinflux.influx import DataHandler
+from toinflux import writer as toinflux_writer
 
 # The process harness's own fixtures, registered here rather than copied into each module
 # that drives a real control: a stub bridge defined twice is two bridges that drift apart.
@@ -13,17 +13,38 @@ pytest_plugins = ["tests.harness.fixtures"]
 
 
 @pytest.fixture(autouse=True)
-def _reset_influx_write_buffers():
-    """Clear DataHandler's class-level per-source write buffers before and after every test.
+def _influx_writer(tmp_path, monkeypatch):
+    """Give every test a writer of its own: inline, with its spool in the test's directory.
 
-    The buffer is intentionally class-level (see toinflux/influx.py) so it survives the
-    DataHandler instance being discarded/recreated on failure - but that also means it
-    persists across tests unless reset, since every test in this session shares the same
-    class object.
+    Inline, so a point's fate is known by the time ``send_data()`` returns and a test can
+    assert on it; the spool, the chunking, the rejections and the reporting are the same code
+    the service's thread runs. The spool is under ``tmp_path`` so no test writes one into the
+    checkout, which is where a writer would otherwise put it with no state directory set.
+
+    Yields:
+        InfluxWriter: the writer, closed afterwards
     """
-    DataHandler._write_buffers.clear()
-    yield
-    DataHandler._write_buffers.clear()
+    # STATE_DIRECTORY too, because a test that drives main() configures a writer of its own, and
+    # with no settings path that resolves to the checkout: tests left a spool there before this.
+    # A test that wants a particular state directory sets it again after this one.
+    monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path / "state"))
+    writer = toinflux_writer.configure("test", {}, spool_root=str(tmp_path / "spool"), inline=True)
+    yield writer
+    writer.close(0)
+    toinflux_writer._WRITER = None
+
+
+@pytest.fixture
+def influx_posts(_influx_writer):
+    """Replace the writer's HTTP post with a mock that accepts everything.
+
+    Yields:
+        MagicMock: the post; ``call_args_list`` holds what was sent, and a test sets
+        ``side_effect`` to make InfluxDB refuse or be unreachable
+    """
+    with patch.object(_influx_writer._session, "post") as post:
+        post.return_value.raise_for_status = MagicMock()
+        yield post
 
 
 _BASE_SAMPLE_SETTINGS = {

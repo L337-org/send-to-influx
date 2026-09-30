@@ -9,11 +9,25 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
+import random
+from types import MappingProxyType
+
 import pytest
 
 from toinflux.exceptions import ConfigError
 from toinflux.rules import RuleEvaluationError
-from toinflux.staging import bracket, build_ladder, cap_ladder, plan_window
+from toinflux.staging import (
+    Dwell,
+    Stage,
+    bracket,
+    build_ladder,
+    cap_ladder,
+    delivered_level,
+    device_windows,
+    pinned_plan,
+    plan_window,
+    reachable_ladder,
+)
 
 # The design note's worked example: two independently switchable heaters.
 CONSERVATORY = [
@@ -330,3 +344,394 @@ class TestADeviceSetToAValueRatherThanSwitched:
         broken = build_ladder([{"level": 0, "set": {}}, {"level": 1000, "set": {"lamp": 100}}])
         plan = plan_window(broken, 500, 30, lambda _device: 1, self.DRIVEN)
         assert "lamp" not in plan[0].stage.states or plan[0].stage.states.get("lamp") is None
+
+
+class TestWhatAWindowDelivers:
+    """The level the devices were told to reach, read back from the plan.
+
+    Rung levels alone are right for switched devices and wrong for driven ones: a lamp on a
+    0 to 1000 ladder asked for 400 is planned as one dwell *at level 0* with the lamp at 40%,
+    so reading the rung would record 0 for a lamp that is plainly on.
+    """
+
+    SWITCHED = build_ladder([{"level": 0, "set": {"heater": False}}, {"level": 750, "set": {"heater": True}}])
+    LAMP = build_ladder([{"level": 0, "set": {"lamp": 0}}, {"level": 1000, "set": {"lamp": 100}}])
+    MIXED = build_ladder(
+        [
+            {"level": 0, "set": {"heater": False, "lamp": 0}},
+            {"level": 500, "set": {"heater": False, "lamp": 100}},
+            {"level": 1000, "set": {"heater": True, "lamp": 100}},
+        ]
+    )
+    DRIVEN = {"lamp": "brightness_pct"}
+
+    def test_switched_devices_deliver_the_time_weighted_rung_levels(self):
+        plan = plan_window(self.SWITCHED, 400, 300, _no_minimum)
+        assert [dwell.stage.level for dwell in plan] == [0.0, 750.0]
+        assert delivered_level(plan, self.SWITCHED) == pytest.approx(400)
+
+    def test_a_driven_device_delivers_the_level_its_value_stands_for(self):
+        plan = plan_window(self.LAMP, 400, 300, _no_minimum, self.DRIVEN)
+        assert [dwell.stage.level for dwell in plan] == [0.0], "the case this exists for has changed shape"
+        assert delivered_level(plan, self.LAMP, self.DRIVEN) == pytest.approx(400)
+
+    @pytest.mark.parametrize("demand", [0, 250, 500, 750, 1000])
+    def test_a_mixed_ladder_delivers_its_demand(self, demand):
+        plan = plan_window(self.MIXED, demand, 300, _no_minimum, self.DRIVEN)
+        assert delivered_level(plan, self.MIXED, self.DRIVEN) == pytest.approx(demand)
+
+    @pytest.mark.parametrize("demand", [250, 750])
+    def test_two_dimmers_ramped_one_after_the_other(self, demand):
+        """Found in review. On the upper stretch the first dimmer is at 100 at both ends, and
+        on the lower the second is at 0 at both ends; a device constant along a stretch was
+        skipped rather than allowed to rule it out, so at 750 the lower stretch fitted too and
+        the tie went to the planned rung, reading 500."""
+        ladder = build_ladder(
+            [
+                {"level": 0, "set": {"a": 0, "b": 0}},
+                {"level": 500, "set": {"a": 100, "b": 0}},
+                {"level": 1000, "set": {"a": 100, "b": 100}},
+            ]
+        )
+        driven = {"a": "brightness_pct", "b": "brightness_pct"}
+        plan = plan_window(ladder, demand, 300, _no_minimum, driven)
+        assert delivered_level(plan, ladder, driven) == pytest.approx(demand)
+
+    def test_a_driven_device_held_at_its_old_value_shows_the_hold(self):
+        """The gap between demand and delivered is what makes a held device visible, so the
+        held value has to be what is read back rather than the demand."""
+        held = (Dwell(stage=_with(self.LAMP[0], lamp=70.0), seconds=300.0),)
+        assert delivered_level(held, self.LAMP, self.DRIVEN) == pytest.approx(700)
+
+    def test_two_driven_devices_that_disagree_average(self):
+        pair = build_ladder([{"level": 0, "set": {"a": 0, "b": 0}}, {"level": 1000, "set": {"a": 100, "b": 100}}])
+        held = (Dwell(stage=_with(pair[0], a=20.0, b=60.0), seconds=60.0),)
+        assert delivered_level(held, pair, {"a": "brightness_pct", "b": "brightness_pct"}) == pytest.approx(400)
+
+    def test_states_the_curve_does_not_describe_fall_back_to_the_rung(self):
+        """A switched device in a state no stretch of the curve gives it: there is nothing to
+        read the driven value against, and the rung it was planned on is what is left."""
+        odd = (Dwell(stage=_with(self.MIXED[0], heater=True, lamp=50.0), seconds=60.0),)
+        assert delivered_level(odd, self.MIXED, self.DRIVEN) == 0.0
+
+    def test_a_plan_with_no_length_delivers_nothing(self):
+        assert delivered_level((), self.SWITCHED) is None
+
+    def test_a_crossfade_reads_its_demand(self):
+        """Found by the generated ladders below. `a` rises then falls and `b` rises then falls
+        further, so at 1043 the states also fitted the stretch below the planned rung once the
+        two lamps' disagreeing positions there were averaged, and that stretch was nearer."""
+        ladder = build_ladder(
+            [
+                {"level": 50, "set": {"a": 55, "b": 15}},
+                {"level": 200, "set": {"a": 75, "b": 80}},
+                {"level": 1750, "set": {"a": 75, "b": 50}},
+                {"level": 2000, "set": {"a": 20, "b": 10}},
+            ]
+        )
+        driven = {"a": "brightness_pct", "b": "brightness_pct"}
+        plan = plan_window(ladder, 1043, 300, _no_minimum, driven)
+        assert delivered_level(plan, ladder, driven) == pytest.approx(1043)
+
+    def test_a_curve_that_doubles_back_at_the_planned_rung(self):
+        """The lamp's 42.5% lies on both stretches either side of 650, and the planned rung sits
+        between them, so nearest-to-the-rung chose the wrong side."""
+        ladder = build_ladder(
+            [
+                {"level": 550, "set": {"lamp": 90}},
+                {"level": 650, "set": {"lamp": 40}},
+                {"level": 900, "set": {"lamp": 70}},
+            ]
+        )
+        plan = plan_window(ladder, 670.86, 300, _no_minimum, self.DRIVEN)
+        assert delivered_level(plan, ladder, self.DRIVEN) == pytest.approx(670.86)
+
+    def test_a_hold_on_a_proportioned_window_leaves_the_rungs(self):
+        """The lamp is part way along its ramp at both rungs, so it places neither dwell: the
+        heater does, and a hold on the lamp does not move them."""
+        ladder = build_ladder(
+            [{"level": 0, "set": {"heater": False, "lamp": 0}}, {"level": 1000, "set": {"heater": True, "lamp": 100}}]
+        )
+        plan = plan_window(ladder, 400, 300, _no_minimum, self.DRIVEN)
+        assert len(plan) == 2, "the case this exists for has changed shape"
+        held = pinned_plan(plan, {"lamp": 10.0}, ladder, self.DRIVEN)
+        assert [dwell.level for dwell in held] == [0.0, 1000.0]
+        assert delivered_level(held, ladder, self.DRIVEN) == pytest.approx(400)
+
+    def test_a_hold_on_a_dwell_the_lamp_places_moves_it(self):
+        """At 750 the lamp is already at 100 on the rung below, so that dwell sits on the curve
+        at its rung, and holding the lamp at 10 puts it where 10 is: 50."""
+        plan = plan_window(self.MIXED, 750, 300, _no_minimum, self.DRIVEN)
+        held = pinned_plan(plan, {"lamp": 10.0}, self.MIXED, self.DRIVEN)
+        assert [dwell.level for dwell in held] == [pytest.approx(50.0), 1000.0]
+
+
+class TestDeliveredOverGeneratedLadders:
+    """`delivered` against ladders nobody wrote by hand, checked by a reading that shares none
+    of its method.
+
+    The cases above are the shapes somebody thought of. These are seeded random ladders of two
+    to five rungs mixing switched devices with driven ones whose ramps rise, fall or double
+    back, and they found what the written cases missed: a curve that doubles back fits a
+    dwell's states in more than one place, and choosing among them without the demand chose
+    wrongly. The reference reading samples the curve finely and compares states, where the
+    code under test solves for positions along each stretch.
+
+    Ladders with two adjacent rungs commanding the same thing are left out: the window
+    collapses onto one of them and every level along that stretch is as true as another, so
+    there is no single right answer to check against.
+    """
+
+    CASES = 1500
+    #: Fewer for the held case, where each is checked against the sampled curve.
+    HELD_CASES = 400
+    SAMPLES = 1000
+
+    @staticmethod
+    def _ladder(rng):
+        while True:
+            count = rng.randint(2, 5)
+            levels = sorted(rng.sample(range(0, 2001, 50), count))
+            switched = [f"s{index}" for index in range(rng.randint(0, 3))]
+            driven = [f"d{index}" for index in range(rng.randint(0 if switched else 1, 2))]
+            stages = []
+            for level in levels:
+                states = {device: rng.random() < 0.5 for device in switched}
+                states.update({device: rng.choice(range(0, 101, 5)) for device in driven})
+                stages.append({"level": level, "set": states})
+            ladder = build_ladder(stages)
+            if all(dict(a.states) != dict(b.states) for a, b in zip(ladder, ladder[1:])):
+                return ladder, {device: "brightness_pct" for device in driven}
+
+    @staticmethod
+    def _curve_at(curve, level):
+        """What the curve commands at a level, with None for a switched device it leaves undefined."""
+        lower = max((rung for rung in curve if rung.level <= level), key=lambda rung: rung.level, default=curve[0])
+        upper = min((rung for rung in curve if rung.level >= level), key=lambda rung: rung.level, default=curve[-1])
+        span = upper.level - lower.level
+        at = {}
+        for device, low in lower.states.items():
+            high = upper.states[device]
+            if isinstance(low, bool):
+                at[device] = low if low == high else None
+            else:
+                at[device] = low + (high - low) * ((level - lower.level) / span if span else 0.0)
+        return at
+
+    def _brute_fits(self, curve, states):
+        """Every sampled interval of the curve that passes through the states.
+
+        Crossings rather than closeness: a driven device's value fits between two samples where
+        the curve is on one side of it at the first and the other side at the second, which a
+        curve that only approaches it - turning just short at a rung - never does. Rungs are
+        among the samples, so no interval straddles a change of slope and the crossing is found
+        by straight interpolation. Several driven devices fit an interval only if each crosses
+        at the same point within it.
+
+        Returns:
+            tuple: the levels that fit, and the sample spacing
+        """
+        low, high = curve[0].level, curve[-1].level
+        step = (high - low) / self.SAMPLES
+        levels = sorted({low + index * step for index in range(self.SAMPLES + 1)} | {rung.level for rung in curve})
+        fits = []
+        previous = self._curve_at(curve, levels[0])
+        for first, second in zip(levels, levels[1:]):
+            here, there = previous, self._curve_at(curve, second)
+            previous = there
+            crossings = []
+            for device, state in states.items():
+                if isinstance(state, bool):
+                    if here[device] != state or there[device] != state:
+                        break
+                    continue
+                below, above = here[device] - state, there[device] - state
+                if below * above > 0:
+                    break
+                crossings.append(first if below == above else first + (second - first) * below / (below - above))
+            else:
+                # Interpolated within an interval no rung falls inside, so the crossings are
+                # exact and two devices that cross at different points do not fit together.
+                if crossings and max(crossings) - min(crossings) <= 1e-6:
+                    fits.append(sum(crossings) / len(crossings))
+        # A rung on its own: where the switched devices differ either side of it, no interval
+        # reaching it fits, and the rung itself still can.
+        fits += [
+            rung.level
+            for rung in curve
+            if all(
+                rung.states[device] == state if isinstance(state, bool) else abs(rung.states[device] - state) <= 1e-9
+                for device, state in states.items()
+            )
+        ]
+        return fits, step
+
+    def test_with_nothing_held_or_capped_it_is_the_demand(self):
+        rng = random.Random(4601)
+        for case in range(self.CASES):
+            ladder, driven = self._ladder(rng)
+            demand = rng.uniform(ladder[0].level - 100, ladder[-1].level + 100)
+            plan = plan_window(ladder, demand, 300, _no_minimum, driven, curve=ladder)
+            expected = min(max(demand, ladder[0].level), ladder[-1].level)
+            assert delivered_level(plan, ladder, driven) == pytest.approx(expected), (case, ladder, demand)
+
+    def test_a_cap_delivers_no_more_than_it_allows(self):
+        rng = random.Random(4602)
+        for case in range(self.CASES):
+            ladder, driven = self._ladder(rng)
+            capped = cap_ladder(ladder, rng.uniform(ladder[0].level, ladder[-1].level))
+            demand = rng.uniform(ladder[0].level, ladder[-1].level)
+            plan = plan_window(capped, demand, 300, _no_minimum, driven, curve=capped)
+            expected = min(max(demand, capped[0].level), capped[-1].level)
+            assert delivered_level(plan, capped, driven) == pytest.approx(expected), (case, ladder, demand)
+
+    def test_with_a_device_frozen_a_lone_dwell_reads_nearest_the_demand(self):
+        """A frozen switched device narrows the rungs the window may use while driven values
+        still come off the whole curve, so a lone dwell can carry values from a stretch its
+        rung is not on, and a curve that doubles back offers more than one place they fit."""
+        rng = random.Random(4604)
+        checked = 0
+        for case in range(self.HELD_CASES):
+            ladder, driven = self._ladder(rng)
+            switched = [device for device in ladder[0].states if device not in driven]
+            # A rung of switched devices alone stands for its own level; only driven values are
+            # read back.
+            if not switched or not driven:
+                continue
+            frozen = rng.choice(switched)
+            reachable = reachable_ladder(ladder, frozenset({frozen}), {frozen: rng.random() < 0.5})
+            demand = rng.uniform(ladder[0].level, ladder[-1].level)
+            plan = plan_window(reachable, demand, 300, _no_minimum, driven, curve=ladder)
+            if len(plan) != 1:
+                continue
+            fits, step = self._brute_fits(ladder, plan[0].stage.states)
+            if not fits:
+                # As for a hold: the accepted mean of positions that disagree, checkable only
+                # as far as staying on the curve.
+                assert ladder[0].level <= plan[0].level <= ladder[-1].level, (case, ladder, demand)
+                continue
+            nearest = min(abs(level - demand) for level in fits)
+            candidates = [level for level in fits if abs(level - demand) <= nearest + 2 * step]
+            assert any(plan[0].level == pytest.approx(level, abs=2 * step) for level in candidates), (
+                case,
+                ladder,
+                demand,
+                candidates,
+            )
+            checked += 1
+        assert checked > self.HELD_CASES / 20, f"only {checked} lone dwells were compared"
+
+    def test_a_held_value_reads_as_the_level_the_curve_gives_it(self):
+        """Every driven device held at what an earlier demand gave it, which is how a hold
+        arises: the device keeps the value it was last sent."""
+        rng = random.Random(4603)
+        checked = 0
+        for case in range(self.HELD_CASES):
+            ladder, driven = self._ladder(rng)
+            demand = rng.uniform(ladder[0].level, ladder[-1].level)
+            plan = plan_window(ladder, demand, 300, _no_minimum, driven, curve=ladder)
+            earlier = self._curve_at(ladder, rng.uniform(ladder[0].level, ladder[-1].level))
+            held = pinned_plan(plan, {device: earlier[device] for device in driven}, ladder, driven)
+            for before, after in zip(plan, held):
+                at = self._curve_at(ladder, before.level)
+                carried = all(
+                    at[device] == state if isinstance(state, bool) else abs(at[device] - state) <= 1e-6
+                    for device, state in before.stage.states.items()
+                )
+                if not carried:
+                    # Time-proportioned: the switched devices place it, and the hold does not.
+                    assert after.level == before.level, (case, ladder, demand)
+                    continue
+                fits, step = self._brute_fits(ladder, after.stage.states)
+                if not fits:
+                    # No level gives every device its held value - they would each put the dwell
+                    # somewhere different - and the mean of their positions is the accepted
+                    # answer, which has no reference to check against beyond staying on the curve.
+                    assert ladder[0].level <= after.level <= ladder[-1].level, (case, ladder, demand, earlier)
+                    continue
+                # Any fit as near as the nearest to within a sample: sampling cannot separate two
+                # that are almost equally far from the demand, and either is then as right.
+                nearest = min(abs(level - before.level) for level in fits)
+                candidates = [level for level in fits if abs(level - before.level) <= nearest + 2 * step]
+                assert any(after.level == pytest.approx(level, abs=2 * step) for level in candidates), (
+                    case,
+                    ladder,
+                    demand,
+                    earlier,
+                    candidates,
+                )
+                checked += 1
+        assert checked > self.HELD_CASES / 4, f"only {checked} held dwells were compared"
+
+
+class TestWhatEachDeviceWasCommanded:
+    """The per-device detail `delivered` folds away, for tuning the ladder rather than the gains."""
+
+    HEATERS = build_ladder(
+        [
+            {"level": 0, "set": {"far": False, "near": False}},
+            {"level": 750, "set": {"far": True, "near": False}},
+            {"level": 1500, "set": {"far": True, "near": True}},
+        ]
+    )
+
+    def test_a_switched_device_reports_how_long_it_was_on(self):
+        plan = plan_window(self.HEATERS, 1000, 300, _no_minimum)
+        windows = device_windows(plan, {"far": True, "near": False}, {})
+        assert windows["far"].on_seconds == pytest.approx(300.0)
+        assert windows["near"].on_seconds == pytest.approx(100.0)
+        assert windows["far"].value is None
+        assert windows["near"].seconds == pytest.approx(300.0)
+
+    def test_changes_count_against_what_it_was_last_commanded(self):
+        """`far` was already on and stays on; `near` goes on part way through."""
+        plan = plan_window(self.HEATERS, 1000, 300, _no_minimum)
+        windows = device_windows(plan, {"far": True, "near": False}, {})
+        assert (windows["far"].changes, windows["near"].changes) == (0, 1)
+
+    def test_a_device_never_commanded_counts_its_first_command(self):
+        plan = plan_window(self.HEATERS, 0, 300, _no_minimum)
+        assert device_windows(plan, {}, {})["far"].changes == 1
+
+    def test_a_driven_device_reports_its_value_over_the_window(self):
+        ladder = build_ladder(
+            [{"level": 0, "set": {"heater": False, "lamp": 0}}, {"level": 1000, "set": {"heater": True, "lamp": 100}}]
+        )
+        driven = {"lamp": "brightness_pct"}
+        plan = pinned_plan(plan_window(ladder, 400, 300, _no_minimum, driven), {"lamp": 70.0}, ladder, driven)
+        windows = device_windows(plan, {"lamp": 70.0, "heater": False}, driven)
+        assert windows["lamp"].value == pytest.approx(70.0)
+        assert windows["lamp"].on_seconds is None
+        assert windows["lamp"].changes == 0
+        assert windows["heater"].on_seconds == pytest.approx(120.0)
+
+    def test_a_driven_value_is_weighted_by_how_long_it_was_held(self):
+        """A planned window holds one value, so this is the case that would tell the weighting
+        from a plain mean: a plan built by something other than `plan_window`."""
+        ladder = build_ladder([{"level": 0, "set": {"lamp": 0}}, {"level": 1000, "set": {"lamp": 100}}])
+        plan = (
+            Dwell(stage=_with(ladder[0], lamp=20.0), seconds=100.0),
+            Dwell(stage=_with(ladder[0], lamp=80.0), seconds=200.0),
+        )
+        assert device_windows(plan, {}, {"lamp": "brightness_pct"})["lamp"].value == pytest.approx(60.0)
+
+    def test_a_state_of_the_wrong_kind_is_left_out(self):
+        """What the validator refuses: nothing true can be said about it."""
+        odd = (Dwell(stage=_with(self.HEATERS[0], near=40), seconds=60.0),)
+        assert set(device_windows(odd, {}, {})) == {"far"}
+
+    def test_a_plan_with_no_length_reports_nothing(self):
+        assert device_windows((), {}, {}) == {}
+
+
+def _with(stage, **states):
+    """Return a rung with some devices' states replaced, as `_hold` pins them.
+
+    Args:
+        stage (Stage): the rung
+        **states: device name to the state it is held at
+
+    Returns:
+        Stage: the rung as it would be commanded
+    """
+    return Stage(level=stage.level, declared=stage.declared, states=MappingProxyType({**stage.states, **states}))

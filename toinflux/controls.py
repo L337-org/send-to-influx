@@ -825,6 +825,27 @@ def holdable_value(state):
     return isinstance(state, (int, float)) and not isinstance(state, bool) and math.isfinite(state)
 
 
+def held_by_minimum(frozen, driven, states):
+    """Return the devices their ``min_transition_seconds`` does not allow to change this cycle.
+
+    Frozen, and for a driven device a recorded value it could actually be pinned to - the other
+    half of what `_hold` requires. **Whether it was allowed to change, not whether it did.** A
+    frozen switched device in states no rung describes is moved anyway, since there is no rung
+    that keeps it where it is; it is still held, and its changes say the minimum was overridden.
+    Shared by `get_control_state`'s ``held_by_minimum`` and the record's ``held``, so the two
+    cannot come to mean different things.
+
+    Args:
+        frozen (set): devices still inside their minimum
+        driven (dict or set): the devices set to a value rather than switched
+        states (dict): device name -> the state it was last commanded to
+
+    Returns:
+        set: the devices held
+    """
+    return {device for device in frozen if device not in driven or holdable_value(states.get(device))}
+
+
 def parameter_devices(devices):
     """Return the devices driven by a continuous parameter rather than switched.
 

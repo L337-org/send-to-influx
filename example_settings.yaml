@@ -46,7 +46,8 @@ influx:
   # For InfluxDB v1, use user/password and per-source db:
   user: "your_influx_user"
   password: "your_influx_password"
-  # For InfluxDB v2, use token/org instead and per-source bucket: instead of db. Leave
+  # For InfluxDB v2, use token/org instead; each source's db: then names its bucket
+  # (an optional per-source bucket: takes precedence over db: where both are set). Leave
   # both blank (as shipped) for v1 - an empty token is falsy, so it's correctly
   # ignored rather than mistaken for real v2 config. token/org are shipped here as
   # real, empty keys rather than commented out specifically so the packaged
@@ -58,6 +59,10 @@ influx:
   timeout: 5
   # Uncomment the line below to skip TLS certificate verification (e.g. self-signed/internal certs)
   # insecure: true
+  # How much disk, in megabytes, may hold points waiting to be sent while InfluxDB is
+  # unreachable - per process, and each control runs in its own. 0 to 1024; 0 keeps them in
+  # memory only, where they are lost if the service stops. See the README.
+  # buffer_mb: 100
 
 # Shared MQTT broker settings, used by every MQTT-based source (currently: nuki).
 # Like the influx block above, this is per-install infrastructure rather than
@@ -133,6 +138,10 @@ controls:
   # actuates devices unattended for as long as it exists. Has no effect unless the MCP
   # server is enabled (see the mcp block above) and "enabled" above is true.
   mcp_write: false
+  # The database the controls record their PID history to, one point per cycle, for tuning:
+  # the "control" measurement, tagged with each control's name, and each device's share of the
+  # cycle to "control_device". Leave it out and nothing is recorded. See CONTROLS.md, "Recording the PID history", for what each field means.
+  # db: "control_db"
 
 # Hue bridge settings
 hue:

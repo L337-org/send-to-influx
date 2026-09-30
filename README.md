@@ -399,7 +399,10 @@ If a source hits a transient failure (e.g. a network error talking to its API or
 
 If `sources:` is empty or absent (and no `-s`/`--source` was given), or every configured instance of a requested source turns out unusable (e.g. a Hue install whose bridges have no tokens), the process logs that plainly and exits with code 1 rather than starting nothing while looking healthy. Both causes require manual intervention (an edit to `settings.yaml` and a restart) and never resolve themselves by waiting, so under the packaged systemd service they are not retried either - see "Exit codes" and "After installing" below.
 
-If InfluxDB itself is briefly unreachable, a point that fails to write is buffered in memory (per source, up to a few hundred points) rather than dropped, and sent automatically - oldest first, batched into a handful of requests - once InfluxDB is reachable again, so a short outage delays data rather than losing it. A point the server itself repeatedly rejects (for example, one that has aged past the bucket's retention window) is given up on after a few attempts rather than blocking the points queued behind it. The buffer is in-memory only: it does not survive a process restart, and if the settings file's InfluxDB destination is changed while a backlog exists, the backlog is delivered to the new destination. Heartbeat status points are never buffered - they are a live signal, so a failed one is simply dropped.
+Collection never waits on InfluxDB. Each point is written to a buffer on disk first - in the state directory, `/var/lib/send-to-influx/spool` on the packaged install - and sent from there by a thread of its own, so a slow or unreachable InfluxDB costs neither a collector its interval nor a control its cycle. Points wait on disk through an outage of any length, including restarts, kills and power cuts, and are sent oldest first once InfluxDB is back - with one exception: a control deleted while its points are still waiting leaves them in its own spool until a control of the same name runs again; after a crash, at most a handful already sent are sent again, which InfluxDB absorbs. A point the server itself keeps refusing (for example, one past the bucket's retention window, or one for a database that does not exist) is given up on after five separate attempts, spaced from 5 to 40 seconds apart, and while it waits for the next one it holds up nothing else; it waits in `retry.jsonl` in the same directory, so a restart does not lose it. Unsent points go to whatever database the current settings name, so a rebuilt or renamed database receives the backlog too. Heartbeat status points are never buffered - they are a live signal, so a failed one is simply dropped.
+
+The buffer holds up to `buffer_mb` megabytes per process in the `influx` block - 100 by default, from 0 to 1024. It is per process, and each control runs in a process of its own, so an install with three controls can use up to four times the setting. When it is full the oldest points are dropped first, and the log says so. `buffer_mb: 0` keeps unsent points in memory only - up to 500 per source, lost if the service stops - and the same happens, with a warning, if the disk cannot be written.
+
 
 After every collection cycle (success or failure), a `collector_status,source=<name>` heartbeat point is written to InfluxDB alongside the source's own data, with fields `ok` (`1`/`0`) and `consecutive_failures`. A dead collector would otherwise only show up as a silent gap in Grafana; this gives you a positive signal to alert on (e.g. `ok == 0` or a stale `collector_status` point). Heartbeats are not written in `--print` mode, since that mode never sends anything to InfluxDB.
 
@@ -871,11 +874,17 @@ watches a heartbeat from each, and restarts one that dies or stops beating with 
 Every death is followed by the parent putting that control's devices into their safe state itself -
 a child that was killed or lost power did not get the chance.
 
+**Each control's PID history can be kept for tuning.** Set `controls.db`, as for any source, and
+every cycle writes its input, setpoint, demand and P, I and D terms to the `control`
+measurement, readable through the MCP read tools as source `controls`, and what each device
+was commanded to the `control_device` measurement, which `get_control_devices` summarises. CONTROLS.md says what each
+field means and how to read it.
+
 **[CONTROLS.md](CONTROLS.md) is the reference**: the document format key by key, the rule language
 and the things about it that bite, safe states and the active period, the stage ladder, a worked
-example, and what `--check-config` checks. The same reference is available at runtime from the
-`get_control_schema` MCP tool, built from the same constants, so a connected model composing a
-control is not guessing.
+example, recording the PID history, and what `--check-config` checks. The same reference is
+available at runtime from the `get_control_schema` MCP tool, built from the same constants, so a
+connected model composing a control is not guessing.
 
 Usage
 -----

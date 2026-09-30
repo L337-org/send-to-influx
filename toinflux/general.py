@@ -1046,6 +1046,12 @@ def _validate_influx_block(influx):
             errors.append("influx.org is required when using token authentication (v2)")
     elif not (influx.get("user") and influx.get("password")):
         errors.append("influx requires either token+org (v2) or user+password (v1)")
+    # Here rather than at the top: the writer imports this module.
+    from toinflux.writer import buffer_mb_problem
+
+    problem = buffer_mb_problem(influx)
+    if problem:
+        errors.append(problem)
     return errors
 
 
@@ -1356,9 +1362,10 @@ def _validate_controls_block(settings):
     operator: the subsystem simply does not run, and nothing says why. Checking the type
     here turns it into a ``--check-config`` error at the moment it is written.
 
-    Only the two switches. The controls themselves are separate documents under the state
-    directory with their own validation (:func:`toinflux.controls.validate_stored_controls`),
-    which needs the store rather than this dict.
+    The two switches, and where the controls' history is written. The controls themselves
+    are separate documents under the state directory with their own validation
+    (:func:`toinflux.controls.validate_stored_controls`), which needs the store rather than
+    this dict.
 
     Args:
         settings (dict): the parsed settings document
@@ -1371,11 +1378,14 @@ def _validate_controls_block(settings):
         return []
     if not isinstance(block, dict):
         return [f"controls must be a mapping of settings (got {type(block).__name__})"]
+    # Here rather than at the top: control_record imports influx, which imports this module.
+    from toinflux.control_record import record_settings_errors
+
     return [
         f"controls.{key} must be true or false (got {block[key]!r})"
         for key in ("enabled", "mcp_write")
         if key in block and not isinstance(block[key], bool)
-    ]
+    ] + record_settings_errors(settings)
 
 
 def _contains_real_secret(settings):

@@ -314,3 +314,48 @@ class TestEveryDeliberateFailureIsTranslated:
             f"project exceptions outside the ToInfluxError hierarchy: {sorted(set(outside))} - they "
             f"will reach a client as a bare crash with their message withheld"
         )
+
+
+class TestTheControlsHistoryIsReadable:
+    """The controls' history is read like a source without being one. It is not in `sources:`,
+    because nothing collects it, so the read tools have to be told about it separately - and
+    the write and control tools, which answer about what is collected, must not be."""
+
+    V1 = {"url": "http://influx", "user": "u", "password": "p"}
+
+    def test_it_is_readable_once_configured(self):
+        from toinflux.mcp_common import readable_sources
+
+        settings = {"sources": ["hue"], "influx": self.V1, "controls": {"db": "control_db"}}
+        assert readable_sources(settings) == ["hue", "controls"]
+        assert configured_sources(settings) == ["hue"]
+
+    def test_and_not_before(self):
+        from toinflux.mcp_common import readable_sources
+
+        assert readable_sources({"sources": ["hue"], "influx": self.V1, "controls": {"enabled": True}}) == ["hue"]
+
+    def test_resolving_it_builds_the_record_not_a_collector(self, installation):
+        from toinflux.control_record import ControlRecord
+
+        installation.set_settings("controls", db="control_db")
+        handler = resolve_handler("controls", installation.settings, installation.settings_file)
+        try:
+            assert isinstance(handler, ControlRecord)
+        finally:
+            close_session(handler.session)
+
+    def test_every_control_is_one_handler(self, installation):
+        from toinflux.mcp_common import resolve_handlers
+
+        installation.set_settings("controls", db="control_db")
+        handlers = resolve_handlers("controls", installation.settings, installation.settings_file)
+        try:
+            assert [instance for instance, _ in handlers] == [None]
+        finally:
+            for _, handler in handlers:
+                close_session(handler.session)
+
+    def test_unconfigured_it_is_an_unknown_source(self, installation):
+        with pytest.raises(ToolParamError, match="unknown source 'controls'"):
+            resolve_handler("controls", installation.settings, installation.settings_file)

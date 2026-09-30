@@ -889,17 +889,16 @@ class TestReadInput:
             read_input(None, SETTINGS, SPEC)
 
     def test_a_failed_write_back_still_returns_the_reading(self, monkeypatch, tmp_path, caplog):
-        """The value in hand is good; only the coordination failed.
+        """The value in hand is good; only the record of it failed.
 
-        Raising would throw away a fresh reading because a best-effort write missed, and
-        the caller's response to a failed read is the safe state - so an InfluxDB hiccup
-        would switch the heating off while the temperature it was holding was perfectly
-        well known. What is genuinely lost is that other controls will not see this value,
-        so the floor stops binding until a write succeeds, and that goes in the log.
+        An outage never raises here - the writer holds those points - so what reaches this is a
+        point that cannot be written at all. Raising would still throw away a fresh reading, and
+        the caller's response to a failed read is the safe state, so the heating would go off
+        while the temperature it was holding was perfectly well known. It goes in the log.
         """
         monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
         handler = _handler(data={"temperature": 21.0})
-        handler.send_data.side_effect = InfluxWriteError("influx returned 503")
+        handler.send_data.side_effect = InfluxWriteError("cannot contain a newline")
         monkeypatch.setattr("toinflux.inputs.handler_reading", lambda *a, **k: None)
         monkeypatch.setattr("toinflux.inputs.get_class", lambda *a, **k: handler)
         with caplog.at_level("WARNING"):
@@ -1127,7 +1126,12 @@ HANDLER_BUILDERS = frozenset({"get_class", "resolve_handler", "resolve_handlers"
 
 #: The modules that hold nothing but the handler machinery itself, where building one is the
 #: point, so the search for control modules does not follow imports into them.
-FACTORY_MODULES = frozenset({"general", "influx", "exceptions", "process", "mcp_common"})
+#:
+#: ``control_record`` is here because it subclasses ``DataHandler`` to reuse the buffered
+#: writer, and names no source: its handler is bound to the ``controls`` section by
+#: construction, so there is no ``sources:`` entry for the refusal to consult. Referencing the
+#: base class is what the search reports, and building one of these is not a second door.
+FACTORY_MODULES = frozenset({"general", "influx", "exceptions", "process", "mcp_common", "control_record"})
 
 
 def _handler_classes():

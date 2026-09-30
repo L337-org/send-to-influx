@@ -491,8 +491,7 @@ def _register_speedtest_write_tools(server, settings, settings_file):
         A run takes up to a couple of minutes and saturates the connection while it
         runs. Only one runs at a time per host: if a scheduled or triggered run is
         already in progress, that's reported rather than a second test started. The
-        result is also recorded to InfluxDB like a scheduled run (best-effort; a
-        failed recording is flagged, not fatal).
+        result is also recorded to InfluxDB like a scheduled run.
         """
         return await anyio.to_thread.run_sync(_speedtest_run_result, settings, settings_file, host)
 

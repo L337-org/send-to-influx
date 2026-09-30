@@ -24,6 +24,7 @@ from toinflux.transitions import TransitionLog, transition_path
 from toinflux.exceptions import ConfigError
 from toinflux.exceptions import ToolParamError
 from toinflux.mcp_controls import (
+    _control_devices_result,
     _control_schema_result,
     _control_state_result,
     _delete_control_result,
@@ -257,6 +258,12 @@ class TestRegistration:
             "get_control_state",
             "get_control_schema",
         }
+
+    def test_the_device_summary_is_offered_only_where_devices_are_recorded(self):
+        """Without `controls.db` there is no history to summarise, and a tool that could only
+        refuse is one a model would still try."""
+        assert "get_control_devices" not in self._tools({"controls": {"enabled": True}})
+        assert "get_control_devices" in self._tools({"controls": {"enabled": True, "db": "controls"}})
 
     def test_reading_is_not_gated_behind_the_write_flag(self):
         """A control document holds no secrets, and gating "what is this install controlling"
@@ -1144,6 +1151,24 @@ class TestReportingWhatAControlHasWorkedOut:
         assert lamp["age_seconds"] is not None
         assert lamp["forced"] is True, "the guard's exit command is a safe state"
 
+    def test_it_points_at_the_recorded_history(self, state_directory, bridge):
+        """The record is not a collected source, so nothing else here leads a caller to it."""
+        name = self._ran(state_directory)
+        state_directory.set_settings("controls", db="controls")
+        assert _control_state_result(name, state_directory.settings_file)["history"] == {
+            "source": "controls",
+            "instance": name,
+            "loop": "query_history",
+            "devices": "get_control_devices",
+        }
+
+    def test_it_names_the_setting_when_nothing_is_recorded(self, state_directory, bridge):
+        name = self._ran(state_directory)
+        assert _control_state_result(name, state_directory.settings_file)["history"] == {
+            "recorded": False,
+            "setting": "controls.db",
+        }
+
     def test_it_names_devices_held_by_their_minimum(self, state_directory, bridge):
         """Which is the other thing that makes a control look like it is ignoring its input."""
         name = self._ran(state_directory, minimum=3600)
@@ -1260,3 +1285,94 @@ class TestReportingWhatAControlHasWorkedOut:
     def test_a_name_that_does_not_exist_is_refused(self, state_directory):
         with pytest.raises(ToolParamError, match="nosuchcontrol"):
             _control_state_result("nosuchcontrol", state_directory.settings_file)
+
+
+class TestSummarisingAControlsDevices:
+    """`get_control_devices`, shaped from what InfluxDB answers. The queries themselves are run
+    against a real InfluxDB in ``tests/integration/test_control_devices_influxdb.py``."""
+
+    @pytest.fixture
+    def answers(self, state_directory, monkeypatch):
+        """Record `controls.db`, and answer the two queries from a list the test fills in.
+
+        Yields:
+            dict: ``totals`` and ``held`` series lists, and ``queries`` as they were run
+        """
+        from toinflux import influx
+        from toinflux.influx import QuerySeries
+
+        state_directory.set_settings("controls", db="controls")
+        canned = {"totals": [], "held": [], "queries": []}
+
+        def run_query(_session, _settings, database, query):
+            canned["queries"].append((database, query))
+            return [QuerySeries(**series) for series in canned["held" if '"held" = true' in query else "totals"]]
+
+        monkeypatch.setattr(influx, "run_query", run_query)
+        yield canned
+
+    COLUMNS = ["time", "cycles", "seconds", "on_seconds", "mean", "min", "max", "changes"]
+
+    def test_each_device_is_summarised_for_its_kind(self, state_directory, answers):
+        answers["totals"] = [
+            {
+                "tags": {"device": "near", "parameter": ""},
+                "columns": self.COLUMNS,
+                "values": [[0, 100, 6000.0, 1500.0, None, None, None, 20]],
+            },
+            {
+                "tags": {"device": "lamp", "parameter": "brightness_pct"},
+                "columns": self.COLUMNS,
+                "values": [[0, 100, 6000.0, None, 40.0, 5.0, 100.0, 90]],
+            },
+        ]
+        answers["held"] = [
+            {
+                "tags": {"device": "near", "parameter": ""},
+                "columns": ["time", "held", "changes"],
+                "values": [[0, 25, 3]],
+            }
+        ]
+        result = _control_devices_result("conservatory", "-24h", "now", state_directory.settings_file)
+        lamp, near = result["devices"]
+        assert near == {
+            "device": "near",
+            "cycles": 100,
+            "active_seconds": 6000.0,
+            "kind": "switched",
+            "on_share": 0.25,
+            "changes": 20,
+            "changes_per_active_hour": 12.0,
+            "held_share": 0.25,
+            "changes_while_held": 3,
+        }
+        assert lamp["kind"] == "driven"
+        assert lamp["parameter"] == "brightness_pct"
+        assert lamp["value"] == {"mean": 40.0, "min": 5.0, "max": 100.0}
+        assert lamp["held_share"] == 0.0
+        assert lamp["changes_while_held"] == 0
+        assert "note" not in result
+
+    def test_it_queries_the_record_s_database_for_that_control(self, state_directory, answers):
+        _control_devices_result("conservatory", "-1h", "now", state_directory.settings_file)
+        assert {database for database, _query in answers["queries"]} == {"controls"}
+        assert all("\"control\" = 'conservatory'" in query for _database, query in answers["queries"])
+
+    def test_no_points_is_an_answer_that_says_why(self, state_directory, answers):
+        result = _control_devices_result("conservatory", "-24h", "now", state_directory.settings_file)
+        assert result["devices"] == []
+        assert "did not act" in result["note"]
+
+    def test_nothing_recorded_names_the_setting(self, state_directory):
+        with pytest.raises(ToolParamError, match=r"controls\.db"):
+            _control_devices_result("conservatory", "-24h", "now", state_directory.settings_file)
+
+    @pytest.mark.parametrize("name", ["../etc", "Conservatory", "a'b", ""])
+    def test_an_invalid_name_is_refused_before_any_query(self, state_directory, answers, name):
+        with pytest.raises(ToolParamError):
+            _control_devices_result(name, "-24h", "now", state_directory.settings_file)
+        assert answers["queries"] == []
+
+    def test_a_period_that_ends_before_it_starts_is_refused(self, state_directory, answers):
+        with pytest.raises(ToolParamError, match="must be before"):
+            _control_devices_result("conservatory", "now", "-1h", state_directory.settings_file)

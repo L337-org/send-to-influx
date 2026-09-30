@@ -1363,3 +1363,373 @@ class TestADisabledSource:
         state_directory.set_sources("openmeteo", "carbonintensity")
         control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
         assert any(state for state in bridge.energised().values()), "the cycle read nothing and did not heat"
+
+
+@pytest.fixture
+def recorded(state_directory):
+    """Yield the example conservatory with its history recorded, and no active period.
+
+    No period, so every cycle is one the record covers unless a test gates it off; the
+    period's own edges are exercised by `recorded_overnight`.
+
+    Yields:
+        ControlProcess: the control, closed afterwards
+    """
+    installation = state_directory
+    installation.set_settings("controls", db="control_db")
+    document = conservatory()
+    document.pop("active_period")
+    installation.write_control(document)
+    process = ControlProcess("conservatory", settings_file=installation.settings_file)
+    try:
+        yield process
+    finally:
+        process.guard.close()
+        process.close()
+
+
+@pytest.fixture
+def recorded_overnight(state_directory):
+    """Yield the example conservatory, active period and all, with its history recorded.
+
+    Yields:
+        ControlProcess: the control, closed afterwards
+    """
+    installation = state_directory
+    installation.set_settings("controls", db="control_db")
+    installation.write_control(conservatory())
+    process = ControlProcess("conservatory", settings_file=installation.settings_file)
+    try:
+        yield process
+    finally:
+        process.guard.close()
+        process.close()
+
+
+def _recorded_points(influx):
+    """Return every point written to the ``control`` measurement, as its lines.
+
+    Args:
+        influx (StubInflux): the database the control wrote to
+
+    Returns:
+        list: one line-protocol string per point
+    """
+    lines = []
+    for body in influx.writes:
+        text = body.decode() if isinstance(body, bytes) else body
+        lines.extend(line for line in text.splitlines() if line.startswith("control,"))
+    return lines
+
+
+def _fields(line):
+    """Return a line-protocol point's fields, values left as written.
+
+    Args:
+        line (str): one point
+
+    Returns:
+        dict: field key to its written value
+    """
+    _series, fields, _stamp = line.rsplit(" ", 2)
+    return dict(pair.split("=", 1) for pair in fields.split(","))
+
+
+class TestTheRecordOfEachCycle:
+    """One point per cycle the loop runs, carrying what a tuning argument is had in.
+
+    Checked against what the stub InfluxDB received, which the control does not write, and
+    against the controller's own terms rather than against numbers worked out here.
+    """
+
+    def test_a_cycle_that_runs_writes_one_point_with_every_term(self, recorded, influx):
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        (point,) = _recorded_points(influx)
+        assert point.startswith("control,control=conservatory ")
+        fields = _fields(point)
+        assert set(fields) == {"input", "setpoint", "demand", "p", "i", "d", "kp", "ki", "kd", "delivered", "state"}
+        assert fields["state"] == '"active"'
+        terms = recorded.controller.last_step
+        assert float(fields["demand"]) == pytest.approx(terms.demand)
+        assert float(fields["i"]) == pytest.approx(terms.i)
+        assert (float(fields["kp"]), float(fields["ki"])) == (200.0, 0.5)
+
+    def test_it_is_stamped_with_the_cycle_s_start(self, recorded, influx):
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        (point,) = _recorded_points(influx)
+        assert point.rsplit(" ", 1)[1] == str(int(NIGHT.timestamp()))
+
+    def test_delivered_is_what_the_plan_commanded_not_what_was_asked(self, recorded, influx, bridge):
+        """The first cycle asks for 460. Splitting a 60s window between 0 and 750 for that
+        leaves 23s at 0, under the 30s minimum, so the window collapses onto 750 - and the
+        record says 750 was delivered against a demand of 460. That gap is what the field is
+        for: without it the history shows a loop asking for less than it got, and no reason."""
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        fields = _fields(_recorded_points(influx)[0])
+        assert float(fields["demand"]) == pytest.approx(460.0)
+        assert float(fields["delivered"]) == pytest.approx(750.0)
+        assert bridge.energised() == {"far": True, "near": False}
+
+    def test_every_cycle_writes_its_own_point(self, recorded, influx):
+        for _ in range(3):
+            recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert len(_recorded_points(influx)) == 3
+
+    def test_a_fail_safe_cycle_writes_its_state_and_nothing_else(self, recorded, influx):
+        """Recorded because it explains a dip in the history that would otherwise read as the
+        loop misbehaving; and with no terms, because none were computed."""
+        recorded.gate._enable_when = _unevaluable_rule()
+        assert recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+        (point,) = _recorded_points(influx)
+        assert _fields(point) == {"state": '"fail_safe"'}
+
+    def test_an_unreadable_input_is_a_fail_safe_point_too(self, recorded, influx, bridge):
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        influx.age_reading("conservatory_temperature", 86400)
+        with faults.frozen(influx), faults.unreachable(bridge):
+            assert recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep) is None
+        assert [_fields(point)["state"] for point in _recorded_points(influx)] == ['"active"', '"fail_safe"']
+
+
+def _device_points(influx):
+    """Return every point written to the ``control_device`` measurement, by device.
+
+    Args:
+        influx (StubInflux): the database the control wrote to
+
+    Returns:
+        list: ``(device, fields)`` per point, in the order written
+    """
+    points = []
+    for body in influx.writes:
+        text = body.decode() if isinstance(body, bytes) else body
+        for line in text.splitlines():
+            if line.startswith("control_device,"):
+                tags = dict(pair.split("=", 1) for pair in line.rsplit(" ", 2)[0].split(",")[1:])
+                points.append((tags["device"], _fields(line)))
+    return points
+
+
+class TestTheRecordOfEachDevice:
+    """One point per device per cycle, for tuning the ladder: which device did the work, how
+    often each changed, and whether its minimum kept it where it was."""
+
+    def test_each_device_says_what_it_was_commanded(self, recorded, influx, bridge):
+        """The first cycle collapses onto 750, the far heater alone, for the whole window."""
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        points = dict(_device_points(influx))
+        assert set(points) == {"far", "near"}
+        assert float(points["far"]["on_seconds"]) == pytest.approx(float(points["far"]["seconds"]))
+        assert float(points["near"]["on_seconds"]) == 0.0
+        assert points["far"]["changes"] == "1", "never commanded before, so its first command is a change"
+        assert (points["far"]["held"], points["near"]["held"]) == ("false", "false")
+        assert bridge.energised() == {"far": True, "near": False}
+
+    def test_a_device_its_minimum_kept_still_is_held(self, recorded, influx):
+        """The second cycle comes at once, inside both heaters' 30s minimum."""
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        second = dict(_device_points(influx)[2:])
+        assert (second["far"]["held"], second["near"]["held"]) == ("true", "true")
+        assert (second["far"]["changes"], second["near"]["changes"]) == ("0", "0")
+
+    def test_a_frozen_device_the_ladder_could_not_keep_still_is_held_and_moved(self, recorded, influx):
+        """Near on and far off is a combination no rung describes, so there is no keeping them
+        where they are: the whole ladder is used and both move. Held says the minimum was
+        running, and the changes beside it say it was overridden - which is what an agent
+        tuning the ladder needs to see, rather than a cycle that looks unconstrained."""
+        record_command(recorded.transitions, recorded.document, {"far": False, "near": True})
+        frozen = recorded.transitions.frozen(recorded.controller.min_transition_for, ("far", "near"))
+        assert frozen == {"far", "near"}, "the case this exists for has changed shape"
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        points = dict(_device_points(influx))
+        assert (points["far"]["changes"], points["near"]["changes"]) == ("1", "1")
+        assert (points["far"]["held"], points["near"]["held"]) == ("true", "true")
+
+    def test_they_share_the_cycle_s_timestamp(self, recorded, influx):
+        """So a device's point and the loop's point for one cycle line up on one time axis."""
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        stamps = {line.rsplit(" ", 1)[1] for body in influx.writes for line in _text(body).splitlines()}
+        assert stamps == {str(int(NIGHT.timestamp()))}
+
+    def test_a_fail_safe_cycle_writes_none(self, recorded, influx):
+        """The devices went to their safe state rather than to a plan, and the loop's own
+        point says so."""
+        recorded.gate._enable_when = _unevaluable_rule()
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert _device_points(influx) == []
+
+    def test_a_disabled_control_writes_none(self, recorded, influx):
+        recorded.gate.enabled = False
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert _device_points(influx) == []
+
+
+def _text(body):
+    return body.decode() if isinstance(body, bytes) else body
+
+
+class TestNothingIsRecordedWhileOff:
+    def test_outside_the_active_period_nothing_is_written(self, recorded_overnight, influx):
+        recorded_overnight.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        assert _recorded_points(influx) == []
+
+    def test_the_cycle_the_window_closes_on_writes_nothing(self, recorded_overnight, influx):
+        recorded_overnight.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        recorded_overnight.cycle(dt=60, moment=DAY, sleep=_never_sleep)
+        assert len(_recorded_points(influx)) == 1
+
+    def test_nor_where_the_closing_command_itself_failed(self, recorded_overnight, influx, bridge):
+        """That failure takes the fail-safe path, and it happens on the first cycle outside
+        the window: a `fail_safe` point there would claim a cycle the record does not cover."""
+        recorded_overnight.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        with faults.unreachable(bridge):
+            assert recorded_overnight.cycle(dt=60, moment=DAY, sleep=_never_sleep) is None
+        assert len(_recorded_points(influx)) == 1
+
+    def test_a_disabled_control_writes_nothing(self, recorded, influx):
+        recorded.gate.enabled = False
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert _recorded_points(influx) == []
+
+    def test_gated_off_by_enable_when_writes_nothing(self, recorded, influx):
+        recorded.gate._enable_when = parse_rule("1 > 2")
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert _recorded_points(influx) == []
+
+
+class TestWithNoRecordConfigured:
+    def test_nothing_is_written(self, control, influx):
+        control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert control.record is None
+        assert _recorded_points(influx) == []
+
+
+class TestARecordThatCannotBeWritten:
+    """The history is for tuning, and the cycle is for the devices. Nothing about InfluxDB -
+    down, refusing, or slow - reaches the cycle, and an outage is not said every cycle."""
+
+    @pytest.fixture
+    def refusing(self, recorded, monkeypatch):
+        """Make every write fail while the control's reads still work.
+
+        The writer's own session only, so the fault is the history's alone: a real outage
+        fails the reads as well, and that is the fail-safe tested above.
+
+        The refusal is `requests.exceptions.ConnectionError`, what requests raises for a
+        refused connection. Checked against a real InfluxDB 1.8 paused mid-run, which failed
+        the same path with `ReadTimeout` and delivered every spooled point once it resumed.
+
+        Returns:
+            callable: the patched post; set its ``down`` to False to let writes through
+        """
+        from toinflux import writer
+
+        real = writer.current()._session.post
+
+        def refuse(url, data=None, **kwargs):
+            if refuse.down:
+                raise requests.exceptions.ConnectionError("connection refused")
+            return real(url, data=data, **kwargs)
+
+        refuse.down = True
+        monkeypatch.setattr(writer.current()._session, "post", refuse)
+        return refuse
+
+    def test_the_cycle_still_runs_and_commands_the_devices(self, recorded, refusing, bridge):
+        decision = recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert decision is not None and decision.actuating
+        assert any(bridge.energised().values())
+
+    def test_the_outage_is_said_once(self, recorded, refusing, caplog):
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(3):
+                recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        levels = [r.levelno for r in caplog.records if "is not taking points" in r.getMessage()]
+        assert levels and levels[0] == logging.ERROR
+        assert logging.ERROR not in levels[1:], levels
+
+    def test_the_points_arrive_once_it_recovers(self, recorded, refusing, influx):
+        from toinflux import writer
+
+        for _ in range(2):
+            recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert _recorded_points(influx) == []
+        refusing.down = False
+        writer.current().run_until_idle()
+        assert len(_recorded_points(influx)) == 2
+
+
+class TestASlowInfluxDBDoesNotDelayTheNextCycle:
+    """The guarantee the writer exists for, with its real thread running: a control whose
+    InfluxDB takes its whole timeout to answer a write starts its next cycle on time."""
+
+    def test_the_cycle_does_not_wait_for_the_write(self, recorded, state_directory, monkeypatch):
+        import threading
+        import time
+
+        from toinflux import writer
+
+        threaded = writer.configure("control-conservatory", recorded.settings, state_directory.settings_file)
+        release = threading.Event()
+        real = threaded._session.post
+
+        def hanging(url, data=None, **kwargs):
+            release.wait(10)
+            return real(url, data=data, **kwargs)
+
+        monkeypatch.setattr(threaded._session, "post", hanging)
+        try:
+            started = time.monotonic()
+            recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            assert time.monotonic() - started < 3, "a cycle waited on its InfluxDB write"
+        finally:
+            release.set()
+            threaded.close(2)
+
+
+class TestTheExitHandlersRunInTheRightOrder:
+    def test_the_guard_s_handler_runs_before_the_writer_s(self, state_directory, monkeypatch):
+        """Found in review. atexit runs handlers last-registered-first, and the writer used to be
+        configured after the control was built - so its handler, which may spend seconds posting,
+        ran before the guard's, which makes the devices safe. The guard's must be registered
+        last."""
+        import atexit
+
+        registered = []
+        real = atexit.register
+
+        def recording(function, *args, **kwargs):
+            registered.append(getattr(function, "__qualname__", repr(function)))
+            return real(function, *args, **kwargs)
+
+        monkeypatch.setattr(atexit, "register", recording)
+        state_directory.write_control(conservatory())
+        run_control("conservatory", settings_file=state_directory.settings_file, cycles=0, sleep=_never_sleep)
+        writer_at = registered.index("InfluxWriter.close")
+        guard_at = registered.index("DeviceGuard._at_exit")
+        assert guard_at > writer_at, f"registered in the order {registered}"
+
+
+class TestWhatStartingSays:
+    def test_a_control_names_the_file_it_started_from(self, state_directory, caplog):
+        """The file is what an operator edits, and a state directory that is not the one they
+        expect is otherwise invisible until they go looking."""
+        from toinflux.controls import control_path
+
+        state_directory.write_control(conservatory())
+        with caplog.at_level(logging.INFO):
+            run_control("conservatory", settings_file=state_directory.settings_file, cycles=0, sleep=_never_sleep)
+        expected = control_path("conservatory", state_directory.settings_file)
+        assert f"Control 'conservatory' started from {expected!r}" in caplog.text
+
+    def test_its_writer_says_where_it_buffers(self, state_directory, caplog):
+        """Its own spool, named for the control, in the installation's state directory."""
+        import os
+
+        state_directory.write_control(conservatory())
+        with caplog.at_level(logging.INFO):
+            run_control("conservatory", settings_file=state_directory.settings_file, cycles=0, sleep=_never_sleep)
+        spool = os.path.join(state_directory.state_dir, "spool", "control-conservatory")
+        assert f"InfluxDB points for control-conservatory are buffered on disk in {spool!r}" in caplog.text

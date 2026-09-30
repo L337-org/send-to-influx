@@ -500,7 +500,8 @@ def build_mcp_server(settings, settings_file=None, supervisor=None):
         name="send-to-influx",
         instructions=(
             "Query the current and historical state of the smart-home and energy devices "
-            "this send-to-influx installation collects data from."
+            "this send-to-influx installation collects data from, and the history of its "
+            "control loops."
         ),
         auth_server_provider=provider,
         auth=AuthSettings(

@@ -38,9 +38,11 @@ isn't covered here, look in `architecture/`.
 │   ├── transitions.py      # when each device last moved and what the loop had learned, so
 │   │                       # min_transition_seconds and the PID integral survive a restart
 │   ├── inputs.py           # reading a control's inputs: InfluxDB first, live fetch past max_age
+│   ├── control_record.py   # each control's PID history, one point per cycle, and how readers see it
 │   ├── credentials.py      # systemd-creds substitution into loaded settings
 │   ├── credential_cli.py   # send-to-influx-set-credential
-│   ├── influx.py           # DataHandler base class - owns send_data() (line protocol + InfluxDB HTTP POST)
+│   ├── influx.py           # DataHandler base class - owns send_data() (line protocol, handed to the writer)
+│   ├── writer.py           # the disk spool and the thread that posts it - the only thing that writes to InfluxDB
 │   ├── mcpserver.py        # MCP server lifecycle, OAuth state, bind address
 │   ├── mcp_*.py            # the MCP surface: common registrars, read, write, resources, prompts, dashboards
 │   ├── mqtt.py             # MqttDataHandler - MQTT transport for interrupt-driven sources
@@ -290,19 +292,24 @@ Run all three locally before pushing (see "Local development" above) to avoid CI
 `.github/workflows/chaos.yaml` drives several real control processes against stub endpoints under
 randomly injected faults - controls killed and stalled, the bridge and the database going away -
 and checks at the end that no device was left energised by a dead control, that nothing leaked and
-that the supervisor never stalled. It runs at two lengths:
+that the supervisor never stalled. The same job runs the writer under load: several threads
+submitting data and heartbeats while InfluxDB fails and recovers at random, checking that every
+point arrives, no heartbeat is posted late, the backlog drains in batches and the writer's thread
+never dies (`tests/chaos/test_writer_stress.py`). It runs at two lengths:
 
-- **On every pull request, 300 ticks**, about a minute. It is not a required check, but a failure is
-  a real finding rather than noise: read it before merging.
-- **Nightly on `main`, 3000 ticks**, about ten minutes, because some interactions only turn up in a
-  long run.
+- **On every pull request, 300 ticks and 20 seconds of writer stress**, a minute or two. It is not a
+  required check, but a failure is a real finding rather than noise: read it before merging.
+- **Nightly on `main`, 3000 ticks and fifteen minutes of writer stress**, about half an hour,
+  because some interactions only turn up in a long run.
 
 Every run prints its seed as `chaos seed: <n>`, whether it passed or failed. To repeat a run, use the
 same seed and tick count:
 
 ```bash
-CHAOS_SEED=<n> CHAOS_TICKS=300 .venv/bin/pytest -m chaos -s
+CHAOS_SEED=<n> CHAOS_TICKS=300 WRITER_STRESS_SECONDS=20 .venv/bin/pytest -m chaos -s
 ```
+
+The writer stress run prints its own seed as `writer stress seed: <n>`.
 
 or run the workflow by hand from the Actions tab, giving it the seed. Once a failure is understood,
 add its seed to `SEEDS_THAT_FAILED` in `tests/harness/chaos.py`, which runs it with the ordinary suite

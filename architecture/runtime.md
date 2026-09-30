@@ -12,7 +12,7 @@ Read this before changing `sendtoinflux.py` or `toinflux/general.py`.
 key everything off the unit, never the source name. A unit is `(source, instance)`, the same
 shape as `DataHandler.worker_key`. Most sources expand to one `(name, None)`; a source in
 `INSTANCED_SOURCES` (only `hue`) expands to one unit per configured bridge, so each bridge gets
-its own thread, backoff and write buffer and an unreachable bridge delays only itself.
+its own thread and backoff and an unreachable bridge delays only itself.
 
 One function serves `--source`, the supervisor and `--dump`, so they cannot disagree about what
 runs. Restart, stall and stopped bookkeeping is keyed by unit, so two workers on one source name
@@ -323,6 +323,65 @@ A handler still reads its own source's section afresh, so a credential rotated t
 running control. The control's InfluxDB settings do not: `ControlProcess` reads the settings
 once at start and queries through that copy, so a changed `influx` block needs the control
 restarted.
+
+## The controls' PID history (`toinflux/control_record.py`)
+
+Each control writes one point per cycle to the `control` measurement, tagged `control=<name>`,
+where `controls.db` is set. CONTROLS.md has the fields and what they mean;
+this is how it is wired and what must not change.
+
+- **`ControlRecord` subclasses `DataHandler` to reuse `send_data()`, and is not a
+  collector.** It is not in `_source_classes()`, because a `sources:` entry naming it would pass
+  validation and then fail at its first collection, as the MyEnergi parent once did. Its
+  settings section is `controls`, so `resolve_db()` and `build_write_request()` find `db` or
+  `bucket` there unchanged. It is exempt from the handler-build guard in
+  `tests/test_inputs.py` (listed in `FACTORY_MODULES`, with the reason): it names no source, so
+  there is no `sources:` entry for the refusal to consult.
+- **Stamped with the cycle's start, and handed to the writer after the window.** The control
+  process has its own writer and spool (`control-<name>`, configured in `run_control()`), so
+  recording a cycle never waits on InfluxDB and a slow or absent one cannot delay the next cycle.
+  `TestASlowInfluxDBDoesNotDelayTheNextCycle` holds that with the writer's real thread running.
+- **`delivered` is computed from the plan as commanded**, after `_hold` pins held driven devices,
+  by `staging.delivered_level()` against the capped ladder the controller kept in
+  `last_step.curve`. **Rung levels alone are wrong for driven devices**, and that was the design's
+  first reading: a lamp on a 0 to 1000 ladder at demand 400 is planned as one dwell *at level
+  0* with the lamp at 40%, so the rung says 0. **What each dwell stands for is set by
+  `plan_window()`, where it is known**, as `Dwell.level`: the rung's own for a window split
+  between rungs, and for a lone dwell the level its driven values sit at, found by
+  `dwell_level()` nearest the demand. Recovering it afterwards from the states alone was the
+  first implementation, and generated ladders in `TestDeliveredOverGeneratedLadders` showed it
+  wrong wherever a curve doubles back - a lamp that brightens then dims, two lamps crossfading -
+  because the states then fit in more than one place: a crossfade asked for 1043 recorded 181.
+  **`pinned_plan()` re-reads a dwell only where its driven values placed it**, which is where a
+  hold is visible in one number; a dwell placed by switched devices keeps its rung, so a hold
+  there does not show - accepted, and said in CONTROLS.md. Two driven devices held at values
+  that disagree about where the window is are averaged, and only where no stretch has them
+  agreeing - accepted.
+- **Each device's share goes to `control_device`, one point per device**, written by
+  `ControlRecord.write_devices()` from `staging.device_windows()` over the same plan as
+  commanded, with the cycle's timestamp. `changes` counts against the states read once before the
+  step, so the first command of a window compares with what the device was last set to. **`held`
+  is whether the device was allowed to change, not whether it did**, decided by
+  `controls.held_by_minimum()`, the same function behind `get_control_state`'s
+  `held_by_minimum`. Where no rung matches the states a frozen device is in,
+  `reachable_ladder()` hands back the whole ladder and the device may move: it is then held with
+  `changes` above 0, which is how an overridden minimum shows. A device key
+  with a line break is skipped and said once per process, because the store does not constrain
+  device keys and a tag cannot hold one.
+- **Which cycles are recorded is decided in `ControlProcess.cycle()`**: `active` after a window
+  was spent, `fail_safe` where the cycle failed while the gate had it operating. A gate that
+  raises counts as operating, because `enable_when` is only evaluated once the control is
+  enabled and inside its period. A failure of the *closing edge's* command also takes the
+  fail-safe path, and is not recorded: that cycle is the first outside the period.
+- **A write failure never reaches the cycle**, because the writer owns it: see
+  "Writing to InfluxDB" in `architecture/collectors.md`. The writer's exit handler runs after the
+  guard's, so posting what it can on the way out never stands between the devices and their safe
+  state. **That depends on the order `run_control()` sets them up in**: `atexit` runs handlers
+  last-registered-first and the guard registers its own as the control is built, so the writer is
+  configured before the control. It was configured after at first, and so ran first -
+  `TestTheExitHandlersRunInTheRightOrder` now holds it.
+- **`i` is simple-pid's integral term**, in levels, not the accumulated error. That is what makes
+  it usable later as a starting output, and `TestTheTermsOfTheLastStep` holds it.
 
 ## The control rule language (`toinflux/rules.py`)
 

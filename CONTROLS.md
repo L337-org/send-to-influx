@@ -614,6 +614,119 @@ look like it is doing the opposite of what it was told - a demand of 150 command
 for the whole window is correct when the far heater may not switch off yet, and inexplicable
 without it.
 
+Recording the PID history
+-------------------------
+
+The `-v` line above is gone as soon as it scrolls. To keep it, give the controls somewhere to
+write in `settings.yaml`:
+
+```yaml
+controls:
+  enabled: true
+  db: "control_db"
+```
+
+The same `db` setting every source has, on either version of InfluxDB. Leave it out and nothing
+is recorded; the service says so once at startup.
+
+Every control then writes one point per cycle to the `control` measurement, tagged
+`control=<name>`, stamped with the moment the cycle began:
+
+| Field | What it is |
+|---|---|
+| `input` | the `pid.input` rule as evaluated this cycle |
+| `setpoint` | the `pid.setpoint` rule as evaluated this cycle |
+| `demand` | what the PID asked for, on the ladder's level scale: `p + i + d`, limited to the ladder and any `max_level` |
+| `p`, `i`, `d` | each term's share of `demand`. `i` is the integral, in levels |
+| `kp`, `ki`, `kd` | the gains in effect for the cycle |
+| `delivered` | the level the devices were commanded to over the window |
+| `state` | `active`, or `fail_safe` - see below |
+
+**`delivered` is what was commanded, as a level.** For switched devices it is the rungs used,
+weighted by how long each was held: level 0 for 140s then level 750 for 160s delivers 400. A
+driven device is read off the ladder at the value it was set to, so a lamp at 40% on a 0 to
+1000 ladder delivers 400, even though its window was planned on the level-0 rung. Where two
+driven devices on one control are held at values that put the window at different places on
+the ladder, the average of the two is recorded. It is what the devices were *told*;
+whether they obeyed is for their own source's data to show.
+
+**A held driven device shows only where it is what places the window.** Where the window is
+split between two rungs, the switched devices are what move between them, and a lamp held at
+its old value changes neither rung: `delivered` still reads the demand. One number cannot say
+both where the switched devices put the window and where a held lamp would, so it says the
+first.
+
+**`state` is `active`** for a cycle that ran the loop, and **`fail_safe`** for a cycle inside
+the active period that could not - an input too old or unreadable, a rule that could not be
+evaluated - and put the devices in their safe state instead. A `fail_safe` point carries
+`state` alone, because none of the rest was worked out. It is recorded so that a dip in the
+history is explained rather than read as the loop misbehaving. Not `held`, which already means
+a device inside its `min_transition_seconds`.
+
+**Nothing is written while a control is not acting**: disabled, outside its active period, or
+gated off by `enable_when`. Which of those it was can be read from the document, and points
+while nothing is happening would say nothing.
+
+**Recording never affects control.** Each control process writes its points to a buffer on disk
+of its own and sends them from a separate thread, so a slow or unreachable InfluxDB delays neither
+the devices nor the next cycle, and the points are sent once it is back - see the README on the
+InfluxDB buffer.
+
+### Each device's share
+
+The same cycles also write one point per device to the `control_device` measurement, tagged
+`control=<name>` and `device=<name>` as the document names it, and for a driven device
+`parameter=<parameter>`, with the cycle's own timestamp:
+
+| Field | What it is |
+|---|---|
+| `seconds` | the window's length |
+| `on_seconds` | a switched device: how long it was commanded on |
+| `value` | a driven device: the value it was commanded to, averaged over the window, on its `parameter`'s scale |
+| `changes` | commands in the window that changed its state, counting the first against what it was last set to |
+| `held` | whether its `min_transition_seconds` had not yet run out, so it was not allowed to change; with `changes` above 0 as well, the ladder had no rung that kept it still and moved it anyway |
+
+This is what tuning the ladder needs and `delivered` folds away: which device did the work, how
+often each switched, and whether a minimum kept one still. The devices' own sources show what
+each ended up doing; this shows what the control decided. A `fail_safe` cycle writes no device
+points, since the devices went to their safe state rather than to a plan.
+
+`parameter` is a tag so that a device moved to another scale by an edit is a separate series,
+rather than one averaged across two. Not written for a device whose name contains a line break,
+which no InfluxDB tag can hold; the control logs that once and records the rest.
+
+### Using it to tune
+
+Plot `input` against `setpoint`, and below it `demand` split into `p`, `i` and `d`, with
+`delivered` beside `demand`. The MCP server's `suggest_dashboard_panels` produces the queries
+for source `controls`, one series per control. An assistant connected over MCP reads the same
+history with `list_fields` and `query_history`, scoped to one control with `instance`, and
+`list_fields` with `detail` gives it what each field means.
+
+* **`p` swinging from side to side cycle after cycle**: `kp` is too high - see *Choosing the
+  gains* above.
+* **`i` creeping for an hour while `input` sits below `setpoint`**: `ki` is too low.
+* **`i` pinned at the top of the ladder**: the devices cannot deliver what is asked. That is
+  capacity, not tuning, and no gain fixes it.
+* **`delivered` apart from `demand`**: the ladder could not do what was asked this window - a
+  device held by `min_transition_seconds`, a window too short to split between two rungs, or
+  a `max_level` cap. A held driven device shows here only where no switched device is moving
+  in the same window.
+* **Once `input` sits on `setpoint`, `i` is the level it takes to hold it there** under the
+  conditions of the moment. Watch it across a few days and it shows how much that varies.
+* **For the ladder rather than the gains**, `get_control_devices` over MCP summarises each
+  device over a period: a switched one's share of active time on, a driven one's mean, lowest
+  and highest value, and for each how many times it changed, how many times an hour, the
+  share of cycles its minimum held it, and how many changes it was given while held. That last
+  is the ladder moving a device its minimum said not to, because no rung kept it where it was:
+  the stages do not describe a combination the devices keep ending up in. A heater beside the sensor doing all the work while the
+  far one never comes on is a ladder whose equal-level rungs are in the wrong order; one
+  changing many times an hour wants a longer `min_transition_seconds` or a longer
+  `cycle_seconds`; a driven value that sits at its highest is a device at the end of its
+  range.
+* **A step in `kp`, `ki` or `kd`** marks a retune. The gains are written on every point, so
+  any window of the history says which tuning produced it.
+
 What a control remembers
 ------------------------
 
@@ -653,7 +766,10 @@ evening.
 matches the document, what each device was last commanded to, and which devices are currently
 held by their `min_transition_seconds`. That is the tool to reach for when an output moves
 against its input, because the integral is the usual explanation and is invisible from the
-device side.
+device side.  Where `controls.db` is set it also names where the control's cycles are recorded,
+as a `source` and `instance` for `query_history`, so a caller tuning the gains can read the loop
+over time rather than only as it stands, and names `get_control_devices` for each device's
+share; where it is not, it names that setting.
 
 What is checked, and when
 -------------------------
@@ -674,10 +790,11 @@ capability a stage asks for. Those need the far end, and they fail that control 
 Reading them over MCP
 ---------------------
 
-With `controls.enabled` and the MCP server both on, four read-only tools appear:
+With `controls.enabled` and the MCP server both on, five read-only tools appear:
 `list_controls` (names, enabled, devices, cycle length, and whether each process is running),
 `get_control` (one document as stored), `get_control_state` (what a running control has since
-worked out), and `get_control_schema` (this format). They are not
+worked out), `get_control_devices` (each device's share of a period, from the recorded
+history, and offered only where `controls.db` is set) and `get_control_schema` (this format). They are not
 behind any write flag: a control document holds no secrets, and being able to ask what is
 being controlled and whether it is running should not require granting the ability to change
 it.

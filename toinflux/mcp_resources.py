@@ -32,7 +32,7 @@ __license__ = "MIT"
 
 from mcp.server.mcpserver.exceptions import ResourceError
 
-from toinflux.mcp_common import configured_sources, translate_failures
+from toinflux.mcp_common import readable_sources, translate_failures
 from toinflux.mcp_read import build_documentation, current_state_result, list_fields_result
 
 
@@ -104,7 +104,7 @@ def register_resources(server, settings, settings_file=None):
     async def _documentation_resource() -> str:
         return await anyio.to_thread.run_sync(build_documentation, settings, settings_file)
 
-    for source in configured_sources(settings):
+    for source in readable_sources(settings):
         _register_source_resources(server, anyio, source, settings, settings_file)
     return server
 
