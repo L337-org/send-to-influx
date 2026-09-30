@@ -127,8 +127,8 @@ timeout. The buffer kept the points that were collected; it could not stop fewer
   the loop would repost one chunk for ever; it is logged as a bug and retried on the timer.
 - **Tested beyond the unit tests** by `tests/chaos/test_writer_stress.py` - threads submitting
   under random outages, 20 seconds per pull request and fifteen minutes nightly in the chaos
-  workflow - and `tests/integration/test_writer_influxdb.py`, against a real InfluxDB behind a
-  proxy that takes it away.
+  workflow - and `tests/integration/test_writer_influxdb.py`, against real InfluxDB 1.8 and 2.7
+  servers behind a proxy that takes them away, and with a database that does not exist.
 - **Every process says at startup where it buffers and how much**, and whether it is resuming a
   backlog, so a spool in the wrong place - a checkout rather than `/var/lib` - is visible the
   first time rather than when somebody goes looking.
