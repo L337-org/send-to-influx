@@ -954,6 +954,32 @@ class TestADiskThatFails:
         assert "Setting aside the unreadable spool segment" in caplog.text
         writer.close(0)
 
+    def test_a_disk_coming_back_during_a_post_is_not_a_stuck_pass(self, tmp_path, post, caplog):
+        """Raised in review. In memory mode after a disk failure, a point arriving while a chunk
+        is out finds the disk again and moves memory into the spool - the chunk being posted
+        with it - so none of the chunk is in the memory queue when the pass consumes it. Those
+        points were posted and are now also spooled, to be posted once more, which InfluxDB
+        absorbs; the pass has made progress and must not report itself stuck."""
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        real = writer._write_entry
+        writer._write_entry = MagicMock(side_effect=OSError(5, "Input/output error"))
+        for n in range(3):
+            writer.submit("hue", None, f"hue n={n}i {n}")
+        assert not writer._disk, "the case this exists for has changed shape"
+        writer._write_entry = real
+
+        def recovering(body):
+            writer.submit("hue", None, "hue n=99i 99")
+            return True
+
+        post.answer = recovering
+        with caplog.at_level(logging.ERROR):
+            assert writer._post_next_chunk() == "sent"
+        assert "this is a bug" not in caplog.text
+        assert writer._disk and "hue n=99i 99" in _spooled(writer)
+        writer.close(0)
+
 
 class TestASpoolThatCannotBeOpened:
     def test_a_full_disk_at_startup_falls_back_to_memory(self, tmp_path, post, monkeypatch, caplog):

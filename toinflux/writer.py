@@ -1176,9 +1176,11 @@ class InfluxWriter:
                     queue.popleft()
                     removed += 1
                 elif not any(queued is entry for queued in queue or ()):
-                    # Evicted for the bound while it was out being posted: dealt with and gone,
-                    # which is progress. Not counting it made a pass whose whole chunk was
-                    # evicted report itself stuck - a false "this is a bug" and a started timer.
+                    # Gone from the queue while it was out being posted - evicted for the bound,
+                    # or moved into the spool by a disk that came back - so dealt with here, which
+                    # is progress (a moved one is posted again, which InfluxDB absorbs). Not
+                    # counting it made such a pass report itself stuck: a false "this is a bug"
+                    # and a started timer.
                     removed += 1
             return removed
         segment, offset = done[-1].end
