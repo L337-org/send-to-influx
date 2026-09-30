@@ -407,6 +407,13 @@ Speedtest shape rather than Hue's: `controls` is not in `INSTANCED_SOURCES`, so
 `resolve_handler(instance=...)` refuses it and `query_history` scopes with a query predicate.
 `MCP_LIVE_STATE` is False, so `get_current_state` reads each control's last point.
 
+All of that is exercised against a real InfluxDB in
+`tests/integration/test_controls_history_mcp.py`, through the MCP server as built: the history
+listed as a source, its fields and their meanings discovered from what the record wrote, a read
+scoped to one control, each control's latest cycle, and every panel query `suggest_dashboard_panels`
+suggests run on the server with Grafana's two macros substituted, one series per control. The unit
+tests reach none of it, because field and tag discovery need a server that answers `SHOW` queries.
+
 ### A tag is either a constant to pin or an axis to enumerate
 
 They are different attributes and confusing them gives wrong answers.

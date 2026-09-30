@@ -2155,6 +2155,50 @@ class TestTheControlSubsystemOptIn:
         finally:
             supervisor.stop_all()
 
+    def test_startup_says_once_that_nothing_is_recorded(self, caplog):
+        """The call site of `log_record_destination`, which was tested only as a function: an
+        installation running controls with no `controls.db` is told once, at INFO, that the PID
+        history is not being kept, and which setting would keep it."""
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        with patch("sendtoinflux.list_controls", return_value=[]):
+            with caplog.at_level(logging.INFO):
+                supervisor = sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)
+        try:
+            said = [r for r in caplog.records if "not recording their PID history" in r.getMessage()]
+            assert len(said) == 1
+            assert said[0].levelno == logging.INFO
+            assert "controls.db" in said[0].getMessage()
+        finally:
+            supervisor.stop_all()
+
+    def test_startup_names_where_the_record_goes(self, caplog):
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        settings = {"controls": {"enabled": True, "db": "control_db"}, "influx": {"url": "http://influx"}}
+        with patch("sendtoinflux.list_controls", return_value=[]):
+            with caplog.at_level(logging.INFO):
+                supervisor = sendtoinflux._start_control_supervisor(settings, args)
+        try:
+            assert "recording their PID history to 'control_db'" in caplog.text
+            assert "not recording" not in caplog.text
+        finally:
+            supervisor.stop_all()
+
+    @pytest.mark.parametrize(
+        "settings, flags",
+        [
+            pytest.param({}, {}, id="controls-off"),
+            pytest.param({"controls": {"enabled": True}}, {"print": True}, id="print-mode"),
+        ],
+    )
+    def test_nothing_is_said_about_the_record_where_no_control_runs(self, caplog, settings, flags):
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        for flag, value in flags.items():
+            setattr(args, flag, value)
+        with patch("sendtoinflux.list_controls", return_value=[]):
+            with caplog.at_level(logging.INFO):
+                assert sendtoinflux._start_control_supervisor(settings, args) is None
+        assert "PID history" not in caplog.text
+
     def test_it_supervises_every_stored_control(self):
         """A stand-in rather than a mock: a MagicMock invents a truthy value for any
         attribute, which is how a test ends up asserting against something it made up."""

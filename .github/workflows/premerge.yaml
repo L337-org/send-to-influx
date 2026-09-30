@@ -167,8 +167,8 @@ jobs:
           docker logs mosquitto-ci 2>&1 | tail -20 >&2
           exit 1
 
-      # For tests/integration/test_writer_influxdb.py and test_control_devices_influxdb.py.
-      # InfluxDB 1.8 with authentication off,
+      # For tests/integration/test_writer_influxdb.py, test_control_devices_influxdb.py and
+      # test_controls_history_mcp.py. InfluxDB 1.8 with authentication off,
       # started the same way as the broker and for the same reasons.
       - name: Start a local InfluxDB
         timeout-minutes: 5
