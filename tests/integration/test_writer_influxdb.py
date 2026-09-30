@@ -6,52 +6,53 @@ drops it, the way a server that has gone away without refusing does. The proxy a
 every write it sees, which is the only account of what the writer attempted that the writer
 did not write itself.
 
-Needs an InfluxDB 1.x at ``INFLUX_TEST_URL`` (default ``http://localhost:8086``), with
-authentication off; a run without one is a skip rather than a failure. CI starts one beside
-the MQTT broker. Excluded from the default run with the other integration tests
-(``pytest -m integration``).
+Runs against each real InfluxDB ``conftest.py`` finds - 1.8 and, where one is set up, 2.7, whose
+write path is a different endpoint with a token - and a server that is not there is a skip rather
+than a failure. CI starts both beside the MQTT broker. Excluded from the default run with the other
+integration tests (``pytest -m integration``).
 """
 
 import http.server
+import logging
 import os
 import socketserver
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
-import uuid
 
 import pytest
 
 from toinflux import writer as writer_module
-from toinflux.writer import InfluxWriter
+from toinflux.writer import InfluxWriter, build_write_request
 
 pytestmark = pytest.mark.integration
 
-INFLUX_URL = os.environ.get("INFLUX_TEST_URL", "http://localhost:8086").rstrip("/")
 
-
-def _influx_reachable():
-    try:
-        with urllib.request.urlopen(f"{INFLUX_URL}/ping", timeout=2):
-            return True
-    except OSError:
-        return False
-
-
-def _query(database, statement):
-    """Return the rows an InfluxQL statement produces, as lists of values.
+def _rows(server, database, statement):
+    """Return the rows an InfluxQL SELECT produces, as lists of values.
 
     Returns:
         list: rows, empty where the statement produced no series
     """
-    url = f"{INFLUX_URL}/query?" + urllib.parse.urlencode({"db": database, "q": statement, "epoch": "s"})
-    with urllib.request.urlopen(url, data=b"" if not statement.startswith("SELECT") else None, timeout=5) as reply:
-        import json
+    return [row for series in server.query(database, statement).get("series", []) for row in series["values"]]
 
-        result = json.load(reply)["results"][0]
-    return [row for series in result.get("series", []) for row in series["values"]]
+
+def _destination(server, database, via=None):
+    """Return where a source's points go, built the way the service builds it.
+
+    Args:
+        server (InfluxServer): the server
+        database (str): the database or bucket
+        via (str or None): a proxy's URL to send through instead of the server's own
+
+    Returns:
+        tuple: (url, request kwargs), with a short timeout
+    """
+    url, kwargs = build_write_request({"db": database}, server.settings)
+    if via:
+        url = url.replace(server.url, via, 1)
+    return url, {**kwargs, "timeout": 2}
 
 
 class _Proxy:
@@ -64,7 +65,7 @@ class _Proxy:
         dropped (list): (arrived, closed) monotonic times of every request dropped while down
     """
 
-    def __init__(self):
+    def __init__(self, target):
         self.down = threading.Event()
         self.writes = []
         self.dropped = []
@@ -83,7 +84,9 @@ class _Proxy:
                     proxy.dropped.append((arrived, time.monotonic()))
                     self.close_connection = True
                     return
-                request = urllib.request.Request(INFLUX_URL + self.path, data=body, method="POST")
+                # The Authorization header too, which 2.x's token rides in.
+                headers = {key: value for key, value in self.headers.items() if key.lower() == "authorization"}
+                request = urllib.request.Request(target + self.path, data=body, method="POST", headers=headers)
                 try:
                     with urllib.request.urlopen(request, timeout=10) as reply:
                         status, data = reply.status, reply.read()
@@ -107,18 +110,8 @@ class _Proxy:
 
 
 @pytest.fixture
-def database():
-    if not _influx_reachable():
-        pytest.skip(f"no InfluxDB at {INFLUX_URL}")
-    name = f"writer_it_{uuid.uuid4().hex[:8]}"
-    _query(name, f'CREATE DATABASE "{name}"')
-    yield name
-    _query(name, f'DROP DATABASE "{name}"')
-
-
-@pytest.fixture
-def proxy():
-    running = _Proxy()
+def proxy(influx_server):
+    running = _Proxy(influx_server.url)
     yield running
     running.close()
 
@@ -130,13 +123,13 @@ def _wait_until_sent(writer, seconds=30):
     assert not writer.pending(), f"the backlog did not drain within {seconds}s"
 
 
-def test_an_outage_loses_nothing_and_replays_no_heartbeat(database, proxy, tmp_path, monkeypatch):
+def test_an_outage_loses_nothing_and_replays_no_heartbeat(influx_server, influx_database, proxy, tmp_path, monkeypatch):
+    server, database = influx_server, influx_database
     monkeypatch.setattr(writer_module, "RETRY_FIRST_SECONDS", 0.2)
     monkeypatch.setattr(writer_module, "RETRY_MAX_SECONDS", 1.0)
     writer = InfluxWriter("integration", str(tmp_path / "spool"), {}, buffer_mb=1)
-    destination = f"{proxy.url}/write?db={database}&precision=s"
     for source in ("hue", "octopus"):
-        writer.set_destination(source, destination, {"timeout": 2})
+        writer.set_destination(source, *_destination(server, database, via=proxy.url))
     try:
         for n in range(10):
             for source in ("hue", "octopus"):
@@ -170,9 +163,11 @@ def test_an_outage_loses_nothing_and_replays_no_heartbeat(database, proxy, tmp_p
         writer.close(2)
 
     for source in ("hue", "octopus"):
-        values = sorted(row[1] for row in _query(database, f'SELECT n FROM "{source}"'))
+        values = sorted(row[1] for row in _rows(server, database, f'SELECT n FROM "{source}"'))
         assert values == list(range(60)), f"{source}: InfluxDB holds {len(values)} of 60 points"
-    assert _query(database, 'SELECT ok FROM "collector_status"') == [], "a heartbeat from the outage was replayed"
+    assert (
+        _rows(server, database, 'SELECT ok FROM "collector_status"') == []
+    ), "a heartbeat from the outage was replayed"
     drained = [body for down, body in proxy.writes[writes_before_recovery:] if not down]
     points = sum(len(body.split("\n")) for body in drained)
     # Two databases' worth of interleaved points, so one post each per chunk rather than one
@@ -180,18 +175,18 @@ def test_an_outage_loses_nothing_and_replays_no_heartbeat(database, proxy, tmp_p
     assert points / len(drained) >= 20, f"{points} points took {len(drained)} posts"
 
 
-def test_a_missing_database_holds_up_no_other_source(database, tmp_path, monkeypatch, caplog):
+def test_a_missing_database_holds_up_no_other_source(influx_server, influx_database, tmp_path, monkeypatch, caplog):
     """A source whose database does not exist, against a real InfluxDB: it answers 404, which is
     a refusal, and every point for it is given up on after five attempts while the healthy
     source's points and heartbeats all arrive. Asserted against the server, not a script, because
-    the design rests on what the server answers - checked by hand for 1.8 and 2.7 as well."""
-    import logging
-
+    the design rests on what the server answers: 1.8 answers "database not found", 2.7 "bucket
+    not found", both with 404."""
+    server, database = influx_server, influx_database
     monkeypatch.setattr(writer_module, "RETRY_FIRST_SECONDS", 0.1)
     monkeypatch.setattr(writer_module, "RETRY_MAX_SECONDS", 0.8)
     writer = InfluxWriter("missing", str(tmp_path / "spool"), {}, buffer_mb=1)
-    writer.set_destination("hue", f"{INFLUX_URL}/write?db={database}&precision=s", {"timeout": 2})
-    writer.set_destination("gone", f"{INFLUX_URL}/write?db=no_such_database_{database}&precision=s", {"timeout": 2})
+    writer.set_destination("hue", *_destination(server, database))
+    writer.set_destination("gone", *_destination(server, f"no_such_database_{database}"))
     try:
         with caplog.at_level(logging.WARNING):
             for n in range(20):
@@ -206,7 +201,7 @@ def test_a_missing_database_holds_up_no_other_source(database, tmp_path, monkeyp
         assert not waiting, f"{len(waiting)} refused point(s) still waiting after 30s"
     finally:
         writer.close(2)
-    assert sorted(row[1] for row in _query(database, 'SELECT n FROM "hue"')) == list(range(20))
-    assert len(_query(database, 'SELECT ok FROM "collector_status"')) == 20, "a heartbeat was held up"
+    assert sorted(row[1] for row in _rows(server, database, 'SELECT n FROM "hue"')) == list(range(20))
+    assert len(_rows(server, database, 'SELECT ok FROM "collector_status"')) == 20, "a heartbeat was held up"
     assert sum("after 5 refusals, the last with HTTP 404" in r.getMessage() for r in caplog.records) == 20
     assert not os.path.exists(os.path.join(writer.directory, writer_module.RETRY_FILE_NAME))

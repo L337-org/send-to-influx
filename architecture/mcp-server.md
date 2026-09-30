@@ -330,8 +330,8 @@ figures each, so two aggregate queries grouped by `device` and `parameter` do th
 totals, and one counting held cycles, because InfluxQL cannot aggregate a boolean and a filter on
 it can. Grouping by `parameter` keeps a device an edit moved to another scale from being averaged
 across both. The device measurement is not a source of its own for `query_history`: its instance
-axis would be two tags, and the read layer has one. Both queries are run against a real InfluxDB
-in `tests/integration/test_control_devices_influxdb.py`, which is the only evidence that the
+axis would be two tags, and the read layer has one. Both queries are run against real InfluxDB 1.8
+and 2.7 servers in `tests/integration/test_control_devices_influxdb.py`, which is the only evidence that the
 InfluxQL is accepted - the unit tests answer from a list.
 
 **Register each tier only where its switch is true.** A capability that is switched off should be
@@ -407,7 +407,7 @@ Speedtest shape rather than Hue's: `controls` is not in `INSTANCED_SOURCES`, so
 `resolve_handler(instance=...)` refuses it and `query_history` scopes with a query predicate.
 `MCP_LIVE_STATE` is False, so `get_current_state` reads each control's last point.
 
-All of that is exercised against a real InfluxDB in
+All of that is exercised against real InfluxDB 1.8 and 2.7 servers in
 `tests/integration/test_controls_history_mcp.py`, through the MCP server as built: the history
 listed as a source, its fields and their meanings discovered from what the record wrote, a read
 scoped to one control, each control's latest cycle, and every panel query `suggest_dashboard_panels`

@@ -6,16 +6,10 @@ to a real server, and the summary is whatever that server makes of the tool's ow
 which is where an aggregate InfluxQL refuses, a boolean that cannot be filtered on, or a tag
 that comes back differently would show.
 
-Needs an InfluxDB 1.x at ``INFLUX_TEST_URL`` (default ``http://localhost:8086``), with
-authentication off; a run without one is a skip rather than a failure. Excluded from the
-default run with the other integration tests (``pytest -m integration``).
+Runs against each real InfluxDB ``conftest.py`` finds - 1.8 and, where one is set up, 2.7 - and a
+server that is not there is a skip rather than a failure. Excluded from the default run with the
+other integration tests (``pytest -m integration``).
 """
-
-import json
-import os
-import urllib.parse
-import urllib.request
-import uuid
 
 import pytest
 
@@ -26,38 +20,21 @@ from toinflux.staging import DeviceWindow
 
 pytestmark = pytest.mark.integration
 
-INFLUX_URL = os.environ.get("INFLUX_TEST_URL", "http://localhost:8086").rstrip("/")
-
 #: 2023-11-14T22:13:20Z, and the two cycles after it.
 FIRST = 1700000000
 
 
-def _statement(statement):
-    url = f"{INFLUX_URL}/query?" + urllib.parse.urlencode({"q": statement})
-    with urllib.request.urlopen(url, data=b"", timeout=5) as reply:
-        return json.load(reply)
-
-
 @pytest.fixture
-def installation(tmp_path):
-    """Yield an installation recording to a fresh database on the real InfluxDB.
+def installation(tmp_path, influx_server, influx_database):
+    """Yield an installation recording to a fresh database on each real InfluxDB.
 
     Yields:
-        Installation: with ``controls.db`` set, the database dropped afterwards
+        Installation: with ``controls.db`` set
     """
-    try:
-        urllib.request.urlopen(f"{INFLUX_URL}/ping", timeout=2).close()
-    except OSError:
-        pytest.skip(f"no InfluxDB at {INFLUX_URL}")
-    database = f"devices_it_{uuid.uuid4().hex[:8]}"
-    _statement(f'CREATE DATABASE "{database}"')
     built = Installation(tmp_path, sources=["openmeteo", "carbonintensity"])
-    built.set_settings("influx", url=INFLUX_URL)
-    built.set_settings("controls", enabled=True, db=database)
-    try:
-        yield built
-    finally:
-        _statement(f'DROP DATABASE "{database}"')
+    built.set_settings("influx", **influx_server.settings)
+    built.set_settings("controls", enabled=True, db=influx_database)
+    yield built
 
 
 def test_three_cycles_summarise_to_what_was_written(installation):

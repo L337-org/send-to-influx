@@ -8,17 +8,13 @@ series per control. The tools are called through the MCP server as built, so the
 error translation are exercised too, and the dashboard queries are run with Grafana's two macros
 substituted, which is all Grafana does to them.
 
-Needs an InfluxDB 1.x at ``INFLUX_TEST_URL`` (default ``http://localhost:8086``), with
-authentication off; a run without one is a skip rather than a failure. Excluded from the default
-run with the other integration tests (``pytest -m integration``).
+Runs against each real InfluxDB ``conftest.py`` finds - 1.8 and, where one is set up, 2.7 - and a
+server that is not there is a skip rather than a failure. Excluded from the default run with the
+other integration tests (``pytest -m integration``).
 """
 
 import json
-import os
 import time
-import urllib.parse
-import urllib.request
-import uuid
 
 import anyio
 import pytest
@@ -31,35 +27,20 @@ from toinflux.mcpserver import build_mcp_server
 
 pytestmark = pytest.mark.integration
 
-INFLUX_URL = os.environ.get("INFLUX_TEST_URL", "http://localhost:8086").rstrip("/")
-
 #: The fields a dashboard of one control's tuning is built from, and the ones this test reads.
 TUNING_FIELDS = ["input", "setpoint", "demand", "p", "i", "d", "delivered", "state"]
 
 
-def _influx(database, statement):
-    url = f"{INFLUX_URL}/query?" + urllib.parse.urlencode({"db": database, "q": statement, "epoch": "s"})
-    with urllib.request.urlopen(
-        url, data=b"" if not statement.lstrip().upper().startswith("SELECT") else None, timeout=5
-    ) as reply:
-        return json.load(reply)["results"][0]
-
-
 @pytest.fixture
-def recorded(tmp_path):
+def recorded(tmp_path, influx_server, influx_database):
     """Yield an installation whose two controls have written a few cycles to a fresh database.
 
     Yields:
-        tuple: (settings file, database name, when the points were stamped)
+        tuple: (settings file, the server, database name, when the points were stamped)
     """
-    try:
-        urllib.request.urlopen(f"{INFLUX_URL}/ping", timeout=2).close()
-    except OSError:
-        pytest.skip(f"no InfluxDB at {INFLUX_URL}")
-    database = f"controls_it_{uuid.uuid4().hex[:8]}"
-    _influx(database, f'CREATE DATABASE "{database}"')
+    database = influx_database
     installation = Installation(tmp_path, sources=["openmeteo", "carbonintensity"])
-    installation.set_settings("influx", url=INFLUX_URL)
+    installation.set_settings("influx", **influx_server.settings)
     installation.set_settings("controls", enabled=True, db=database)
     # The server refuses to build without an MCP block; nothing here listens on it.
     installation.set_settings(
@@ -82,10 +63,7 @@ def recorded(tmp_path):
             record.write(FAIL_SAFE, timestamp=now - 60)
         finally:
             record.session.close()
-    try:
-        yield installation.settings_file, database, now
-    finally:
-        _influx(database, f'DROP DATABASE "{database}"')
+    yield installation.settings_file, influx_server, database, now
 
 
 def _call(settings_file, tool, **arguments):
@@ -100,24 +78,26 @@ def _call(settings_file, tool, **arguments):
 
 
 def test_the_history_is_listed_as_a_source(recorded):
-    settings_file, _database, _now = recorded
+    settings_file, _server, _database, _now = recorded
     sources = {entry["source"]: entry for entry in _call(settings_file, "list_sources")["sources"]}
     assert "controls" in sources
     assert sources["controls"]["instance_tag"] == "control"
 
 
 def test_every_tuning_field_is_discovered_with_its_meaning(recorded):
-    settings_file, _database, _now = recorded
+    settings_file, _server, _database, _now = recorded
     result = _call(settings_file, "list_fields", source="controls", detail=True)
     fields = {entry["field"]: entry for entry in result["fields"]}
     for name in TUNING_FIELDS + ["kp", "ki", "kd"]:
         assert name in fields, f"{name} was not discovered"
         assert fields[name].get("description"), f"{name} carries no meaning"
-    assert "fail_safe" in fields["state"]["description"]
+    # The state field's values mean nothing without the explanation, so both are asserted.
+    assert "'active'" in fields["state"]["description"]
+    assert "'fail_safe'" in fields["state"]["description"]
 
 
 def test_a_read_scopes_to_one_control(recorded):
-    settings_file, _database, now = recorded
+    settings_file, _server, _database, _now = recorded
     result = _call(
         settings_file, "query_history", source="controls", field="delivered", start="-1h", end="now", instance="lamp"
     )
@@ -128,7 +108,7 @@ def test_a_read_scopes_to_one_control(recorded):
 
 
 def test_the_latest_cycle_is_reported_per_control(recorded):
-    settings_file, _database, _now = recorded
+    settings_file, _server, _database, _now = recorded
     state = _call(settings_file, "get_current_state", source="controls")
     text = json.dumps(state)
     assert "conservatory" in text and "lamp" in text
@@ -138,13 +118,13 @@ def test_the_latest_cycle_is_reported_per_control(recorded):
 def test_every_suggested_panel_query_runs_and_splits_by_control(recorded):
     """Grafana substitutes ``$timeFilter`` and ``$__interval`` and runs the query as written;
     this does the same, and every panel must come back with one series per control."""
-    settings_file, database, _now = recorded
+    settings_file, server, database, _now = recorded
     result = _call(settings_file, "suggest_dashboard_panels", source="controls", fields=TUNING_FIELDS)
     assert result["series_tags"] == ["control"]
     assert sorted(panel["field"] for panel in result["panels"]) == sorted(TUNING_FIELDS)
     for panel in result["panels"]:
         query = panel["query"].replace("$timeFilter", "time > now() - 1h").replace("$__interval", "1m")
-        answer = _influx(database, query)
+        answer = server.query(database, query)
         assert "error" not in answer, f"{panel['field']}: {answer.get('error')}"
         controls = {series["tags"]["control"] for series in answer.get("series", [])}
         assert controls == {"conservatory", "lamp"}, f"{panel['field']}: series for {controls}"
