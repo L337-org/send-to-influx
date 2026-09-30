@@ -357,6 +357,15 @@ this is how it is wired and what must not change.
   there does not show - accepted, and said in CONTROLS.md. Two driven devices held at values
   that disagree about where the window is are averaged, and only where no stretch has them
   agreeing - accepted.
+- **Each device's share goes to `control_device`, one point per device**, written by
+  `ControlRecord.write_devices()` from `staging.device_windows()` over the same plan as
+  commanded, with the cycle's timestamp. `changes` counts against the states read once before the
+  step, so the first command of a window compares with what the device was last set to. **`held`
+  is a frozen device that did not change**, not merely a frozen one: where no rung matches the
+  states a frozen device is in, `reachable_ladder()` hands back the whole ladder and the device
+  may move, and calling that held would describe a restraint that did not happen. A device key
+  with a line break is skipped and said once per process, because the store does not constrain
+  device keys and a tag cannot hold one.
 - **Which cycles are recorded is decided in `ControlProcess.cycle()`**: `active` after a window
   was spent, `fail_safe` where the cycle failed while the gate had it operating. A gate that
   raises counts as operating, because `enable_when` is only evaluated once the control is

@@ -672,6 +672,29 @@ of its own and sends them from a separate thread, so a slow or unreachable Influ
 the devices nor the next cycle, and the points are sent once it is back - see the README on the
 InfluxDB buffer.
 
+### Each device's share
+
+The same cycles also write one point per device to the `control_device` measurement, tagged
+`control=<name>` and `device=<name>` as the document names it, and for a driven device
+`parameter=<parameter>`, with the cycle's own timestamp:
+
+| Field | What it is |
+|---|---|
+| `seconds` | the window's length |
+| `on_seconds` | a switched device: how long it was commanded on |
+| `value` | a driven device: the value it was commanded to, averaged over the window, on its `parameter`'s scale |
+| `changes` | commands in the window that changed its state, counting the first against what it was last set to |
+| `held` | whether its `min_transition_seconds` kept it where it was |
+
+This is what tuning the ladder needs and `delivered` folds away: which device did the work, how
+often each switched, and whether a minimum kept one still. The devices' own sources show what
+each ended up doing; this shows what the control decided. A `fail_safe` cycle writes no device
+points, since the devices went to their safe state rather than to a plan.
+
+`parameter` is a tag so that a device moved to another scale by an edit is a separate series,
+rather than one averaged across two. Not written for a device whose name contains a line break,
+which no InfluxDB tag can hold; the control logs that once and records the rest.
+
 ### Using it to tune
 
 Plot `input` against `setpoint`, and below it `demand` split into `p`, `i` and `d`, with
@@ -691,6 +714,14 @@ history with `list_fields` and `query_history`, scoped to one control with `inst
   in the same window.
 * **Once `input` sits on `setpoint`, `i` is the level it takes to hold it there** under the
   conditions of the moment. Watch it across a few days and it shows how much that varies.
+* **For the ladder rather than the gains**, `get_control_devices` over MCP summarises each
+  device over a period: a switched one's share of active time on, a driven one's mean, lowest
+  and highest value, and for each how many times it changed, how many times an hour, and the
+  share of cycles its minimum held it. A heater beside the sensor doing all the work while the
+  far one never comes on is a ladder whose equal-level rungs are in the wrong order; one
+  changing many times an hour wants a longer `min_transition_seconds` or a longer
+  `cycle_seconds`; a driven value that sits at its highest is a device at the end of its
+  range.
 * **A step in `kp`, `ki` or `kd`** marks a retune. The gains are written on every point, so
   any window of the history says which tuning produced it.
 
@@ -756,10 +787,11 @@ capability a stage asks for. Those need the far end, and they fail that control 
 Reading them over MCP
 ---------------------
 
-With `controls.enabled` and the MCP server both on, four read-only tools appear:
+With `controls.enabled` and the MCP server both on, five read-only tools appear:
 `list_controls` (names, enabled, devices, cycle length, and whether each process is running),
 `get_control` (one document as stored), `get_control_state` (what a running control has since
-worked out), and `get_control_schema` (this format). They are not
+worked out), `get_control_devices` (each device's share of a period, from the recorded
+history, and offered only where `controls.db` is set) and `get_control_schema` (this format). They are not
 behind any write flag: a control document holds no secrets, and being able to ask what is
 being controlled and whether it is running should not require granting the ability to change
 it.

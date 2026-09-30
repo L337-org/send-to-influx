@@ -139,8 +139,8 @@ controls:
   # server is enabled (see the mcp block above) and "enabled" above is true.
   mcp_write: false
   # The database the controls record their PID history to, one point per cycle, for tuning:
-  # the "control" measurement, tagged with each control's name. Leave it out and nothing is
-  # recorded. See CONTROLS.md, "Recording the PID history", for what each field means.
+  # the "control" measurement, tagged with each control's name, and each device's share of the
+  # cycle to "control_device". Leave it out and nothing is recorded. See CONTROLS.md, "Recording the PID history", for what each field means.
   # db: "control_db"
 
 # Hue bridge settings

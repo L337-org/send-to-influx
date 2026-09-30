@@ -405,6 +405,70 @@ def plan_window(ladder, demand, cycle_seconds, min_transition_for, driven=None, 
     )
 
 
+@dataclass(frozen=True)
+class DeviceWindow:
+    """What one device was commanded to over a cycle window.
+
+    Attributes:
+        seconds (float): the window's length.
+        on_seconds (float or None): for a switched device, how long it was commanded on;
+            None for a driven one.
+        value (float or None): for a driven device, the value it was commanded to, averaged
+            over the window; None for a switched one.
+        changes (int): commands in the window that changed its state from the one before,
+            counting the first against what it was last commanded to.
+    """
+
+    seconds: float
+    on_seconds: "float | None"
+    value: "float | None"
+    changes: int
+
+
+def device_windows(plan, before, driven):
+    """Return what each device was commanded to over a window, device by device.
+
+    **The detail `delivered` folds away.** One level says how much the ladder gave; tuning the
+    ladder is a question about which device gave it - the heater beside the sensor or the one
+    across the room - how often each switched, and whether a minimum kept one where it was.
+
+    Args:
+        plan (tuple): Dwell, as commanded
+        before (dict): device name -> the state it was last commanded to, before this window
+        driven (dict): device name -> its parameter, for devices set to a value
+
+    Returns:
+        dict: device name -> DeviceWindow, for every device the plan commands a usable state
+    """
+    total = float(sum(dwell.seconds for dwell in plan))
+    devices = sorted({device for dwell in plan for device in dwell.stage.states})
+    windows = {}
+    for device in devices:
+        states = [(dwell.stage.states.get(device), dwell.seconds) for dwell in plan]
+        if device in driven:
+            usable = all(isinstance(state, (int, float)) and not isinstance(state, bool) for state, _ in states)
+        else:
+            usable = all(isinstance(state, bool) for state, _ in states)
+        if not usable or not total:
+            # A state the validator refuses - a rung omitting the device, a number for a switch.
+            # Nothing true can be said about it, and the plan's own log line shows it.
+            continue
+        changes, previous = 0, before.get(device)
+        for state, _seconds in states:
+            if previous is None or not _same_state(state, previous):
+                changes += 1
+            previous = state
+        if device in driven:
+            windows[device] = DeviceWindow(
+                total, None, sum(float(state) * seconds for state, seconds in states) / total, changes
+            )
+        else:
+            windows[device] = DeviceWindow(
+                total, float(sum(seconds for state, seconds in states if state)), None, changes
+            )
+    return windows
+
+
 def pinned_plan(plan, pinned, curve, driven):
     """Return a plan with some driven devices pinned to values they already hold.
 

@@ -240,4 +240,14 @@ for tuning.
 | `kp` | - | Levels per unit of input error |
 | `ki` | - | Levels per unit of input error per second |
 | `kd` | - | Levels per unit of input change per second |
+
+Each cycle also writes one point per device to the `control_device` measurement, tagged `control`,
+`device` and, for a driven device, `parameter`:
+
+| Field | Unit | Notes |
+|---|---|---|
+| `seconds`, `on_seconds` | s | The window's length, and how long a switched device was commanded on |
+| `value` | - | A driven device's commanded value averaged over the window, on the scale its `parameter` tag names |
+| `changes` | count | Commands that changed the device's state this window |
+| `held` | bool | Whether `min_transition_seconds` kept it where it was |
 | `state` | - | `active` or `fail_safe`, as a string |

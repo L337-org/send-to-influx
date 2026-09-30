@@ -80,6 +80,8 @@ SIBLINGS = {
     # told to do where this returns what it has since worked out - and `list_controls`, which
     # says whether it is running at all.
     "get_control_state": {"get_control", "list_controls"},
+    # The two it is confused with: the loop's own history, and what the device is doing now.
+    "get_control_devices": {"get_control_state", "query_history", "get_current_state"},
     # A write tool's confusable neighbours are the other ways to change the same control.
     # The narrow one is named from the broad one deliberately: rewriting a whole document
     # to switch a control off is how a misremembered stage ladder reaches the heaters.
@@ -183,11 +185,24 @@ WRITE_EFFECT_PHRASES = {
 # `get_control_state` pointing at `query_history` for a control's recorded cycles. The
 # controls' history is not a collected source, so without it nothing a caller reads leads
 # there: the record would exist and a model tuning the gains would never find it.
-MAX_TOOL_BYTES = 20_000
+# **Raised 20,000 -> 20,850 (and the total 22,200 -> 23,050) for `get_control_devices`**, at
+# 838 bytes. Tuning a control's ladder - which heater does the work, whether one switches too
+# often, whether a minimum keeps holding one - needs per-device figures that neither the loop's
+# history nor any collector has: the collectors see what a device ended up doing, not what the
+# control decided or held. The description names the tool's two confusable neighbours, the
+# loop's history and the device's present state, because those are what a caller would reach
+# for instead.
+# **And the total raised again, 23,050 -> 23,700, because the fixture was under-measuring.**
+# `controls.db` was not set, so the controls history's two resources, `schema://controls` and
+# `state://controls`, were not registered here while every install recording its controls
+# advertised them. Setting it, which `get_control_devices` now needs to register at all, added
+# their 633 bytes, already being sent - the ceiling had not been holding what it claimed, as
+# with the write tools above.
+MAX_TOOL_BYTES = 20_850
 MAX_SINGLE_TOOL_BYTES = 2_100
 MAX_PROMPT_BYTES = 600
 MAX_BYTES_PER_RESOURCE = 400
-MAX_TOTAL_BYTES = 22_200
+MAX_TOTAL_BYTES = 23_700
 
 SETTINGS = {
     "sources": ["hue", "speedtest"],
@@ -201,7 +216,8 @@ SETTINGS = {
     # `set_control_enabled` and `delete_control` were advertised to any install that
     # switched writes on and measured by nothing here. A guard that stops looking is worse
     # than no guard, because it reports success either way.
-    "controls": {"enabled": True, "mcp_write": True},
+    # `db` too, or `get_control_devices` is not registered and goes unmeasured.
+    "controls": {"enabled": True, "mcp_write": True, "db": "controls"},
 }
 
 
@@ -274,8 +290,10 @@ class TestEverythingAdvertisedIsDescribed:
         }
         assert {str(resource.uri) for resource in surface["resources"]} == {
             "docs://reference",
+            "schema://controls",
             "schema://hue",
             "schema://speedtest",
+            "state://controls",
             "state://hue",
             "state://speedtest",
         }
@@ -298,8 +316,10 @@ class TestEverythingAdvertisedIsDescribed:
         # client choosing between them can only know that if the resource says so.
         covering = {
             "docs://reference": "get_documentation",
+            "schema://controls": "list_fields",
             "schema://hue": "list_fields",
             "schema://speedtest": "list_fields",
+            "state://controls": "get_current_state",
             "state://hue": "get_current_state",
             "state://speedtest": "get_current_state",
         }
@@ -537,7 +557,7 @@ class TestEveryAdvertisedThingExplainsItsFailures:
         resources = registered._resource_manager.list_resources()
         templates = registered._resource_manager.list_templates()
         assert {tool.name for tool in tools} == set(SIBLINGS), "not every tool reached the tool manager"
-        assert len(resources) == 5, f"enumerated {len(resources)} resources, expected the fixture's 5"
+        assert len(resources) == 7, f"enumerated {len(resources)} resources, expected the fixture's 7"
         # No templated URIs today. Asserted rather than assumed: the moment one is added, this fails
         # and points at the guard above, which has to keep covering both kinds.
         assert not templates, f"a resource template appeared ({[t.uri_template for t in templates]}) - see above"

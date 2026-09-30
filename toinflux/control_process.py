@@ -50,7 +50,7 @@ from toinflux.general import (
 )
 from toinflux.inputs import input_max_age, read_input, source_handler
 from toinflux.rules import RuleEvaluationError
-from toinflux.staging import build_ladder, delivered_level, pinned_plan
+from toinflux.staging import build_ladder, delivered_level, device_windows, pinned_plan
 from toinflux.transitions import TransitionLog
 from toinflux import writer
 
@@ -591,9 +591,10 @@ class ControlProcess:
         # already has, which is what `min_transition_seconds` means for a device that is
         # adjusted rather than switched: how often the adjustment is made.
         driven = self.controller.driven
-        demand = self.controller.step(
-            bindings, dt, frozen=frozenset(frozen - set(driven)), states=self.transitions.states()
-        )
+        # Read once, before anything is commanded: the step plans from it, and the record counts
+        # this window's changes against it.
+        before = self.transitions.states()
+        demand = self.controller.step(bindings, dt, frozen=frozenset(frozen - set(driven)), states=before)
         demand = self._hold(demand, frozen & set(driven))
         # After the step, so what is stored is what the loop actually knows now. Written every
         # cycle: the file is a few hundred bytes and the alternative is a memory that is
@@ -643,7 +644,13 @@ class ControlProcess:
         # From the plan as commanded, after `_hold`, so a device pinned by its minimum shows
         # as what it was told rather than what the loop wanted.
         terms = self.controller.last_step
-        self._record(ACTIVE, moment, terms, delivered_level(demand, terms.curve, self.controller.driven))
+        self._record(ACTIVE, moment, terms, delivered_level(demand, terms.curve, driven))
+        if self.record is not None:
+            windows = device_windows(demand, before, driven)
+            # Held means the minimum actually kept it: a frozen device the ladder could not keep
+            # still - no rung matched the states it was in - moved, and says so in `changes`.
+            held = {device for device in frozen if device in windows and windows[device].changes == 0}
+            self.record.write_devices(windows, held, driven, timestamp=self._stamp(moment))
 
     def _resume_the_loop(self) -> None:
         """Put back the integral this control had built before it was last restarted.
@@ -714,8 +721,19 @@ class ControlProcess:
         """
         if self.record is None:
             return
-        stamp = (moment or datetime.datetime.now(datetime.timezone.utc)).timestamp()
-        self.record.write(state, terms, delivered, timestamp=int(stamp))
+        self.record.write(state, terms, delivered, timestamp=self._stamp(moment))
+
+    @staticmethod
+    def _stamp(moment) -> int:
+        """Return the epoch second a cycle's points are written at.
+
+        Args:
+            moment (datetime.datetime or None): when the cycle began; now when None
+
+        Returns:
+            int: epoch seconds
+        """
+        return int((moment or datetime.datetime.now(datetime.timezone.utc)).timestamp())
 
     def _fail_safe(self, reason) -> None:
         """Put the devices somewhere safe after a cycle that could not be completed.

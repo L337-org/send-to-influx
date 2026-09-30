@@ -25,6 +25,7 @@ from toinflux.control_record import (
 )
 from toinflux.controller import StepTerms
 from toinflux.exceptions import ConfigError
+from toinflux.staging import DeviceWindow
 from toinflux.general import _validate_controls_block, known_sources, source_class
 
 V1 = {"url": "http://influx", "user": "u", "password": "p"}
@@ -113,6 +114,41 @@ class TestAPoint:
         _series, fields, _stamp = _written(influx)[0].rsplit(" ", 2)
         written = {pair.split("=", 1)[0] for pair in fields.split(",")}
         assert written == set(ControlRecord.MCP_FIELD_METADATA)
+
+
+class TestADevicePoint:
+    """One per device per cycle, in a measurement of its own, for tuning the ladder."""
+
+    def test_a_switched_device_says_how_long_it_was_on(self, record, influx):
+        record.write_devices({"far heater": DeviceWindow(60.0, 23.0, None, 1)}, set(), {}, timestamp=1700000000)
+        assert _written(influx) == [
+            "control_device,control=back\\ room,device=far\\ heater "
+            "seconds=60.0,on_seconds=23.0,changes=1,held=false 1700000000"
+        ]
+
+    def test_a_driven_device_carries_its_value_and_its_scale(self, record, influx):
+        """The parameter is a tag, so a device moved to another scale is a separate series
+        rather than one averaged across both."""
+        record.write_devices({"lamp": DeviceWindow(60.0, None, 40.0, 0)}, {"lamp"}, {"lamp": "brightness_pct"})
+        (line,) = _written(influx)
+        assert line.startswith(
+            "control_device,control=back\\ room,device=lamp,parameter=brightness_pct "
+            "seconds=60.0,value=40.0,changes=0,held=true "
+        )
+
+    def test_a_device_that_cannot_be_a_tag_is_said_once_and_skipped(self, record, influx, caplog):
+        """Nothing in the store constrains a device's key, and a newline cannot be written as a
+        tag. The other devices are still recorded."""
+        windows = {"bad\nname": DeviceWindow(60.0, 0.0, None, 0), "good": DeviceWindow(60.0, 0.0, None, 0)}
+        with caplog.at_level(logging.WARNING):
+            record.write_devices(windows, set(), {}, timestamp=1700000000)
+            record.write_devices(windows, set(), {}, timestamp=1700000060)
+        assert [line.rsplit(" ", 2)[0] for line in _written(influx)] == [
+            "control_device,control=back\\ room,device=good"
+        ] * 2
+        warnings = [r for r in caplog.records if "cannot record device" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "'bad\\nname'" in warnings[0].getMessage()
 
 
 class TestAFailedWrite:

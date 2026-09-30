@@ -23,6 +23,7 @@ from toinflux.staging import (
     build_ladder,
     cap_ladder,
     delivered_level,
+    device_windows,
     pinned_plan,
     plan_window,
     reachable_ladder,
@@ -661,6 +662,66 @@ class TestDeliveredOverGeneratedLadders:
                 )
                 checked += 1
         assert checked > self.HELD_CASES / 4, f"only {checked} held dwells were compared"
+
+
+class TestWhatEachDeviceWasCommanded:
+    """The per-device detail `delivered` folds away, for tuning the ladder rather than the gains."""
+
+    HEATERS = build_ladder(
+        [
+            {"level": 0, "set": {"far": False, "near": False}},
+            {"level": 750, "set": {"far": True, "near": False}},
+            {"level": 1500, "set": {"far": True, "near": True}},
+        ]
+    )
+
+    def test_a_switched_device_reports_how_long_it_was_on(self):
+        plan = plan_window(self.HEATERS, 1000, 300, _no_minimum)
+        windows = device_windows(plan, {"far": True, "near": False}, {})
+        assert windows["far"].on_seconds == pytest.approx(300.0)
+        assert windows["near"].on_seconds == pytest.approx(100.0)
+        assert windows["far"].value is None
+        assert windows["near"].seconds == pytest.approx(300.0)
+
+    def test_changes_count_against_what_it_was_last_commanded(self):
+        """`far` was already on and stays on; `near` goes on part way through."""
+        plan = plan_window(self.HEATERS, 1000, 300, _no_minimum)
+        windows = device_windows(plan, {"far": True, "near": False}, {})
+        assert (windows["far"].changes, windows["near"].changes) == (0, 1)
+
+    def test_a_device_never_commanded_counts_its_first_command(self):
+        plan = plan_window(self.HEATERS, 0, 300, _no_minimum)
+        assert device_windows(plan, {}, {})["far"].changes == 1
+
+    def test_a_driven_device_reports_its_value_over_the_window(self):
+        ladder = build_ladder(
+            [{"level": 0, "set": {"heater": False, "lamp": 0}}, {"level": 1000, "set": {"heater": True, "lamp": 100}}]
+        )
+        driven = {"lamp": "brightness_pct"}
+        plan = pinned_plan(plan_window(ladder, 400, 300, _no_minimum, driven), {"lamp": 70.0}, ladder, driven)
+        windows = device_windows(plan, {"lamp": 70.0, "heater": False}, driven)
+        assert windows["lamp"].value == pytest.approx(70.0)
+        assert windows["lamp"].on_seconds is None
+        assert windows["lamp"].changes == 0
+        assert windows["heater"].on_seconds == pytest.approx(120.0)
+
+    def test_a_driven_value_is_weighted_by_how_long_it_was_held(self):
+        """A planned window holds one value, so this is the case that would tell the weighting
+        from a plain mean: a plan built by something other than `plan_window`."""
+        ladder = build_ladder([{"level": 0, "set": {"lamp": 0}}, {"level": 1000, "set": {"lamp": 100}}])
+        plan = (
+            Dwell(stage=_with(ladder[0], lamp=20.0), seconds=100.0),
+            Dwell(stage=_with(ladder[0], lamp=80.0), seconds=200.0),
+        )
+        assert device_windows(plan, {}, {"lamp": "brightness_pct"})["lamp"].value == pytest.approx(60.0)
+
+    def test_a_state_of_the_wrong_kind_is_left_out(self):
+        """What the validator refuses: nothing true can be said about it."""
+        odd = (Dwell(stage=_with(self.HEATERS[0], near=40), seconds=60.0),)
+        assert set(device_windows(odd, {}, {})) == {"far"}
+
+    def test_a_plan_with_no_length_reports_nothing(self):
+        assert device_windows((), {}, {}) == {}
 
 
 def _with(stage, **states):

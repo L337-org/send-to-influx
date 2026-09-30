@@ -876,7 +876,8 @@ a child that was killed or lost power did not get the chance.
 
 **Each control's PID history can be kept for tuning.** Set `controls.db`, as for any source, and
 every cycle writes its input, setpoint, demand and P, I and D terms to the `control`
-measurement, readable through the MCP read tools as source `controls`. CONTROLS.md says what each
+measurement, readable through the MCP read tools as source `controls`, and what each device
+was commanded to the `control_device` measurement, which `get_control_devices` summarises. CONTROLS.md says what each
 field means and how to read it.
 
 **[CONTROLS.md](CONTROLS.md) is the reference**: the document format key by key, the rule language

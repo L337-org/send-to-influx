@@ -42,6 +42,7 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2026 Gavin Lucas"
 __license__ = "MIT"
 
+import datetime
 import logging
 import time
 import threading
@@ -63,6 +64,7 @@ from toinflux.controls import (
     control_writes_enabled,
     controls_enabled,
     load_control,
+    require_valid_control_name,
     validate_control,
 )
 
@@ -271,6 +273,8 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
         nothing. See `get_control` for the document and `list_controls` for what is running.
         """
         return await anyio.to_thread.run_sync(_control_state_result, name, settings_file, supervisor)
+
+    _register_device_summary(server, settings, settings_file)
 
     @register_tool(
         server,
@@ -560,6 +564,202 @@ def _control_state_result(name, settings_file=None, supervisor=None):
     )
     entry["history"] = _history_of(name, settings_file)
     return entry
+
+
+def _register_device_summary(server, settings, settings_file):
+    """Register the tool that summarises a control's devices from its recorded history.
+
+    Apart from the rest of the read tier to keep ``register_control_tools`` within the
+    project's complexity limit. Registered under the same switch, and only where
+    ``controls.db`` is set.
+
+    Args:
+        server (MCPServer): the MCPServer instance
+        settings (dict): the parsed settings document
+        settings_file (str or None): the settings path the process was started with
+    """
+    from mcp.types import ToolAnnotations
+
+    import anyio
+
+    # Only where there is a history to summarise: offered without one, every call would refuse.
+    if record_destination(settings):
+
+        @register_tool(
+            server,
+            title="Summarise Control Devices",
+            annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+        )
+        async def get_control_devices(  # noqa: DOC101,DOC103,DOC108,DOC201
+            name: str, start: str = "-24h", end: str = "now"
+        ) -> dict:
+            """Summarise what each of a control's devices was commanded to over a period: for a
+            switched device the share of active time it was on, for a driven one the mean, lowest
+            and highest value it was set to, and for every device how often it changed and how
+            often `min_transition_seconds` held it.
+
+            For tuning the ladder rather than the gains: which device does the work, whether one
+            switches too often, whether a value sits at the end of its range. The loop's terms over
+            time are `query_history`, at the `history` that `get_control_state` names; what a
+            device is doing now is `get_current_state`.
+
+            `start` and `end` take `now`, an offset such as `-7d`, or an ISO 8601 time. Only cycles
+            the control acted in are counted. Fails where the name is invalid, `controls.db` is not
+            set, or InfluxDB cannot be reached. Reads InfluxDB and changes nothing.
+            """
+            return await anyio.to_thread.run_sync(_control_devices_result, name, start, end, settings_file)
+
+
+def _control_devices_result(name, start, end, settings_file=None):
+    """Summarise a control's device points over a period, off the event loop.
+
+    **Aggregated in InfluxDB, and summarised rather than listed.** A day of one-minute cycles is
+    1,440 points a device; what a caller tuning the ladder needs from them is a handful of
+    figures each, and a series that size would crowd out the reasoning it was fetched for.
+    Grouped by ``parameter`` as well as ``device`` so a device whose document moved it to
+    another scale is reported once per scale rather than averaged across both.
+
+    Args:
+        name (str): the control
+        start (str): the period's start, as ``parse_time_bound`` reads it
+        end (str): the period's end
+        settings_file (str or None): the settings path the process was started with
+
+    Returns:
+        dict: the tool's result
+
+    Raises:
+        ToolParamError: the name is invalid, the period is, or nothing is recorded
+    """
+    from toinflux.control_record import DEVICE_MEASUREMENT, DEVICE_TAG, PARAMETER_TAG, RECORD_TAG, ControlRecord
+    from toinflux.influx import _quote_identifier, _quote_string_literal, run_query
+    from toinflux.mcp_common import close_session
+    from toinflux.mcp_read import _rfc3339, parse_time_bound
+
+    try:
+        require_valid_control_name(name)
+    except ConfigError as exc:
+        raise ToolParamError(render_external(exc)) from exc
+    database = record_destination(load_settings(settings_file))
+    # Also refused at registration, where the tool is not offered without the record; this is
+    # for a settings file edited since the server started.
+    if not database:
+        raise ToolParamError(f"no control's devices are recorded: set {RECORD_SOURCE}.db in the settings to keep them")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    start_at, end_at = parse_time_bound(start, now=now), parse_time_bound(end, now=now)
+    if start_at >= end_at:
+        raise ToolParamError(f"start ({_rfc3339(start_at)}) must be before end ({_rfc3339(end_at)})")
+    where = (
+        f"time >= {_quote_string_literal(_rfc3339(start_at))} AND time <= {_quote_string_literal(_rfc3339(end_at))} "
+        f"AND {_quote_identifier(RECORD_TAG)} = {_quote_string_literal(name)}"
+    )
+    source = f"FROM {_quote_identifier(DEVICE_MEASUREMENT)} WHERE {where}"
+    group = f"GROUP BY {_quote_identifier(DEVICE_TAG)}, {_quote_identifier(PARAMETER_TAG)}"
+    handler = ControlRecord(settings_file)
+    try:
+        influx = handler.settings["influx"]
+        totals = run_query(
+            handler.session,
+            influx,
+            database,
+            'SELECT count("seconds") AS cycles, sum("seconds") AS seconds, sum("on_seconds") AS on_seconds, '
+            'mean("value") AS mean, min("value") AS min, max("value") AS max, sum("changes") AS changes '
+            f"{source} {group}",
+        )
+        # A second query because InfluxQL cannot aggregate a boolean: counting the held cycles
+        # is a filter on the field rather than a function of it.
+        held = run_query(
+            handler.session, influx, database, f'SELECT count("seconds") AS held {source} AND "held" = true {group}'
+        )
+    finally:
+        close_session(handler.session)
+    held_by = {_series_key(series): _first_row(series).get("held") or 0 for series in held}
+    devices = [_device_summary(series, held_by.get(_series_key(series), 0)) for series in totals]
+    result = {
+        "control": name,
+        "start": _rfc3339(start_at),
+        "end": _rfc3339(end_at),
+        "devices": sorted(devices, key=lambda entry: (entry["device"], entry.get("parameter") or "")),
+    }
+    if not devices:
+        # Empty is an answer here, not a failure: a control that was off all period acted in no
+        # cycle. Said, because it reads the same as a control that has never recorded devices.
+        result["note"] = (
+            "no device points in this period: the control did not act in it, or its history "
+            "predates per-device recording"
+        )
+    return result
+
+
+def _series_key(series):
+    """Return the (device, parameter) a summary series belongs to.
+
+    Args:
+        series (QuerySeries): one series of a query grouped by device and parameter
+
+    Returns:
+        tuple: device name and parameter, the parameter empty for a switched device
+    """
+    return series.tags.get("device", ""), series.tags.get("parameter", "")
+
+
+def _first_row(series):
+    """Return an aggregate series' only row as a column -> value mapping.
+
+    Args:
+        series (QuerySeries): a series from an aggregate query without a time grouping
+
+    Returns:
+        dict: column name -> value, empty where the series has no rows
+    """
+    if not series.values:
+        return {}
+    return dict(zip(series.columns, series.values[0]))
+
+
+def _device_summary(series, held_cycles):
+    """Shape one device's aggregates into what a caller tuning the ladder reads.
+
+    Args:
+        series (QuerySeries): the device's row of totals
+        held_cycles (int): how many of its cycles were held by its minimum
+
+    Returns:
+        dict: the device's summary
+    """
+    device, parameter = _series_key(series)
+    row = _first_row(series)
+    cycles = row.get("cycles") or 0
+    seconds = row.get("seconds") or 0.0
+    changes = row.get("changes") or 0
+    entry: dict = {"device": device, "cycles": cycles, "active_seconds": seconds}
+    if parameter:
+        entry.update(
+            kind="driven",
+            parameter=parameter,
+            value={"mean": row.get("mean"), "min": row.get("min"), "max": row.get("max")},
+        )
+    else:
+        entry.update(kind="switched", on_share=_ratio(row.get("on_seconds"), seconds))
+    entry["changes"] = changes
+    entry["changes_per_active_hour"] = _ratio(changes * 3600, seconds)
+    entry["held_share"] = _ratio(held_cycles, cycles)
+    return entry
+
+
+def _ratio(part, whole):
+    """Return part over whole to four places, or None where there is no whole.
+
+    Args:
+        part (float or None): the numerator
+        whole (float or None): the denominator
+
+    Returns:
+        float or None: the ratio
+    """
+    if part is None or not whole:
+        return None
+    return round(part / whole, 4)
 
 
 def _history_of(name, settings_file):

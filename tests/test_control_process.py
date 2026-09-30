@@ -1491,6 +1491,83 @@ class TestTheRecordOfEachCycle:
         assert [_fields(point)["state"] for point in _recorded_points(influx)] == ['"active"', '"fail_safe"']
 
 
+def _device_points(influx):
+    """Return every point written to the ``control_device`` measurement, by device.
+
+    Args:
+        influx (StubInflux): the database the control wrote to
+
+    Returns:
+        list: ``(device, fields)`` per point, in the order written
+    """
+    points = []
+    for body in influx.writes:
+        text = body.decode() if isinstance(body, bytes) else body
+        for line in text.splitlines():
+            if line.startswith("control_device,"):
+                tags = dict(pair.split("=", 1) for pair in line.rsplit(" ", 2)[0].split(",")[1:])
+                points.append((tags["device"], _fields(line)))
+    return points
+
+
+class TestTheRecordOfEachDevice:
+    """One point per device per cycle, for tuning the ladder: which device did the work, how
+    often each changed, and whether its minimum kept it where it was."""
+
+    def test_each_device_says_what_it_was_commanded(self, recorded, influx, bridge):
+        """The first cycle collapses onto 750, the far heater alone, for the whole window."""
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        points = dict(_device_points(influx))
+        assert set(points) == {"far", "near"}
+        assert float(points["far"]["on_seconds"]) == pytest.approx(float(points["far"]["seconds"]))
+        assert float(points["near"]["on_seconds"]) == 0.0
+        assert points["far"]["changes"] == "1", "never commanded before, so its first command is a change"
+        assert (points["far"]["held"], points["near"]["held"]) == ("false", "false")
+        assert bridge.energised() == {"far": True, "near": False}
+
+    def test_a_device_its_minimum_kept_still_is_held(self, recorded, influx):
+        """The second cycle comes at once, inside both heaters' 30s minimum."""
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        second = dict(_device_points(influx)[2:])
+        assert (second["far"]["held"], second["near"]["held"]) == ("true", "true")
+        assert (second["far"]["changes"], second["near"]["changes"]) == ("0", "0")
+
+    def test_a_frozen_device_the_ladder_could_not_keep_still_is_not_held(self, recorded, influx):
+        """Near on and far off is a combination no rung describes, so there is no keeping them
+        where they are: the whole ladder is used and both move. Held would describe a
+        restraint that did not happen."""
+        record_command(recorded.transitions, recorded.document, {"far": False, "near": True})
+        frozen = recorded.transitions.frozen(recorded.controller.min_transition_for, ("far", "near"))
+        assert frozen == {"far", "near"}, "the case this exists for has changed shape"
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        points = dict(_device_points(influx))
+        assert (points["far"]["changes"], points["near"]["changes"]) == ("1", "1")
+        assert (points["far"]["held"], points["near"]["held"]) == ("false", "false")
+
+    def test_they_share_the_cycle_s_timestamp(self, recorded, influx):
+        """So a device's point and the loop's point for one cycle line up on one time axis."""
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        stamps = {line.rsplit(" ", 1)[1] for body in influx.writes for line in _text(body).splitlines()}
+        assert stamps == {str(int(NIGHT.timestamp()))}
+
+    def test_a_fail_safe_cycle_writes_none(self, recorded, influx):
+        """The devices went to their safe state rather than to a plan, and the loop's own
+        point says so."""
+        recorded.gate._enable_when = _unevaluable_rule()
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert _device_points(influx) == []
+
+    def test_a_disabled_control_writes_none(self, recorded, influx):
+        recorded.gate.enabled = False
+        recorded.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        assert _device_points(influx) == []
+
+
+def _text(body):
+    return body.decode() if isinstance(body, bytes) else body
+
+
 class TestNothingIsRecordedWhileOff:
     def test_outside_the_active_period_nothing_is_written(self, recorded_overnight, influx):
         recorded_overnight.cycle(dt=60, moment=DAY, sleep=_never_sleep)

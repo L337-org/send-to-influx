@@ -43,6 +43,15 @@ RECORD_MEASUREMENT = "control"
 #: The tag naming which control a point belongs to.
 RECORD_TAG = "control"
 
+#: The measurement each device's share of a cycle is written to, one point per device.
+DEVICE_MEASUREMENT = "control_device"
+
+#: The tag naming the device, as the control document names it.
+DEVICE_TAG = "device"
+
+#: The tag naming a driven device's parameter, so values on different scales stay apart.
+PARAMETER_TAG = "parameter"
+
 #: ``state`` for a cycle that ran the loop.
 ACTIVE = "active"
 
@@ -199,6 +208,7 @@ class ControlRecord(DataHandler):
             ConfigError: where the settings have no ``controls`` section
         """
         super().__init__(RECORD_SOURCE, settings_file=settings_file, instance=instance)
+        self._unwritable: set = set()
 
     def write(self, state, terms=None, delivered=None, timestamp=None) -> None:
         """Hand one cycle's point to the writer, which commits it and sends it.
@@ -223,6 +233,47 @@ class ControlRecord(DataHandler):
         # one, so the escape cannot raise here.
         self.influx_header = f"{RECORD_MEASUREMENT},{RECORD_TAG}={escape_key_or_tag_value(self.instance)} "
         self.send_data(fields, timestamp=timestamp)
+
+    def write_devices(self, windows, held, driven, timestamp=None) -> None:
+        """Hand one point per device to the writer, saying what each was commanded to this cycle.
+
+        **A separate measurement, because this is what tuning the ladder needs and the gains do
+        not.** Which heater did the work, how often each switched, and whether a minimum kept one
+        where it was are per device; the loop's own point says how much the ladder gave in one
+        number, and folding a device each into it would give every control its own schema.
+
+        Args:
+            windows (dict): device name -> DeviceWindow for this cycle
+            held (set): devices whose ``min_transition_seconds`` kept them where they were
+            driven (dict): device name -> its parameter, for devices set to a value
+            timestamp (int or None): the cycle's own time, in epoch seconds, the same as its
+                ``control`` point
+        """
+        control = escape_key_or_tag_value(self.instance)
+        for device, window in sorted(windows.items()):
+            if any(char in device for char in "\r\n"):
+                # Nothing in the store constrains a device's key, and a newline cannot be escaped
+                # in a tag. Said once per device rather than every cycle, and the cycle goes on.
+                if device not in self._unwritable:
+                    self._unwritable.add(device)
+                    logging.warning(
+                        "Control %r cannot record device %r: a line break cannot be written as an "
+                        "InfluxDB tag, so rename it in the control's devices section",
+                        self.instance,
+                        device,
+                    )
+                continue
+            header = f"{DEVICE_MEASUREMENT},{RECORD_TAG}={control},{DEVICE_TAG}={escape_key_or_tag_value(device)}"
+            fields = {"seconds": window.seconds}
+            if device in driven:
+                header += f",{PARAMETER_TAG}={escape_key_or_tag_value(str(driven[device]))}"
+                fields["value"] = window.value
+            else:
+                fields["on_seconds"] = window.on_seconds
+            fields["changes"] = window.changes
+            fields["held"] = device in held
+            self.influx_header = header + " "
+            self.send_data(fields, timestamp=timestamp)
 
 
 def log_record_destination(settings) -> None:

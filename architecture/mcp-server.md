@@ -299,11 +299,12 @@ network-facing server.
 
 ## Control tools (`toinflux/mcp_controls.py`, `register_control_tools()`)
 
-Seven tools in two tiers behind two switches.
+Eight tools in two tiers behind two switches.
 
 **`controls.enabled` registers the read tier**: `list_controls` for what is stored and what is
 running, `get_control` for one document as held on disk, `get_control_state` for what a running
-control has since worked out, and `get_control_schema` for the document format itself. **`controls.mcp_write` then adds the write tier**: `save_control`,
+control has since worked out, `get_control_devices` for each device's share of a period, and
+`get_control_schema` for the document format itself. **`controls.mcp_write` then adds the write tier**: `save_control`,
 `set_control_enabled` and `delete_control`.
 
 **Neither switch implies the other, and `control_writes_enabled()` requires both.** Running the loops
@@ -320,6 +321,18 @@ setting where it is not. The record is written by the control processes, not col
 absent from `sources:` and nothing else in a control's result would lead a caller to it; reading
 it is `query_history`'s job, which already carries the field meanings, so a second reader here
 would only be a second thing to keep in step.
+
+**`get_control_devices` is registered only where `controls.db` is set**, since without the
+record every call could only refuse; the refusal stays for a settings file edited after
+startup. **It summarises in InfluxDB rather than returning a series.** A day of
+one-minute cycles is 1,440 points a device, and what tuning the ladder needs from them is a few
+figures each, so two aggregate queries grouped by `device` and `parameter` do the work: one of
+totals, and one counting held cycles, because InfluxQL cannot aggregate a boolean and a filter on
+it can. Grouping by `parameter` keeps a device an edit moved to another scale from being averaged
+across both. The device measurement is not a source of its own for `query_history`: its instance
+axis would be two tags, and the read layer has one. Both queries are run against a real InfluxDB
+in `tests/integration/test_control_devices_influxdb.py`, which is the only evidence that the
+InfluxQL is accepted - the unit tests answer from a list.
 
 **Register each tier only where its switch is true.** A capability that is switched off should be
 absent from the advertised surface rather than present and refusing, because a tool a model can see
