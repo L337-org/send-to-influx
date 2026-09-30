@@ -114,13 +114,16 @@ jobs:
 
   integration-run:
     # Runs the marked integration tests (excluded from the default pytest run above)
-    # against a real MQTT broker started on the runner. A required check on main's ruleset
-    # (a failure blocks merging), so the streaming path is exercised against a real broker
-    # on every PR.
+    # against a real MQTT broker and a real InfluxDB started on the runner. A required check
+    # on main's ruleset (a failure blocks merging), so the streaming path and the writer are
+    # exercised against the real things on every PR.
+    #
+    # The name still says MQTT broker: it is the required status check's name in the ruleset,
+    # and renaming a required check means changing the ruleset in the same change.
     runs-on: [ubuntu-latest]
     name: Run integration tests (MQTT broker)
-    # 148s observed max, including the broker image pull.
-    timeout-minutes: 15
+    # 148s observed max with the broker alone; the InfluxDB image pull adds to that.
+    timeout-minutes: 20
     steps:
       - name: Check out source repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -163,11 +166,28 @@ jobs:
           docker logs mosquitto-ci 2>&1 | tail -20 >&2
           exit 1
 
+      # For tests/integration/test_writer_influxdb.py. InfluxDB 1.8 with authentication off,
+      # started the same way as the broker and for the same reasons.
+      - name: Start a local InfluxDB
+        timeout-minutes: 5
+        run: |
+          docker run -d --name influxdb-ci -p 8086:8086 influxdb:1.8
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8086/ping >/dev/null; then
+              echo "InfluxDB up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "InfluxDB did not come up on localhost:8086" >&2
+          docker logs influxdb-ci 2>&1 | tail -20 >&2
+          exit 1
+
       - name: Run integration tests
         timeout-minutes: 10
         env:
           MQTT_TEST_BROKER_HOST: localhost
           MQTT_TEST_BROKER_PORT: "1883"
+          INFLUX_TEST_URL: http://localhost:8086
         run: pytest -m integration -v
 
   flake8-run:

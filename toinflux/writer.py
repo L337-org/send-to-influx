@@ -35,6 +35,7 @@ __license__ = "MIT"
 import atexit
 import errno
 import fcntl
+import itertools
 import json
 import logging
 import os
@@ -767,8 +768,8 @@ class InfluxWriter:
             return "idle"
         done = []
         outcome = "sent"
-        for run in _runs(chunk):
-            result = self._send_run(run, done)
+        for group in _by_database(chunk):
+            result = self._send_run(group, done)
             if result == "failed":
                 outcome = "failed"
                 break
@@ -778,8 +779,30 @@ class InfluxWriter:
             # A chunk is all live or none of it. A live one is dropped whole rather than kept for
             # the retry, which is the whole of what makes a heartbeat different on this path.
             done = chunk
+        # Only the start of the chunk that was dealt with in full can be consumed, because the
+        # spool's pointer and the queues only move forward from their front. Grouping by database
+        # means what was dealt with need not be a start - one database's points sent, a later
+        # one's failed - and anything sent beyond that start is sent again next time, which
+        # InfluxDB absorbs.
+        handled = {id(entry) for entry in done}
+        start = list(itertools.takewhile(lambda entry: id(entry) in handled, chunk))
         with self._lock:
-            self._consume(done)
+            removed = self._consume(start)
+        if start and not removed:
+            # **A pass that removes nothing it has dealt with would repeat for ever**, reposting
+            # the same chunk as fast as InfluxDB answers - two deliberately broken versions of
+            # the consume step both hung that way. It is a bug in the writer, so it is said as
+            # one, and the timer stands between attempts rather than a hot loop.
+            self._problems.report(
+                "stuck",
+                logging.ERROR,
+                "The InfluxDB writer for %s dealt with %d point(s) and could not remove them from its queue; "
+                "this is a bug, and it will try again on its retry timer",
+                self.name,
+                len(start),
+                identity="stuck",
+            )
+            return "failed"
         if outcome != "failed":
             self._problems.cleared("write", "InfluxDB is taking points from %s again", self.name)
         return outcome
@@ -949,32 +972,39 @@ class InfluxWriter:
             )
             return None
 
-    def _consume(self, done) -> None:
+    def _consume(self, done):
         """Mark a prefix of the last chunk as dealt with.
 
         Args:
             done (list): _Entry, in the order they were read
+
+        Returns:
+            int: how many entries were removed from their queue or passed by the pointer
         """
         if not done:
-            return
+            return 0
         if done[0].end is None:
             # By identity, not by count. The queue is only ever trimmed from the front, but a
             # point arriving while this chunk was out may have evicted some of it for the bound
             # already, and removing len(done) from the front then took points never posted.
             queue = self._live if done[0].live else self._memory.get((done[0].source, done[0].instance))
+            removed = 0
             for entry in done:
                 if queue and queue[0] is entry:
                     queue.popleft()
-            return
+                    removed += 1
+            return removed
         segment, offset = done[-1].end
         if segment not in self._sizes:
             # Dropped by the size bound while this chunk was being posted: the pointer was
-            # already moved on past it, and must not be moved back.
-            return
+            # already moved on past it, and must not be moved back. They are gone either way.
+            return len(done)
+        before = self._pointer
         self._pointer = (segment, offset)
         if offset >= self._sizes[segment] and segment != self._append_segment:
             self._retire(segment)
         self._write_pointer()
+        return len(done) if self._pointer != before else 0
 
     def _retire(self, segment) -> None:
         """Delete a segment that has been sent, and move the pointer to the next.
@@ -1127,22 +1157,25 @@ class InfluxWriter:
         self._session.close()
 
 
-def _runs(chunk):
-    """Split a chunk into runs of consecutive points bound for the same source's database.
+def _by_database(chunk):
+    """Split a chunk into one group per source's database, keeping each source's own order.
+
+    **One post per database, not one per consecutive run.** Every collector in a process writes
+    to its own database through the one spool, so their points interleave, and splitting on runs
+    of consecutive points gave nearly every post a single point: a stress run drained under 90
+    points a second, and a heartbeat waited behind a chunk of single-point posts. The order
+    between databases does not matter; within one, it is kept.
 
     Args:
         chunk (list): _Entry, in order
 
     Returns:
-        list: lists of _Entry
+        list: lists of _Entry, in the order each source first appears
     """
-    runs = []
+    groups = {}
     for entry in chunk:
-        if runs and runs[-1][0].source == entry.source:
-            runs[-1].append(entry)
-        else:
-            runs.append([entry])
-    return runs
+        groups.setdefault(entry.source, []).append(entry)
+    return list(groups.values())
 
 
 def _without_query(url):

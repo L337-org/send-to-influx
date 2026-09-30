@@ -117,6 +117,17 @@ timeout. The buffer kept the points that were collected; it could not stop fewer
   its traceback, once while it repeats, and the thread carries on after the retry delay;
   `_ensure_thread()` also starts again a thread that has died. Either alone would have kept every
   later point waiting on disk until the process restarted, which is what happened before.
+- **A chunk goes out as one post per database, not one per consecutive run.** Every collector
+  writes to its own database through the one spool, so their points interleave; split on runs,
+  nearly every post carried a single point and a backlog drained at one point per round trip
+  (found by the stress run). Grouping means what was sent need not be a start of the chunk, so
+  only the start sent in full is consumed and the rest is sent again, which InfluxDB absorbs.
+- **A pass that removes nothing stops.** If consuming ever fails to remove what was dealt with,
+  the loop would repost one chunk for ever; it is logged as a bug and retried on the timer.
+- **Tested beyond the unit tests** by `tests/chaos/test_writer_stress.py` - threads submitting
+  under random outages, 20 seconds per pull request and fifteen minutes nightly in the chaos
+  workflow - and `tests/integration/test_writer_influxdb.py`, against a real InfluxDB behind a
+  proxy that takes it away.
 - **Every process says at startup where it buffers and how much**, and whether it is resuming a
   backlog, so a spool in the wrong place - a checkout rather than `/var/lib` - is visible the
   first time rather than when somebody goes looking.

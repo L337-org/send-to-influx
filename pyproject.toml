@@ -55,8 +55,8 @@ testpaths = ["tests"]
 # is not excluded - those run with the ordinary suite from then on.
 addopts = "--capture=sys -m 'not integration and not chaos'"
 markers = [
-    "integration: exercises a real external dependency (e.g. a live MQTT broker); excluded from the default run",
-    "chaos: a long seeded run against randomly injected faults; run by its own workflow, short per pull request and long nightly",
+    "integration: exercises a real external dependency (a live MQTT broker, a live InfluxDB); excluded from the default run",
+    "chaos: a long seeded run against randomly injected faults - the control processes, and the writer under load; run by its own workflow, short per pull request and long nightly",
 ]
 
 [tool.ruff.lint.per-file-ignores]

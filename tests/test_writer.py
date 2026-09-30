@@ -432,6 +432,71 @@ class TestARestart:
         writer.close(0)
 
 
+class TestBatching:
+    def test_interleaved_databases_go_out_as_one_post_each(self, tmp_path, post):
+        """Found by the stress run. Every collector writes to its own database through the one
+        spool, so their points interleave; splitting a chunk on runs of consecutive points gave
+        nearly every post a single point, and a backlog drained at one point per round trip."""
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        for source in "abcd":
+            writer.set_destination(source, f"http://influx/write?db={source}", {})
+        for n in range(10):
+            for source in "abcd":
+                writer.submit(source, None, f"{source} n={n}i {n}")
+        writer.run_until_idle()
+        assert len(post.bodies) == 4
+        for url, body in post.bodies:
+            source = url.rsplit("=", 1)[1]
+            assert body.split("\n") == [f"{source} n={n}i {n}" for n in range(10)], "a source's own order was lost"
+        writer.close(0)
+
+    def test_a_database_that_fails_part_way_through_a_chunk_loses_nothing(self, tmp_path, post):
+        """What was sent is no longer a start of the chunk once it is grouped, so only the start
+        sent in full is consumed and the rest is sent again: duplicates InfluxDB absorbs, never a
+        gap."""
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        for source in "ab":
+            writer.set_destination(source, f"http://influx/write?db={source}", {})
+        for n in range(5):
+            for source in "ab":
+                writer.submit(source, None, f"{source} n={n}i {n}")
+        post.answer = lambda body: None if body.startswith("b ") else True
+        writer.run_until_idle()
+        assert writer.pending()
+        # Only what InfluxDB accepted. Counting every attempt, as this first did, counted the
+        # failed post's points as delivered - and passed against a writer that skipped them.
+        accepted = [line for _url, body in post.bodies if not body.startswith("b ") for line in body.split("\n")]
+        post.answer = lambda body: True
+        post.bodies.clear()
+        writer.run_until_idle()
+        accepted += post.lines()
+        assert not writer.pending()
+        expected = {f"{source} n={n}i {n}" for source in "ab" for n in range(5)}
+        assert set(accepted) == expected
+        writer.close(0)
+
+
+class TestNeverLoopingForEver:
+    def test_a_pass_that_removes_nothing_stops_and_says_so(self, tmp_path, post, caplog):
+        """Two deliberately broken versions of the consume step both hung the writer, reposting
+        one chunk for ever. However it comes about, that is a bug: said as one, and retried on
+        the timer rather than in a hot loop."""
+        writer = _writer(tmp_path, post)
+        writer._ensure_thread = lambda: None
+        writer.submit("hue", None, "hue n=1 1")
+        writer._consume = lambda done: 0
+        finished = threading.Event()
+        with caplog.at_level(logging.ERROR):
+            runner = threading.Thread(target=lambda: (writer.run_until_idle(), finished.set()), daemon=True)
+            runner.start()
+            assert finished.wait(5), "the writer looped for ever"
+        assert len(post.bodies) == 1
+        assert "could not remove them from its queue" in caplog.text
+        writer.close(0)
+
+
 class TestRefusals:
     """Carried over from the in-memory buffer: only the server refusing the point counts."""
 
@@ -744,7 +809,11 @@ class TestRepeatsAndLiveSignals:
         post.bodies.clear()
         writer.submit("hue", None, "collector_status,source=hue ok=1 9", buffered=False)
         writer.run_until_idle(force=False)
-        assert "collector_status,source=hue ok=1 9" in post.lines()
+        # Only the one submitted after recovery. The three from the wait were dropped, not held:
+        # an earlier version of this test checked only that the new one arrived, and a writer
+        # that held the old ones and posted them late passed it.
+        live = [line for line in post.lines() if line.startswith("collector_status")]
+        assert live == ["collector_status,source=hue ok=1 9"]
         writer.close(0)
 
     def test_a_live_post_that_fails_starts_the_retry_timer(self, tmp_path, post):
