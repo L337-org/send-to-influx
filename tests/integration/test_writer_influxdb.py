@@ -61,11 +61,13 @@ class _Proxy:
         url (str): where to send writes instead of InfluxDB
         down (threading.Event): set to drop every request after a short hold
         writes (list): (was it down, the body) for every write request, in order
+        dropped (list): (arrived, closed) monotonic times of every request dropped while down
     """
 
     def __init__(self):
         self.down = threading.Event()
         self.writes = []
+        self.dropped = []
         proxy = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -73,10 +75,12 @@ class _Proxy:
                 pass
 
             def do_POST(self):  # noqa: D102 - part of the proxy
+                arrived = time.monotonic()
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 proxy.writes.append((proxy.down.is_set(), body.decode()))
                 if proxy.down.is_set():
                     time.sleep(0.2)
+                    proxy.dropped.append((arrived, time.monotonic()))
                     self.close_connection = True
                     return
                 request = urllib.request.Request(INFLUX_URL + self.path, data=body, method="POST")
@@ -143,14 +147,21 @@ def test_an_outage_loses_nothing_and_replays_no_heartbeat(database, proxy, tmp_p
         for n in range(10, 60):
             for source in ("hue", "octopus"):
                 writer.submit(source, None, f"{source} n={n}i {1700000000 + n}")
-            if n % 10 == 0:
+            if n % 2 == 0:
                 writer.submit("hue", None, f"collector_status,source=hue ok=1 {1700001000 + n}", buffered=False)
             time.sleep(0.02)
         time.sleep(1.5)
-        attempted_live = [body for down, body in proxy.writes if down and body.startswith("collector_status")]
-        # At most the one that found the outage: after it, the timer is running and they are
-        # dropped unposted, each of which would otherwise have cost a connection that hangs.
-        assert len(attempted_live) <= 1, attempted_live
+        # Nothing posted while the retry timer runs: every attempt after the first starts at
+        # least the shortest retry delay after the one before it closed. A heartbeat every 40ms
+        # would otherwise be posted straight away, each costing a connection that hangs. One can
+        # be posted as the timer runs out, as that attempt's first point, which is why this is
+        # the spacing of the attempts rather than a count of heartbeats: a count assumed the
+        # timer never ran out between two heartbeats, and CI's timing once broke that.
+        gaps = [later[0] - earlier[1] for earlier, later in zip(proxy.dropped, proxy.dropped[1:])]
+        assert all(gap >= writer_module.RETRY_FIRST_SECONDS - 0.05 for gap in gaps), (
+            f"an attempt started inside the retry timer: gaps {[round(gap, 3) for gap in gaps]}s "
+            f"between {len(proxy.dropped)} dropped attempts"
+        )
 
         proxy.down.clear()
         writes_before_recovery = len(proxy.writes)
