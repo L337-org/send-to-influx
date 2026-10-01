@@ -4,13 +4,11 @@ Everything here is mechanical: a rule that could otherwise only live as prose in
 be re-broken by whoever did not read it. The project's standing preference is a failing test
 over a note asking someone to be careful.
 
-**What is no longer here, and where it went.** Five checks moved to
-``scripts/check-repo-hygiene.py``, which is vendored byte-identically into every repository in
-the organisation: tracker keys and wiki links in a public repository, every CI job declaring a
-timeout, those timeouts being real bounds, and the instruction file and its pointers existing.
-They were not dropped - they are now enforced in four repositories instead of one, by the
-``Repository hygiene`` job. Reimplementing them here as well would be divergence by
-construction, which is the thing the convergence experiment is meant to measure.
+**What is no longer here, and where it went.** Five checks moved to the shared repository
+hygiene check in L337-org/github-workflows, which the ``Repository hygiene`` job runs at the
+commit ``.github/workflows/premerge.yaml`` pins; that repository's README says what it covers.
+They were not dropped - they are now enforced in every repository that pins it instead of one.
+Reimplementing them here as well would be a second copy of the same check, free to drift.
 
 What stays is what would mean nothing in a repository that had never heard of this product: the
 supported-Python floor, the licence-header convention, the documented constants, the
@@ -1020,10 +1018,7 @@ def test_every_named_guard_exists():
 VALUE_RENDERER = "render_values"
 RENDERER_HOME = Path("toinflux") / "general.py"
 
-# The rule covers feature code: the package and the entry point. scripts/ is deliberately
-# out of scope - check-repo-hygiene.py is vendored byte-identically across the
-# organisation's repositories, so it cannot call a helper that exists only here, and
-# rewriting it locally would break the property that makes vendoring worthwhile.
+# The rule covers feature code: the package and the entry point.
 PRODUCT_CODE_ROOTS = ("toinflux", "sendtoinflux.py")
 
 
