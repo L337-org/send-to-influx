@@ -2,7 +2,7 @@
 -e .
 black~=26.5.1
 flake8~=7.4.1
-flake8-bugbear~=26.9.9
+flake8-bugbear~=26.9.30
 flake8-black~=0.4.0
 # Docstring rules (pydocstyle). Installing this turns D on by default, which is why the
 # convention, the decorator exemption and the backlog ignore-list all land in tox.ini in
@@ -12,10 +12,10 @@ flake8-docstrings~=1.7.0
 # chose to write, so a function that documents no parameters at all passes it entirely. This is
 # the check that closes that, and it registers as a flake8 plugin, so it runs in the job that
 # already gates.
-pydoclint~=0.9.1
+pydoclint~=0.11.0
 pytest~=9.1.1
 pytest-cov~=7.1.0
-mypy~=2.3.1
+mypy~=2.4.0
 # For the SPDX licence-list check in tests/test_repo_hygiene.py. pytest already pulls
 # packaging in, but only at >=22, and packaging.licenses arrived in 24.2 - so a floor
 # that actually has the module is declared here rather than inherited by luck.
@@ -26,12 +26,12 @@ packaging~=26.3.0
 # than committed - a private key in a fixture is a private key in the repository, whatever
 # it is for - and this is the only way to generate one without shelling out to openssl.
 # abi3 wheels, so one build serves every supported minor: verified with
-# `pip download cryptography~=50.0.1 --only-binary=:all: --python-version 310` through 314,
+# `pip download cryptography~=50.0.2 --only-binary=:all: --python-version 310` through 314,
 # for manylinux x86_64 and aarch64, which resolve to cp39-abi3 and cp311-abi3 wheels. The
 # --only-binary matters: without it a missing wheel is a silent source build against the local
 # Rust toolchain, which succeeds here and tells you nothing about the build hosts.
 # Held at 50 rather than the 49 that first carried the fix, because two advisories against 48
 # landed in one week and the later release is the one less likely to need this again.
-cryptography~=50.0.1
+cryptography~=50.0.2
 types-PyYAML~=6.0.12
 types-requests~=2.33.0
