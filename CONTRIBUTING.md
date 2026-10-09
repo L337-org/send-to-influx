@@ -300,7 +300,8 @@ never dies (`tests/chaos/test_writer_stress.py`). It runs at two lengths:
 - **On every pull request, 300 ticks and 20 seconds of writer stress**, a minute or two. It is not a
   required check, but a failure is a real finding rather than noise: read it before merging.
 - **Nightly on `main`, 3000 ticks and fifteen minutes of writer stress**, about half an hour,
-  because some interactions only turn up in a long run.
+  because some interactions only turn up in a long run.  A failed nightly run is posted to
+  `#send-to-influx` (below).
 
 Every run prints its seed as `chaos seed: <n>`, whether it passed or failed. To repeat a run, use the
 same seed and tick count:
@@ -314,6 +315,25 @@ The writer stress run prints its own seed as `writer stress seed: <n>`.
 or run the workflow by hand from the Actions tab, giving it the seed. Once a failure is understood,
 add its seed to `SEEDS_THAT_FAILED` in `tests/harness/chaos.py`, which runs it with the ordinary suite
 from then on.
+
+### Failed runs nobody is watching
+
+A run started by a schedule, a push to `main` or a release has no pull request to show its
+failure on, so `.github/workflows/report-failures.yaml` posts its failure to `#send-to-influx`,
+through the shared Slack reporter from `L337-org/github-workflows`, whose README says what it
+posts and when.  It uses this repository's `SLACK_WEBHOOK` secret, which overrides the
+organisation's secret of the same name.  If the post fails, the *Report failures* run fails, with
+Slack's answer in its log.
+
+To add a workflow that runs on a schedule, a push or a release:
+
+1. Give it a `name:`, and give every job a `timeout-minutes:`.
+2. Add its `name:` to the `workflows:` list in `report-failures.yaml`, exactly as written, since
+   GitHub matches on it.  The repository hygiene check in `premerge.yaml` fails on such a
+   workflow missing from the list, and on a listed name no workflow has, so a rename that leaves
+   the list behind fails too.
+
+A pull request's run and a run started by hand are not posted, because someone is watching each.
 
 Per repo convention, update `README.md`, the relevant file under `architecture/` and `AGENTS.md`
 alongside any behaviour change, before committing - see the "Checklist when adding a new data
