@@ -1,9 +1,9 @@
 name: 'Report failures'
 
-# Posts a failed run of a workflow named below, started by one of the events below, to
-# #send-to-influx, through the shared reporter pinned here, using this repository's own
-# SLACK_WEBHOOK secret (CONTRIBUTING.md, "Failed runs nobody is watching").  GitHub reads this
-# trigger only from the default branch.
+# Posts a failed run of a workflow named below, started by one of the events below, through the
+# shared reporter pinned here, to the Slack channel of the webhook in the SLACK_WEBHOOK secret
+# (CONTRIBUTING.md, "Failed runs nobody is watching").  GitHub reads this trigger only from the
+# default branch.
 on:
   workflow_run:
     workflows:

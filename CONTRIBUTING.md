@@ -300,8 +300,8 @@ never dies (`tests/chaos/test_writer_stress.py`). It runs at two lengths:
 - **On every pull request, 300 ticks and 20 seconds of writer stress**, a minute or two. It is not a
   required check, but a failure is a real finding rather than noise: read it before merging.
 - **Nightly on `main`, 3000 ticks and fifteen minutes of writer stress**, about half an hour,
-  because some interactions only turn up in a long run.  A failed nightly run is posted to
-  `#send-to-influx` (below).
+  because some interactions only turn up in a long run.  A failed nightly run is posted to Slack
+  (below).
 
 Every run prints its seed as `chaos seed: <n>`, whether it passed or failed. To repeat a run, use the
 same seed and tick count:
@@ -319,11 +319,10 @@ from then on.
 ### Failed runs nobody is watching
 
 A run started by a schedule, a push to `main` or a release has no pull request to show its
-failure on, so `.github/workflows/report-failures.yaml` posts its failure to `#send-to-influx`,
-through the shared Slack reporter from `L337-org/github-workflows`, whose README says what it
-posts and when.  It uses this repository's `SLACK_WEBHOOK` secret, which overrides the
-organisation's secret of the same name.  If the post fails, the *Report failures* run fails, with
-Slack's answer in its log.
+failure on, so `.github/workflows/report-failures.yaml` posts its failure to Slack, through the
+shared reporter from `L337-org/github-workflows`, whose README says what it posts and when.  It
+posts to the channel of the webhook in the `SLACK_WEBHOOK` secret; a repository secret of that
+name overrides an organisation one.
 
 To add a workflow that runs on a schedule, a push or a release:
 
