@@ -333,7 +333,8 @@ To add a workflow that runs on a schedule, a push, a release or a pull request:
    workflow missing from the list, and on a listed name no workflow has, so a rename that leaves
    the list behind fails too.
 
-A run started by hand is not posted, because whoever started it is watching.
+A run started by hand, or a review asked for by comment, is not posted, because whoever started
+it is watching.
 
 Per repo convention, update `README.md`, the relevant file under `architecture/` and `AGENTS.md`
 alongside any behaviour change, before committing - see the "Checklist when adding a new data
