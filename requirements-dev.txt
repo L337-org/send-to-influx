@@ -12,7 +12,7 @@ flake8-docstrings~=1.7.0
 # chose to write, so a function that documents no parameters at all passes it entirely. This is
 # the check that closes that, and it registers as a flake8 plugin, so it runs in the job that
 # already gates.
-pydoclint~=0.9.1
+pydoclint~=0.11.0
 pytest~=9.1.1
 pytest-cov~=7.1.0
 mypy~=2.4.0
