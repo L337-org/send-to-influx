@@ -300,7 +300,8 @@ never dies (`tests/chaos/test_writer_stress.py`). It runs at two lengths:
 - **On every pull request, 300 ticks and 20 seconds of writer stress**, a minute or two. It is not a
   required check, but a failure is a real finding rather than noise: read it before merging.
 - **Nightly on `main`, 3000 ticks and fifteen minutes of writer stress**, about half an hour,
-  because some interactions only turn up in a long run.
+  because some interactions only turn up in a long run.  A failed nightly run is posted to Slack
+  (below).
 
 Every run prints its seed as `chaos seed: <n>`, whether it passed or failed. To repeat a run, use the
 same seed and tick count:
@@ -314,6 +315,26 @@ The writer stress run prints its own seed as `writer stress seed: <n>`.
 or run the workflow by hand from the Actions tab, giving it the seed. Once a failure is understood,
 add its seed to `SEEDS_THAT_FAILED` in `tests/harness/chaos.py`, which runs it with the ordinary suite
 from then on.
+
+### Failed runs are posted to Slack
+
+A failed run is otherwise one red entry in a list nobody opens, so a failure started by a
+schedule, a push to `main`, a release or a pull request is posted to Slack by
+`.github/workflows/report-failures.yaml`, through the shared reporter from
+`L337-org/github-workflows`, whose README says what it posts and when.  It
+posts to the channel of the webhook in the `SLACK_WEBHOOK` secret; a repository secret of that
+name overrides an organisation one.
+
+To add a workflow that runs on a schedule, a push, a release or a pull request:
+
+1. Give it a `name:`, and give every job a `timeout-minutes:`.
+2. Add its `name:` to the `workflows:` list in `report-failures.yaml`, exactly as written, since
+   GitHub matches on it.  The repository hygiene check in `premerge.yaml` fails on such a
+   workflow missing from the list, and on a listed name no workflow has, so a rename that leaves
+   the list behind fails too.
+
+A run started by hand, or a review asked for by comment, is not posted, because whoever started
+it is watching.
 
 Per repo convention, update `README.md`, the relevant file under `architecture/` and `AGENTS.md`
 alongside any behaviour change, before committing - see the "Checklist when adding a new data
