@@ -1,11 +1,22 @@
+# Each ecosystem's version updates come as one pull request a week rather than one per dependency:
+# separate pull requests each need a rebase and a full CI run after the one before merges, and
+# a grouped one that fails is cheaper to bisect than that queue is to work through.
 version: 2
 updates:
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      python:
+        patterns:
+          - "*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"
