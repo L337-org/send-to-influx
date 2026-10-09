@@ -102,10 +102,11 @@ jobs:
   # Releases - so attaching the .deb above is all this workflow needs to do.
 
   # A job killed by `timeout-minutes` ends as `cancelled`, not `failure`, so GitHub
-  # raises no workflow-failure notification for it and anything sweeping for failed
-  # runs never sees it. This workflow is the one place here where that really bites:
-  # it runs unattended when a release is published, so nothing else would notice that
-  # the .deb was never attached. This job turns the cancellation into a failure.
+  # raises no workflow-failure notification for it, and the Actions list shows it as
+  # a cancellation rather than a red failure. This workflow is the one place here where
+  # that really bites: it runs unattended when a release is published, so a release
+  # that never attached its .deb should read as a failure wherever it is seen. This job
+  # turns the cancellation into one.
   #
   # Safe because this workflow declares no `concurrency` block, so nothing supersedes
   # it: the only routes to `cancelled` are the timeout and a human pressing cancel,
