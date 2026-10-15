@@ -6,8 +6,8 @@ over a note asking someone to be careful.
 
 **What is no longer here, and where it went.** Five checks moved to the shared repository
 hygiene check in L337-org/github-workflows, which the ``Repository hygiene`` job runs at the
-commit ``.github/workflows/premerge.yaml`` pins; that repository's README says what it covers.
-They were not dropped - they are now enforced in every repository that pins it instead of one.
+version ``.github/workflows/premerge.yaml`` names; that repository's README says what it covers.
+They were not dropped - they are now enforced in every repository that calls it instead of one.
 Reimplementing them here as well would be a second copy of the same check, free to drift.
 
 What stays is what would mean nothing in a repository that had never heard of this product: the

@@ -321,9 +321,13 @@ from then on.
 A failed run is otherwise one red entry in a list nobody opens, so a failure started by a
 schedule, a push to `main`, a release or a pull request is posted to Slack by
 `.github/workflows/report-failures.yaml`, through the shared reporter from
-`L337-org/github-workflows`, whose README says what it posts and when.  It
-posts to the channel of the webhook in the `SLACK_WEBHOOK` secret; a repository secret of that
-name overrides an organisation one.
+`L337-org/github-workflows`, whose README says what it posts and when.  It posts to
+`#send-to-influx` with the organisation's bot token in the `SLACK_BOT_TOKEN` secret.
+
+A pull request that needs action is announced in the same channel by
+`.github/workflows/announce-pull-requests.yaml`, through the shared announcer from the same
+repository: one opened or reopened that is not a draft, and a draft marked ready for review.  Pull
+requests from forks are not announced.
 
 To add a workflow that runs on a schedule, a push, a release or a pull request:
 
