@@ -289,21 +289,8 @@ Run all three locally before pushing (see "Local development" above) to avoid CI
 
 ### Shared workflows
 
-The repository hygiene and pin checks, the Claude review and the Slack workflows come from
-`L337-org/github-workflows`, named at its major-version tag in each `uses:` line, so a release
-there reaches this repository without a change here.  Every other action is pinned by full
-commit SHA, which the pin check enforces.  The exception for the shared workflows holds only
-while that tag is protected by a ruleset in that repository.
-
-A release that moves the tag changes, with no commit here:
-
-- the Claude review, which runs with the `CLAUDE_CODE_OAUTH_TOKEN` secret and
-  `pull-requests: write`;
-- the Slack reporter and announcer, which receive the `SLACK_BOT_TOKEN` secret;
-- the logic of the hygiene and pin checks, which must pass before merging.
-
-`release.yaml`, which runs at `contents: write` to attach the `.deb`, uses nothing from that
-repository.
+Workflows from `L337-org/github-workflows` are named at its major-version tag; every other action
+is pinned by full commit SHA, which the pin check enforces.
 
 ### The chaos run
 
@@ -343,11 +330,8 @@ schedule, a push to `main`, a release or a pull request is posted to Slack by
 announced by `.github/workflows/announce-pull-requests.yaml`, through the shared announcer from
 the same repository, whose README says which ones it posts.
 
-Both post to the channel named in each workflow's `channel:` input, using the `SLACK_BOT_TOKEN`
-secret; a repository secret of that name overrides an organisation one.  The token must be set
-both as an Actions secret and as a Dependabot secret, because a run Dependabot starts sees only
-Dependabot secrets, so without the second Dependabot's pull requests are not announced.  The
-shared README's "The Slack token" section says what the token needs.
+Both post to the channel in their `channel:` input using the `SLACK_BOT_TOKEN` secret, which
+must also be a Dependabot secret or Dependabot's pull requests are not announced.
 
 To add a workflow that runs on a schedule, a push, a release or a pull request:
 
