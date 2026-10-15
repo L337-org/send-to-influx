@@ -1,8 +1,7 @@
 name: 'Announce pull requests'
 
-# Posts each pull request that needs action - opened or reopened and not a draft, or marked ready
-# for review - to Slack through the shared announcer (CONTRIBUTING.md, "Failed runs are posted to
-# Slack").  Pull requests from forks are not announced.
+# Announces pull requests to Slack through the shared announcer, whose README says which ones it
+# posts (CONTRIBUTING.md, "Slack notifications").
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
