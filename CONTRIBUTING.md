@@ -287,6 +287,11 @@ merging:
 
 Run all three locally before pushing (see "Local development" above) to avoid CI failures.
 
+### Shared workflows
+
+Workflows from `L337-org/github-workflows` are named at its major-version tag; every other action
+is pinned by full commit SHA, which the pin check enforces.
+
 ### The chaos run
 
 `.github/workflows/chaos.yaml` drives several real control processes against stub endpoints under
@@ -316,14 +321,17 @@ or run the workflow by hand from the Actions tab, giving it the seed. Once a fai
 add its seed to `SEEDS_THAT_FAILED` in `tests/harness/chaos.py`, which runs it with the ordinary suite
 from then on.
 
-### Failed runs are posted to Slack
+### Slack notifications
 
 A failed run is otherwise one red entry in a list nobody opens, so a failure started by a
 schedule, a push to `main`, a release or a pull request is posted to Slack by
 `.github/workflows/report-failures.yaml`, through the shared reporter from
-`L337-org/github-workflows`, whose README says what it posts and when.  It
-posts to the channel of the webhook in the `SLACK_WEBHOOK` secret; a repository secret of that
-name overrides an organisation one.
+`L337-org/github-workflows`, whose README says what it posts and when.  Pull requests are
+announced by `.github/workflows/announce-pull-requests.yaml`, through the shared announcer from
+the same repository, whose README says which ones it posts.
+
+Both post to the channel in their `channel:` input using the `SLACK_BOT_TOKEN` secret, which
+must also be a Dependabot secret or Dependabot's pull requests are not announced.
 
 To add a workflow that runs on a schedule, a push, a release or a pull request:
 

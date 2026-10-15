@@ -1,12 +1,13 @@
 name: 'Report failures'
 
 # Posts a failed run of a workflow named below, started by one of the events below, through the
-# shared reporter pinned here, to the Slack channel of the webhook in the SLACK_WEBHOOK secret
-# (CONTRIBUTING.md, "Failed runs are posted to Slack").  GitHub reads this trigger only from the
-# default branch.
+# shared reporter, to the channel named in `channel:` using the SLACK_BOT_TOKEN secret
+# (CONTRIBUTING.md, "Slack notifications").  GitHub reads this trigger only from the default
+# branch.
 on:
   workflow_run:
     workflows:
+      - 'Announce pull requests'
       - 'Chaos run'
       - 'Check inbound changes'
       - 'Code review'
@@ -22,8 +23,9 @@ permissions:
 jobs:
   slack:
     name: Report to Slack
-    uses: L337-org/github-workflows/.github/workflows/slack-on-failure.yaml@fd692a603b2f6bb8bc73aaeaefa46c24b409705b # v1.3.1
+    uses: L337-org/github-workflows/.github/workflows/slack-on-failure.yaml@v2
     with:
+      channel: '#send-to-influx'
       events: '["schedule", "push", "release", "pull_request"]'
     secrets:
-      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

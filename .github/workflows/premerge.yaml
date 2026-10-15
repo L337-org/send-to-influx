@@ -19,7 +19,7 @@ jobs:
 
   repo-hygiene:
     # Conventions every repository in this organisation shares, checked by the one copy in the
-    # shared workflows repository at the commit pinned here.
+    # shared workflows repository at the version named here.
     runs-on: [ubuntu-latest]
     name: Repository hygiene
     # The shared action installs uv, then runs a git listing, a YAML parse and some regexes.
@@ -29,22 +29,25 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Repository conventions hold
-        uses: L337-org/github-workflows/actions/repo-hygiene@fd692a603b2f6bb8bc73aaeaefa46c24b409705b # v1.3.1
+        uses: L337-org/github-workflows/actions/repo-hygiene@v2
 
   action-pins:
-    # Every `uses:` names a full commit SHA, checked by the shared copy pinned here.  release.yaml
-    # runs at `contents: write` with GITHUB_TOKEN available when it attaches the .deb, so a
-    # repointed tag would run inside the publishing step next to a write-scoped token.
+    # Every third-party `uses:` names a full commit SHA, checked by the shared copy named here.
+    # The shared workflows are named at their major-version tag instead, an exception that holds
+    # only while that tag is protected by a ruleset in that repository (CONTRIBUTING.md, "Shared
+    # workflows").  release.yaml runs at `contents: write` with GITHUB_TOKEN available when it
+    # attaches the .deb, so a repointed tag would run inside the publishing step next to a
+    # write-scoped token.
     runs-on: [ubuntu-latest]
-    name: Action pins are immutable
+    name: Action pin check
     # The shared action is a grep over the workflow files.
     timeout-minutes: 5
     steps:
       - name: Check out source repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Every `uses:` must name a 40-hex commit SHA
-        uses: L337-org/github-workflows/actions/action-pins@fd692a603b2f6bb8bc73aaeaefa46c24b409705b # v1.3.1
+      - name: Every `uses:` must name a 40-hex commit SHA, or the shared workflows' major-version tag
+        uses: L337-org/github-workflows/actions/action-pins@v2
 
   pytest-run:
     runs-on: [ubuntu-latest]
