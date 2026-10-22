@@ -23,6 +23,7 @@ import urllib.request
 
 import pytest
 
+from tests.harness.endpoints import SHUTDOWN_POLL_SECONDS
 from toinflux import writer as writer_module
 from toinflux.writer import InfluxWriter, build_write_request
 
@@ -102,7 +103,7 @@ class _Proxy:
 
         self._server = Server(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        threading.Thread(target=self._server.serve_forever, args=(SHUTDOWN_POLL_SECONDS,), daemon=True).start()
 
     def close(self):
         self._server.shutdown()

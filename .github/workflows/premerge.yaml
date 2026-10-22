@@ -52,7 +52,9 @@ jobs:
   pytest-run:
     runs-on: [ubuntu-latest]
     name: Run pytest
-    # 47s observed max across the 3.10-3.14 matrix.
+    # 580s observed max across the 3.10-3.14 matrix before the harness's stub servers stopped
+    # paying 0.5s each to shut down and the suite ran across cores; 15 minutes still covers a
+    # serial run if xdist ever has to come out.
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -66,6 +68,13 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
+          # Caches pip's downloads, not the installed environment, so every job still
+          # installs from the current requirements; it only stops each of the nine jobs
+          # fetching the same wheels from PyPI.
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -73,7 +82,9 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run pytest with coverage
-        run: pytest -v --cov=toinflux --cov=sendtoinflux --cov-report=term-missing
+        # `-n auto` is one worker per core. pytest-cov combines the workers' data, so the
+        # report is the same one a serial run produces.
+        run: pytest -v -n auto --cov=toinflux --cov=sendtoinflux --cov-report=term-missing
 
   integration-run:
     # Runs the marked integration tests (excluded from the default pytest run above)
@@ -96,6 +107,10 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -205,6 +220,10 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -232,6 +251,10 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -263,6 +286,10 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -270,7 +297,7 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run pytest
-        run: pytest -v
+        run: pytest -v -n auto
 
       - name: Ensure rsyslog and logrotate are present
         # Recommends:, not Depends: (see build-deb.sh) - typically present on

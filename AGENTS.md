@@ -47,6 +47,7 @@ python -m venv .venv
 
 # Tests
 .venv/bin/pytest -v                  # all tests
+.venv/bin/pytest -v -n auto          # all tests, across every core, as CI runs it
 .venv/bin/pytest -v tests/test_hue.py::TestClass::test_name  # single test
 
 # Lint / format
