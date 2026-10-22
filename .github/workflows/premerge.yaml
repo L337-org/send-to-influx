@@ -52,9 +52,8 @@ jobs:
   pytest-run:
     runs-on: [ubuntu-latest]
     name: Run pytest
-    # 580s observed max across the 3.10-3.14 matrix before the harness's stub servers stopped
-    # paying 0.5s each to shut down and the suite ran across cores; 15 minutes still covers a
-    # serial run if xdist ever has to come out.
+    # 138s observed max across the 3.10-3.14 matrix. 15 minutes still covers a serial run if
+    # xdist ever has to come out.
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -69,8 +68,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           # Caches pip's downloads, not the installed environment, so every job still
-          # installs from the current requirements; it only stops each of the nine jobs
-          # fetching the same wheels from PyPI.
+          # installs from the current requirements; it only stops every job fetching the
+          # same wheels from PyPI.
           cache: pip
           cache-dependency-path: |
             requirements*.txt
@@ -276,7 +275,7 @@ jobs:
     # instead of only being noticed after it's already on main.
     runs-on: [ubuntu-24.04-arm]
     name: Verify .deb build on arm64
-    # 148s observed max - builds the .deb and runs the scenario suite.
+    # 242s observed max - runs the unit suite, builds the .deb and runs the scenario suite.
     timeout-minutes: 20
     steps:
       - name: Check out source repository

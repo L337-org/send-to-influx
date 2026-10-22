@@ -2132,6 +2132,7 @@ class TestTheControlSubsystemOptIn:
             Supervisor: the running supervisor
         """
         args = argparse.Namespace(settings=None, print=False, dump=False)
+        sendtoinflux.SHUTDOWN.clear()
         with (
             patch("sendtoinflux.list_controls", return_value=[]),
             patch("sendtoinflux.atexit.register") as register,
@@ -2139,7 +2140,6 @@ class TestTheControlSubsystemOptIn:
             supervisor = sendtoinflux._start_control_supervisor(settings, args)
         assert supervisor is not None, "with nothing supervising, a control created later cannot start"
         handler, *handler_args = register.call_args.args
-        sendtoinflux.SHUTDOWN.clear()
         try:
             yield supervisor
         finally:

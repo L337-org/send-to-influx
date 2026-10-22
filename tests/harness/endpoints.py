@@ -50,9 +50,8 @@ DISCONNECTED = (ConnectionError, ssl.SSLEOFError, ssl.SSLZeroReturnError)
 
 #: How often a stub's ``serve_forever`` loop checks for ``shutdown()``. ``shutdown()`` blocks
 #: until the next check, and the standard library's default of 0.5s cost every test that
-#: stopped two endpoints a full second of teardown: about 400s of a 580s suite, paid on every
-#: interpreter in the CI matrix. Requests are answered as they arrive whatever this is set to;
-#: it only bounds how long stopping takes.
+#: stopped two endpoints a full second of teardown. Requests are answered as they arrive
+#: whatever this is set to; it only bounds how long stopping takes.
 SHUTDOWN_POLL_SECONDS = 0.05
 
 
