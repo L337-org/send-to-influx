@@ -1,6 +1,7 @@
 """Unit tests for sendtoinflux (signal_handler, main, helper functions)."""
 
 import argparse
+import contextlib
 import itertools
 import json
 import logging
@@ -2112,6 +2113,41 @@ class TestTheControlSubsystemOptIn:
     that does not get it. Deliberately not the collector's mcp_read_write flag: wanting a
     heating loop is not the same as granting a model device-write access."""
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _supervising(settings):
+        """Start the real supervisor thread with no controls stored, and stop it as the service does.
+
+        Stopped through `_stop_supervising` rather than `stop_all`. `stop_all` called from the
+        test's thread closes the selector while the supervisor thread is still waiting on it,
+        which is the race `_stop_supervising` exists to prevent: it surfaced as an unhandled
+        `OSError: [Errno 9] Bad file descriptor` in that thread whenever the suite ran under
+        load. The exit handler is captured rather than registered, so the test process does not
+        collect one per test and run them all against stopped supervisors when it exits.
+
+        Args:
+            settings (dict): the settings `_start_control_supervisor` is given
+
+        Yields:
+            Supervisor: the running supervisor
+        """
+        args = argparse.Namespace(settings=None, print=False, dump=False)
+        sendtoinflux.SHUTDOWN.clear()
+        with (
+            patch("sendtoinflux.list_controls", return_value=[]),
+            patch("sendtoinflux.atexit.register") as register,
+        ):
+            supervisor = sendtoinflux._start_control_supervisor(settings, args)
+        assert supervisor is not None, "with nothing supervising, a control created later cannot start"
+        handler, *handler_args = register.call_args.args
+        try:
+            yield supervisor
+        finally:
+            try:
+                handler(*handler_args)
+            finally:
+                sendtoinflux.SHUTDOWN.clear()
+
     @pytest.mark.parametrize(
         "settings,enabled",
         [
@@ -2141,47 +2177,28 @@ class TestTheControlSubsystemOptIn:
         The line names the directory, which makes it useful to somebody part-way through
         setting up rather than a reprimand for being there.
         """
-        args = argparse.Namespace(settings=None, print=False, dump=False)
-        with patch("sendtoinflux.list_controls", return_value=[]):
-            with caplog.at_level(logging.INFO):
-                supervisor = sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)
-        try:
-            assert supervisor is not None, "with nothing supervising, a control created later cannot start"
+        with caplog.at_level(logging.INFO), self._supervising({"controls": {"enabled": True}}):
             assert "none are stored yet" in caplog.text
             assert "controls" in caplog.text, "the line should say where they go"
             assert not [
                 r for r in caplog.records if r.levelno >= logging.WARNING
             ], "an empty control store is not a fault, so it must not be logged as one"
-        finally:
-            supervisor.stop_all()
 
     def test_startup_says_once_that_nothing_is_recorded(self, caplog):
         """The call site of `log_record_destination`, which was tested only as a function: an
         installation running controls with no `controls.db` is told once, at INFO, that the PID
         history is not being kept, and which setting would keep it."""
-        args = argparse.Namespace(settings=None, print=False, dump=False)
-        with patch("sendtoinflux.list_controls", return_value=[]):
-            with caplog.at_level(logging.INFO):
-                supervisor = sendtoinflux._start_control_supervisor({"controls": {"enabled": True}}, args)
-        try:
+        with caplog.at_level(logging.INFO), self._supervising({"controls": {"enabled": True}}):
             said = [r for r in caplog.records if "not recording their PID history" in r.getMessage()]
             assert len(said) == 1
             assert said[0].levelno == logging.INFO
             assert "controls.db" in said[0].getMessage()
-        finally:
-            supervisor.stop_all()
 
     def test_startup_names_where_the_record_goes(self, caplog):
-        args = argparse.Namespace(settings=None, print=False, dump=False)
         settings = {"controls": {"enabled": True, "db": "control_db"}, "influx": {"url": "http://influx"}}
-        with patch("sendtoinflux.list_controls", return_value=[]):
-            with caplog.at_level(logging.INFO):
-                supervisor = sendtoinflux._start_control_supervisor(settings, args)
-        try:
+        with caplog.at_level(logging.INFO), self._supervising(settings):
             assert "recording their PID history to 'control_db'" in caplog.text
             assert "not recording" not in caplog.text
-        finally:
-            supervisor.stop_all()
 
     @pytest.mark.parametrize(
         "settings, flags",

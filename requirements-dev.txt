@@ -15,6 +15,9 @@ flake8-docstrings~=1.7.0
 pydoclint~=0.11.1
 pytest~=9.1.1
 pytest-cov~=7.1.0
+# Runs the suite across the runner's cores in CI (`-n auto`). Not in addopts, so a local
+# `pytest` stays serial and a single test still runs in-process under a debugger.
+pytest-xdist~=3.8.0
 mypy~=2.4.0
 # For the SPDX licence-list check in tests/test_repo_hygiene.py. pytest already pulls
 # packaging in, but only at >=22, and packaging.licenses arrived in 24.2 - so a floor

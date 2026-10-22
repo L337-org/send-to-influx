@@ -48,6 +48,12 @@ from tests.harness.certificates import write_self_signed
 #: version: 3.10-3.12 raise SSLEOFError where 3.13 and later raise ConnectionResetError.
 DISCONNECTED = (ConnectionError, ssl.SSLEOFError, ssl.SSLZeroReturnError)
 
+#: How often a stub's ``serve_forever`` loop checks for ``shutdown()``. ``shutdown()`` blocks
+#: until the next check, and the standard library's default of 0.5s cost every test that
+#: stopped two endpoints a full second of teardown. Requests are answered as they arrive
+#: whatever this is set to; it only bounds how long stopping takes.
+SHUTDOWN_POLL_SECONDS = 0.05
+
 
 @dataclass
 class Request:
@@ -289,7 +295,7 @@ class StubEndpoint:
             context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(certificate_path, key_path)
             self._server.socket = context.wrap_socket(self._server.socket, server_side=True)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread = threading.Thread(target=self._server.serve_forever, args=(SHUTDOWN_POLL_SECONDS,), daemon=True)
         self._thread.start()
 
     @property
