@@ -784,8 +784,9 @@ history with `list_fields` and `query_history`, scoped to one control with `inst
   and highest value, and for each how many times it changed, how many times an hour, the
   share of cycles its minimum held it, and how many changes it was given while held. That last
   is the ladder moving a device its minimum said not to, because no rung kept it where it was:
-  the stages do not describe a combination the devices keep ending up in. A heater beside the sensor doing all the work while the
-  far one never comes on is a ladder whose equal-level rungs are in the wrong order; one
+  the stages do not describe a combination the devices keep ending up in. A heater beside the
+  sensor doing all the work while the far one never comes on is a ladder whose equal-level
+  rungs are in the wrong order; one
   changing many times an hour wants a longer `min_transition_seconds` or a longer
   `cycle_seconds` - see *How often a device switches* above for which, and what each costs;
   a driven value that sits at its highest is a device at the end of its range.
@@ -919,10 +920,10 @@ With `controls.enabled` and the MCP server both on, five read-only tools appear:
 `list_controls` (names, enabled, devices, cycle length, and whether each process is running),
 `get_control` (one document as stored), `get_control_state` (what a running control has since
 worked out), `get_control_devices` (each device's share of a period, from the recorded
-history, and offered only where `controls.db` is set) and `get_control_schema` (this format). They are not
-behind any write flag: a control document holds no secrets, and being able to ask what is
-being controlled and whether it is running should not require granting the ability to change
-it.
+history, and offered only where `controls.db` is set) and `get_control_schema` (this format).
+They are not behind any write flag: a control document holds no secrets, and being able to
+ask what is being controlled and whether it is running should not require granting the
+ability to change it.
 
 Add `controls.mcp_write` and three more appear: `save_control` (create or replace a document,
 validated before anything is written), `set_control_enabled` (turn one on or off without
