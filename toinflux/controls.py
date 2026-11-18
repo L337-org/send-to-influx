@@ -40,8 +40,8 @@ DEFAULT_CYCLE_SECONDS = 900.0
 
 #: How long a hold may last and still be resumed from. A fail-safe lasts one cycle and a
 #: gated-off control lasts until its window reopens, which is the distinction that matters: a
-#: blip must not cost the loop what it learned, and last night's integral must not be handed
-#: to this evening. Generous against the first and far short of the second.
+#: blip must not cost the loop what it learned, and the integral from the last window must not
+#: be handed to the next. Generous against the first and far short of the second.
 #:
 #: Homed here rather than with the loop that applies it because the schema's notes on
 #: `pid.starting_output` state it, and a figure restated by hand is one that drifts.

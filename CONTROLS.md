@@ -829,13 +829,13 @@ about this one.
 
 `get_control_state` over MCP reports all of it - the integral, its age, whether it still
 matches the document, what the integral started from (`started_from`: `resumed`,
-`starting_output` or `zero`, with `starting_integral`), what each device was last commanded
-to, and which devices are currently held by their `min_transition_seconds`. That is the tool
-to reach for when an output moves against its input, because the integral is the usual explanation and is invisible from the
-device side.  Where `controls.db` is set it also names where the control's cycles are recorded,
-as a `source` and `instance` for `query_history`, so a caller tuning the gains can read the loop
-over time rather than only as it stands, and names `get_control_devices` for each device's
-share; where it is not, it names that setting.
+`starting_output` or `zero`, with `starting_integral`), what each device was last commanded to,
+and which devices are currently held by their `min_transition_seconds`. That is the tool to
+reach for when an output moves against its input, because the integral is the usual explanation
+and is invisible from the device side.  Where `controls.db` is set it also names where the
+control's cycles are recorded, as a `source` and `instance` for `query_history`, so a caller
+tuning the gains can read the loop over time rather than only as it stands, and names
+`get_control_devices` for each device's share; where it is not, it names that setting.
 
 Starting from a configured output
 ---------------------------------
