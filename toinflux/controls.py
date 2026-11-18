@@ -290,7 +290,7 @@ TUNING_NOTES = [
     "the reading) or a longer min_transition_seconds on that device (the whole cycle goes to the "
     "nearer rung when a share would be shorter than it); gain changes do not reduce it",
     "order the rungs so each step changes as few devices as possible: between a rung with only one "
-    "heater on and one with only the other on, every cycle switches both",
+    "device on and one with only the other on, every cycle switches both",
     "general PID references - Ziegler-Nichols, the usual manual method - are for understanding "
     "what each term does, not for values to use here: they aim at quarter-amplitude decay, which "
     "is deliberate oscillation, they start by driving the loop into it, and they assume a "
@@ -306,11 +306,12 @@ STARTING_OUTPUT_NOTES = [
     f"a hold longer than {RESUMABLE_HOLD_MINUTES:g} minutes such as the active period closing. A "
     "stored integral that passes its tests is always used instead",
     "on the ladder's level scale, and clamped to the ladder after any max_level cap",
-    "the value to aim for is the integral `i` once `input` has sat on `setpoint` for an hour or "
-    "more: that is the output needed to hold it. Read `i` from the control's history with "
+    "the value to aim for is the integral `i` once `input` has sat on `setpoint` long enough to "
+    "settle: that is the output needed to hold it. Read `i` from the control's history with "
     "`query_history`, at the source and instance `get_control_state` names",
-    "that value usually depends on outside conditions, so a rule can scale it: for heating, "
-    "`k * (setpoint - outside)` with k = i / (setpoint - outside) read from the same moment. "
+    "where that value depends on something the control already reads, a rule can scale it: for "
+    "heating against outside temperature, `k * (setpoint - outside)` with k = i / (setpoint - "
+    "outside) read from the same moment. "
     "`setpoint` here is the setpoint as evaluated this cycle",
     "start low: too low costs settling time, as having no starting output does; too high overshoots",
     "editing it does not discard a stored integral, and `get_control_state` reports which "

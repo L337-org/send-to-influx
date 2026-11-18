@@ -841,9 +841,10 @@ ranges normalised in the app, and a capped result size.
 Control loops
 -------------
 
-A **control** holds something at a target by switching devices: a conservatory at a temperature,
-using two heaters on smart plugs. It reads its inputs from the data already being collected, runs a
-PID, and spends each cycle window across the rungs of a stage ladder - so two heaters can average a
+A **control** holds something at a target by switching devices: a conservatory at a temperature
+using two heaters on smart plugs, a room at a light level using a dimmable lamp, or a seed tray at a
+temperature using a heat mat. It reads its inputs from the data already being collected, runs a PID,
+and spends each cycle window across the rungs of a stage ladder - so two heaters, say, can average a
 demand that neither of them can produce on its own.
 
 Controls are **off unless you switch them on**, because a control actuates devices with nobody
