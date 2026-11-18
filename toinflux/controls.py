@@ -259,6 +259,16 @@ TUNING_NOTES = [
     "just short",
     "a sensor that reports only when its reading changes leaves the loop steering blind between "
     "reports, which looks like too much gain and is usually met by detuning",
+    "a level is what the rung delivers, not its place in the list: give each rung its real "
+    "output, such as watts, or the loop proportions between rungs on a mix the devices do not "
+    "make. Scale kp and ki with the levels",
+    "a switched device turns on and off once each cycle while the demand sits between two rungs "
+    "that differ by it - up to 24 changes an hour at a 300-second cycle. That is the ladder "
+    "working, not the loop hunting. Fewer changes need a longer cycle_seconds (a wider swing in "
+    "the reading) or a longer min_transition_seconds on that device (the whole cycle goes to the "
+    "nearer rung when a share would be shorter than it); gain changes do not reduce it",
+    "order the rungs so each step changes as few devices as possible: between a rung with only one "
+    "heater on and one with only the other on, every cycle switches both",
     "general PID references - Ziegler-Nichols, the usual manual method - are for understanding "
     "what each term does, not for values to use here: they aim at quarter-amplitude decay, which "
     "is deliberate oscillation, they start by driving the loop into it, and they assume a "

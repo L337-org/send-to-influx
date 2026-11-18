@@ -268,6 +268,63 @@ window at 1500 and 35% at 750.
 * `max_level` caps the **ladder**, not the demand. Capping the demand still proportions
   between rungs above the cap; capping the ladder does not.
 
+### A level is an output, not a position
+
+`level` is how much the rung delivers, on whatever scale you choose, and the PID's demand is
+on the same scale. It is not the rung's place in the list. A ladder written `0, 1, 2, 3` for
+"off, small heater, large heater, both" says the large heater gives exactly twice the small
+one, and the loop proportions between rungs on that assumption: if the heaters are really
+750 W and 2000 W, a demand meant to be met by the small heater lands on the wrong mix. Use the
+real figures - watts, or each device's share of the total - and the time-proportioning comes
+out right.
+
+The gains are in the same units, so changing the levels changes what `kp` and `ki` mean.
+Multiply the levels by ten and multiply both gains by ten too, or the loop becomes ten times
+gentler. See *Choosing the gains* below.
+
+### How often a device switches
+
+A switched device has no middle setting, so a demand between two rungs is met by spending part
+of each cycle on each. With a heater on one rung and off on the other, that is one on and one
+off per cycle: at a 300-second cycle, up to 24 changes an hour, for as long as the demand sits
+between those two rungs. **That is the ladder working, not the loop hunting.** One real
+conservatory heater changed 17 times an hour across a mild night with its demand between the
+bottom two rungs the whole time, holding the room within a few tenths of a degree.
+
+`get_control_devices` shows which you have. A device with a high `changes_per_active_hour` and
+an `on_share` between 0 and 1 is being time-proportioned; read `demand` from the history to
+confirm it sits between two rungs that differ by that device.
+
+Where that is more switching than the hardware or the household wants, three settings govern
+it, and each trades something:
+
+* **`cycle_seconds`** sets how many on-off pairs there are. Doubling it halves the switching,
+  and doubles how long the heater stays on or off at a stretch, so the reading swings further
+  either side of the setpoint.
+* **The device's `min_transition_seconds`** stops short bursts. Where either share of the cycle
+  would be shorter than the minimum, the whole cycle goes to the nearer rung instead. With a
+  60-second minimum on a 300-second cycle, a demand within a fifth of the gap from either rung
+  holds that rung all cycle; a longer minimum widens that band, at the cost of the demand being
+  met less closely within each cycle (the integral makes up the difference over several).
+* **The order of the rungs.** Each step up the ladder should change as few devices as possible.
+  Between a rung with only the small heater on and one with only the large heater on, every
+  cycle switches *both*. Where that is the ladder you need, give the device you want left alone
+  the longer `min_transition_seconds`, as the *Slow response* example does: it is then held
+  while the other one trims, and the cycles are planned around it.
+
+Three other mechanisms are sometimes suggested for this, and none is provided, for these
+reasons:
+
+* **A hysteresis band** around each rung, moving to a new rung only once the demand is well
+  past it. The ladder does not move from rung to rung; it splits every cycle between the two
+  rungs either side of the demand. Near a rung, `min_transition_seconds` already merges a short
+  share into the nearer rung, which is the effect a band would have.
+* **A separate output weight on each rung.** That is what `level` already is - see above.
+* **Smoothing an input** before the PID sees it. It makes the demand steadier from cycle to
+  cycle, but a demand between two rungs still switches the device twice a cycle, and the
+  smoothing delays the reading the loop acts on, which costs stability. A noisy input is better
+  met by `kd` staying at zero, and by an input that refreshes at least once a cycle.
+
 Choosing the gains
 ------------------
 
@@ -729,8 +786,8 @@ history with `list_fields` and `query_history`, scoped to one control with `inst
   the stages do not describe a combination the devices keep ending up in. A heater beside the sensor doing all the work while the
   far one never comes on is a ladder whose equal-level rungs are in the wrong order; one
   changing many times an hour wants a longer `min_transition_seconds` or a longer
-  `cycle_seconds`; a driven value that sits at its highest is a device at the end of its
-  range.
+  `cycle_seconds` - see *How often a device switches* above for which, and what each costs;
+  a driven value that sits at its highest is a device at the end of its range.
 * **A step in `kp`, `ki` or `kd`** marks a retune. The gains are written on every point, so
   any window of the history says which tuning produced it.
 
