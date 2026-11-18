@@ -4,6 +4,24 @@ Version-specific steps needed when moving between releases. Anything not listed 
 with no action: `settings.yaml` is never rewritten by an upgrade, and new configuration is
 optional with a safe default.
 
+## 6.1 to 6.2
+
+### `setpoint` is a reserved name in a control
+
+**Who this affects:** anyone running controls where an input or parameter is called
+`setpoint`. If none is, skip this section.
+
+From 6.2 a rule in `pid.starting_output` or `output.max_level` can read `setpoint`, which is
+the value `pid.setpoint` produced that cycle. A declared name spelt the same would make the
+one word mean two things, so it is refused.
+
+**What happens if you do nothing:** `--check-config` reports the control as invalid
+(`parameters: 'setpoint' is reserved ...`), and the service does not start that control.
+Everything else starts and runs as before.
+
+**What to do:** rename the input or parameter, and every rule that reads it, then restart the
+service. A rule that wanted the evaluated setpoint can now read `setpoint` directly instead.
+
 ## 6.0 to 6.1
 
 ### A control no longer uses a source that is not in `sources:`

@@ -408,7 +408,7 @@ class TransitionLog:
         """Note the loop's own memory, so a restart does not rebuild it from nothing.
 
         Args:
-            state (dict): what the controller wants back, already plain numbers
+            state (dict): what the controller wants back, already plain values
             fingerprint (str): what the current document's tuning and ladder hash to
             now (float or None): epoch seconds; read from the clock when None
         """

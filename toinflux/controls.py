@@ -38,6 +38,16 @@ CONTROL_DIR_NAME = "controls"
 # its first cycle. A default with three spellings is a default with none.
 DEFAULT_CYCLE_SECONDS = 900.0
 
+#: How long a hold may last and still be resumed from. A fail-safe lasts one cycle and a
+#: gated-off control lasts until its window reopens, which is the distinction that matters: a
+#: blip must not cost the loop what it learned, and the integral from the last window must not
+#: be handed to the next. Generous against the first and far short of the second.
+#:
+#: Homed here rather than with the loop that applies it because the schema's notes on
+#: `pid.starting_output` state it, and a figure restated by hand is one that drifts.
+RESUMABLE_HOLD_SECONDS = 1800.0
+RESUMABLE_HOLD_MINUTES = RESUMABLE_HOLD_SECONDS / 60
+
 CONTROL_SUFFIX = ".yaml"
 
 #: How much staler than its own cycle a control's feedback may be before it is worth saying
@@ -95,7 +105,7 @@ BUILT_IN_SAFE_STATES = (SAFE_STATE_UNENERGISED, SAFE_STATE_ENERGISED, SAFE_STATE
 # neither is a stage's `set`, whose keys are checked against the device list instead.
 INPUT_KEYS = frozenset({"source", "field", "instance", "max_age"})
 DEVICE_KEYS = frozenset({"source", "device", "instance", "min_transition_seconds", "parameter"})
-PID_KEYS = frozenset({"input", "setpoint", "kp", "ki", "kd"})
+PID_KEYS = frozenset({"input", "setpoint", "kp", "ki", "kd", "starting_output"})
 OUTPUT_KEYS = frozenset({"cycle_seconds", "min_transition_seconds", "max_level", "stages"})
 STAGE_KEYS = frozenset({"level", "set"})
 ACTIVE_PERIOD_KEYS = frozenset({"from", "to", "end_state"})
@@ -128,7 +138,10 @@ CONTROL_KEY_HELP = {
     "timezone": "an IANA zone name for the active period; absent means this machine's local time",
     "parameters": "constants the rules may read, such as a target temperature, adjustable at runtime",
     "inputs": "name -> {source, field, instance, max_age}: the readings the rules may use",
-    "pid": "the loop itself: input and setpoint rules, and the kp, ki and kd gains",
+    "pid": (
+        "the loop itself: input and setpoint rules, the kp, ki and kd gains, and an optional "
+        "starting_output rule giving the integral to start from when there is no memory to resume"
+    ),
     "output": "cycle_seconds, min_transition_seconds, an optional max_level rule, and the stage ladder",
     "devices": (
         "name -> {source, device, instance, min_transition_seconds, parameter}: what the control "
@@ -140,18 +153,38 @@ CONTROL_KEY_HELP = {
     "active_period": "{from, to, end_state}: a daily wall-clock window in the control's own timezone",
 }
 
-#: Every slot in a control document holding a rule expression: where it lives, the name to
-#: call it in a message, and whether it may be absent. One table, because the runtime parses
-#: these in two other modules and a validator with its own private list would be a second
-#: copy that drifts - a rule slot the runtime honours and the validator has never heard of
-#: passes `--check-config` and kills the control at startup, which is the failure this table
-#: exists to make impossible. ``tests/test_repo_hygiene.py`` fails the build where the
-#: runtime parses a number of slots this table does not describe.
+#: The name a rule reads to get the setpoint as evaluated this cycle. Reserved: no input or
+#: parameter may be called this, because a rule reading it must get the setpoint and nothing
+#: else, and a declared name would shadow it in some slots and not others.
+SETPOINT_NAME = "setpoint"
+
+#: Why each slot that may not read :data:`SETPOINT_NAME` may not, so the refusal names the
+#: actual reason for the slot in front of the operator rather than one that is true of another.
+_SETPOINT_REFUSED = {
+    "pid.setpoint": "the setpoint would be defined in terms of itself",
+    "pid.input": (
+        "a reading defined in terms of the setpoint would make the error a function of the "
+        "setpoint rather than a measurement"
+    ),
+    "enable_when": "the gate decides it before the setpoint is worked out",
+}
+
+#: Every slot in a control document holding a rule expression: where it lives, the name to call
+#: it in a message, whether it may be absent, and whether it may read :data:`SETPOINT_NAME`.
+#: Only the slots that use the setpoint to shape the output can - see `_SETPOINT_REFUSED` for
+#: why each of the others cannot.
+#:
+#: One table, because the runtime parses these in two other modules and a validator with its
+#: own private list would be a second copy that drifts - a rule slot the runtime honours and
+#: the validator has never heard of passes `--check-config` and kills the control at startup,
+#: which is the failure this table exists to make impossible. ``tests/test_repo_hygiene.py``
+#: fails the build where the runtime parses a number of slots this table does not describe.
 CONTROL_RULE_SLOTS = (
-    (("pid", "setpoint"), "pid.setpoint", False),
-    (("pid", "input"), "pid.input", False),
-    (("output", "max_level"), "output.max_level", True),
-    (("enable_when",), "enable_when", True),
+    (("pid", "setpoint"), "pid.setpoint", False, False),
+    (("pid", "input"), "pid.input", False, False),
+    (("pid", "starting_output"), "pid.starting_output", True, True),
+    (("output", "max_level"), "output.max_level", True, True),
+    (("enable_when",), "enable_when", True, False),
 )
 
 
@@ -248,10 +281,41 @@ TUNING_NOTES = [
     "just short",
     "a sensor that reports only when its reading changes leaves the loop steering blind between "
     "reports, which looks like too much gain and is usually met by detuning",
+    "a level is what the rung delivers, not its place in the list: give each rung its real "
+    "output, such as watts, or the loop proportions between rungs on a mix the devices do not "
+    "make. Scale kp and ki with the levels",
+    "a switched device turns on and off once each cycle while the demand sits between two rungs "
+    "that differ by it - up to 24 changes an hour at a 300-second cycle. That is the ladder "
+    "working, not the loop hunting. Fewer changes need a longer cycle_seconds (a wider swing in "
+    "the reading) or a longer min_transition_seconds on that device (the whole cycle goes to the "
+    "nearer rung when a share would be shorter than it); gain changes do not reduce it",
+    "order the rungs so each step changes as few devices as possible: between a rung with only one "
+    "device on and one with only the other on, every cycle switches both",
     "general PID references - Ziegler-Nichols, the usual manual method - are for understanding "
     "what each term does, not for values to use here: they aim at quarter-amplitude decay, which "
     "is deliberate oscillation, they start by driving the loop into it, and they assume a "
     "continuous output rather than a ladder on a scale you chose",
+]
+
+#: How to choose `pid.starting_output`, published with the schema for the same reason as
+#: `TUNING_NOTES`: a client composing one needs to know what the number means and where to
+#: read it from, and none of that is in the document format itself.
+STARTING_OUTPUT_NOTES = [
+    "optional, in `pid`: a number or a rule giving the integral to start from when the loop has "
+    "nothing to resume - a fresh start, a stored integral that failed its age or document test, or "
+    f"a hold longer than {RESUMABLE_HOLD_MINUTES:g} minutes such as the active period closing. A "
+    "stored integral that passes its tests is always used instead",
+    "on the ladder's level scale, and clamped to the ladder after any max_level cap",
+    "the value to aim for is the integral `i` once `input` has sat on `setpoint` long enough to "
+    "settle: that is the output needed to hold it. Read `i` from the control's history with "
+    "`query_history`, at the source and instance `get_control_state` names",
+    "where that value depends on something the control already reads, a rule can scale it: for "
+    "heating against outside temperature, `k * (setpoint - outside)` with k = i / (setpoint - "
+    "outside) read from the same moment. "
+    "`setpoint` here is the setpoint as evaluated this cycle",
+    "start low: too low costs settling time, as having no starting output does; too high overshoots",
+    "editing it does not discard a stored integral, and `get_control_state` reports which "
+    "start the loop used as `started_from`",
 ]
 
 CONTROL_EXAMPLES = {
@@ -737,6 +801,13 @@ def _check_pid(document, errors) -> None:
     for field in ("kp", "ki", "kd"):
         if field in pid and not _is_number(pid[field]):
             errors.append(f"pid.{field}: must be a number, got {pid[field]!r}")
+    # A number as well as a rule, unlike every other slot, because the plain form - one
+    # figure read off the history - is the commoner one, and `starting_output: 0.5` refused
+    # as "not a rule" would be a trap set by YAML rather than by anything the operator meant.
+    if "starting_output" in pid:
+        value = pid["starting_output"]
+        if not ((isinstance(value, str) and value.strip()) or _is_number(value)):
+            errors.append(f"pid.starting_output: must be a number or a rule expression, got {value!r}")
     _check_no_unknown_keys("pid", pid, PID_KEYS, errors)
 
 
@@ -1237,7 +1308,7 @@ def validate_control_rules(document):
             return []
     names = rule_names(document)
     errors = []
-    for path, where, _optional in CONTROL_RULE_SLOTS:
+    for path, where, _optional, reads_setpoint in CONTROL_RULE_SLOTS:
         text = document
         for key in path:
             text = text.get(key) if isinstance(text, dict) else None
@@ -1247,10 +1318,39 @@ def validate_control_rules(document):
         if not isinstance(text, str):
             continue
         try:
-            parse_rule(text, allowed_names=names)
+            parse_rule(text, allowed_names=names + ((SETPOINT_NAME,) if reads_setpoint else ()))
         except RuleSyntaxError as exc:
-            errors.append(f"{where}: {exc}")
+            errors.append(f"{where}: {_setpoint_hint(text, names, where, reads_setpoint) or exc}")
     return errors
+
+
+def _setpoint_hint(text, names, where, reads_setpoint):
+    """Return a clearer refusal for `setpoint` read where it does not exist, or None.
+
+    The parser's own message calls it an undeclared name, which sends an operator to
+    declare it - and declaring it is refused too, because the name is reserved. Said
+    specifically instead, naming the slots that can read it.
+
+    Args:
+        text (str): the rule as written
+        names (tuple): the declared names
+        where (str): the slot, which decides the reason given
+        reads_setpoint (bool): whether this slot may read it
+
+    Returns:
+        str or None: the message, or None where the fault is something else
+    """
+    from toinflux.rules import RuleSyntaxError, parse_rule
+
+    if reads_setpoint:
+        return None
+    try:
+        parse_rule(text, allowed_names=names + (SETPOINT_NAME,))
+    except RuleSyntaxError:
+        return None
+    readers = ", ".join(where for _path, where, _optional, reads in CONTROL_RULE_SLOTS if reads)
+    reason = _SETPOINT_REFUSED.get(where, "this slot is not one of them")
+    return f"reads {SETPOINT_NAME!r}, which only {readers} can read: here, {reason}"
 
 
 def validate_control_structure(name, document):
@@ -1295,6 +1395,7 @@ def validate_control_structure(name, document):
         document, "devices", errors, ("source", "device"), ("min_transition_seconds",), DEVICE_KEYS
     )
     _check_no_name_is_both_an_input_and_a_parameter(document, errors)
+    _check_no_name_is_reserved(document, errors)
     _check_instances_are_names("inputs", inputs, errors)
     _check_instances_are_names("devices", devices, errors)
     _check_one_key_per_actuator(document, devices, errors)
@@ -1615,6 +1716,26 @@ def _check_no_name_is_both_an_input_and_a_parameter(document, errors) -> None:
             f"inputs and parameters both declare {_render_names(both)}: a rule reads one set "
             f"of names, so the parameter would be shadowed by the reading and never used"
         )
+
+
+def _check_no_name_is_reserved(document, errors) -> None:
+    """Refuse an input or parameter named :data:`SETPOINT_NAME`.
+
+    A rule reading `setpoint` is given the setpoint as evaluated this cycle. A declared name
+    of the same spelling would either shadow that or be shadowed by it depending on the slot,
+    so the same text would mean two things in one document.
+
+    Args:
+        document (dict): the control document
+        errors (list): appended to with any problems found
+    """
+    for key in ("inputs", "parameters"):
+        section = document.get(key)
+        if isinstance(section, dict) and SETPOINT_NAME in section:
+            errors.append(
+                f"{key}: {SETPOINT_NAME!r} is reserved - a rule reading it gets the evaluated "
+                f"pid.setpoint - so rename this {key[:-1]}"
+            )
 
 
 def _check_instances_are_names(section, entries, errors) -> None:

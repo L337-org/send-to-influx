@@ -2,7 +2,8 @@ Control loops
 =============
 
 A control is a closed loop that holds something at a target by switching devices: a
-conservatory at a temperature, using dumb heaters on smart plugs. It reads its inputs from
+conservatory at a temperature using dumb heaters on smart plugs, a room at a light level using
+a dimmable lamp, or a seed tray at a temperature using a heat mat. It reads its inputs from
 the data this installation already collects, runs a PID, and picks rungs from a ladder of
 device combinations.
 
@@ -71,7 +72,7 @@ The document
 | `name` | no | the control's own name, which must match the file it is stored as |
 | `output` | yes | cycle_seconds, min_transition_seconds, an optional max_level rule, and the stage ladder |
 | `parameters` | no | constants the rules may read, such as a target temperature, adjustable at runtime |
-| `pid` | yes | the loop itself: input and setpoint rules, and the kp, ki and kd gains |
+| `pid` | yes | the loop itself: input and setpoint rules, the kp, ki and kd gains, and an optional `starting_output` |
 | `safe_state` | no | unenergised, energised or leave_unchanged: what the devices do at startup, on failure and at shutdown |
 | `timezone` | no | an IANA zone name for the active period; absent means this machine's local time |
 
@@ -108,12 +109,13 @@ The rule language
 
 These slots hold an expression:
 
-| Slot | |
-| --- | --- |
-| `pid.setpoint` | required |
-| `pid.input` | required |
-| `output.max_level` | optional |
-| `enable_when` | optional |
+| Slot | | May read `setpoint` |
+| --- | --- | --- |
+| `pid.setpoint` | required | no |
+| `pid.input` | required | no |
+| `pid.starting_output` | optional, and may be a plain number | yes |
+| `output.max_level` | optional | yes |
+| `enable_when` | optional | no |
 
 Rules are **parsed, never evaluated as code**. The grammar is arithmetic over numbers and
 nothing else: no strings, no attribute access, no indexing, no assignment. There is no path
@@ -122,6 +124,13 @@ one.
 
 A rule may read the keys of `inputs` and `parameters`, and nothing else. A name nothing
 declares is refused when the document is validated, not discovered at three in the morning.
+
+The one exception is `setpoint`, which is the value `pid.setpoint` produced this cycle rather
+than a copy of its text, so a rule reading it follows the setpoint when the setpoint rule is
+edited. Only `pid.starting_output` and `output.max_level` can read it. `pid.setpoint` would be
+defined in terms of itself; `pid.input` would make the error a function of the setpoint rather
+than a measurement; and `enable_when` is decided before the setpoint is worked out. The name is
+reserved, so an input or parameter called `setpoint` is refused.
 
 | Function | |
 | --- | --- |
@@ -229,16 +238,17 @@ without the integral jumping.
 The stage ladder
 ----------------
 
-Two independently switchable heaters give a ladder of discrete levels, not a continuous
-output. The PID produces a demand on the level scale, and the cycle window is split between
-the two stages bracketing it: a demand of 1237 with rungs at 750 and 1500 spends 65% of the
+Devices that can only be switched give a ladder of discrete levels, not a continuous output:
+two independently switchable heaters, for example, give off, one, the other and both. The PID
+produces a demand on the level scale, and the cycle window is split between the two stages
+bracketing it: a demand of 1237 with rungs at 750 and 1500 spends 65% of the
 window at 1500 and 35% at 750.
 
 * Stages sort by declared `level`, and "the next stage up" is by level rather than list
   order.
 * Among stages of equal level the earliest declared wins. Declaration order is how you say
-  which element should do the steady-state work: the far heater first, so the near one,
-  sitting next to the sensor, only trims.
+  which element should do the steady-state work: with two heaters, the far one first, so the
+  near one, sitting next to the sensor, only trims.
 * **Every stage must assign every device the control owns.** A stage saying nothing about a
   device is not a stage turning it off, and this is refused - an operator reading the ladder
   would assume it was off, which is how a heater stays on.
@@ -260,6 +270,61 @@ window at 1500 and 35% at 750.
   mechanism. The next ordinary command restores the normal rule.
 * `max_level` caps the **ladder**, not the demand. Capping the demand still proportions
   between rungs above the cap; capping the ladder does not.
+
+### A level is an output, not a position
+
+`level` is how much the rung delivers, on whatever scale you choose, and the PID's demand is
+on the same scale. It is not the rung's place in the list. A ladder written `0, 1, 2, 3` for
+"off, small heater, large heater, both" says the large heater gives exactly twice the small
+one, and the loop proportions between rungs on that assumption: if the heaters are really
+750 W and 2000 W, a demand meant to be met by the small heater lands on the wrong mix. Use the
+real figures - watts, or each device's share of the total - and the time-proportioning comes
+out right.
+
+The gains are in the same units, so changing the levels changes what `kp` and `ki` mean.
+Multiply the levels by ten and multiply both gains by ten too, or the loop becomes ten times
+gentler. See *Choosing the gains* below.
+
+### How often a device switches
+
+A switched device has no middle setting, so a demand between two rungs is met by spending part
+of each cycle on each. With a device on at one rung and off at the other, that is one on and
+one off per cycle: at a 300-second cycle, up to 24 changes an hour, for as long as the demand sits
+between those two rungs. **That is the ladder working, not the loop hunting.**
+
+`get_control_devices` shows which you have. A device with a high `changes_per_active_hour` and
+an `on_share` between 0 and 1 is being time-proportioned; read `demand` from the history to
+confirm it sits between two rungs that differ by that device.
+
+Where that is more switching than the hardware or the household wants, three settings govern
+it, and each trades something:
+
+* **`cycle_seconds`** sets how many on-off pairs there are. Doubling it halves the switching,
+  and doubles how long the device stays on or off at a stretch, so the reading swings further
+  either side of the setpoint.
+* **The device's `min_transition_seconds`** stops short bursts. Where either share of the cycle
+  would be shorter than the minimum, the whole cycle goes to the nearer rung instead. With a
+  60-second minimum on a 300-second cycle, a demand within a fifth of the gap from either rung
+  holds that rung all cycle; a longer minimum widens that band, at the cost of the demand being
+  met less closely within each cycle (the integral makes up the difference over several).
+* **The order of the rungs.** Each step up the ladder should change as few devices as possible.
+  Between a rung with only one device on and one with only the other on, every cycle switches
+  *both*. Where that is the ladder you need, give the device you want left alone
+  the longer `min_transition_seconds`, as the *Slow response* example does: it is then held
+  while the other one trims, and the cycles are planned around it.
+
+Three other mechanisms are sometimes suggested for this, and none is provided, for these
+reasons:
+
+* **A hysteresis band** around each rung, moving to a new rung only once the demand is well
+  past it. The ladder does not move from rung to rung; it splits every cycle between the two
+  rungs either side of the demand. Near a rung, `min_transition_seconds` already merges a short
+  share into the nearer rung, which is the effect a band would have.
+* **A separate output weight on each rung.** That is what `level` already is - see above.
+* **Smoothing an input** before the PID sees it. It makes the demand steadier from cycle to
+  cycle, but a demand between two rungs still switches the device twice a cycle, and the
+  smoothing delays the reading the loop acts on, which costs stability. A noisy input is better
+  met by `kd` staying at zero, and by an input that refreshes at least once a cycle.
 
 Choosing the gains
 ------------------
@@ -719,11 +784,12 @@ history with `list_fields` and `query_history`, scoped to one control with `inst
   and highest value, and for each how many times it changed, how many times an hour, the
   share of cycles its minimum held it, and how many changes it was given while held. That last
   is the ladder moving a device its minimum said not to, because no rung kept it where it was:
-  the stages do not describe a combination the devices keep ending up in. A heater beside the sensor doing all the work while the
-  far one never comes on is a ladder whose equal-level rungs are in the wrong order; one
+  the stages do not describe a combination the devices keep ending up in. A heater beside the
+  sensor doing all the work while the far one never comes on is a ladder whose equal-level
+  rungs are in the wrong order; one
   changing many times an hour wants a longer `min_transition_seconds` or a longer
-  `cycle_seconds`; a driven value that sits at its highest is a device at the end of its
-  range.
+  `cycle_seconds` - see *How often a device switches* above for which, and what each costs;
+  a driven value that sits at its highest is a device at the end of its range.
 * **A step in `kp`, `ki` or `kd`** marks a retune. The gains are written on every point, so
   any window of the history says which tuning produced it.
 
@@ -740,14 +806,14 @@ before a service restart could be switched on again immediately, because the pro
 knew about it had gone.
 
 The **loop half** records the PID's integral. That is the part a slow plant spends a long
-time earning, and rebuilding it from nothing is why a restarted control can sit below target
-for an hour having already learned the answer once. It is put back only when the stored
+time earning, and rebuilding it from nothing is why a restarted control can sit short of its
+target for many cycles having already learned the answer once. It is put back only when the stored
 memory still describes the present, on two tests: the gains, ladder and cycle must be
 unchanged, because an integral is in the output's units and means something else under a
 different tuning; and it must be recent, within a few cycles, because a machine that has been
-down long enough for the room to change should look at the room rather than at what it
-remembered. Failing either, the control starts afresh - which is simply what it always did.
-`--verbose` says which happened.
+down long enough for the reading to have moved on should look at it rather than at what it
+remembered. Failing either, the control starts afresh: from `pid.starting_output` where the
+document has one, and from zero where it does not. The log says which happened.
 
 The file is written whenever a device actually changes, and once per cycle for the loop
 half. Deleting it costs nothing but the memory; the control rebuilds both. A damaged file
@@ -759,17 +825,77 @@ The same memory survives a **momentary** failure within one run. A cycle that ca
 input falls to the safe state and stops actuating, and the loop is held; resuming keeps the
 integral where the pause was short, and starts afresh where it was long. That distinction is
 the difference between a single flaky reading, which must not cost the control what it knew,
-and the end of an active period, after which last night's integral says nothing about this
-evening.
+and the end of an active period, after which the integral from the last window says nothing
+about this one.
 
 `get_control_state` over MCP reports all of it - the integral, its age, whether it still
-matches the document, what each device was last commanded to, and which devices are currently
-held by their `min_transition_seconds`. That is the tool to reach for when an output moves
-against its input, because the integral is the usual explanation and is invisible from the
-device side.  Where `controls.db` is set it also names where the control's cycles are recorded,
-as a `source` and `instance` for `query_history`, so a caller tuning the gains can read the loop
-over time rather than only as it stands, and names `get_control_devices` for each device's
-share; where it is not, it names that setting.
+matches the document, what the integral started from (`started_from`: `resumed`,
+`starting_output` or `zero`, with `starting_integral`), what each device was last commanded to,
+and which devices are currently held by their `min_transition_seconds`. That is the tool to
+reach for when an output moves against its input, because the integral is the usual explanation
+and is invisible from the device side.  Where `controls.db` is set it also names where the
+control's cycles are recorded, as a `source` and `instance` for `query_history`, so a caller
+tuning the gains can read the loop over time rather than only as it stands, and names
+`get_control_devices` for each device's share; where it is not, it names that setting.
+
+Starting from a configured output
+---------------------------------
+
+A control with an active period is held between its windows, usually for far longer than the
+30 minutes a hold may last and still be resumed, so it starts afresh each time its window opens.
+Started from zero, its output is carried by the proportional term alone until the integral
+builds up to what holding the setpoint takes, and on a slow plant that can be many cycles.
+`pid.starting_output` gives it somewhere better to start.
+
+For heating, added to the *Normal* example above, it reads:
+
+```yaml
+parameters:
+  target: 18.0
+  k_env: 60.0
+pid:
+  input: inside
+  setpoint: max(target, dew + 5)
+  kp: 500.0
+  ki: 0.15
+  kd: 0.0
+  starting_output: k_env * (setpoint - outside)
+```
+
+At a setpoint of 18 and 5 degrees outside, that starts the integral at 780, just above the far
+heater's rung, before the proportional term adds whatever the error asks for. `k_env` is a
+figure for that example's plant, not yours - see below.
+
+* **It is used only where nothing was carried in**: a fresh start, a stored integral that
+  failed the age or document test above, or a resume after a hold longer than 30 minutes, such
+  as the active period opening. A stored integral that passes its tests always wins, and a
+  brief hold within a run keeps what the loop had.
+* **It is the integral, on the ladder's level scale**, so it is clamped to the ladder after any
+  `max_level` cap, exactly as a resumed integral is. The proportional term is added on top as
+  usual.
+* **A plain number works** - `starting_output: 750` on the example above - and is the
+  simplest place to begin.
+* **Editing it keeps a stored integral.** It is not part of what a stored integral is checked
+  against, because it matters only when there is no integral to keep.
+* Absent, the loop starts from zero.
+
+### Choosing a value
+
+The number to aim for is in the control's own history. Once `input` has sat on `setpoint` long
+enough to settle, the integral `i` is the output it takes to hold it there under the conditions
+of the moment - see *Recording the PID history* above. Read `i` from a few such stretches with
+`query_history`, at the `source` and `instance` that `get_control_state` names.
+
+Where the output needed depends on something the control already reads, make it a rule over
+that input: outside temperature for a heater, daylight for a lamp topping up a room's light.
+For heating, the heat lost is roughly proportional to how much warmer inside is than outside,
+so `k * (setpoint - outside)` follows the same shape, with `k` read off the history as
+`i / (setpoint - outside)` at a settled moment. Where the control reads nothing that moves the
+output it needs, a constant is the honest answer.
+
+Start low. Too low costs settling time, which is what having no starting output costs; too high
+overshoots the setpoint before the loop can take it back. `get_control_state` reports which
+start a control actually used, and the log says so once each time it starts afresh.
 
 What is checked, and when
 -------------------------
@@ -794,10 +920,10 @@ With `controls.enabled` and the MCP server both on, five read-only tools appear:
 `list_controls` (names, enabled, devices, cycle length, and whether each process is running),
 `get_control` (one document as stored), `get_control_state` (what a running control has since
 worked out), `get_control_devices` (each device's share of a period, from the recorded
-history, and offered only where `controls.db` is set) and `get_control_schema` (this format). They are not
-behind any write flag: a control document holds no secrets, and being able to ask what is
-being controlled and whether it is running should not require granting the ability to change
-it.
+history, and offered only where `controls.db` is set) and `get_control_schema` (this format).
+They are not behind any write flag: a control document holds no secrets, and being able to
+ask what is being controlled and whether it is running should not require granting the
+ability to change it.
 
 Add `controls.mcp_write` and three more appear: `save_control` (create or replace a document,
 validated before anything is written), `set_control_enabled` (turn one on or off without

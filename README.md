@@ -7,19 +7,20 @@ https://github.com/L337-org/send-to-influx
 Collect metrics from your smart-home and energy devices into InfluxDB, and then really take control!
 
 The built-in [MCP server](#remote-mcp-server) means that you can use your AI of choice as one place
-to **control** your devices, query their **live and historical** state, and ask **complex questions**
-about **relationships between different measurements**, and **spot trends** in your data.
+to **control** your devices, query their **live and historical** state, and ask **complex
+questions** about **relationships between different measurements**, and **spot trends** in your
+data.
 
 Because the data is stored in InfluxDB it can also be **displayed in Grafana** dashboards and other
 visualization tools that support it.
 
-It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National Grid
-Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data sources.
-Most are read-only; Hue lights/plugs and on-demand Speedtest runs can be controlled through the MCP server
-when you opt in.
+It currently supports Hue Bridges, MyEnergi Zappi/Eddi/Harvi devices, Open-Meteo weather, National
+Grid Carbon Intensity, Octopus Energy, Nuki smart locks, and Speedtest network performance data
+sources. Most are read-only; Hue lights/plugs and on-demand Speedtest runs can be controlled through
+the MCP server when you opt in.
 
-It can be installed as a .deb package on supported platforms, or run directly from the source code in a
-Python virtual environment.
+It can be installed as a .deb package on supported platforms, or run directly from the source code
+in a Python virtual environment.
 
 For a full field-by-field reference of what each source collects and the units it's reported in, see
 [UNITS.md](UNITS.md).
@@ -39,7 +40,8 @@ Contents
 - [InfluxDB setup](#influxdb)
 - [Running the script](#running-the-script)
 - [Using the .deb package](#using-the-deb-package)
-- [Remote MCP server (query and control your devices via an MCP client like Claude)](#remote-mcp-server)
+- [Remote MCP server (query and control your devices via an MCP client like
+  Claude)](#remote-mcp-server)
 - [Usage / CLI reference](#usage)
 - [Upgrading](#upgrading)
 - [Contributing](#contributing)
@@ -48,8 +50,9 @@ Contents
 Hue Bridge
 ----------
 
-It will collect occupancy, temperature and light readings from Hue Motion Sensors, on/off state 
-of Smart Plugs and the brightness of lights, but could be modified to collect other data from the bridge.
+It will collect occupancy, temperature and light readings from Hue Motion Sensors, on/off state of
+Smart Plugs and the brightness of lights, but could be modified to collect other data from the
+bridge.
 
 To create a username and password for the Hue Bridge, follow the instructions 
 here: https://developers.meethue.com/develop/get-started-2/
@@ -168,15 +171,19 @@ https://support.myenergi.com/hc/en-gb/articles/5069627351185-How-do-I-get-an-API
 Some information on the API fields is available here:
 https://github.com/twonk/MyEnergi-App-Api
 
-- **Zappi**: EV charger. Collects real-time status fields plus daily energy totals (Charge, Import, Export, Genera).
-- **Harvi**: CT clamp energy monitor. Collects CT clamp power readings (ectp1/ectp2/ectp3) and channel names.
-- **Eddi**: Hot water diverter. Collects real-time status fields (frequency, voltage, diversion amount, temperatures, etc.).
+- **Zappi**: EV charger. Collects real-time status fields plus daily energy totals (Charge, Import,
+  Export, Genera).
+- **Harvi**: CT clamp energy monitor. Collects CT clamp power readings (ectp1/ectp2/ectp3) and
+  channel names.
+- **Eddi**: Hot water diverter. Collects real-time status fields (frequency, voltage, diversion
+  amount, temperatures, etc.).
 
 UK National Grid Carbon Intensity
 ------------------------------
 
-Real-time national grid carbon intensity (gCO2/kWh) and generation fuel mix (wind, solar, gas, nuclear, etc.)
-from the National Grid ESO Carbon Intensity API. No API key required. Data updates every 30 minutes.
+Real-time national grid carbon intensity (gCO2/kWh) and generation fuel mix (wind, solar, gas,
+nuclear, etc.) from the National Grid ESO Carbon Intensity API. No API key required. Data updates
+every 30 minutes.
 
 API documentation: https://carbon-intensity.github.io/api-definitions/
 
@@ -185,8 +192,8 @@ Set `include_generation: true` in settings to also collect the fuel mix percenta
 Open-Meteo
 ----------
 
-Free weather data with no API key required. Configure latitude/longitude and choose which fields to collect
-from the `current` weather variables (see https://open-meteo.com/en/docs for the full list).
+Free weather data with no API key required. Configure latitude/longitude and choose which fields to
+collect from the `current` weather variables (see https://open-meteo.com/en/docs for the full list).
 Recommended interval is 15 minutes (900 seconds) or longer.
 
 Octopus Energy
@@ -289,7 +296,8 @@ a blank answer there means "keep the current value".
 Speedtest
 ---------
 
-This uses the speedtest-cli python library and will run download and upload tests and store the results.
+This uses the speedtest-cli python library and will run download and upload tests and store the
+results.
 
 If every latency probe to a candidate server fails, speedtest-cli reports a nonsensical `ping`
 (hardcoded penalty values averaged in place of real samples - can come out as high as 1,800,000 ms)
@@ -310,15 +318,17 @@ For v1, configure `user` and `password` in the `influx` settings block and use `
       user: "your_user"
       password: "your_password"
 
-For v2, use `token` and `org` instead and optionally use `bucket` per source (falls back to `db` if `bucket` is not set):
+For v2, use `token` and `org` instead and optionally use `bucket` per source (falls back to `db` if
+`bucket` is not set):
 
     influx:
       url: "http://influx.example.com:8086"
       token: "your_token"
       org: "your_org"
 
-If your InfluxDB URL uses `https` with a self-signed or internally-issued certificate, TLS certificate
-verification will fail by default. Set `insecure: true` in the `influx` settings block to skip verification:
+If your InfluxDB URL uses `https` with a self-signed or internally-issued certificate, TLS
+certificate verification will fail by default. Set `insecure: true` in the `influx` settings block
+to skip verification:
 
     influx:
       url: "https://influx.example.com:8086"
@@ -358,12 +368,14 @@ other stream. **If you redirect logs to a file, redirect stderr**: `sendtoinflux
 `> mylog 2>&1` to capture both. Watching a terminal or a screen session needs no change, and
 neither does the packaged service - the journal captures both streams.
 
-On startup, an INFO line logs the version and which source(s) will run, so restarts are visible in the logs:
+On startup, an INFO line logs the version and which source(s) will run, so restarts are visible in
+the logs:
 
     2026-06-29 14:23:00 INFO     Starting send-to-influx v1.0 (workers=hue@hue.example.com, zappi, speedtest)
 
-To also write logs to a file, add an optional `logfile` key to `settings.yaml`. The file is rotated automatically
-once it reaches `log_max_bytes` (default 10 MiB), keeping `log_backup_count` old copies (default 3):
+To also write logs to a file, add an optional `logfile` key to `settings.yaml`. The file is rotated
+automatically once it reaches `log_max_bytes` (default 10 MiB), keeping `log_backup_count` old
+copies (default 3):
 
     logfile: "/var/log/send-to-influx.log"
     # log_max_bytes: 10485760
@@ -380,8 +392,9 @@ it can write - or add your own path to `ReadWritePaths=` (or a `LogsDirectory=`)
 `/var/log/send-to-influx.log` itself, since that's the same file the packaging-level mechanism below
 already writes to, and you'd end up with two independent writers to one file.
 
-The log level defaults to `INFO`. Set an optional `loglevel` key in `settings.yaml` (e.g. `DEBUG`, `WARNING`), or
-pass `-v`/`--verbose` on the command line to force `DEBUG` regardless of what's configured:
+The log level defaults to `INFO`. Set an optional `loglevel` key in `settings.yaml` (e.g. `DEBUG`,
+`WARNING`), or pass `-v`/`--verbose` on the command line to force `DEBUG` regardless of what's
+configured:
 
     loglevel: "INFO"
 
@@ -391,30 +404,69 @@ different location (e.g. `/etc/send-to-influx/settings.yaml` for a packaged inst
 
     sendtoinflux.py --settings /etc/send-to-influx/settings.yaml
 
-By default, `sendtoinflux.py` starts one worker per source listed in the `sources` setting. Each source runs in its own loop using its own `interval`.
+By default, `sendtoinflux.py` starts one worker per source listed in the `sources` setting. Each
+source runs in its own loop using its own `interval`.
 
-Worker start times are slightly staggered to avoid all collectors firing at exactly the same moment when intervals are equal.
+Worker start times are slightly staggered to avoid all collectors firing at exactly the same moment
+when intervals are equal.
 
-If a source hits a transient failure (e.g. a network error talking to its API or to InfluxDB) - whether running in single-source or multi-source mode - it is automatically restarted with exponential backoff (base 5 s, max 300 s) to avoid tight failure loops. In multi-source mode, only the failed source is retried; other sources keep running. A configuration problem (e.g. a source missing its settings section) is not retried: in single-source mode the process exits with code 1; in multi-source mode that source's worker stops permanently and a critical line is logged, while other sources keep running.
+If a source hits a transient failure (e.g. a network error talking to its API or to InfluxDB) -
+whether running in single-source or multi-source mode - it is automatically restarted with
+exponential backoff (base 5 s, max 300 s) to avoid tight failure loops. In multi-source mode, only
+the failed source is retried; other sources keep running. A configuration problem (e.g. a source
+missing its settings section) is not retried: in single-source mode the process exits with code 1;
+in multi-source mode that source's worker stops permanently and a critical line is logged, while
+other sources keep running.
 
-If `sources:` is empty or absent (and no `-s`/`--source` was given), or every configured instance of a requested source turns out unusable (e.g. a Hue install whose bridges have no tokens), the process logs that plainly and exits with code 1 rather than starting nothing while looking healthy. Both causes require manual intervention (an edit to `settings.yaml` and a restart) and never resolve themselves by waiting, so under the packaged systemd service they are not retried either - see "Exit codes" and "After installing" below.
+If `sources:` is empty or absent (and no `-s`/`--source` was given), or every configured instance of
+a requested source turns out unusable (e.g. a Hue install whose bridges have no tokens), the process
+logs that plainly and exits with code 1 rather than starting nothing while looking healthy. Both
+causes require manual intervention (an edit to `settings.yaml` and a restart) and never resolve
+themselves by waiting, so under the packaged systemd service they are not retried either - see "Exit
+codes" and "After installing" below.
 
-Collection never waits on InfluxDB. Each point is written to a buffer on disk first - in the state directory, `/var/lib/send-to-influx/spool` on the packaged install - and sent from there by a thread of its own, so a slow or unreachable InfluxDB costs neither a collector its interval nor a control its cycle. Points wait on disk through an outage of any length, including restarts, kills and power cuts, and are sent oldest first once InfluxDB is back - with one exception: a control deleted while its points are still waiting leaves them in its own spool until a control of the same name runs again; after a crash, at most a handful already sent are sent again, which InfluxDB absorbs. A point the server itself keeps refusing (for example, one past the bucket's retention window, or one for a database that does not exist) is given up on after five separate attempts, spaced from 5 to 40 seconds apart, and while it waits for the next one it holds up nothing else; it waits in `retry.jsonl` in the same directory, so a restart does not lose it. Unsent points go to whatever database the current settings name, so a rebuilt or renamed database receives the backlog too. Heartbeat status points are never buffered - they are a live signal, so a failed one is simply dropped.
+Collection never waits on InfluxDB. Each point is written to a buffer on disk first - in the state
+directory, `/var/lib/send-to-influx/spool` on the packaged install - and sent from there by a thread
+of its own, so a slow or unreachable InfluxDB costs neither a collector its interval nor a control
+its cycle. Points wait on disk through an outage of any length, including restarts, kills and power
+cuts, and are sent oldest first once InfluxDB is back - with one exception: a control deleted while
+its points are still waiting leaves them in its own spool until a control of the same name runs
+again; after a crash, at most a handful already sent are sent again, which InfluxDB absorbs. A point
+the server itself keeps refusing (for example, one past the bucket's retention window, or one for a
+database that does not exist) is given up on after five separate attempts, spaced from 5 to 40
+seconds apart, and while it waits for the next one it holds up nothing else; it waits in
+`retry.jsonl` in the same directory, so a restart does not lose it. Unsent points go to whatever
+database the current settings name, so a rebuilt or renamed database receives the backlog too.
+Heartbeat status points are never buffered - they are a live signal, so a failed one is simply
+dropped.
 
-The buffer holds up to `buffer_mb` megabytes per process in the `influx` block - 100 by default, from 0 to 1024. It is per process, and each control runs in a process of its own, so an install with three controls can use up to four times the setting. When it is full the oldest points are dropped first, and the log says so. `buffer_mb: 0` keeps unsent points in memory only - up to 500 per source, lost if the service stops - and the same happens, with a warning, if the disk cannot be written.
+The buffer holds up to `buffer_mb` megabytes per process in the `influx` block - 100 by default,
+from 0 to 1024. It is per process, and each control runs in a process of its own, so an install with
+three controls can use up to four times the setting. When it is full the oldest points are dropped
+first, and the log says so. `buffer_mb: 0` keeps unsent points in memory only - up to 500 per
+source, lost if the service stops - and the same happens, with a warning, if the disk cannot be
+written.
 
 
-After every collection cycle (success or failure), a `collector_status,source=<name>` heartbeat point is written to InfluxDB alongside the source's own data, with fields `ok` (`1`/`0`) and `consecutive_failures`. A dead collector would otherwise only show up as a silent gap in Grafana; this gives you a positive signal to alert on (e.g. `ok == 0` or a stale `collector_status` point). Heartbeats are not written in `--print` mode, since that mode never sends anything to InfluxDB.
+After every collection cycle (success or failure), a `collector_status,source=<name>` heartbeat
+point is written to InfluxDB alongside the source's own data, with fields `ok` (`1`/`0`) and
+`consecutive_failures`. A dead collector would otherwise only show up as a silent gap in Grafana;
+this gives you a positive signal to alert on (e.g. `ok == 0` or a stale `collector_status` point).
+Heartbeats are not written in `--print` mode, since that mode never sends anything to InfluxDB.
 
-There are a few options that can be passed to the script and a couple of these can help you to debug and also to help you understand your data:
+There are a few options that can be passed to the script and a couple of these can help you to debug
+and also to help you understand your data:
 
 - To run only one data source, use the 'source' option, e.g. `sendtoinflux.py --source zappi`.
-- To dump all the data from the Hue Bridge in order to see the names, etc., run `sendtoinflux.py --source hue --dump`
-and it will output all the data returned as json. When `sources` is configured in `settings.yaml`, `--dump` must be
-used together with `--source` so the script knows which source to dump.
-- To print the data rather than send it to InfluxDB, run `sendtoinflux.py --source hue --print` and it will output the
+- To dump all the data from the Hue Bridge in order to see the names, etc., run `sendtoinflux.py
+  --source hue --dump`
+and it will output all the data returned as json. When `sources` is configured in `settings.yaml`,
+`--dump` must be used together with `--source` so the script knows which source to dump.
+- To print the data rather than send it to InfluxDB, run `sendtoinflux.py --source hue --print` and
+  it will output the
 parsed data structure as json.
-- To check `settings.yaml` is valid without starting any collectors, run `sendtoinflux.py --check-config`. It prints
+- To check `settings.yaml` is valid without starting any collectors, run `sendtoinflux.py
+  --check-config`. It prints
 `Configuration OK` and exits 0, or exits 1 with details of what's wrong.
 - To print the installed version, run `sendtoinflux.py --version`.
 
@@ -508,36 +560,33 @@ filter.
 
 ### Configuring during install (debconf)
 
-A fresh interactive install of the `.deb` presents a debconf prompt: your InfluxDB
-connection details first (asked unconditionally, regardless of what else you answer - useful on
-its own if you just want to move an existing InfluxDB
-credential into `systemd-creds` without touching anything else), then a checklist of which data
-sources you want to configure now, then - only for the ones you pick - the fields needed to
-actually reach that source's API (credentials plus things like a Hue bridge hostname or an Octopus
-meter number; tuning settings like intervals keep their shipped defaults and can be adjusted in
-`settings.yaml` afterwards). You're also asked, with a default of "no", whether to enable the
-[remote MCP server](#remote-mcp-server) - answer yes and it collects the public URL, login username
-and password for it (the password goes into `systemd-creds` like any other). A plain package
-*upgrade* never prompts and never applies debconf
-answers: your `settings.yaml` and credentials are only ever written by a fresh install's prompts or
-by an explicit `sudo dpkg-reconfigure send-to-influx`, which re-runs the same flow at any time.
-Secrets you enter are moved into `systemd-creds` (see below)
-and never written into `settings.yaml` in plaintext. Debconf itself briefly holds what you type in
-its own separate, `chmod 600` password store while `postinst` runs, then clears each
-password-type answer back to the empty string immediately after reading it - regardless of whether
-the subsequent migration
-into `systemd-creds` goes on to succeed - see SECURITY.md if you want the detail. Non-secret answers
-(a Hue bridge hostname, an Octopus meter number, and so on) aren't password-type and stay in
-debconf's regular database as normal, same as any other package's debconf answers - with one
-exception: the InfluxDB user/organisation answer is cleared like the secrets are, since for a v1
-install it's the InfluxDB username, which is treated as a credential everywhere else. If every required
-field for a source was answered *and* your InfluxDB connection details resolved successfully, it's
-automatically added to `sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is
-created for you where possible - a source with everything else filled in still won't be enabled if
-InfluxDB itself couldn't be reached or authenticated. When you revisit the prompts with
-`dpkg-reconfigure`, a secret left blank counts as provided if it's already stored in
-`systemd-creds`, so adding a new source never requires re-entering credentials that are already
-migrated.
+A fresh interactive install of the `.deb` presents a debconf prompt: your InfluxDB connection
+details first (asked unconditionally, regardless of what else you answer - useful on its own if you
+just want to move an existing InfluxDB credential into `systemd-creds` without touching anything
+else), then a checklist of which data sources you want to configure now, then - only for the ones
+you pick - the fields needed to actually reach that source's API (credentials plus things like a Hue
+bridge hostname or an Octopus meter number; tuning settings like intervals keep their shipped
+defaults and can be adjusted in `settings.yaml` afterwards). You're also asked, with a default of
+"no", whether to enable the [remote MCP server](#remote-mcp-server) - answer yes and it collects the
+public URL, login username and password for it (the password goes into `systemd-creds` like any
+other). A plain package *upgrade* never prompts and never applies debconf answers: your
+`settings.yaml` and credentials are only ever written by a fresh install's prompts or by an explicit
+`sudo dpkg-reconfigure send-to-influx`, which re-runs the same flow at any time. Secrets you enter
+are moved into `systemd-creds` (see below) and never written into `settings.yaml` in plaintext.
+Debconf itself briefly holds what you type in its own separate, `chmod 600` password store while
+`postinst` runs, then clears each password-type answer back to the empty string immediately after
+reading it - regardless of whether the subsequent migration into `systemd-creds` goes on to
+succeed - see SECURITY.md if you want the detail. Non-secret answers (a Hue bridge hostname, an
+Octopus meter number, and so on) aren't password-type and stay in debconf's regular database as
+normal, same as any other package's debconf answers - with one exception: the InfluxDB
+user/organisation answer is cleared like the secrets are, since for a v1 install it's the InfluxDB
+username, which is treated as a credential everywhere else. If every required field for a source was
+answered *and* your InfluxDB connection details resolved successfully, it's automatically added to
+`sources:` in `settings.yaml` and the InfluxDB database/bucket it needs is created for you where
+possible - a source with everything else filled in still won't be enabled if InfluxDB itself
+couldn't be reached or authenticated. When you revisit the prompts with `dpkg-reconfigure`, a secret
+left blank counts as provided if it's already stored in `systemd-creds`, so adding a new source
+never requires re-entering credentials that are already migrated.
 
 You can leave every question blank and configure `settings.yaml` by hand instead - nothing here is
 required. Re-run `sudo dpkg-reconfigure send-to-influx` at any time to change your answers; secret
@@ -550,21 +599,20 @@ stored rather than clearing it.
 By default, `settings.yaml` holds credentials (InfluxDB token/user/password, Hue bridge user,
 MyEnergi API key, Octopus API key) in plaintext, same as the source-checkout path. On the packaged
 install (requires `systemd >= 250`), you can instead move them into
-[systemd-creds](https://systemd.io/CREDENTIALS/) - encrypted at rest with a TPM-bound or host-derived
-key, decrypted only into a restricted, in-memory location for the service's lifetime:
+[systemd-creds](https://systemd.io/CREDENTIALS/) - encrypted at rest with a TPM-bound or
+host-derived key, decrypted only into a restricted, in-memory location for the service's lifetime:
 
     sudo send-to-influx-set-credential influx-token
     sudo send-to-influx-set-credential --list
 
 Run `send-to-influx-set-credential --list` to see the full set of available credential names. Each
-`set` call prompts for the value (or reads it from stdin if piped, e.g.
-`echo -n "$TOKEN" | sudo send-to-influx-set-credential influx-token`) and replaces the plaintext value
-in `settings.yaml` with a note that it's now managed elsewhere - the file stays readable for the rest
-of its content, but that field is never used from it again. Use
-`send-to-influx-set-credential <name> --remove` to remove a credential from systemd-creds again -
-note this resets the `settings.yaml` field to its placeholder rather than restoring the secret (the
-encrypted value is destroyed, not decrypted back into the file), so re-enter the value by hand
-afterwards if you still need it.
+`set` call prompts for the value (or reads it from stdin if piped, e.g. `echo -n "$TOKEN" | sudo
+send-to-influx-set-credential influx-token`) and replaces the plaintext value in `settings.yaml`
+with a note that it's now managed elsewhere - the file stays readable for the rest of its content,
+but that field is never used from it again. Use `send-to-influx-set-credential <name> --remove` to
+remove a credential from systemd-creds again - note this resets the `settings.yaml` field to its
+placeholder rather than restoring the secret (the encrypted value is destroyed, not decrypted back
+into the file), so re-enter the value by hand afterwards if you still need it.
 
 This is entirely optional and per-field - you can mix systemd-creds and plaintext values freely, and
 the source-checkout/screen-session path is unaffected either way, since systemd-creds only applies
@@ -605,8 +653,9 @@ Key points:
   logged. On the packaged install the password can be stored in systemd-creds:
   `sudo send-to-influx-set-credential mcp-password`.
 - **Connections survive restarts.** OAuth client registrations and refresh tokens are persisted
-  (hashed) in `mcp-oauth-state.json` - under `/var/lib/send-to-influx` on the packaged systemd install, or next to the settings file when run by hand (override with `mcp.state_file`),
-  so package upgrades and reboots don't make the client re-authenticate.
+  (hashed) in `mcp-oauth-state.json` - under `/var/lib/send-to-influx` on the packaged systemd
+  install, or next to the settings file when run by hand (override with `mcp.state_file`), so
+  package upgrades and reboots don't make the client re-authenticate.
 - **Read-only by default.** Device-control tools are opt-in per collector and aren't registered at
   all unless enabled in that collector's own settings block - when none is enabled, the write tools
   don't exist on the server. The same is true of the control-loop write tools, which need
@@ -675,12 +724,12 @@ Once connected, the client has these read tools:
   database and measurement to query, the tag keys available to group by, and every field with its
   InfluxDB type, its unit, what each value means for a coded field like Nuki lock state, and how it
   may be aggregated. Each of those is omitted rather than nulled where it is not known - including
-  the type, which InfluxDB does not report for every field. That last part - `kind` - is the one a dashboard gets silently wrong without:
-  a `gauge` is an instantaneous reading (never sum them), an `interval` total is a quantity
-  accumulated over its reporting period (sum them to get a total for a day or a week), a `counter` a
-  running total that resets (read its last value or a difference, never its mean), a `state` a
-  discrete code or label. Pass `detail: true` for the per-field descriptions as well, in the same
-  call.
+  the type, which InfluxDB does not report for every field. That last part - `kind` - is the one a
+  dashboard gets silently wrong without: a `gauge` is an instantaneous reading (never sum them), an
+  `interval` total is a quantity accumulated over its reporting period (sum them to get a total for
+  a day or a week), a `counter` a running total that resets (read its last value or a difference,
+  never its mean), a `state` a discrete code or label. Pass `detail: true` for the per-field
+  descriptions as well, in the same call.
 Hue is a special case worth knowing about: its field keys are your own device names, so no built-in
 table can say what they mean. The collector therefore records each device's class alongside the
 readings (see `hue_devices` in [UNITS.md](UNITS.md)), and the MCP server reads that back - so a Hue
@@ -700,11 +749,11 @@ Nothing else needs configuring, and it starts working from the first collection.
   data, not three years.
 - **`get_documentation`** - a one-call reference of what every source reports and what its coded
   values mean.
-- **`suggest_dashboard_panels`** - the same schema turned into chart panels: per field a ready-to-run
-  InfluxQL query, the panel type to draw it as, the aggregation to use and any that would be wrong, a
-  Grafana unit, value mappings decoding a coded field to labels, and an alias naming each series
-  after its tag. It returns panel *parts*, not a dashboard document - see "Building a Grafana
-  dashboard" below.
+- **`suggest_dashboard_panels`** - the same schema turned into chart panels: per field a
+  ready-to-run InfluxQL query, the panel type to draw it as, the aggregation to use and any that
+  would be wrong, a Grafana unit, value mappings decoding a coded field to labels, and an alias
+  naming each series after its tag. It returns panel *parts*, not a dashboard document - see
+  "Building a Grafana dashboard" below.
 
 Alongside the tools, the server offers **resources** - the same read data as addressable items a
 client can list and attach, rather than call:
@@ -726,8 +775,8 @@ Grafana's own dashboard tool to create it.
 
 Some prompts that work, in rough order of ambition:
 
-> Using send-to-influx and Grafana, create a dashboard called "Home" with a panel for each Nuki lock's
-> state and battery level. Use `suggest_dashboard_panels` for the queries and panel settings.
+> Using send-to-influx and Grafana, create a dashboard called "Home" with a panel for each Nuki
+> lock's state and battery level. Use `suggest_dashboard_panels` for the queries and panel settings.
 
 > What can you chart from my send-to-influx data? List the sources, then for the two or three most
 > interesting ones show me what panels you would build and why, before creating anything.
@@ -738,8 +787,8 @@ Some prompts that work, in rough order of ambition:
 > underneath.
 
 > Add a panel to my "Home" dashboard for today's grid import, and check with
-> `suggest_dashboard_panels` how that field should be aggregated before you pick a function - it is a
-> counter, so a mean would be meaningless.
+> `suggest_dashboard_panels` how that field should be aggregated before you pick a function - it is
+> a counter, so a mean would be meaningless.
 
 Two things worth knowing when you ask:
 
@@ -830,9 +879,9 @@ Results are domain-aware throughout: values carry their unit, and coded fields c
 decoded label alongside the raw number. The same data is also exposed as MCP **resources** (a
 documentation reference, and a live-state and schema resource per source) for clients that use them.
 
-The server also offers a few **prompts** - ready-made tasks you can pick in the client: *home status*
-(summarise everything now), *usage trends* (historical analysis, e.g. "electricity this month vs
-last"), and, when device control is enabled, *control device*.
+The server also offers a few **prompts** - ready-made tasks you can pick in the client: *home
+status* (summarise everything now), *usage trends* (historical analysis, e.g. "electricity this
+month vs last"), and, when device control is enabled, *control device*.
 
 History queries run against InfluxDB through a fixed, parameterised query builder - never a raw
 query from the model - with field names checked against the measurement's live field list, time
@@ -841,9 +890,10 @@ ranges normalised in the app, and a capped result size.
 Control loops
 -------------
 
-A **control** holds something at a target by switching devices: a conservatory at a temperature,
-using two heaters on smart plugs. It reads its inputs from the data already being collected, runs a
-PID, and spends each cycle window across the rungs of a stage ladder - so two heaters can average a
+A **control** holds something at a target by switching devices: a conservatory at a temperature
+using two heaters on smart plugs, a room at a light level using a dimmable lamp, or a seed tray at a
+temperature using a heat mat. It reads its inputs from the data already being collected, runs a PID,
+and spends each cycle window across the rungs of a stage ladder - so two heaters, say, can average a
 demand that neither of them can produce on its own.
 
 Controls are **off unless you switch them on**, because a control actuates devices with nobody
@@ -875,9 +925,9 @@ Every death is followed by the parent putting that control's devices into their 
 a child that was killed or lost power did not get the chance.
 
 **Each control's PID history can be kept for tuning.** Set `controls.db`, as for any source, and
-every cycle writes its input, setpoint, demand and P, I and D terms to the `control`
-measurement, readable through the MCP read tools as source `controls`, and what each device
-was commanded to the `control_device` measurement, which `get_control_devices` summarises. CONTROLS.md says what each
+every cycle writes its input, setpoint, demand and P, I and D terms to the `control` measurement,
+readable through the MCP read tools as source `controls`, and what each device was commanded to the
+`control_device` measurement, which `get_control_devices` summarises. CONTROLS.md says what each
 field means and how to read it.
 
 **[CONTROLS.md](CONTROLS.md) is the reference**: the document format key by key, the rule language

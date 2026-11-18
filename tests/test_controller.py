@@ -781,3 +781,158 @@ class TestTheTermsOfTheLastStep:
         with pytest.raises(RuleEvaluationError):
             controller.step({"inside": math.nan, "target": 18.0}, dt=CYCLE)
         assert controller.last_step is before
+
+
+class TestStartingOutput:
+    """`pid.starting_output` is the integral a stretch of control begins from where nothing
+    was carried into it, so a heater whose window opens on a cold room does not spend an hour
+    earning back the output it needs every night.
+
+    ki is zero throughout, so the integral after a step is exactly what it started from.
+    """
+
+    @staticmethod
+    def _controller(clock, starting_output=None, max_level=None, **pid):
+        tunings = {"input": "inside", "setpoint": "target", "kp": 0.0, "ki": 0.0, "kd": 0.0, **pid}
+        if starting_output is not None:
+            tunings["starting_output"] = starting_output
+        output = {"cycle_seconds": CYCLE, "stages": STAGES}
+        if max_level is not None:
+            output["max_level"] = max_level
+        document = _document(
+            inputs={"outside": {"source": "openmeteo", "field": "temperature_2m"}},
+            pid=tunings,
+            output=output,
+        )
+        return Controller(document, time_fn=lambda: clock[0])
+
+    @staticmethod
+    def _step(controller, clock, outside=5.0):
+        clock[0] += CYCLE
+        return controller.step({"inside": 15.0, "outside": outside, "target": 18.0}, dt=CYCLE)
+
+    def test_a_fresh_controller_starts_from_it(self):
+        clock = [0.0]
+        controller = self._controller(clock, starting_output=600)
+        self._step(controller, clock)
+        assert controller.pid._integral == pytest.approx(600)
+        assert (controller.started_from, controller.starting_integral) == ("starting_output", 600)
+        assert controller.started_now
+
+    def test_a_number_and_a_rule_reading_the_setpoint_both_work(self):
+        clock = [0.0]
+        controller = self._controller(clock, starting_output="50 * (setpoint - outside)")
+        self._step(controller, clock, outside=6.0)
+        # setpoint 18, outside 6: 50 x 12
+        assert controller.pid._integral == pytest.approx(600)
+
+    def test_it_is_clamped_to_the_ladder_and_to_the_cap(self):
+        clock = [0.0]
+        controller = self._controller(clock, starting_output=99999)
+        self._step(controller, clock)
+        assert controller.pid._integral == pytest.approx(1500)
+        # simple-pid clamps the integral on its own, so the report is what this pins down.
+        assert controller.starting_integral == pytest.approx(1500)
+        capped = self._controller(clock, starting_output=99999, max_level="setpoint * 50")
+        self._step(capped, clock)
+        # setpoint 18 x 50 = 900 caps the ladder at its 750 rung
+        assert capped.pid._integral == pytest.approx(750)
+        # The report, because simple-pid would clamp the integral to the cap on its own.
+        assert capped.starting_integral == pytest.approx(750)
+
+    def test_it_is_used_once_not_every_cycle(self):
+        clock = [0.0]
+        controller = self._controller(clock, starting_output=600, ki=0.01)
+        self._step(controller, clock)
+        after_first = controller.pid._integral
+        self._step(controller, clock)
+        assert controller.pid._integral > after_first, "the integral was put back to the start"
+        assert not controller.started_now
+
+    def test_without_it_the_loop_starts_from_zero_as_it_always_did(self):
+        clock = [0.0]
+        controller = self._controller(clock)
+        self._step(controller, clock)
+        assert controller.pid._integral == 0
+        assert controller.started_from == "zero"
+
+    def test_a_stored_integral_that_passes_its_tests_wins(self):
+        clock = [0.0]
+        controller = self._controller(clock, starting_output=600)
+        controller.resume_from({"integral": 300.0}, age=0.0)
+        controller.resume()
+        self._step(controller, clock)
+        assert controller.pid._integral == pytest.approx(300)
+        assert (controller.started_from, controller.starting_integral) == ("resumed", 300)
+
+    def test_a_stored_integral_too_old_to_resume_gives_way_to_it(self):
+        clock = [0.0]
+        controller = self._controller(clock, starting_output=600)
+        controller.resume_from({"integral": 300.0}, age=RESUMABLE_HOLD_SECONDS + 1)
+        controller.resume()
+        self._step(controller, clock)
+        assert controller.pid._integral == pytest.approx(600)
+        assert controller.started_from == "starting_output"
+
+    def test_a_long_hold_starts_from_it_again(self):
+        clock = [0.0]
+        controller = self._controller(clock, starting_output=600, ki=0.01)
+        for _ in range(3):
+            self._step(controller, clock)
+        assert controller.pid._integral != pytest.approx(600), "nothing moved, so this proves nothing"
+        controller.hold()
+        clock[0] += RESUMABLE_HOLD_SECONDS + 1
+        controller.resume()
+        clock[0] += CYCLE
+        controller.step({"inside": 18.0, "outside": 5.0, "target": 18.0}, dt=CYCLE)
+        # On the setpoint, so nothing is integrated on top of the start.
+        assert controller.pid._integral == pytest.approx(600)
+        assert controller.started_now
+
+    def test_a_brief_hold_keeps_what_was_learned(self):
+        clock = [0.0]
+        controller = self._controller(clock, starting_output=600, ki=0.01)
+        for _ in range(3):
+            self._step(controller, clock)
+        learned = controller.pid._integral
+        controller.hold()
+        clock[0] += 60
+        controller.resume()
+        clock[0] += CYCLE
+        controller.step({"inside": 18.0, "outside": 5.0, "target": 18.0}, dt=CYCLE)
+        assert controller.pid._integral == pytest.approx(learned)
+        assert not controller.started_now
+
+    def test_a_first_cycle_that_failed_is_still_started_after_a_brief_hold(self):
+        clock = [0.0]
+        controller = self._controller(clock, starting_output=600)
+        controller.hold()
+        clock[0] += 60
+        controller.resume()
+        self._step(controller, clock)
+        assert controller.pid._integral == pytest.approx(600)
+
+    def test_a_value_it_cannot_use_leaves_the_start_for_the_next_cycle(self):
+        clock = [0.0]
+        controller = self._controller(clock, starting_output="outside / (setpoint - 18)")
+        with pytest.raises(RuleEvaluationError):
+            self._step(controller, clock)
+        assert controller.started_from is None
+        controller._starting_rule = None
+        self._step(controller, clock)
+        assert controller.started_from == "zero"
+
+    def test_capture_carries_the_start_for_the_state_tool(self):
+        clock = [0.0]
+        controller = self._controller(clock, starting_output=600)
+        self._step(controller, clock)
+        state = controller.capture()
+        assert (state["started_from"], state["starting_integral"]) == ("starting_output", 600)
+
+    def test_editing_it_does_not_discard_a_stored_integral(self):
+        clock = [0.0]
+        assert (
+            self._controller(clock, starting_output=600).fingerprint
+            == self._controller(clock, starting_output="setpoint - outside").fingerprint
+            == self._controller(clock).fingerprint
+        )

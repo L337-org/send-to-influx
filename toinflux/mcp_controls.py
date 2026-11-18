@@ -55,6 +55,8 @@ from toinflux.controls import (
     enabled_owner_of,
     CONTROL_KEY_HELP,
     CONTROL_RULE_SLOTS,
+    SETPOINT_NAME,
+    STARTING_OUTPUT_NOTES,
     BUILT_IN_SAFE_STATES,
     REQUIRED_CONTROL_KEYS,
     control_dir,
@@ -258,12 +260,12 @@ def register_control_tools(server, settings, settings_file=None, supervisor=None
         device was last commanded to and when.
 
         `get_control` gives the document - what it was told to do. This gives what it has
-        since learned, which device output alone cannot show. Read it before concluding a
+        since learned. Read it before concluding a
         demand is misbehaving: an output falling while the input is still far from target is
         usually the integral, which is invisible from outside.
 
         `matches_document` is false once the control has been edited, when that memory stops
-        meaning anything. `held_by_minimum` names devices still inside their
+        meaning anything; `started_from` says what it began from. `held_by_minimum` names devices still inside their
         `min_transition_seconds`, so they are being commanded what they already have.
 
         `history` says where its cycles are recorded: `query_history` with that `source` and
@@ -481,7 +483,7 @@ def _control_state_result(name, settings_file=None, supervisor=None):
         ToolParamError: there is no such control
     """
     from toinflux.controller import Controller
-    from toinflux.transitions import TransitionLog
+    from toinflux.transitions import TransitionLog, usable_number
 
     try:
         document = load_control(name, settings_file)
@@ -505,6 +507,17 @@ def _control_state_result(name, settings_file=None, supervisor=None):
             "age_seconds": log.loop_age(now=now),
             # The question a reader actually has: would a restart keep this, or start over?
             "matches_document": fingerprint is not None and stored.get("fingerprint") == fingerprint,
+            # How the integral began the current stretch of control, and from what. Passed
+            # through only where it is one of the three the controller writes, because this
+            # is a hand-editable file and the value reaches a model.
+            "started_from": (
+                stored.get("started_from")
+                if stored.get("started_from") in ("resumed", "starting_output", "zero")
+                else None
+            ),
+            "starting_integral": (
+                stored["starting_integral"] if usable_number(stored.get("starting_integral")) else None
+            ),
         }
     else:
         entry["loop"] = None
@@ -835,10 +848,15 @@ def _control_schema_result(settings, settings_file=None, supervisor=None):
             "keys": dict(sorted(CONTROL_KEY_HELP.items())),
         },
         "rules": {
-            "slots": [{"where": where, "required": not optional} for _path, where, optional in CONTROL_RULE_SLOTS],
+            "slots": [
+                {"where": where, "required": not optional, "reads_setpoint": reads}
+                for _path, where, optional, reads in CONTROL_RULE_SLOTS
+            ],
             "names": (
                 "a rule may read the keys of `inputs` and `parameters` and nothing else; "
-                "an undeclared name is refused when the document is validated"
+                "an undeclared name is refused when the document is validated. A slot marked "
+                f"`reads_setpoint` may also read `{SETPOINT_NAME}`, the setpoint as evaluated "
+                f"this cycle, and no input or parameter may be called `{SETPOINT_NAME}`"
             ),
             "functions": {name: _arity(low, high) for name, (low, high) in sorted(FUNCTION_ARITY.items())},
             "operators": list(OPERATORS),
@@ -858,6 +876,9 @@ def _control_schema_result(settings, settings_file=None, supervisor=None):
         # are the one part of a control document that cannot be right in the abstract, and
         # every word explaining that used to live in comments this payload does not carry.
         "tuning": TUNING_NOTES,
+        # The one setting whose value is read off the control's own history, so how to read it
+        # has to travel with the format rather than be guessed.
+        "starting_output": STARTING_OUTPUT_NOTES,
         "sources": _usable_sources(settings),
         "examples": CONTROL_EXAMPLES,
         "writing": _writing_availability(settings, settings_file, supervisor),

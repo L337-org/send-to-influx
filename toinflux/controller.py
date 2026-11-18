@@ -25,15 +25,15 @@ from simple_pid import PID
 
 from toinflux.exceptions import ConfigError
 from toinflux.general import render_values
-from toinflux.controls import DEFAULT_CYCLE_SECONDS, parameter_devices, rule_names
+from toinflux.controls import (
+    DEFAULT_CYCLE_SECONDS,
+    RESUMABLE_HOLD_SECONDS,
+    SETPOINT_NAME,
+    parameter_devices,
+    rule_names,
+)
 from toinflux.rules import RuleEvaluationError, parse_rule
 from toinflux.staging import build_ladder, cap_ladder, plan_window, reachable_ladder
-
-#: How long a hold may last and still be resumed from. A fail-safe lasts one cycle and a
-#: gated-off control lasts until its window reopens, which is the distinction that matters: a
-#: blip must not cost the loop what it learned, and last night's integral must not be handed
-#: to this evening. Generous against the first and far short of the second.
-RESUMABLE_HOLD_SECONDS = 1800.0
 
 
 @dataclass(frozen=True)
@@ -107,6 +107,12 @@ def _loop_material(document):
     output = material.get("output")
     if isinstance(output, dict):
         material["output"] = {k: v for k, v in output.items() if k != "min_transition_seconds"}
+    # **What to start from when there is nothing to resume is not what a memory means.** It is
+    # read only where no integral survived, so a stored one is unaffected by it - and leaving it
+    # in would make editing it discard the very integral it exists to stand in for.
+    pid = material.get("pid")
+    if isinstance(pid, dict):
+        material["pid"] = {k: v for k, v in pid.items() if k != "starting_output"}
     return material
 
 
@@ -156,10 +162,28 @@ class Controller:
         #: the loop can record them without this module knowing anything is recorded.
         self.last_step: "StepTerms | None" = None
         names = rule_names(document)
-        self._setpoint_rule = _rule(document.get("pid", {}).get("setpoint"), names, "pid.setpoint")
-        self._input_rule = _rule(document.get("pid", {}).get("input"), names, "pid.input")
-        self._max_level_rule = _rule(output.get("max_level"), names, "output.max_level", optional=True)
+        # The slots evaluated after the setpoint may read it - see `CONTROL_RULE_SLOTS`.
+        after_setpoint = names + (SETPOINT_NAME,)
         tunings = document.get("pid") or {}
+        self._setpoint_rule = _rule(tunings.get("setpoint"), names, "pid.setpoint")
+        self._input_rule = _rule(tunings.get("input"), names, "pid.input")
+        self._starting_rule = _rule(
+            tunings.get("starting_output"), after_setpoint, "pid.starting_output", optional=True
+        )
+        self._max_level_rule = _rule(output.get("max_level"), after_setpoint, "output.max_level", optional=True)
+        #: Whether the next step must decide what the integral starts from, because nothing
+        #: was carried into it: true for a new controller, and after a hold too long to resume.
+        self._start_pending = True
+        #: How the integral began the current stretch of control: ``resumed`` (a stored
+        #: integral that passed its tests), ``starting_output`` or ``zero``. None before the
+        #: first step. Reported by `get_control_state`, because which one happened is
+        #: otherwise invisible and is the first question when a loop opens high or low.
+        self.started_from: "str | None" = None
+        #: The integral that stretch began from, alongside `started_from`.
+        self.starting_integral: "float | None" = None
+        #: Whether the step just taken was the one that decided the start, so the process,
+        #: which knows the control's name, can say so once.
+        self.started_now = False
         self.pid = PID(
             Kp=float(tunings.get("kp", 0.0)),
             Ki=float(tunings.get("ki", 0.0)),
@@ -213,10 +237,17 @@ class Controller:
         # rule evaluation is worse than one that skips a cycle.
         setpoint = _finite(self._setpoint_rule.evaluate(bindings), "pid.setpoint")
         process_variable = _finite(self._input_rule.evaluate(bindings), "pid.input")
+        # The setpoint as a name, for the slots evaluated after it. Its value rather than its
+        # text, so a rule reading it cannot drift from the setpoint actually in force.
+        later = {**bindings, SETPOINT_NAME: setpoint}
+        starting = None
+        if self._start_pending and self._starting_rule is not None:
+            starting = _finite(self._starting_rule.evaluate(later), "pid.starting_output")
+        self.started_now = False
         ladder = self.ladder
         limits = None
         if self._max_level_rule is not None:
-            cap = self._max_level_rule.evaluate(bindings)
+            cap = self._max_level_rule.evaluate(later)
             ladder = cap_ladder(self.ladder, cap)
             limits = (ladder[0].level, ladder[-1].level)
         # After the cap and deliberately *not* reflected in `limits` above. A cap is a
@@ -235,6 +266,8 @@ class Controller:
             # keep accumulating towards a level the cap has just forbidden, and every cycle
             # spent capped would be paid back as overshoot the moment it lifted.
             self.pid.output_limits = limits
+        if self._start_pending:
+            self._start(starting)
         demand = self.pid(process_variable, dt=dt)
         if demand is None:
             # Held, and stepped anyway. simple-pid answers with its last output while manual,
@@ -276,6 +309,34 @@ class Controller:
                 f", held={render_values(sorted(frozen))}" if frozen else "",
             )
         return plan
+
+    def _start(self, starting) -> None:
+        """Set the integral a stretch of control begins from, where nothing was carried in.
+
+        **Set directly rather than through simple-pid's own `starting_output`**, which is read
+        only when the controller is built - and the case this exists for is the opposite one: a
+        controller that has been running all day and is resuming after its window was closed,
+        where `set_auto_mode(True)` has just reset the integral to zero.
+
+        Clamped to the limits in force, after any cap, as a resumed integral is: a starting
+        point above what the ladder may deliver this cycle would be paid back as overshoot.
+
+        Args:
+            starting (float or None): the evaluated `pid.starting_output`, or None where the
+                document has none
+        """
+        if starting is None:
+            self.started_from, self.starting_integral = "zero", float(getattr(self.pid, "_integral", 0.0) or 0.0)
+        else:
+            low, high = self.pid.output_limits
+            if low is not None:
+                starting = max(low, starting)
+            if high is not None:
+                starting = min(high, starting)
+            self.pid._integral = starting
+            self.started_from, self.starting_integral = "starting_output", starting
+        self._start_pending = False
+        self.started_now = True
 
     def min_transition_for(self, device):
         """Return a device's minimum transition time in seconds.
@@ -342,7 +403,7 @@ class Controller:
         return hashlib.sha256(material.encode()).hexdigest()[:16]
 
     def capture(self):
-        """Return the loop's own memory, as plain numbers a file can hold.
+        """Return the loop's own memory, as plain values a file can hold.
 
         The integral is the whole point: it is what takes a slow plant an hour to rebuild and
         the only part a restart genuinely loses. The last input and error come with it so a
@@ -359,6 +420,11 @@ class Controller:
             value = getattr(self.pid, name, None)
             if isinstance(value, (int, float)) and math.isfinite(value):
                 state[name.lstrip("_")] = float(value)
+        # Not read back by `resume_from`: a restart that keeps this integral has resumed, and
+        # one that does not decides afresh. Written so `get_control_state` can report it.
+        if self.started_from is not None:
+            state["started_from"] = self.started_from
+            state["starting_integral"] = self.starting_integral
         return state
 
     def resume_from(self, state, age=0.0) -> None:
@@ -413,7 +479,7 @@ class Controller:
             # An unusable age means an unusable lease, and the safe reading of that is that it
             # has all been spent: a clock that went backwards must not buy extra time.
             age = RESUMABLE_HOLD_SECONDS + 1
-        self._held = {"integral": float(integral), "at": self._clock() - age}
+        self._held = {"integral": float(integral), "at": self._clock() - age, "restored": True}
         self.pid.set_auto_mode(False)
 
     def hold(self) -> None:
@@ -469,8 +535,13 @@ class Controller:
 
         Args:
             last_output (float or None): the demand to resume from, overriding what was held.
-                None means use what was held, or zero where the hold was too long ago
+                None means use what was held, or zero where the hold was too long ago - and
+                then the next step starts from `pid.starting_output` where the document has one
         """
+        # Only a real manual-to-automatic change starts a stretch: this is called every cycle,
+        # and simple-pid ignores the call while already automatic.
+        starting = not self.pid.auto_mode
+        explicit = last_output is not None
         if last_output is None:
             last_output = self._held_integral()
         # **The derivative's memory has to be carried by hand across this call.** simple-pid
@@ -495,17 +566,32 @@ class Controller:
         # that pair doing work this method silently undid.
         brief = self._held_integral() is not None
         carried = {name: getattr(self.pid, name, None) for name in ("_last_input", "_last_error")} if brief else {}
+        restored = brief and bool((self._held or {}).get("restored"))
         self.pid.set_auto_mode(True, last_output=last_output)
         for name, value in carried.items():
             if value is not None:
                 setattr(self.pid, name, value)
+        if starting:
+            if restored or explicit:
+                # A stored integral put back by `resume_from`, or a caller's own value: the
+                # start is decided, and `pid.starting_output` must not overwrite it.
+                self._start_pending = False
+                if restored:
+                    self.started_from, self.starting_integral = "resumed", float(last_output)
+            elif last_output is None:
+                # Nothing carried in, which is the case `pid.starting_output` is for.
+                self._start_pending = True
+            # Otherwise a brief hold within this run, which continues the stretch it
+            # interrupted: whatever began that stretch still stands, and a start still
+            # pending - a first cycle that failed - is still pending.
         self._held = None
 
     def _held_integral(self):
         """Return the integral worth carrying across a brief hold, or None.
 
         Returns:
-            float or None: what to resume the I-term from, or None to start it at zero
+            float or None: what to resume the I-term from, or None where nothing is carried,
+                which the next step starts from `pid.starting_output` or zero
         """
         held = self._held
         if not held:
