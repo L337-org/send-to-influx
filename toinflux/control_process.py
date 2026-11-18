@@ -596,6 +596,15 @@ class ControlProcess:
         # this window's changes against it.
         before = self.transitions.states()
         demand = self.controller.step(bindings, dt, frozen=frozenset(frozen - set(driven)), states=before)
+        if self.controller.started_now:
+            # Once per stretch of control, because it decides how the first hour goes and is
+            # otherwise visible only as an `i` that did or did not begin at zero.
+            logging.info(
+                "Control %r had no integral to resume, so it started from %s (integral %.3g)",
+                self.name,
+                "pid.starting_output" if self.controller.started_from == "starting_output" else "zero",
+                self.controller.starting_integral,
+            )
         demand = self._hold(demand, frozen & set(driven))
         # After the step, so what is stored is what the loop actually knows now. Written every
         # cycle: the file is a few hundred bytes and the alternative is a memory that is

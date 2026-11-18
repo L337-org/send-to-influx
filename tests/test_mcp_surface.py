@@ -101,6 +101,7 @@ NON_TOOL_IDENTIFIERS = {
     # Keys in `get_control_state`'s own result rather than tools.
     "matches_document",
     "held_by_minimum",
+    "started_from",
     "min_transition_seconds",
     "as_of",
     # Keys in save_control's result, not tools.

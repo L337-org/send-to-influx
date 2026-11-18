@@ -1733,3 +1733,29 @@ class TestWhatStartingSays:
             run_control("conservatory", settings_file=state_directory.settings_file, cycles=0, sleep=_never_sleep)
         spool = os.path.join(state_directory.state_dir, "spool", "control-conservatory")
         assert f"InfluxDB points for control-conservatory are buffered on disk in {spool!r}" in caplog.text
+
+
+class TestItSaysWhatTheLoopStartedFrom:
+    """Which start a stretch of control used decides how its first hour goes, and is otherwise
+    visible only as an `i` that did or did not begin at zero - so it is said once, by name."""
+
+    def test_a_fresh_start_says_so_once(self, control, bridge, caplog):
+        with caplog.at_level(logging.INFO):
+            control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+            control.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        lines = [r.getMessage() for r in caplog.records if "had no integral to resume" in r.getMessage()]
+        assert lines == ["Control 'conservatory' had no integral to resume, so it started from zero (integral 0)"]
+
+    def test_a_configured_start_is_named(self, state_directory, bridge, caplog):
+        document = conservatory()
+        document["pid"]["starting_output"] = 600
+        state_directory.write_control(document)
+        process = ControlProcess("conservatory", settings_file=state_directory.settings_file)
+        try:
+            with caplog.at_level(logging.INFO):
+                process.cycle(dt=60, moment=NIGHT, sleep=_never_sleep)
+        finally:
+            process.guard.close()
+            process.close()
+        assert "started from pid.starting_output (integral 600)" in caplog.text
+        assert process.transitions.loop["started_from"] == "starting_output"

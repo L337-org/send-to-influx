@@ -1616,3 +1616,61 @@ class TestAnUnquotedClockTime:
         reference = (pathlib.Path(__file__).resolve().parent.parent / "CONTROLS.md").read_text(encoding="utf-8")
         bare = re.findall(r"(?m)^\s*(?:from|to): (?!')(\d{1,2}:\d{2})\s*$", reference)
         assert not bare, f"unquoted clock times in the reference: {bare}"
+
+
+class TestStartingOutputAndTheSetpointName:
+    """`pid.starting_output` takes a number or a rule, and it and `output.max_level` may read
+    `setpoint` - the setpoint as evaluated that cycle. The name is reserved, so no input or
+    parameter may take it, and a slot evaluated before the setpoint exists may not read it.
+    """
+
+    @staticmethod
+    def _with(**pid):
+        document = a_valid_control()
+        document["pid"] = {**document["pid"], **pid}
+        return document
+
+    @pytest.mark.parametrize("value", [0.5, 600, "750", "clamp(50 * (setpoint - outside), 0, 1500)"])
+    def test_a_number_or_a_rule_is_accepted(self, value):
+        assert validate_control("conservatory", self._with(starting_output=value)) == []
+
+    @pytest.mark.parametrize("value", [True, [1], {"a": 1}, "", float("nan")])
+    def test_anything_else_is_refused_naming_the_slot(self, value):
+        errors = validate_control("conservatory", self._with(starting_output=value))
+        assert any(error.startswith("pid.starting_output:") for error in errors), errors
+
+    def test_an_undeclared_name_in_it_is_refused(self):
+        errors = validate_control("conservatory", self._with(starting_output="k_env * outside"))
+        assert any(error.startswith("pid.starting_output:") and "k_env" in error for error in errors), errors
+
+    def test_max_level_may_read_the_setpoint(self):
+        document = a_valid_control()
+        document["output"]["max_level"] = "if(inside > setpoint + 1, 0, 2250)"
+        assert validate_control("conservatory", document) == []
+
+    def test_enable_when_may_not_and_says_why(self):
+        document = a_valid_control()
+        document["enable_when"] = "inside < setpoint"
+        errors = validate_control("conservatory", document)
+        assert any(
+            error.startswith("enable_when:") and "only pid.starting_output, output.max_level" in error
+            for error in errors
+        ), errors
+
+    def test_the_setpoint_may_not_read_itself(self):
+        errors = validate_control("conservatory", self._with(setpoint="setpoint + 1"))
+        assert any(error.startswith("pid.setpoint:") and "'setpoint'" in error for error in errors), errors
+
+    def test_a_different_fault_keeps_the_parser_s_own_message(self):
+        document = a_valid_control()
+        document["enable_when"] = "nonsense < setpoint"
+        errors = validate_control("conservatory", document)
+        assert any(error.startswith("enable_when:") and "nonsense" in error for error in errors), errors
+
+    @pytest.mark.parametrize("section", ["parameters", "inputs"])
+    def test_the_name_is_reserved(self, section):
+        document = a_valid_control()
+        entry = 18.0 if section == "parameters" else {"source": "openmeteo", "field": "temperature_2m"}
+        document[section]["setpoint"] = entry
+        errors = validate_control("conservatory", document)
+        assert any(error.startswith(f"{section}: 'setpoint' is reserved") for error in errors), errors

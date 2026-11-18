@@ -71,7 +71,7 @@ The document
 | `name` | no | the control's own name, which must match the file it is stored as |
 | `output` | yes | cycle_seconds, min_transition_seconds, an optional max_level rule, and the stage ladder |
 | `parameters` | no | constants the rules may read, such as a target temperature, adjustable at runtime |
-| `pid` | yes | the loop itself: input and setpoint rules, and the kp, ki and kd gains |
+| `pid` | yes | the loop itself: input and setpoint rules, the kp, ki and kd gains, and an optional `starting_output` |
 | `safe_state` | no | unenergised, energised or leave_unchanged: what the devices do at startup, on failure and at shutdown |
 | `timezone` | no | an IANA zone name for the active period; absent means this machine's local time |
 
@@ -108,12 +108,13 @@ The rule language
 
 These slots hold an expression:
 
-| Slot | |
-| --- | --- |
-| `pid.setpoint` | required |
-| `pid.input` | required |
-| `output.max_level` | optional |
-| `enable_when` | optional |
+| Slot | | May read `setpoint` |
+| --- | --- | --- |
+| `pid.setpoint` | required | no |
+| `pid.input` | required | no |
+| `pid.starting_output` | optional, and may be a plain number | yes |
+| `output.max_level` | optional | yes |
+| `enable_when` | optional | no |
 
 Rules are **parsed, never evaluated as code**. The grammar is arithmetic over numbers and
 nothing else: no strings, no attribute access, no indexing, no assignment. There is no path
@@ -122,6 +123,12 @@ one.
 
 A rule may read the keys of `inputs` and `parameters`, and nothing else. A name nothing
 declares is refused when the document is validated, not discovered at three in the morning.
+
+The one exception is `setpoint`, which is the value `pid.setpoint` produced this cycle rather
+than a copy of its text, so a rule reading it follows the setpoint when the setpoint rule is
+edited. Only the slots evaluated after the setpoint can read it: `pid.setpoint` would be
+reading itself, and `enable_when` is decided before the setpoint is worked out. The name is
+reserved, so an input or parameter called `setpoint` is refused.
 
 | Function | |
 | --- | --- |
@@ -746,8 +753,8 @@ memory still describes the present, on two tests: the gains, ladder and cycle mu
 unchanged, because an integral is in the output's units and means something else under a
 different tuning; and it must be recent, within a few cycles, because a machine that has been
 down long enough for the room to change should look at the room rather than at what it
-remembered. Failing either, the control starts afresh - which is simply what it always did.
-`--verbose` says which happened.
+remembered. Failing either, the control starts afresh: from `pid.starting_output` where the
+document has one, and from zero where it does not. The log says which happened.
 
 The file is written whenever a device actually changes, and once per cycle for the loop
 half. Deleting it costs nothing but the memory; the control rebuilds both. A damaged file
@@ -763,13 +770,68 @@ and the end of an active period, after which last night's integral says nothing 
 evening.
 
 `get_control_state` over MCP reports all of it - the integral, its age, whether it still
-matches the document, what each device was last commanded to, and which devices are currently
+matches the document, what the integral started from (`started_from`: `resumed`,
+`starting_output` or `zero`, with `starting_integral`), what each device was last commanded to, and which devices are currently
 held by their `min_transition_seconds`. That is the tool to reach for when an output moves
 against its input, because the integral is the usual explanation and is invisible from the
 device side.  Where `controls.db` is set it also names where the control's cycles are recorded,
 as a `source` and `instance` for `query_history`, so a caller tuning the gains can read the loop
 over time rather than only as it stands, and names `get_control_devices` for each device's
 share; where it is not, it names that setting.
+
+Starting from a configured output
+---------------------------------
+
+A control whose active period opens at night has been held all day, far longer than the
+half-hour a hold may last and still be resumed, so it starts afresh every evening. Started from
+zero, the output on a cold room is carried by the proportional term alone and the integral
+takes what can be an hour to build up to what the room needs. `pid.starting_output` gives it
+somewhere better to start. Added to the *Normal* example above, it reads:
+
+```yaml
+parameters:
+  target: 18.0
+  k_env: 60.0
+pid:
+  input: inside
+  setpoint: max(target, dew + 5)
+  kp: 500.0
+  ki: 0.15
+  kd: 0.0
+  starting_output: k_env * (setpoint - outside)
+```
+
+At a setpoint of 18 and 5 degrees outside, that starts the integral at 780, just above the far
+heater's rung, before the proportional term adds whatever a cold room asks for. `k_env` is a figure for that conservatory, not yours - see below.
+
+* **It is used only where nothing was carried in**: a fresh start, a stored integral that
+  failed the age or document test above, or a resume after a hold longer than 30 minutes, such
+  as the active period opening. A stored integral that passes its tests always wins, and a
+  brief hold within a run keeps what the loop had.
+* **It is the integral, on the ladder's level scale**, so it is clamped to the ladder after any
+  `max_level` cap, exactly as a resumed integral is. The proportional term is added on top as
+  usual.
+* **A plain number works** - `starting_output: 0.5` - and is the simplest place to begin.
+* **Editing it keeps a stored integral.** It is not part of what a stored integral is checked
+  against, because it matters only when there is no integral to keep.
+* Absent, the loop starts from zero, as it always has.
+
+### Choosing a value
+
+The number to aim for is in the control's own history. Once `input` has sat on `setpoint` for an
+hour or more, the integral `i` is the output it takes to hold it there under the conditions of
+the moment - see *Recording the PID history* above. Read `i` from a few such stretches with
+`query_history`, at the `source` and `instance` that `get_control_state` names.
+
+Where it varies with the weather, as heating does, make it a rule over an input the control
+already reads. The heat a room loses is roughly proportional to how much warmer it is than
+outside, so `k * (setpoint - outside)` follows the same shape, with `k` read off the history as
+`i / (setpoint - outside)` at a settled moment. Where the control reads nothing about outside
+conditions, a constant is the honest answer.
+
+Start low. Too low costs settling time, which is what starting from zero costs today; too high
+heats past the setpoint before the loop can take it back. `get_control_state` reports which
+start a control actually used, and the log says so once each time it starts afresh.
 
 What is checked, and when
 -------------------------
