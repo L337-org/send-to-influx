@@ -38,6 +38,16 @@ CONTROL_DIR_NAME = "controls"
 # its first cycle. A default with three spellings is a default with none.
 DEFAULT_CYCLE_SECONDS = 900.0
 
+#: How long a hold may last and still be resumed from. A fail-safe lasts one cycle and a
+#: gated-off control lasts until its window reopens, which is the distinction that matters: a
+#: blip must not cost the loop what it learned, and last night's integral must not be handed
+#: to this evening. Generous against the first and far short of the second.
+#:
+#: Homed here rather than with the loop that applies it because the schema's notes on
+#: `pid.starting_output` state it, and a figure restated by hand is one that drifts.
+RESUMABLE_HOLD_SECONDS = 1800.0
+RESUMABLE_HOLD_MINUTES = RESUMABLE_HOLD_SECONDS / 60
+
 CONTROL_SUFFIX = ".yaml"
 
 #: How much staler than its own cycle a control's feedback may be before it is worth saying
@@ -150,13 +160,24 @@ SETPOINT_NAME = "setpoint"
 
 #: Every slot in a control document holding a rule expression: where it lives, the name to call
 #: it in a message, whether it may be absent, and whether it may read :data:`SETPOINT_NAME`.
-#: Only slots evaluated after the setpoint can: `pid.setpoint` would be reading itself, and
-#: `enable_when` is decided by the gate before the setpoint exists. One table, because the
+#: Only the slots that use the setpoint to shape the output can - see `_SETPOINT_REFUSED` for why
+#: each of the others cannot. One table, because the
 #: runtime parses these in two other modules and a validator with its own private list would be
 #: a second copy that drifts - a rule slot the runtime honours and the validator has never
 #: heard of passes `--check-config` and kills the control at startup, which is the failure this
 #: table exists to make impossible. ``tests/test_repo_hygiene.py`` fails the build where the
 #: runtime parses a number of slots this table does not describe.
+#: Why each slot that may not read :data:`SETPOINT_NAME` may not, so the refusal names the
+#: actual reason for the slot in front of the operator rather than one that is true of another.
+_SETPOINT_REFUSED = {
+    "pid.setpoint": "the setpoint would be defined in terms of itself",
+    "pid.input": (
+        "a reading defined in terms of the setpoint would make the error a function of the "
+        "setpoint rather than a measurement"
+    ),
+    "enable_when": "the gate decides it before the setpoint is worked out",
+}
+
 CONTROL_RULE_SLOTS = (
     (("pid", "setpoint"), "pid.setpoint", False, False),
     (("pid", "input"), "pid.input", False, False),
@@ -281,8 +302,8 @@ TUNING_NOTES = [
 STARTING_OUTPUT_NOTES = [
     "optional, in `pid`: a number or a rule giving the integral to start from when the loop has "
     "nothing to resume - a fresh start, a stored integral that failed its age or document test, or "
-    "a hold longer than 30 minutes such as the active period closing. A stored integral that "
-    "passes its tests is always used instead",
+    f"a hold longer than {RESUMABLE_HOLD_MINUTES:g} minutes such as the active period closing. A "
+    "stored integral that passes its tests is always used instead",
     "on the ladder's level scale, and clamped to the ladder after any max_level cap",
     "the value to aim for is the integral `i` once `input` has sat on `setpoint` for an hour or "
     "more: that is the output needed to hold it. Read `i` from the control's history with "
@@ -290,7 +311,7 @@ STARTING_OUTPUT_NOTES = [
     "that value usually depends on outside conditions, so a rule can scale it: for heating, "
     "`k * (setpoint - outside)` with k = i / (setpoint - outside) read from the same moment. "
     "`setpoint` here is the setpoint as evaluated this cycle",
-    "start low: too low costs settling time, as having none does today; too high overshoots",
+    "start low: too low costs settling time, as having no starting output does; too high overshoots",
     "editing it does not discard a stored integral, and `get_control_state` reports which "
     "start the loop used as `started_from`",
 ]
@@ -1297,11 +1318,11 @@ def validate_control_rules(document):
         try:
             parse_rule(text, allowed_names=names + ((SETPOINT_NAME,) if reads_setpoint else ()))
         except RuleSyntaxError as exc:
-            errors.append(f"{where}: {_setpoint_hint(text, names, reads_setpoint) or exc}")
+            errors.append(f"{where}: {_setpoint_hint(text, names, where, reads_setpoint) or exc}")
     return errors
 
 
-def _setpoint_hint(text, names, reads_setpoint):
+def _setpoint_hint(text, names, where, reads_setpoint):
     """Return a clearer refusal for `setpoint` read where it does not exist, or None.
 
     The parser's own message calls it an undeclared name, which sends an operator to
@@ -1311,6 +1332,7 @@ def _setpoint_hint(text, names, reads_setpoint):
     Args:
         text (str): the rule as written
         names (tuple): the declared names
+        where (str): the slot, which decides the reason given
         reads_setpoint (bool): whether this slot may read it
 
     Returns:
@@ -1325,10 +1347,8 @@ def _setpoint_hint(text, names, reads_setpoint):
     except RuleSyntaxError:
         return None
     readers = ", ".join(where for _path, where, _optional, reads in CONTROL_RULE_SLOTS if reads)
-    return (
-        f"reads {SETPOINT_NAME!r}, which only {readers} can read: those are evaluated after "
-        f"pid.setpoint, and this slot is not"
-    )
+    reason = _SETPOINT_REFUSED.get(where, "this slot is not one of them")
+    return f"reads {SETPOINT_NAME!r}, which only {readers} can read: here, {reason}"
 
 
 def validate_control_structure(name, document):

@@ -25,15 +25,15 @@ from simple_pid import PID
 
 from toinflux.exceptions import ConfigError
 from toinflux.general import render_values
-from toinflux.controls import DEFAULT_CYCLE_SECONDS, SETPOINT_NAME, parameter_devices, rule_names
+from toinflux.controls import (
+    DEFAULT_CYCLE_SECONDS,
+    RESUMABLE_HOLD_SECONDS,
+    SETPOINT_NAME,
+    parameter_devices,
+    rule_names,
+)
 from toinflux.rules import RuleEvaluationError, parse_rule
 from toinflux.staging import build_ladder, cap_ladder, plan_window, reachable_ladder
-
-#: How long a hold may last and still be resumed from. A fail-safe lasts one cycle and a
-#: gated-off control lasts until its window reopens, which is the distinction that matters: a
-#: blip must not cost the loop what it learned, and last night's integral must not be handed
-#: to this evening. Generous against the first and far short of the second.
-RESUMABLE_HOLD_SECONDS = 1800.0
 
 
 @dataclass(frozen=True)
@@ -403,7 +403,7 @@ class Controller:
         return hashlib.sha256(material.encode()).hexdigest()[:16]
 
     def capture(self):
-        """Return the loop's own memory, as plain numbers a file can hold.
+        """Return the loop's own memory, as plain values a file can hold.
 
         The integral is the whole point: it is what takes a slow plant an hour to rebuild and
         the only part a restart genuinely loses. The last input and error come with it so a
@@ -535,7 +535,8 @@ class Controller:
 
         Args:
             last_output (float or None): the demand to resume from, overriding what was held.
-                None means use what was held, or zero where the hold was too long ago
+                None means use what was held, or zero where the hold was too long ago - and
+                then the next step starts from `pid.starting_output` where the document has one
         """
         # Only a real manual-to-automatic change starts a stretch: this is called every cycle,
         # and simple-pid ignores the call while already automatic.
@@ -589,7 +590,8 @@ class Controller:
         """Return the integral worth carrying across a brief hold, or None.
 
         Returns:
-            float or None: what to resume the I-term from, or None to start it at zero
+            float or None: what to resume the I-term from, or None where nothing is carried,
+                which the next step starts from `pid.starting_output` or zero
         """
         held = self._held
         if not held:

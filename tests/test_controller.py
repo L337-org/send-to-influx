@@ -837,6 +837,8 @@ class TestStartingOutput:
         self._step(capped, clock)
         # setpoint 18 x 50 = 900 caps the ladder at its 750 rung
         assert capped.pid._integral == pytest.approx(750)
+        # The report, because simple-pid would clamp the integral to the cap on its own.
+        assert capped.starting_integral == pytest.approx(750)
 
     def test_it_is_used_once_not_every_cycle(self):
         clock = [0.0]

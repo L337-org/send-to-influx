@@ -1657,6 +1657,23 @@ class TestStartingOutputAndTheSetpointName:
             for error in errors
         ), errors
 
+    def test_the_input_may_not_and_is_given_its_own_reason(self):
+        errors = validate_control("conservatory", self._with(input="setpoint - inside"))
+        assert any(
+            error.startswith("pid.input:") and "function of the setpoint rather than a measurement" in error
+            for error in errors
+        ), errors
+
+    def test_the_hold_limit_in_the_notes_and_the_reference_is_the_one_the_loop_applies(self):
+        """Stated in prose in two places a client or an operator reads, and owned by a constant."""
+        from toinflux.controls import RESUMABLE_HOLD_SECONDS, STARTING_OUTPUT_NOTES
+
+        figure = f"{RESUMABLE_HOLD_SECONDS / 60:g} minutes"
+        assert figure in " ".join(STARTING_OUTPUT_NOTES)
+        reference = (pathlib.Path(__file__).resolve().parent.parent / "CONTROLS.md").read_text(encoding="utf-8")
+        section = reference.split("Starting from a configured output", 1)[1].split("What is checked, and when", 1)[0]
+        assert section.count(figure) >= 2, f"CONTROLS.md does not say {figure!r} where it describes the hold"
+
     def test_the_setpoint_may_not_read_itself(self):
         errors = validate_control("conservatory", self._with(setpoint="setpoint + 1"))
         assert any(error.startswith("pid.setpoint:") and "'setpoint'" in error for error in errors), errors

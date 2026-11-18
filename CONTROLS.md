@@ -126,8 +126,9 @@ declares is refused when the document is validated, not discovered at three in t
 
 The one exception is `setpoint`, which is the value `pid.setpoint` produced this cycle rather
 than a copy of its text, so a rule reading it follows the setpoint when the setpoint rule is
-edited. Only the slots evaluated after the setpoint can read it: `pid.setpoint` would be
-reading itself, and `enable_when` is decided before the setpoint is worked out. The name is
+edited. Only `pid.starting_output` and `output.max_level` can read it. `pid.setpoint` would be
+defined in terms of itself; `pid.input` would make the error a function of the setpoint rather
+than a measurement; and `enable_when` is decided before the setpoint is worked out. The name is
 reserved, so an input or parameter called `setpoint` is refused.
 
 | Function | |
@@ -287,9 +288,7 @@ gentler. See *Choosing the gains* below.
 A switched device has no middle setting, so a demand between two rungs is met by spending part
 of each cycle on each. With a heater on one rung and off on the other, that is one on and one
 off per cycle: at a 300-second cycle, up to 24 changes an hour, for as long as the demand sits
-between those two rungs. **That is the ladder working, not the loop hunting.** One real
-conservatory heater changed 17 times an hour across a mild night with its demand between the
-bottom two rungs the whole time, holding the room within a few tenths of a degree.
+between those two rungs. **That is the ladder working, not the loop hunting.**
 
 `get_control_devices` shows which you have. A device with a high `changes_per_active_hour` and
 an `on_share` between 0 and 1 is being time-proportioned; read `demand` from the history to
@@ -840,7 +839,7 @@ Starting from a configured output
 ---------------------------------
 
 A control whose active period opens at night has been held all day, far longer than the
-half-hour a hold may last and still be resumed, so it starts afresh every evening. Started from
+30 minutes a hold may last and still be resumed, so it starts afresh every evening. Started from
 zero, the output on a cold room is carried by the proportional term alone and the integral
 takes what can be an hour to build up to what the room needs. `pid.starting_output` gives it
 somewhere better to start. Added to the *Normal* example above, it reads:
@@ -868,10 +867,11 @@ heater's rung, before the proportional term adds whatever a cold room asks for. 
 * **It is the integral, on the ladder's level scale**, so it is clamped to the ladder after any
   `max_level` cap, exactly as a resumed integral is. The proportional term is added on top as
   usual.
-* **A plain number works** - `starting_output: 0.5` - and is the simplest place to begin.
+* **A plain number works** - `starting_output: 750` on the example above - and is the
+  simplest place to begin.
 * **Editing it keeps a stored integral.** It is not part of what a stored integral is checked
   against, because it matters only when there is no integral to keep.
-* Absent, the loop starts from zero, as it always has.
+* Absent, the loop starts from zero.
 
 ### Choosing a value
 
@@ -886,7 +886,7 @@ outside, so `k * (setpoint - outside)` follows the same shape, with `k` read off
 `i / (setpoint - outside)` at a settled moment. Where the control reads nothing about outside
 conditions, a constant is the honest answer.
 
-Start low. Too low costs settling time, which is what starting from zero costs today; too high
+Start low. Too low costs settling time, which is what having no starting output costs; too high
 heats past the setpoint before the loop can take it back. `get_control_state` reports which
 start a control actually used, and the log says so once each time it starts afresh.
 
