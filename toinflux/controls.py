@@ -158,15 +158,6 @@ CONTROL_KEY_HELP = {
 #: else, and a declared name would shadow it in some slots and not others.
 SETPOINT_NAME = "setpoint"
 
-#: Every slot in a control document holding a rule expression: where it lives, the name to call
-#: it in a message, whether it may be absent, and whether it may read :data:`SETPOINT_NAME`.
-#: Only the slots that use the setpoint to shape the output can - see `_SETPOINT_REFUSED` for why
-#: each of the others cannot. One table, because the
-#: runtime parses these in two other modules and a validator with its own private list would be
-#: a second copy that drifts - a rule slot the runtime honours and the validator has never
-#: heard of passes `--check-config` and kills the control at startup, which is the failure this
-#: table exists to make impossible. ``tests/test_repo_hygiene.py`` fails the build where the
-#: runtime parses a number of slots this table does not describe.
 #: Why each slot that may not read :data:`SETPOINT_NAME` may not, so the refusal names the
 #: actual reason for the slot in front of the operator rather than one that is true of another.
 _SETPOINT_REFUSED = {
@@ -178,6 +169,16 @@ _SETPOINT_REFUSED = {
     "enable_when": "the gate decides it before the setpoint is worked out",
 }
 
+#: Every slot in a control document holding a rule expression: where it lives, the name to call
+#: it in a message, whether it may be absent, and whether it may read :data:`SETPOINT_NAME`.
+#: Only the slots that use the setpoint to shape the output can - see `_SETPOINT_REFUSED` for
+#: why each of the others cannot.
+#:
+#: One table, because the runtime parses these in two other modules and a validator with its
+#: own private list would be a second copy that drifts - a rule slot the runtime honours and
+#: the validator has never heard of passes `--check-config` and kills the control at startup,
+#: which is the failure this table exists to make impossible. ``tests/test_repo_hygiene.py``
+#: fails the build where the runtime parses a number of slots this table does not describe.
 CONTROL_RULE_SLOTS = (
     (("pid", "setpoint"), "pid.setpoint", False, False),
     (("pid", "input"), "pid.input", False, False),

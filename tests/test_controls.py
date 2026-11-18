@@ -1666,9 +1666,10 @@ class TestStartingOutputAndTheSetpointName:
 
     def test_the_hold_limit_in_the_notes_and_the_reference_is_the_one_the_loop_applies(self):
         """Stated in prose in two places a client or an operator reads, and owned by a constant."""
-        from toinflux.controls import RESUMABLE_HOLD_SECONDS, STARTING_OUTPUT_NOTES
+        from toinflux.controls import RESUMABLE_HOLD_MINUTES, RESUMABLE_HOLD_SECONDS, STARTING_OUTPUT_NOTES
 
-        figure = f"{RESUMABLE_HOLD_SECONDS / 60:g} minutes"
+        assert RESUMABLE_HOLD_MINUTES == RESUMABLE_HOLD_SECONDS / 60
+        figure = f"{RESUMABLE_HOLD_MINUTES:g} minutes"
         assert figure in " ".join(STARTING_OUTPUT_NOTES)
         reference = (pathlib.Path(__file__).resolve().parent.parent / "CONTROLS.md").read_text(encoding="utf-8")
         section = reference.split("Starting from a configured output", 1)[1].split("What is checked, and when", 1)[0]
