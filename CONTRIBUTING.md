@@ -336,7 +336,8 @@ must also be a Dependabot secret or Dependabot's pull requests are not announced
 
 To add a workflow that runs on a schedule, a push, a release or a pull request:
 
-1. Give it a `name:`, and give every job a `timeout-minutes:`.
+1. Give it a `name:`, and give every job a `timeout-minutes:`, except a job that calls a shared
+   reusable workflow, which cannot take one: that workflow's own jobs carry it.
 2. Add its `name:` to the `workflows:` list in `report-failures.yaml`, exactly as written, since
    GitHub matches on it.  The repository hygiene check in `premerge.yaml` fails on such a
    workflow missing from the list, and on a listed name no workflow has, so a rename that leaves

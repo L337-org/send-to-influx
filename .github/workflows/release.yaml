@@ -33,6 +33,18 @@ jobs:
       - name: Check out source repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Read the version pyproject.toml declares
+        id: version
+        run: echo "version=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')" >>"$GITHUB_OUTPUT"
+
+      # First, so nothing is tested or built for a release that should not have been published.
+      # This repository tags the bare version, 6.2, not v6.2, so it passes an empty prefix.
+      - name: The release is this repository's, and its tag names the declared version
+        uses: L337-org/github-workflows/actions/release-preflight@v2
+        with:
+          version: ${{ steps.version.outputs.version }}
+          tag-prefix: ''
+
       - name: Set up Python environment
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -49,17 +61,6 @@ jobs:
       - name: Run flake8
         run: flake8
 
-      - name: Read the version pyproject.toml declares
-        id: version
-        run: echo "version=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')" >>"$GITHUB_OUTPUT"
-
-      # This repository tags the bare version, 6.2, not v6.2, so it passes an empty prefix.
-      - name: The release is this repository's, and its tag names the declared version
-        uses: L337-org/github-workflows/actions/release-preflight@v2
-        with:
-          version: ${{ steps.version.outputs.version }}
-          tag-prefix: ''
-
       - name: Build .deb package
         run: packaging/deb/build-deb.sh
 
@@ -69,10 +70,9 @@ jobs:
           name: send-to-influx-deb
           path: send-to-influx_*.deb
 
-      # By release id from the event, never a lookup by tag.  A .deb an earlier run of this
-      # release attached is replaced if it differs, and what the release serves is read back
-      # and compared with the build.  The artifact above stays, so a hand upload is still
-      # possible in a pinch.
+      # By release id from the event, never a lookup by tag, after the 4.3 lookup outage; the
+      # shared action takes the id from the event by default.  The artifact above stays, so a
+      # hand upload is still possible in a pinch.
       - name: Attach .deb to the release
         uses: L337-org/github-workflows/actions/release-attach@v2
         with:

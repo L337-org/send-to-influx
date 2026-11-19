@@ -303,9 +303,8 @@ jobs:
         # a full Ubuntu runner image already, but installed explicitly rather
         # than assumed, so the packaging scenario tests below (the
         # rsyslog/logrotate config) can't be silently skipped by a future
-        # runner-image change.  The shared action bounds and retries apt, and
-        # reads the package lists again after a failed install, which is what
-        # the arm64 ports mirror needs when its index runs ahead of its pool.
+        # runner-image change.  Through the shared action, which retries apt,
+        # because the arm64 ports mirror's index can run ahead of its pool.
         uses: L337-org/github-workflows/actions/apt-install@v2
         with:
           packages: rsyslog logrotate
