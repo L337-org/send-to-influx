@@ -33,6 +33,18 @@ jobs:
       - name: Check out source repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Read the version pyproject.toml declares
+        id: version
+        run: echo "version=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')" >>"$GITHUB_OUTPUT"
+
+      # First, so nothing is tested or built for a release that should not have been published.
+      # This repository tags the bare version, 6.2, not v6.2, so it passes an empty prefix.
+      - name: The release is this repository's, and its tag names the declared version
+        uses: L337-org/github-workflows/actions/release-preflight@v2
+        with:
+          version: ${{ steps.version.outputs.version }}
+          tag-prefix: ''
+
       - name: Set up Python environment
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -49,16 +61,6 @@ jobs:
       - name: Run flake8
         run: flake8
 
-      - name: Verify release tag matches pyproject.toml version
-        env:
-          TAG_NAME: ${{ github.event.release.tag_name }}
-        run: |
-          pkg_version="$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')"
-          if [ "$TAG_NAME" != "$pkg_version" ]; then
-            echo "Release tag ${TAG_NAME} does not match pyproject.toml version ${pkg_version}"
-            exit 1
-          fi
-
       - name: Build .deb package
         run: packaging/deb/build-deb.sh
 
@@ -68,61 +70,26 @@ jobs:
           name: send-to-influx-deb
           path: send-to-influx_*.deb
 
+      # By release id from the event, never a lookup by tag, after the 4.3 lookup outage; the
+      # shared action takes the id from the event by default.  The artifact above stays, so a
+      # hand upload is still possible in a pinch.
       - name: Attach .deb to the release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_ID: ${{ github.event.release.id }}
-          TAG_NAME: ${{ github.event.release.tag_name }}
-        run: |
-          # The upload goes straight to the release-id endpoints using the id from
-          # the event payload. A same-named asset (left by a previously-failed or
-          # partial attempt) is replaced first. No retries by design: if this
-          # fails (e.g. a GitHub outage), the error below reports it plainly and
-          # the fix is to re-run the failed job once GitHub recovers - nothing is
-          # ever half-created, and the .deb is also saved as a workflow artifact
-          # by the step above, so it can be attached by hand in a pinch (as was
-          # done for 4.3).
-          for deb in send-to-influx_*.deb; do
-            name="$(basename "$deb")"
-            asset_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
-              --jq "[.[] | select(.name == \"$name\")][0].id // empty")"
-            if [ -n "$asset_id" ]; then
-              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
-            fi
-            gh api --method POST -H "Content-Type: application/vnd.debian.binary-package" \
-              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$name" \
-              --input "$deb" >/dev/null \
-              || { echo "Failed to attach $name to release $TAG_NAME (id $RELEASE_ID) - re-run this job to retry"; exit 1; }
-            echo "Attached $name to release $TAG_NAME (id $RELEASE_ID)"
-          done
+        uses: L337-org/github-workflows/actions/release-attach@v2
+        with:
+          files: send-to-influx_*.deb
 
   # APT publishing note: the flat APT repo at https://apt.l337.org/ is no longer
   # published from this workflow. It's owned by https://github.com/L337-org/apt,
   # whose hourly aggregator pulls the .deb assets straight from this repo's GitHub
   # Releases - so attaching the .deb above is all this workflow needs to do.
 
-  # A job killed by `timeout-minutes` ends as `cancelled`, not `failure`, so GitHub
-  # raises no workflow-failure notification for it, and the Actions list shows it as
-  # a cancellation rather than a red failure. This workflow is the one place here where
-  # that really bites: it runs unattended when a release is published, so a release
-  # that never attached its .deb should read as a failure wherever it is seen. This job
-  # turns the cancellation into one.
-  #
-  # Safe because this workflow declares no `concurrency` block, so nothing supersedes
-  # it: the only routes to `cancelled` are the timeout and a human pressing cancel,
-  # and both are worth reporting on a publish. `premerge.yaml` deliberately has no
-  # equivalent - `cancel-in-progress: true` there cancels superseded runs as a matter
-  # of course, and a cancelled premerge run blocks the merge in front of a human
-  # anyway. Same guard, same reasoning, as the scheduled workflows in L337-org/apt.
+  # A job killed by its timeout-minutes ends as cancelled, which raises no failure
+  # notification, so a release that never attached its .deb fails the run here instead.
+  # Safe because this workflow declares no concurrency block, so nothing supersedes a run.
   report-cancelled-as-failure:
     name: Report a cancelled release run as a failure
     needs: [build-and-release]
     if: always() && needs.build-and-release.result == 'cancelled'
-    runs-on: [ubuntu-latest]
-    # Only has to bound runner startup: this job emits an annotation and exits.
-    timeout-minutes: 5
-    steps:
-      - name: Fail the run, because a cancellation would not notify
-        run: |
-          echo "::error::The build-and-release job ended as cancelled, which is the conclusion a timeout-minutes kill produces. Failing this run so the release notifies instead of silently not completing."
-          exit 1
+    uses: L337-org/github-workflows/.github/workflows/release-cancelled.yaml@v2
+    with:
+      job: build-and-release
