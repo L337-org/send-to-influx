@@ -13,9 +13,8 @@ from toinflux.general import render_external, render_values
 
 CARBON_INTENSITY_BASE_URL = "https://api.carbonintensity.org.uk"
 
-#: The intensity fields ``fields`` may select, and the default: both, as every install collected
-#: before the setting existed. The ``gen_<fuel>`` fields stay with ``include_generation``, because
-#: their names come from the API's fuel list rather than from us.
+#: The intensity fields ``fields`` may select, and the default. The ``gen_<fuel>`` fields stay with
+#: ``include_generation``, because their names come from the API's fuel list rather than from us.
 INTENSITY_FIELDS = ("intensity_actual", "intensity_forecast")
 ACCEPT_JSON = {"Accept": "application/json"}
 
