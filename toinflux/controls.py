@@ -1186,10 +1186,44 @@ def validate_control_sources(document, settings=None):
                 continue
             if must_actuate and _check_actuation(where, entry, source, handler, errors):
                 continue
-            unusable = _installation_problem(source, settings) if settings is not None else None
+            unusable = (None if must_actuate else _forecast_input_problem(entry, handler)) or (
+                _installation_problem(source, settings) if settings is not None else None
+            )
             if unusable:
                 errors.append(f"{where}: {unusable}")
     return errors
+
+
+def _forecast_input_problem(entry, handler):
+    """Return why an input naming a forecast field cannot be read, or None.
+
+    An input reads its source's live measurement - the stored point first, then the source's
+    own ``get_data()`` - and a forecast field is in neither: it is written to the source's
+    forecast measurement. So such an input would never have a reading, and the control would
+    sit in its safe state from its first cycle with nothing in the document to say why. Said
+    here instead, where ``--check-config`` and a save over MCP both see it.
+
+    Making it readable would take an input that reads the forecast measurement, and a forecast
+    stamped at the time it is for is in the future until that time has passed, so it would
+    also have to read ahead rather than take the newest point.
+
+    Args:
+        entry (dict): the input's entry in the document
+        handler (type): the source's class
+
+    Returns:
+        str or None: the problem, or None where the field is not a forecast
+    """
+    from toinflux.influx import FORECAST_FIELD_RE
+
+    field = entry.get("field")
+    if handler.FORECAST_HEADER is None or not isinstance(field, str) or not FORECAST_FIELD_RE.fullmatch(field):
+        return None
+    measurement = handler.FORECAST_HEADER.split(",", 1)[0]
+    return (
+        f"field {field!r} is a forecast, kept in the {measurement!r} measurement to compare with what "
+        f"happened; a control input reads the source's live measurement, which does not hold it"
+    )
 
 
 def _installation_problem(source, settings):

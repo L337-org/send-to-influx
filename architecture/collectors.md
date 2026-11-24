@@ -169,6 +169,46 @@ collection, and in a live run backing off for it held the next data behind it. H
 `validate_settings()` still rejects duplicate `sources:` entries, since two workers for one name
 would be one worker's identity twice.
 
+## Forecasts (Open-Meteo and carbon intensity)
+
+Switched on per source by `forecast_hours`, a list of whole hours ahead, validated by
+`_validate_forecast_leads()` against the class's `FORECAST_MAX_LEAD_HOURS`; a source whose class
+sets none refuses the key. User-facing description in UNITS.md, "Forecasts".
+
+- **`get_forecast()` is separate from `get_data()`.** `get_data()` is also the live read for a
+  control's input and for the MCP current-state tool, and neither should pay for a second request.
+  The collection loop calls `collect_forecast()` after the reading has been written.
+- **A forecast failure is never the source's failure.** `collect_forecast()` catches
+  `SourceConnectionError` and reports it through a `RepeatingProblem`, once per outage at WARNING:
+  no backoff, no `ok=0` heartbeat, because the reading the collector exists for was written.
+  Open-Meteo's forecast is a request of its own for the same reason: a configured field it has no
+  hourly forecast of fails the whole request with a 400, and in the current-conditions request that
+  would have cost the reading. The 400's body carries the reason naming the field, and the error
+  message includes it.
+- **Stamped at the time the forecast is for, at the first slot at or after `now + lead`**
+  (`forecast_slots()` in `influx.py`). A slot is rewritten on every collection while it is at least
+  the lead away and left alone after, so a past slot holds the last forecast made at least that far
+  ahead. Rejected: stamping at fetch time, which a control could read as an ordinary input, but
+  which needs a different time shift per lead time to compare with the actual; and keeping only the
+  latest issued forecast per slot, because Open-Meteo returns every hour since the start of the
+  current hour on each fetch, so a past slot would end up holding a forecast made minutes ahead.
+- **One field per base field and lead time**, `<field>_forecast_<N>h` (`forecast_field_name()`),
+  so lead times are separate series and the read layer can describe each.
+- **Their own measurement** (`FORECAST_HEADER`: `weather_forecast`, `carbonintensity_forecast`),
+  written by `send_forecast()` through `send_data()` with the header swapped and restored, the
+  heartbeat's idiom. Future-stamped points cannot share the live measurement: the MCP
+  current-state read selects a source's fields `ORDER BY time DESC LIMIT 1`, and the data-range
+  read selects `*` the same way, so either would report a forecast as the present.
+- **A refresh replaces, it does not duplicate.** InfluxDB 1.x and 2.x both document that a point
+  is identified by measurement, tag set and timestamp, and that a rewrite takes "the union of the
+  old field set and the new field set, where any ties go to the new field set". So a slot rewritten
+  by a later fetch holds the later value. The union also means a field the API stops returning
+  keeps its last stored value at that slot rather than disappearing.
+- **Open-Meteo is asked with `timeformat=unixtime`**, so slot times are UTC epoch seconds and need
+  no offset applied, and with the API's own `forecast_hours` parameter (not our setting of the same
+  name) at the longest lead plus two, because the series starts at
+  the current hour.
+
 ## Hue
 
 **Build every bridge request URL through `Hue._api_base()`** (`https://<host>/api/<user>`), shared

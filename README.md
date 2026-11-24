@@ -189,12 +189,26 @@ API documentation: https://carbon-intensity.github.io/api-definitions/
 
 Set `include_generation: true` in settings to also collect the fuel mix percentages.
 
+`fields` chooses which of `intensity_actual` and `intensity_forecast` to collect, both by default.
+`intensity_forecast` is the forecast for the half-hour `intensity_actual` describes, read after the
+fact; once forecasts are being recorded with `forecast_hours`, removing it from `fields` drops it.
+
+Set `forecast_hours` to a list of whole hours ahead, from 1 to 47, to also record the forward
+forecast at those lead times, in its own `carbonintensity_forecast` measurement. See
+[UNITS.md](UNITS.md#forecasts) for how forecasts are stamped and compared with what happened.
+
 Open-Meteo
 ----------
 
 Free weather data with no API key required. Configure latitude/longitude and choose which fields to
 collect from the `current` weather variables (see https://open-meteo.com/en/docs for the full list).
 Recommended interval is 15 minutes (900 seconds) or longer.
+
+Set `forecast_hours` to a list of whole hours ahead, from 1 to 382, to also record the hourly
+forecast of the same fields at those lead times, in its own `weather_forecast` measurement - for
+example `[3, 6, 12, 24]`. The forecast is a separate request, so a field Open-Meteo has no hourly
+forecast of is reported in the log once and costs you only the forecast, never current conditions.
+See [UNITS.md](UNITS.md#forecasts) for how forecasts are stamped and compared with what happened.
 
 Octopus Energy
 --------------

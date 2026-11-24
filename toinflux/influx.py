@@ -24,7 +24,7 @@ import urllib3
 import requests
 from dataclasses import dataclass
 from toinflux.exceptions import ConfigError, SourceConnectionError, ToInfluxError, ToolParamError
-from toinflux.general import load_settings, render_external
+from toinflux.general import FORECAST_LEADS_KEY, load_settings, render_external
 
 
 class InfluxWriteError(ToInfluxError):
@@ -97,6 +97,53 @@ def escape_key_or_tag_value(value):
             f"it would split the point in two"
         )
     return value.replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
+
+
+#: The shape of a forecast field key, ``<field>_forecast_<hours>h``. Read with ``fullmatch``.
+FORECAST_FIELD_RE = re.compile(r"(?P<field>.+)_forecast_(?P<hours>[1-9][0-9]*)h")
+
+
+def forecast_field_name(field, lead_hours):
+    """Return the field key a forecast of ``field`` made ``lead_hours`` ahead is written under.
+
+    One place builds it so the collectors, the MCP read layer's descriptions and the controls
+    guard cannot disagree about the shape.
+
+    Args:
+        field (str): the field the forecast is of, such as ``temperature_2m``
+        lead_hours (int): how far ahead the forecast was made, in whole hours
+
+    Returns:
+        str: the forecast field key, such as ``temperature_2m_forecast_3h``
+    """
+    return f"{field}_forecast_{lead_hours}h"
+
+
+def forecast_slots(slot_times, now, lead_hours):
+    """Choose, for each lead time, the forecast slot its value is stamped at.
+
+    The slot for lead ``L`` is the first one starting at or after ``now + L`` hours. Each
+    fetch therefore rewrites a slot only while it is still at least ``L`` hours away, so
+    once a slot is in the past it holds the last forecast made at least ``L`` hours before
+    it - which is what comparing a forecast with what happened needs. A slot that is merely
+    the latest issued would end up holding a forecast made minutes ahead.
+
+    Args:
+        slot_times (list): the start of each forecast slot, in epoch seconds, ascending
+        now (float): the current time, in epoch seconds
+        lead_hours (list): the configured lead times, in hours
+
+    Returns:
+        dict: lead time to the chosen slot's start, omitting a lead time the forecast does not
+            reach
+    """
+    chosen = {}
+    for lead in lead_hours:
+        target = now + lead * 3600
+        slot = next((start for start in slot_times if start >= target), None)
+        if slot is not None:
+            chosen[lead] = slot
+    return chosen
 
 
 def worker_label(source, instance=None):
@@ -172,6 +219,14 @@ class DataHandler:
             instance produced a point, where one source has several.
         MCP_LIVE_STATE_COVERS_ALL_INSTANCES (bool): False - whether one live read returns every
             instance, rather than needing one read per instance.
+        FORECAST_MAX_LEAD_HOURS (int or None): None - how far ahead this source can forecast,
+            in hours, and so the longest lead ``forecast_hours`` accepts. None means no
+            forecast, and the setting is refused.
+        FORECAST_HEADER (str or None): None - the line-protocol header forecast points are
+            written under, a measurement of their own.
+        FORECAST_UNITS (dict): empty - units for forecast base names that are not live fields.
+        MCP_FORECAST (bool): False - whether this source holds forecasts stamped at the time
+            they are for. True only on the MCP layer's read-only forecast sources.
     """
 
     # Whether this source is event-driven over a held-open connection rather than
@@ -288,6 +343,109 @@ class DataHandler:
     # single handler's live read covers them all. Only the third can report per instance
     # from a live read, which is what this distinguishes.
     MCP_LIVE_STATE_COVERS_ALL_INSTANCES = False
+    # How many hours ahead this source can forecast, and so the largest lead time its
+    # `forecast_hours` setting accepts. None means the source has no forecast to collect,
+    # and the setting is refused for it. Set on the sources whose far end publishes one.
+    FORECAST_MAX_LEAD_HOURS: "int | None" = None
+    # The line-protocol header forecast points are written under: a measurement of their own,
+    # never the live one. A forecast is stamped at the time it is *for*, which is in the
+    # future when it is written, and the read paths that take a measurement's newest point -
+    # current state, the data range - would otherwise report a forecast as the present.
+    FORECAST_HEADER: "str | None" = None
+    # Units for forecast fields whose base name is not a live field with a unit of its own -
+    # carbon intensity forecasts "intensity", which the live measurement splits into
+    # intensity_actual and intensity_forecast. A base name that is a live field takes that
+    # field's unit from MCP_FIELD_METADATA instead.
+    FORECAST_UNITS: dict = {}
+    # Whether this source holds forecasts, stamped at the time they are for. True only on the
+    # MCP layer's read-only forecast sources: their newest point is in the future, so the
+    # current-state read refuses them rather than reporting a forecast as the present.
+    MCP_FORECAST = False
+
+    @classmethod
+    def settings_problems(cls, source, source_settings):
+        """Return problems with settings only this source understands.
+
+        Called by ``validate_settings()`` for each enabled source, after the checks every
+        source shares, so ``--check-config`` reports a key the source would misread rather
+        than the collector meeting it at its first collection. The base has none.
+
+        Args:
+            source (str): the source name, for the message
+            source_settings (dict): the source's settings section
+
+        Returns:
+            list: error strings, empty when the section is usable
+        """
+        return []
+
+    @classmethod
+    def forecast_fields_for(cls, source_settings):
+        """Return the fields this source forecasts, by the base name each forecast field extends.
+
+        A class method taking the section, so the MCP layer can describe a source's forecast
+        fields without building a collector. The base has no forecast and returns an empty
+        list.
+
+        Args:
+            source_settings (dict): the source's settings section
+
+        Returns:
+            list: field names, each written as ``<field>_forecast_<hours>h`` per lead time
+        """
+        return []
+
+    @classmethod
+    def forecast_lead_hours_for(cls, source_settings):
+        """Return the configured forecast lead times, in hours, or an empty list when off.
+
+        Validated by ``validate_settings()`` before any handler exists, so this only reads.
+
+        Args:
+            source_settings (dict): the source's settings section
+
+        Returns:
+            list: the lead times in hours, ascending; empty when forecasting is not switched on
+        """
+        if cls.FORECAST_MAX_LEAD_HOURS is None:
+            return []
+        return sorted(source_settings.get(FORECAST_LEADS_KEY) or [])
+
+    def forecast_fields(self):
+        """Return the fields this handler's source forecasts. See ``forecast_fields_for()``.
+
+        Returns:
+            list: field names
+        """
+        return self.forecast_fields_for(self.source_settings)
+
+    def forecast_lead_hours(self):
+        """Return this handler's forecast lead times. See ``forecast_lead_hours_for()``.
+
+        Returns:
+            list: the lead times in hours, ascending; empty when forecasting is off
+        """
+        return self.forecast_lead_hours_for(self.source_settings)
+
+    def get_forecast(self):
+        """Fetch this source's forecast for its configured lead times.
+
+        Separate from ``get_data()`` on purpose. ``get_data()`` is also what a control's live
+        input read and the MCP current-state read call, and neither wants a second request to
+        the far end; and a forecast that cannot be fetched must not cost the collector its
+        current reading. The collection loop calls this after the reading is written, and
+        logs a failure here without counting it against the source.
+
+        The base has no forecast and returns an empty list.
+
+        Returns:
+            list: ``(timestamp, {field: value})`` pairs, each stamped at the time the forecast
+                is for. Empty when the source has none or forecasting is not switched on.
+
+        Raises:
+            SourceConnectionError: the forecast could not be fetched or was not understood
+        """
+        return []
 
     def mcp_tag_filters(self):
         """Return the tag filters that scope this handler's reads.
@@ -470,6 +628,31 @@ class DataHandler:
         # destination the latest-built handler's settings name - backlog included.
         writer.set_destination(self.source, *self._build_write_request(self.settings["influx"]))
         writer.submit(self.source, self.instance, line, buffered=use_buffer)
+
+    def send_forecast(self, points) -> None:
+        """Hand forecast points to the writer under this source's forecast measurement.
+
+        Reuses ``send_data()`` with the forecast header swapped in, the idiom the heartbeat
+        and Nuki's per-lock points use, so spooling and the ``InfluxWriteError`` contract stay
+        the base's rather than being written twice. The header is put back however the write
+        ends, so a failure here cannot leave the next reading under the forecast measurement.
+
+        Args:
+            points (list): ``(timestamp, {field: value})`` pairs from ``get_forecast()``
+
+        Raises:
+            InfluxWriteError: a point cannot be written at all - see ``send_data()``
+        """
+        header = self.FORECAST_HEADER
+        if header is None or not points:
+            return
+        original_header = self.influx_header
+        try:
+            self.influx_header = header
+            for timestamp, fields in points:
+                self.send_data(data=fields, timestamp=timestamp)
+        finally:
+            self.influx_header = original_header
 
     def _log_missing_data(self, data) -> None:
         """Say that a send_data() call had no usable data of its own.

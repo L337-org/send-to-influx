@@ -1692,3 +1692,31 @@ class TestStartingOutputAndTheSetpointName:
         document[section]["setpoint"] = entry
         errors = validate_control("conservatory", document)
         assert any(error.startswith(f"{section}: 'setpoint' is reserved") for error in errors), errors
+
+
+class TestAForecastIsNotAnInput:
+    """An input reads its source's live measurement, and a forecast field is written to the
+    forecast measurement instead, so a control reading one would sit in its safe state from its
+    first cycle with nothing in the document saying why. Refused where --check-config and a
+    save over MCP both see it."""
+
+    def test_a_forecast_field_on_a_forecasting_source_is_refused(self):
+        document = a_valid_control()
+        name, spec = next((n, s) for n, s in document["inputs"].items() if s["source"] == "openmeteo")
+        spec["field"] = "temperature_2m_forecast_3h"
+        (error,) = validate_control_sources(document)
+        assert f"inputs[{name!r}]" in error
+        assert "'temperature_2m_forecast_3h' is a forecast" in error
+        assert "'weather_forecast' measurement" in error
+        assert "live measurement, which does not hold it" in error
+
+    def test_the_live_intensity_forecast_is_still_an_input(self):
+        """intensity_forecast is the current half-hour's forecast on the live measurement."""
+        document = a_valid_control()
+        document["inputs"]["grid"] = {"source": "carbonintensity", "field": "intensity_forecast"}
+        assert validate_control_sources(document) == []
+
+    def test_a_like_named_field_on_a_source_with_no_forecast_is_left_alone(self):
+        document = a_valid_control()
+        document["inputs"]["odd"] = {"source": "hue", "field": "Garden_forecast_3h"}
+        assert validate_control_sources(document) == []

@@ -457,3 +457,71 @@ def test_no_source_narrows_the_base_send_data_signature():
         "these overrides do not accept everything DataHandler.send_data() does, so a generic "
         "caller breaks on them alone:\n  " + "\n  ".join(narrowed)
     )
+
+
+class TestForecastHelpers:
+    """The slot choice is what makes a stored forecast mean "made at least N hours ahead"."""
+
+    def test_the_field_name_carries_the_lead(self):
+        from toinflux.influx import FORECAST_FIELD_RE, forecast_field_name
+
+        name = forecast_field_name("temperature_2m", 3)
+        assert name == "temperature_2m_forecast_3h"
+        assert FORECAST_FIELD_RE.fullmatch(name).group("field", "hours") == ("temperature_2m", "3")
+        # The live carbon-intensity field is the current half-hour's forecast, not a lead time.
+        assert FORECAST_FIELD_RE.fullmatch("intensity_forecast") is None
+
+    def test_a_slot_exactly_on_the_lead_is_taken(self):
+        from toinflux.influx import forecast_slots
+
+        assert forecast_slots([0, 3600, 7200], now=0, lead_hours=[1]) == {1: 3600}
+
+    def test_otherwise_the_next_slot_after_it(self):
+        from toinflux.influx import forecast_slots
+
+        assert forecast_slots([0, 3600, 7200, 10800], now=1, lead_hours=[1, 2]) == {1: 7200, 2: 10800}
+
+    def test_a_lead_past_the_end_is_left_out(self):
+        from toinflux.influx import forecast_slots
+
+        assert forecast_slots([0, 3600], now=0, lead_hours=[1, 5]) == {1: 3600}
+
+
+class TestSendingAForecast:
+    """Forecast points go under their own measurement, and the reading's header survives."""
+
+    def test_points_are_spooled_under_the_forecast_header(self, sample_settings, influx_posts):
+        from toinflux.openmeteo import OpenMeteo
+
+        sample_settings["openmeteo"] = {"db": "weather_db", "interval": 900, "latitude": 1, "longitude": 2}
+        with patch("toinflux.influx.load_settings", return_value=sample_settings):
+            handler = OpenMeteo(source="openmeteo")
+        handler.influx_header = "weather,source=open-meteo "
+        influx_posts.side_effect = requests.exceptions.ConnectionError("down")
+        handler.send_forecast([(1795546800, {"temperature_2m_forecast_3h": 8.4}), (1795557600, {"x_forecast_6h": 1})])
+        writer = toinflux_writer.current()
+        with writer._lock:
+            lines = [entry.line for entry in writer._read_spool()]
+        assert lines == [
+            "weather_forecast,source=open-meteo temperature_2m_forecast_3h=8.4 1795546800",
+            "weather_forecast,source=open-meteo x_forecast_6h=1 1795557600",
+        ]
+        assert handler.influx_header == "weather,source=open-meteo "
+
+    def test_the_header_is_restored_when_a_point_cannot_be_written(self, sample_settings):
+        from toinflux.influx import InfluxWriteError
+        from toinflux.openmeteo import OpenMeteo
+
+        sample_settings["openmeteo"] = {"db": "weather_db", "interval": 900, "latitude": 1, "longitude": 2}
+        with patch("toinflux.influx.load_settings", return_value=sample_settings):
+            handler = OpenMeteo(source="openmeteo")
+        handler.influx_header = "weather,source=open-meteo "
+        with pytest.raises(InfluxWriteError):
+            handler.send_forecast([(1, {"bad\nfield_forecast_3h": 1})])
+        assert handler.influx_header == "weather,source=open-meteo "
+
+    def test_a_source_with_no_forecast_writes_nothing(self, sample_settings, influx_posts):
+        with patch("toinflux.influx.load_settings", return_value=sample_settings):
+            handler = DataHandler(source="hue")
+        handler.send_forecast([(1, {"x": 1})])
+        assert toinflux_writer.current().pending() == 0

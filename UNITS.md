@@ -116,8 +116,15 @@ tests.
 
 | Field | Unit | Notes |
 |---|---|---|
-| `intensity_actual`, `intensity_forecast` | gCO2/kWh | From the `/intensity` endpoint |
+| `intensity_actual`, `intensity_forecast` | gCO2/kWh | From the `/intensity` endpoint; `fields` selects which, both by default. `intensity_forecast` is the forecast for the same half-hour `intensity_actual` describes, which has usually already happened when it is read - not a look ahead |
 | `gen_<fuel>` (e.g. `gen_wind`, `gen_gas`) | % (0-100) | Generation fuel mix share; only collected if `include_generation: true` |
+
+With `forecast_hours` set, the forward forecast is also written, to its own
+`carbonintensity_forecast` measurement - see [Forecasts](#forecasts) below:
+
+| Field | Unit | Notes |
+|---|---|---|
+| `intensity_forecast_<N>h` | gCO2/kWh | The last forecast made at least N hours before the half-hour it is stamped at, from the `/intensity/{from}/fw48h` endpoint |
 
 ## Open-Meteo (`openmeteo`)
 
@@ -136,6 +143,32 @@ the API, so every field uses Open-Meteo's own default unit. For the fields in th
 
 If you configure other `fields` from the [Open-Meteo variable list](https://open-meteo.com/en/docs), check that
 page for the default unit of each one.
+
+With `forecast_hours` set, the hourly forecast of the same `fields` is also written, to its own
+`weather_forecast` measurement - see [Forecasts](#forecasts) below:
+
+| Field | Unit | Notes |
+|---|---|---|
+| `<field>_forecast_<N>h` (e.g. `temperature_2m_forecast_3h`) | The field's own unit | The last forecast made at least N hours before the hour it is stamped at |
+
+## Forecasts
+
+Open-Meteo and carbon intensity can also record forecasts, switched on per source with
+`forecast_hours`, a list of whole hours ahead. Each forecast point is **stamped at the time the
+forecast is for**, not when it was fetched, so it lines up with the actual reading at the same time:
+plot `temperature_2m_forecast_3h` from `weather_forecast` beside `temperature_2m` from `weather` and
+the gap between the two lines is how wrong the three-hour forecast was. No time shift is needed, and
+each lead time is a separate field, so the three-hour and the day-ahead forecasts can be judged
+separately.
+
+A forecast is rewritten on every collection until it is less than its lead time away, then left
+alone, so once that time has passed the stored value is the last forecast made at least that far
+ahead. Points for the hours still to come are in the future, which is why they are kept in a
+measurement of their own: a read of the live measurement's newest point never finds a forecast.
+
+Forecast fields are read over MCP through `openmeteo_forecast` and `carbonintensity_forecast`, which
+are offered only where forecasting is switched on. A forecast field cannot be a control's input, and a
+control naming one is refused: an input reads the source's live measurement, which does not hold it.
 
 ## Octopus Energy (`octopus`)
 

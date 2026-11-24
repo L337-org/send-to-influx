@@ -32,7 +32,7 @@ __license__ = "MIT"
 
 from mcp.server.mcpserver.exceptions import ResourceError
 
-from toinflux.mcp_common import readable_sources, translate_failures
+from toinflux.mcp_common import forecast_sources, readable_sources, translate_failures
 from toinflux.mcp_read import build_documentation, current_state_result, list_fields_result
 
 
@@ -104,13 +104,18 @@ def register_resources(server, settings, settings_file=None):
     async def _documentation_resource() -> str:
         return await anyio.to_thread.run_sync(build_documentation, settings, settings_file)
 
+    forecasts = set(forecast_sources(settings))
     for source in readable_sources(settings):
-        _register_source_resources(server, anyio, source, settings, settings_file)
+        _register_source_resources(server, anyio, source, settings, settings_file, state=source not in forecasts)
     return server
 
 
-def _register_source_resources(server, anyio, source, settings, settings_file):
+def _register_source_resources(server, anyio, source, settings, settings_file, state=True):
     """Register the schema and current-state resources for one source.
+
+    A forecast source gets the schema resource only. Its current state would always be refused,
+    since its newest point is in the future, and a resource that can only refuse is a
+    capability registered to say no.
 
     A factory (not an inline loop body) so each resource closure binds its own
     ``source`` - a closure over the loop variable would make every resource read
@@ -123,6 +128,7 @@ def _register_source_resources(server, anyio, source, settings, settings_file):
         source (str): the configured source name these resources describe
         settings (dict): parsed settings dict
         settings_file (str or None): settings path, for re-resolving handlers per read
+        state (bool): whether to register the current-state resource too
     """
 
     @_register_resource(
@@ -141,6 +147,9 @@ def _register_source_resources(server, anyio, source, settings, settings_file):
     )
     async def _schema_resource() -> dict:
         return await anyio.to_thread.run_sync(list_fields_result, source, settings, settings_file)
+
+    if not state:
+        return
 
     @_register_resource(
         server,

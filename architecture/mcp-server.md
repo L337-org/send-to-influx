@@ -414,6 +414,23 @@ scoped to one control, each control's latest cycle, and every panel query `sugge
 suggests run on the server with Grafana's two macros substituted, one series per control. The unit
 tests reach none of it, because field and tag discovery need a server that answers `SHOW` queries.
 
+### Forecasts are read the same way
+
+`forecast_sources()` names `<source>_forecast` for each configured source whose class has a
+`FORECAST_HEADER` and whose section sets `forecast_hours`, and `readable_sources()` adds them.
+`_construct()` builds a `ForecastRecord` on the collector's own section, so it reads the database
+the collector wrote to; its measurement comes from the header, and its field metadata is built
+from the configured fields and lead times, with each base field's unit from the collector's
+`MCP_FIELD_METADATA` or `FORECAST_UNITS`. Being instance attributes, they reach
+`get_documentation` too, which reads `MCP_FIELD_METADATA` without a round trip.
+
+`MCP_FORECAST` is True on it, and `current_state_result()` refuses it through
+`_refuse_a_forecast()`: the latest point is the furthest ahead the forecast reaches. For the same
+reason `register_resources()` gives it a `schema://` resource and no `state://` one. `query_history`
+reads past forecasts beside the actuals unchanged; a future range needs an explicit ISO end, since
+relative ranges only look back. A control cannot use one: the name is not in `configured_sources()`,
+and `validate_control_sources()` refuses a forecast field named on the forecasting source itself.
+
 ### A tag is either a constant to pin or an axis to enumerate
 
 They are different attributes and confusing them gives wrong answers.

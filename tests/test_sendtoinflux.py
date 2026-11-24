@@ -2961,3 +2961,65 @@ class TestCheckConfigWarnsAboutStaleFeedback:
     def test_and_says_nothing_when_the_feedback_keeps_up(self, tmp_path, monkeypatch, capsys):
         printed = self._run(tmp_path, monkeypatch, capsys, 60)
         assert "Warning:" not in printed
+
+
+class TestCollectingAForecast:
+    """A forecast failure must never become the source's failure: the reading it exists to
+    collect has been written, so no backoff, no unhealthy heartbeat, one log line."""
+
+    @staticmethod
+    def _handler(forecast):
+        handler = MagicMock(STREAMING=False, instance=None, worker_label="openmeteo")
+        handler.get_data.return_value = {"temperature_2m": 9.4}
+        handler.source_settings = {"interval": 900}
+        if isinstance(forecast, Exception):
+            handler.get_forecast.side_effect = forecast
+        else:
+            handler.get_forecast.return_value = forecast
+        return handler
+
+    @pytest.fixture(autouse=True)
+    def _fresh_problems(self, monkeypatch):
+        monkeypatch.setattr(sendtoinflux, "_FORECAST_PROBLEMS", sendtoinflux.RepeatingProblem())
+
+    def test_points_are_sent_after_the_reading(self):
+        handler = self._handler([(1795546800, {"temperature_2m_forecast_3h": 8.4})])
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+        assert sendtoinflux.collect_source_data("openmeteo", args, handler) == 900
+        assert [call[0] for call in handler.method_calls if call[0] in ("send_data", "send_forecast")] == [
+            "send_data",
+            "send_forecast",
+        ]
+        handler.send_forecast.assert_called_once_with([(1795546800, {"temperature_2m_forecast_3h": 8.4})])
+
+    def test_a_failed_forecast_keeps_the_interval_and_is_said_once(self, caplog):
+        handler = self._handler(SourceConnectionError("Could not fetch the Open-Meteo forecast: no route"))
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(3):
+                assert sendtoinflux.collect_source_data("openmeteo", args, handler) == 900
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert [r.getMessage() for r in warnings] == [
+            "Could not collect the forecast for 'openmeteo': Could not fetch the Open-Meteo forecast: no route"
+        ]
+        assert handler.send_data.call_count == 3
+        handler.send_forecast.assert_not_called()
+
+    def test_recovery_is_said(self, caplog):
+        handler = self._handler(SourceConnectionError("down"))
+        args = SimpleNamespace(print=False, dump=False, settings=None)
+        sendtoinflux.collect_source_data("openmeteo", args, handler)
+        handler.get_forecast.side_effect = None
+        handler.get_forecast.return_value = []
+        with caplog.at_level(logging.INFO):
+            sendtoinflux.collect_source_data("openmeteo", args, handler)
+        assert any("Collecting the forecast for 'openmeteo' again" in r.getMessage() for r in caplog.records)
+
+    def test_print_mode_prints_the_forecast_rather_than_sending_it(self, capsys):
+        handler = self._handler([(1795546800, {"temperature_2m_forecast_3h": 8.4})])
+        args = SimpleNamespace(print=True, dump=False, settings=None)
+        sendtoinflux.collect_source_data("openmeteo", args, handler)
+        blobs = [json.loads(chunk) for chunk in capsys.readouterr().out.replace("}\n{", "}\x00{").split("\x00")]
+        assert blobs[1]["source"] == "openmeteo forecast"
+        assert blobs[1]["data"] == [{"time": 1795546800, "data": {"temperature_2m_forecast_3h": 8.4}}]
+        handler.send_forecast.assert_not_called()
