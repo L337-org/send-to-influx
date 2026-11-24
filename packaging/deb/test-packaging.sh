@@ -32,7 +32,26 @@ export DEBIAN_FRONTEND=noninteractive
 [ "$(id -u)" = 0 ] || { echo "must run as root (on a DISPOSABLE system)" >&2; exit 1; }
 
 pass() { echo "PASS: $*"; }
-fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# While SERVICE_DIAG_SINCE is set (a journalctl --since timestamp), a failure also prints the
+# service's state, how often systemd restarted it, the last upgrade's output and its journal
+# since that moment. A failure in a scenario that drives the running service is otherwise
+# only its FAIL line, which says what was expected but not what the service did.
+SERVICE_DIAG_SINCE=""
+LAST_UPGRADE_OUTPUT=""
+service_diagnostics() {
+    [ -n "$SERVICE_DIAG_SINCE" ] || return 0
+    {
+        echo "--- diagnostics: service state now"
+        systemctl show -p ActiveState,SubState,MainPID,NRestarts,ExecMainStatus,Result send-to-influx 2>&1 || true
+        echo "--- diagnostics: last upgrade output"
+        echo "${LAST_UPGRADE_OUTPUT:-(none captured)}"
+        echo "--- diagnostics: journal since $SERVICE_DIAG_SINCE"
+        journalctl -u send-to-influx --since "$SERVICE_DIAG_SINCE" --no-pager 2>&1 || true
+        echo "--- end of diagnostics"
+    } >&2
+}
+fail() { echo "FAIL: $*" >&2; service_diagnostics; exit 1; }
 
 HAVE_SYSTEMD=0
 [ -d /run/systemd/system ] && HAVE_SYSTEMD=1
@@ -195,6 +214,7 @@ EOF
 # EOF), which is exactly what these upgrades must never produce.
 upgrade_and_assert_silent() {
     local out
+    LAST_UPGRADE_OUTPUT=""
     out=$(DEBIAN_FRONTEND=teletype dpkg -i "$DEB" </dev/null 2>&1) || { echo "$out"; fail "$1: dpkg -i failed"; }
     echo "$out" | grep -qi "InfluxDB URL\|Hue bridge\|data sources do you want" && { echo "$out"; fail "$1: prompted debconf questions"; }
     echo "$out" | grep -q "(Y/I/N/O/D/Z)" && { echo "$out"; fail "$1: conffile prompt appeared"; }
@@ -718,12 +738,8 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
     fi
     # The log-line wait above (and the restart it follows, when the journald_forward branch
     # ran) only proves the process started - not that the unit has finished the activating ->
-    # active transition. postinst's own restart-on-upgrade decision below hinges on
-    # `systemctl is-active --quiet` at the moment dpkg invokes it, and on a slower runner
-    # (observed on arm64) that check can still land mid-transition, reading the service as not
-    # running and silently skipping the restart - the failure looks like a missing "has been
-    # restarted" message with no other symptom. Wait for "active" specifically, the same state
-    # postinst tests, rather than inferring it from the log line.
+    # active transition. Wait for "active" specifically, so the MainPID recorded below is the
+    # settled process and the upgrade starts from the state this scenario is about.
     active_ok=0
     for _ in $(seq 1 15); do
         if systemctl is-active --quiet send-to-influx; then
@@ -733,12 +749,68 @@ if [ "$HAVE_SYSTEMD" = 1 ]; then
     done
     [ "$active_ok" = 1 ] || fail "service did not reach 'active' before the restart-on-upgrade scenario (state: $(systemctl is-active send-to-influx 2>&1 || true))"
     pid_before=$(systemctl show -p MainPID --value send-to-influx)
+    SERVICE_DIAG_SINCE="$(date '+%Y-%m-%d %H:%M:%S')"
     upgrade_and_assert_silent "upgrade with running service"
     echo "$LAST_UPGRADE_OUTPUT" | grep -q "has been restarted" || fail "expected the restarted upgrade message"
     systemctl is-active --quiet send-to-influx || fail "service not active after restart-on-upgrade"
     pid_after=$(systemctl show -p MainPID --value send-to-influx)
     [ "$pid_before" != "$pid_after" ] || fail "MainPID unchanged - service was not actually restarted"
+    # preinst stops the service before removing the venv and leaves a marker for postinst;
+    # one left behind would make a later configure start a service the operator stopped.
+    [ ! -e /run/send-to-influx.restart-after-upgrade ] || fail "preinst's restart marker was left behind after the upgrade"
+    SERVICE_DIAG_SINCE=""
     pass "restart-on-upgrade: service restarted (pid $pid_before -> $pid_after) and active"
+
+    # The restart above passes whether or not the old process was stopped before preinst
+    # removed the venv, and the window in which it runs on without its code is too short to
+    # catch from outside. So run this package's preinst on its own, with an `rm` shim in front
+    # of the real one that records the unit's state at the moment the venv is removed: it
+    # must already be inactive then, with the marker left for postinst, and the upgrade that
+    # follows must start the service again from that marker alone. Run twice: from "active",
+    # and from "activating" - the unit waiting out RestartSec after a crash, which is still a
+    # service the operator expects back.
+    echo "=== scenario: preinst stops a running service before removing its code ==="
+    ctrl="$(mktemp -d)"
+    dpkg-deb -e "$DEB" "$ctrl/control"
+    mkdir "$ctrl/shim"
+    cat > "$ctrl/shim/rm" <<SHIM
+#!/bin/sh
+if [ "\$*" = "-rf /opt/send-to-influx/venv" ]; then
+    systemctl is-active send-to-influx > "$ctrl/state-at-rm" 2>&1 || true
+fi
+exec "$(command -v rm)" "\$@"
+SHIM
+    chmod 755 "$ctrl/shim/rm"
+    for from in active activating; do
+        SERVICE_DIAG_SINCE="$(date '+%Y-%m-%d %H:%M:%S')"
+        systemctl is-active --quiet send-to-influx || fail "service not active before the preinst check ($from)"
+        if [ "$from" = activating ]; then
+            systemctl kill -s KILL send-to-influx
+            for _ in $(seq 1 20); do
+                [ "$(systemctl is-active send-to-influx 2>&1 || true)" = activating ] && break
+                sleep 0.1
+            done
+            state="$(systemctl is-active send-to-influx 2>&1 || true)"
+            [ "$state" = activating ] || fail "could not put the unit in its restart wait (state '$state')"
+        fi
+        rm -f "$ctrl/state-at-rm"
+        preinst_out="$(PATH="$ctrl/shim:$PATH" sh "$ctrl/control/preinst" upgrade "$(dpkg-deb -f "$DEB" Version)" 2>&1)" \
+            || { echo "$preinst_out"; fail "preinst upgrade failed ($from)"; }
+        [ -e "$ctrl/state-at-rm" ] || fail "preinst did not remove the venv through rm -rf as the shim expects ($from)"
+        state="$(cat "$ctrl/state-at-rm")"
+        [ "$state" = inactive ] || fail "preinst removed the venv with the service '$state', starting from '$from' - it must stop it first"
+        [ -e /run/send-to-influx.restart-after-upgrade ] || fail "preinst stopped the service but left no marker for postinst ($from)"
+        upgrade_and_assert_silent "upgrade after preinst stopped the service ($from)"
+        echo "$LAST_UPGRADE_OUTPUT" | grep -q "has been restarted" || fail "expected the restarted upgrade message after preinst stopped the service ($from)"
+        systemctl is-active --quiet send-to-influx || fail "service not started again after preinst stopped it ($from)"
+        [ ! -e /run/send-to-influx.restart-after-upgrade ] || fail "postinst left the restart marker behind ($from)"
+        SERVICE_DIAG_SINCE=""
+        pass "preinst stops the service before removing the venv, from '$from', and postinst starts it again"
+        # Settle before the next round, as above, so its kill lands on a running process.
+        for _ in $(seq 1 15); do systemctl is-active --quiet send-to-influx && break; sleep 1; done
+        sleep 2
+    done
+    rm -rf "$ctrl"
 else
     echo "note: skipping restart-on-upgrade scenario (systemd not running here)"
 fi

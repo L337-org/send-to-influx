@@ -683,6 +683,7 @@ if [ -z "$2" ] || [ "${DEBCONF_RECONFIGURE:-}" = "1" ]; then
 fi
 
 WAS_ACTIVE=0
+WAS_STOPPED_FOR_UPGRADE=0
 RESTARTED=0
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
@@ -708,15 +709,27 @@ if [ -d /run/systemd/system ]; then
     # in the output would never be seen - even on an attended run, nobody
     # reads every line of every upgraded package's output. "enabled" doesn't
     # imply "running" (could be enabled-but-stopped, or running-but-disabled),
-    # so check the actual current state; a stopped service is left exactly as
-    # it is - this never *starts* anything. Guarded on /run/systemd/system
-    # like the daemon-reload above: on a non-systemd host systemctl may not
+    # so check whether it was running; a stopped service is left exactly as
+    # it is - this never starts one the operator had stopped. Guarded on
+    # /run/systemd/system like the daemon-reload above: on a non-systemd host systemctl may not
     # exist at all.
-    if systemctl is-active --quiet send-to-influx 2>/dev/null; then
+    #
+    # On an upgrade preinst has already stopped a running service, before
+    # removing the code under it, and left a marker saying so; that marker,
+    # not the current state, is what says it was running. A dpkg-reconfigure
+    # skips preinst's stop, so the current state still decides there.
+    UPGRADE_MARKER=/run/send-to-influx.restart-after-upgrade
+    if [ -e "$UPGRADE_MARKER" ]; then
+        WAS_STOPPED_FOR_UPGRADE=1
+        rm -f "$UPGRADE_MARKER"
+    fi
+    if [ "$WAS_STOPPED_FOR_UPGRADE" = 1 ] || systemctl is-active --quiet send-to-influx 2>/dev/null; then
         WAS_ACTIVE=1
         if [ -n "$2" ]; then
             if systemctl restart send-to-influx; then
                 RESTARTED=1
+            elif [ "$WAS_STOPPED_FOR_UPGRADE" = 1 ]; then
+                echo "send-to-influx: could not start the service again after the upgrade - it was running before and is now stopped. Check 'systemctl status send-to-influx'." >&2
             else
                 echo "send-to-influx: automatic restart after upgrade failed - the service may still be running the previous version. Check 'systemctl status send-to-influx'." >&2
             fi
@@ -767,6 +780,15 @@ and is now running the new version. Your /etc/send-to-influx/settings.yaml
 and any systemd-creds credentials are untouched - upgrades never modify
 them. Run 'sudo dpkg-reconfigure send-to-influx' at any time to revisit the
 interactive setup (including migrating secrets into systemd-creds).
+
+MSG
+        elif [ "$WAS_STOPPED_FOR_UPGRADE" = 1 ]; then
+            cat <<'MSG'
+
+send-to-influx upgraded, but the service, which was running before the
+upgrade, could not be started again - it is STOPPED. Check
+'systemctl status send-to-influx' and start it by hand. Your configuration
+is untouched.
 
 MSG
         elif [ "$WAS_ACTIVE" = 1 ]; then
