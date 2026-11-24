@@ -112,7 +112,8 @@ larger of the input's `max_age` and the source's `minimum_interval`, the control
 source live, and a reading still older than `max_age` is not acted on: the cycle is
 `fail_safe` and the devices go to their `safe_state`. An input with no `max_age` takes the
 source section's `max_age` where the settings set one, and otherwise the source's own
-default - an hour for Open-Meteo and carbon intensity, fifteen minutes for Hue.
+default, its class's `DEFAULT_MAX_AGE`, which the commented `max_age` line in each source's
+section of `example_settings.yaml` also shows.
 
 So an input's `max_age` answers one question: how old can this reading be and still be
 better than stopping? The answer differs by input:
@@ -121,17 +122,17 @@ better than stopping? The answer differs by input:
   room temperature is worse than stopping, so keep its `max_age` to a few cycles.
 * **An input that only shapes the setpoint or a cap** - outside temperature, dew point, grid
   intensity - moves slowly, and a reading a few hours old still gives a sound setpoint. Give
-  it room: three hours (`10800`) rides out a typical outage of a free weather API, where the
-  hour's default turns a heater off for the rest of the night.
+  it room: three hours (`10800`) rides out a typical outage of a free weather API, where a
+  bound of an hour or less turns a heater off for the rest of the night.
 * **Which way is safe depends on the devices.** Stopping is the risky direction for a heater
   keeping a conservatory above freezing, so its setpoint inputs want a long `max_age`. For a
   device where acting on old information is worse than doing nothing, keep it short. No one
   default suits both, which is why the sources' defaults stay modest and the choice is the
   control's.
 
-A forecast field (`<field>_forecast_<N>h`) cannot be an input. It is stamped at the time it
-is for, so its newest point is always in the future, and a control naming one is refused.
-See [UNITS.md](UNITS.md#forecasts).
+A forecast field (`<field>_forecast_<N>h`) cannot be an input, and a control naming one is
+refused. An input reads its source's live measurement, and forecasts are kept in a
+measurement of their own. See [UNITS.md](UNITS.md#forecasts).
 
 The rule language
 -----------------

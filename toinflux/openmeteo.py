@@ -180,12 +180,7 @@ class OpenMeteo(DataHandler):
         except requests.exceptions.RequestException as e:
             raise SourceConnectionError(f"Could not fetch the Open-Meteo forecast: {render_external(e)}") from e
 
-        hourly = response.json().get("hourly")
-        times = hourly.get("time") if isinstance(hourly, dict) else None
-        if not isinstance(times, list) or not all(isinstance(t, (int, float)) for t in times):
-            raise SourceConnectionError(
-                f"Open-Meteo answered the forecast request without an hourly time series (got hourly={hourly!r:.200})"
-            )
+        hourly, times = _hourly_series(response)
         slots = forecast_slots(times, time.time(), leads)
         points = {}
         for lead, slot in slots.items():
@@ -195,6 +190,37 @@ class OpenMeteo(DataHandler):
                 if isinstance(series, list) and index < len(series) and series[index] is not None:
                     points.setdefault(int(slot), {})[forecast_field_name(field, lead)] = series[index]
         return sorted(points.items())
+
+
+def _hourly_series(response):
+    """Read an Open-Meteo forecast response's hourly block and its slot times.
+
+    Args:
+        response (requests.Response): the forecast response, already checked for an error status
+
+    Returns:
+        tuple: (the ``hourly`` mapping, its ``time`` list in epoch seconds)
+
+    Raises:
+        SourceConnectionError: the body is not JSON, or holds no hourly time series. Raised as a
+            source failure because that is the one ``collect_forecast()`` tolerates; any other
+            type would reach the worker and cost the collector its interval for a forecast it
+            does not depend on. A 200 that is not JSON is a captive portal or a proxy's page.
+    """
+    try:
+        body = response.json()
+    except ValueError as e:
+        raise SourceConnectionError(
+            f"Open-Meteo answered the forecast request with something that is not JSON "
+            f"(got {response.text[:200]!r}): {render_external(e)}"
+        ) from e
+    hourly = body.get("hourly") if isinstance(body, dict) else None
+    times = hourly.get("time") if isinstance(hourly, dict) else None
+    if not isinstance(times, list) or not all(isinstance(t, (int, float)) for t in times):
+        raise SourceConnectionError(
+            f"Open-Meteo answered the forecast request without an hourly time series (got {body!r:.200})"
+        )
+    return hourly, times
 
 
 def _refusal_reason(response):

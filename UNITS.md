@@ -167,8 +167,8 @@ ahead. Points for the hours still to come are in the future, which is why they a
 measurement of their own: a read of the live measurement's newest point never finds a forecast.
 
 Forecast fields are read over MCP through `openmeteo_forecast` and `carbonintensity_forecast`, which
-are offered only where forecasting is switched on. They cannot be a control's input yet: an input
-reads the newest point, and a forecast's newest point is always in the future.
+are offered only where forecasting is switched on. A forecast field cannot be a control's input, and a
+control naming one is refused: an input reads the source's live measurement, which does not hold it.
 
 ## Octopus Energy (`octopus`)
 

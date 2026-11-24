@@ -1695,9 +1695,10 @@ class TestStartingOutputAndTheSetpointName:
 
 
 class TestAForecastIsNotAnInput:
-    """A forecast field's newest point is always in the future, which an input refuses, so a
-    control reading one would sit in its safe state from its first cycle with nothing in the
-    document saying why. Refused where --check-config and a save over MCP both see it."""
+    """An input reads its source's live measurement, and a forecast field is written to the
+    forecast measurement instead, so a control reading one would sit in its safe state from its
+    first cycle with nothing in the document saying why. Refused where --check-config and a
+    save over MCP both see it."""
 
     def test_a_forecast_field_on_a_forecasting_source_is_refused(self):
         document = a_valid_control()
@@ -1706,7 +1707,8 @@ class TestAForecastIsNotAnInput:
         (error,) = validate_control_sources(document)
         assert f"inputs[{name!r}]" in error
         assert "'temperature_2m_forecast_3h' is a forecast" in error
-        assert "always in the future" in error
+        assert "'weather_forecast' measurement" in error
+        assert "live measurement, which does not hold it" in error
 
     def test_the_live_intensity_forecast_is_still_an_input(self):
         """intensity_forecast is the current half-hour's forecast on the live measurement."""

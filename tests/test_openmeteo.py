@@ -220,3 +220,40 @@ class TestOpenMeteoForecast:
             handler.get_data()
         assert get.call_count == 1
         assert "hourly" not in get.call_args[1]["params"]
+
+
+def _real_response(body):
+    """A real requests.Response with status 200 and this raw body, so decoding is requests' own."""
+    response = requests.Response()
+    response.status_code = 200
+    response._content = body
+    return response
+
+
+class TestAForecastAnswerThatIsNotAForecast:
+    """A 200 that is not an hourly forecast must be a SourceConnectionError: that is the only
+    failure collect_forecast() tolerates, and anything else reaches the worker and costs the
+    collector its interval for a forecast it does not depend on."""
+
+    def test_a_body_that_is_not_json(self, sample_settings):
+        handler = _forecasting_handler(sample_settings)
+        with patch.object(handler.session, "get", return_value=_real_response(b"<html>proxy</html>")):
+            with pytest.raises(SourceConnectionError) as raised:
+                handler.get_forecast()
+        assert "something that is not JSON" in str(raised.value)
+        assert "<html>proxy</html>" in str(raised.value)
+
+    def test_a_json_body_that_is_not_an_object(self, sample_settings):
+        handler = _forecasting_handler(sample_settings)
+        with patch.object(handler.session, "get", return_value=_real_response(b"[]")):
+            with pytest.raises(SourceConnectionError, match=r"without an hourly time series \(got \[\]\)"):
+                handler.get_forecast()
+
+    @pytest.mark.parametrize("body", [b"<html>proxy</html>", b"[]"])
+    def test_neither_becomes_the_collector_s_failure(self, sample_settings, body):
+        import sendtoinflux
+        from types import SimpleNamespace
+
+        handler = _forecasting_handler(sample_settings)
+        with patch.object(handler.session, "get", return_value=_real_response(body)):
+            sendtoinflux.collect_forecast(SimpleNamespace(print=False), handler)

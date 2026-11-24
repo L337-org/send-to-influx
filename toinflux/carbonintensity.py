@@ -167,7 +167,11 @@ class CarbonIntensity(DataHandler):
         start = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
         try:
             result = self._get(f"intensity/{start}/fw48h")
-        except SourceConnectionError as e:
+        # ValueError too: _get() decodes the body outside its own try, so a 200 that is not JSON
+        # - a captive portal, a proxy's error page - raises a decode error. As a source failure
+        # collect_forecast() tolerates it; any other type would reach the worker and cost the
+        # collector its interval for a forecast it does not depend on.
+        except (SourceConnectionError, ValueError) as e:
             raise SourceConnectionError(
                 f"Could not fetch the carbon-intensity forecast from {start}: {render_external(e)}"
             ) from e

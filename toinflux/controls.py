@@ -1197,11 +1197,15 @@ def validate_control_sources(document, settings=None):
 def _forecast_input_problem(entry, handler):
     """Return why an input naming a forecast field cannot be read, or None.
 
-    A forecast field is written to the source's forecast measurement, stamped at the time it
-    is for, so its newest point is always in the future. An input reads the newest point and
-    refuses one stamped ahead of now, so such an input would never have a reading: the
-    control would sit in its safe state from its first cycle, with nothing in the document
-    to say why. Said here instead, where ``--check-config`` and a save over MCP both see it.
+    An input reads its source's live measurement - the stored point first, then the source's
+    own ``get_data()`` - and a forecast field is in neither: it is written to the source's
+    forecast measurement. So such an input would never have a reading, and the control would
+    sit in its safe state from its first cycle with nothing in the document to say why. Said
+    here instead, where ``--check-config`` and a save over MCP both see it.
+
+    Making it readable would take an input that reads the forecast measurement, and a forecast
+    stamped at the time it is for is in the future until that time has passed, so it would
+    also have to read ahead rather than take the newest point.
 
     Args:
         entry (dict): the input's entry in the document
@@ -1215,10 +1219,10 @@ def _forecast_input_problem(entry, handler):
     field = entry.get("field")
     if handler.FORECAST_HEADER is None or not isinstance(field, str) or not FORECAST_FIELD_RE.fullmatch(field):
         return None
+    measurement = handler.FORECAST_HEADER.split(",", 1)[0]
     return (
-        f"field {field!r} is a forecast, stamped at the time it is for, so its newest point is always "
-        f"in the future and a control input cannot read it. Forecasts are kept to compare with what "
-        f"happened; a control cannot use them yet"
+        f"field {field!r} is a forecast, kept in the {measurement!r} measurement to compare with what "
+        f"happened; a control input reads the source's live measurement, which does not hold it"
     )
 
 

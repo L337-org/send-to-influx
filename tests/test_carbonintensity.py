@@ -219,3 +219,39 @@ class TestCarbonIntensityForecast:
             with pytest.raises(SourceConnectionError) as raised:
                 handler.get_forecast()
         assert "could not be read from" in str(raised.value) and "yesterday" in str(raised.value)
+
+
+def _real_response(body):
+    """A real requests.Response with status 200 and this raw body, so decoding is requests' own."""
+    response = requests.Response()
+    response.status_code = 200
+    response._content = body
+    return response
+
+
+class TestAForecastAnswerThatIsNotAForecast:
+    """A 200 that is not a forward forecast must be a SourceConnectionError, the only failure
+    collect_forecast() tolerates."""
+
+    def test_a_body_that_is_not_json(self, sample_settings):
+        handler = _forecasting(sample_settings)
+        with patch.object(handler.session, "get", return_value=_real_response(b"<html>proxy</html>")):
+            with patch("toinflux.carbonintensity.time.time", return_value=_NOW):
+                with pytest.raises(SourceConnectionError) as raised:
+                    handler.get_forecast()
+        assert "Could not fetch the carbon-intensity forecast from 2026-11-24T15:52Z" in str(raised.value)
+
+    def test_a_json_body_that_is_not_an_object(self, sample_settings):
+        handler = _forecasting(sample_settings)
+        with patch.object(handler.session, "get", return_value=_real_response(b"[]")):
+            with pytest.raises(SourceConnectionError, match="without a list of half-hours"):
+                handler.get_forecast()
+
+    @pytest.mark.parametrize("body", [b"<html>proxy</html>", b"[]"])
+    def test_neither_becomes_the_collector_s_failure(self, sample_settings, body):
+        import sendtoinflux
+        from types import SimpleNamespace
+
+        handler = _forecasting(sample_settings)
+        with patch.object(handler.session, "get", return_value=_real_response(body)):
+            sendtoinflux.collect_forecast(SimpleNamespace(print=False), handler)
