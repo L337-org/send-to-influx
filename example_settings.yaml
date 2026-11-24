@@ -271,9 +271,12 @@ carbonintensity:
   # Set to true to also collect the national generation fuel mix percentages
   # (gas, nuclear, wind, solar, coal, hydro, biomass, imports, other)
   include_generation: true
-  # Which intensity fields to collect (default: both). intensity_forecast is the forecast for the
-  # half-hour intensity_actual describes, read after the fact; drop it if you record forecasts below.
-  # fields: [intensity_actual, intensity_forecast]
+  # Intensity fields to collect (default: both)
+  fields:
+    - "intensity_actual"
+    # The forecast for the half-hour intensity_actual describes, read after the fact. Remove it
+    # if you record forecasts with forecast_hours below, which look ahead.
+    - "intensity_forecast"
   # Uncomment the line below to also record the forward forecast this many hours ahead (1-47),
   # in the carbonintensity_forecast measurement. See UNITS.md, "Forecasts".
   # forecast_hours: [3, 24]

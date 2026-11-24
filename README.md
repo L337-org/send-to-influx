@@ -191,7 +191,7 @@ Set `include_generation: true` in settings to also collect the fuel mix percenta
 
 `fields` chooses which of `intensity_actual` and `intensity_forecast` to collect, both by default.
 `intensity_forecast` is the forecast for the half-hour `intensity_actual` describes, read after the
-fact; once forecasts are being recorded with `forecast_hours`, `fields: [intensity_actual]` drops it.
+fact; once forecasts are being recorded with `forecast_hours`, removing it from `fields` drops it.
 
 Set `forecast_hours` to a list of whole hours ahead, from 1 to 47, to also record the forward
 forecast at those lead times, in its own `carbonintensity_forecast` measurement. See
