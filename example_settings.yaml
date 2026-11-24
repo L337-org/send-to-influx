@@ -279,7 +279,7 @@ carbonintensity:
     - "intensity_forecast"
   # Uncomment the line below to also record the forward forecast this many hours ahead (1-47),
   # in the carbonintensity_forecast measurement. See UNITS.md, "Forecasts".
-  # forecast_hours: [3, 24]
+  # forecast_hours: [3, 6, 12, 24]
 
 # General Myenergi settings
 myenergi:
