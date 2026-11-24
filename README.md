@@ -546,10 +546,11 @@ first:
   the debconf/`send-to-influx-set-credential` flows described below, ever write to it).
 - Then enable and start it: `systemctl enable --now send-to-influx`
 
-On upgrades, a *running* service is automatically restarted so it actually picks up the new
-version - upgrades are often unattended (cron/apt timers), where a "please restart" hint in the
-package output would never be seen, and the old code would otherwise keep running until the next
-reboot. A stopped service is left stopped; an upgrade never starts anything.
+On upgrades, a *running* service is stopped before its code is replaced and started again on the
+new version once the upgrade completes - upgrades are often unattended (cron/apt timers), where a
+"please restart" hint in the package output would never be seen, and the old code would otherwise
+keep running until the next reboot. A stopped service is left stopped; an upgrade never starts one
+you stopped.
 
 The shipped `settings.yaml` starts with `sources:` empty, so starting the service before editing it
 exits immediately rather than silently running nothing useful - see "Exit codes" above. That exit

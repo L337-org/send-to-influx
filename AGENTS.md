@@ -263,7 +263,9 @@ move into `systemd-creds`.
 - **`preinst` deletes the whole bundled venv, and the `DEBCONF_RECONFIGURE=1` early exit at the top is
   essential.** `dpkg-reconfigure` also runs `preinst` as `upgrade <version>`, indistinguishable by
   arguments alone, but with no unpack following - so without the guard a reconfigure destroys the
-  installation.
+  installation. It stops a running service before the deletion and leaves
+  `/run/send-to-influx.restart-after-upgrade` for `postinst`, which starts the service again from that
+  marker rather than from the service's state at the time.
 - **Clear a consumed debconf password with `db_set <question> ""`, never `db_unregister`** - the latter
   deletes the seen flag and causes blank re-prompts on every upgrade.
 - **Auto-enable a source only when every required field actually resolved.** "Was it ticked" is not
