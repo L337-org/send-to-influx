@@ -417,7 +417,7 @@ tests reach none of it, because field and tag discovery need a server that answe
 ### Forecasts are read the same way
 
 `forecast_sources()` names `<source>_forecast` for each configured source whose class has a
-`FORECAST_HEADER` and whose section sets `forecast_lead_hours`, and `readable_sources()` adds them.
+`FORECAST_HEADER` and whose section sets `forecast_hours`, and `readable_sources()` adds them.
 `_construct()` builds a `ForecastRecord` on the collector's own section, so it reads the database
 the collector wrote to; its measurement comes from the header, and its field metadata is built
 from the configured fields and lead times, with each base field's unit from the collector's

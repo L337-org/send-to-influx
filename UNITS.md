@@ -116,10 +116,10 @@ tests.
 
 | Field | Unit | Notes |
 |---|---|---|
-| `intensity_actual`, `intensity_forecast` | gCO2/kWh | From the `/intensity` endpoint. `intensity_forecast` is the forecast for the same half-hour `intensity_actual` describes, which has usually already happened when it is read - not a look ahead |
+| `intensity_actual`, `intensity_forecast` | gCO2/kWh | From the `/intensity` endpoint; `fields` selects which, both by default. `intensity_forecast` is the forecast for the same half-hour `intensity_actual` describes, which has usually already happened when it is read - not a look ahead |
 | `gen_<fuel>` (e.g. `gen_wind`, `gen_gas`) | % (0-100) | Generation fuel mix share; only collected if `include_generation: true` |
 
-With `forecast_lead_hours` set, the forward forecast is also written, to its own
+With `forecast_hours` set, the forward forecast is also written, to its own
 `carbonintensity_forecast` measurement - see [Forecasts](#forecasts) below:
 
 | Field | Unit | Notes |
@@ -144,7 +144,7 @@ the API, so every field uses Open-Meteo's own default unit. For the fields in th
 If you configure other `fields` from the [Open-Meteo variable list](https://open-meteo.com/en/docs), check that
 page for the default unit of each one.
 
-With `forecast_lead_hours` set, the hourly forecast of the same `fields` is also written, to its own
+With `forecast_hours` set, the hourly forecast of the same `fields` is also written, to its own
 `weather_forecast` measurement - see [Forecasts](#forecasts) below:
 
 | Field | Unit | Notes |
@@ -154,7 +154,7 @@ With `forecast_lead_hours` set, the hourly forecast of the same `fields` is also
 ## Forecasts
 
 Open-Meteo and carbon intensity can also record forecasts, switched on per source with
-`forecast_lead_hours`, a list of whole hours ahead. Each forecast point is **stamped at the time the
+`forecast_hours`, a list of whole hours ahead. Each forecast point is **stamped at the time the
 forecast is for**, not when it was fetched, so it lines up with the actual reading at the same time:
 plot `temperature_2m_forecast_3h` from `weather_forecast` beside `temperature_2m` from `weather` and
 the gap between the two lines is how wrong the three-hour forecast was. No time shift is needed, and

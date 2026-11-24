@@ -37,7 +37,7 @@ def forecasting(tmp_path, influx_server, influx_database):
     """
     installation = Installation(tmp_path, sources=["openmeteo"])
     installation.set_settings("influx", **influx_server.settings)
-    installation.set_settings("openmeteo", db=influx_database, forecast_lead_hours=[3])
+    installation.set_settings("openmeteo", db=influx_database, forecast_hours=[3])
     # The server refuses to build without an MCP block; nothing here listens on it.
     installation.set_settings(
         "mcp",

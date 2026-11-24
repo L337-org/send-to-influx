@@ -140,7 +140,7 @@ class OpenMeteo(DataHandler):
         Returns:
             list: ``(timestamp, {field: value})`` pairs, one per hourly slot a lead time lands
                 on, each field named ``<field>_forecast_<hours>h`` and stamped at the slot's
-                start. Empty when ``forecast_lead_hours`` is not set. A value the API left null
+                start. Empty when ``forecast_hours`` is not set. A value the API left null
                 is absent rather than None.
 
         Raises:
@@ -155,8 +155,9 @@ class OpenMeteo(DataHandler):
             "latitude": self.source_settings["latitude"],
             "longitude": self.source_settings["longitude"],
             "hourly": ",".join(fields),
-            # Counted from the start of the current hour, so one more than the longest lead
-            # reaches the slot after it.
+            # Open-Meteo's own parameter, not our setting of the same name: how many hourly
+            # slots to return, counted from the start of the current hour, so two more than the
+            # longest lead reaches the slot at or after it.
             "forecast_hours": max(leads) + 2,
             # Epoch seconds in UTC, rather than local wall-clock strings that would need the
             # response's offset applied to mean anything.

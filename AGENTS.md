@@ -208,7 +208,7 @@ disabled capability is not registered at all rather than registered-and-refusing
   `controls` to `configured_sources()` for the read tools only, and `_construct()` builds its
   `ControlRecord`; it is not in `_source_classes()`, so nothing can collect it. Its `control`
   measurement and field keys are emitted data like any other. **Forecasts are read the same way**,
-  through `<source>_forecast` and a `ForecastRecord`, offered only where `forecast_lead_hours` is set,
+  through `<source>_forecast` and a `ForecastRecord`, offered only where `forecast_hours` is set,
   and refused by the current-state read (`MCP_FORECAST`), whose newest point would be in the future.
 - **Grafana vocabulary stays in `toinflux/mcp_dashboards.py`.** `mcp_read` does not import it, so the
   leak is structurally impossible rather than merely avoided.

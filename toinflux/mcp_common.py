@@ -191,7 +191,7 @@ def forecast_sources(settings):
     """Return the read-only source names forecasts are read through, one per forecasting source.
 
     ``<source>_forecast`` for each configured source whose class has a forecast and whose
-    section switches it on with ``forecast_lead_hours``. Read like the controls' history and
+    section switches it on with ``forecast_hours``. Read like the controls' history and
     for the same reason: the points are written by a collector under a measurement of their
     own, so there is nothing to collect under this name and it must not be in ``sources:``.
     Not offered where forecasting is off, so a name that would answer with nothing is never

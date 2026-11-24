@@ -375,7 +375,7 @@ class TestForecastsAreReadable:
             "carbonintensity": {"db": "g", "interval": 1800},
         }
         if leads:
-            settings["openmeteo"]["forecast_lead_hours"] = list(leads)
+            settings["openmeteo"]["forecast_hours"] = list(leads)
         return settings
 
     def test_offered_once_switched_on(self):
@@ -400,7 +400,7 @@ class TestForecastsAreReadable:
     def test_resolving_it_reads_the_forecast_measurement_in_the_collector_database(self, installation):
         from toinflux.mcp_common import ForecastRecord, resolve_handlers
 
-        installation.set_settings("openmeteo", forecast_lead_hours=[3, 24])
+        installation.set_settings("openmeteo", forecast_hours=[3, 24])
         handlers = resolve_handlers("openmeteo_forecast", installation.settings, installation.settings_file)
         try:
             ((instance, handler),) = handlers
@@ -423,7 +423,7 @@ class TestForecastsAreReadable:
                 close_session(handler.session)
 
     def test_carbon_intensity_forecasts_carry_their_unit(self, installation):
-        installation.set_settings("carbonintensity", forecast_lead_hours=[1])
+        installation.set_settings("carbonintensity", forecast_hours=[1])
         handler = resolve_handler("carbonintensity_forecast", installation.settings, installation.settings_file)
         try:
             assert handler.MCP_MEASUREMENT == "carbonintensity_forecast"

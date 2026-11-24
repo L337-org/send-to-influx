@@ -113,7 +113,7 @@ _HOURLY = {
 def _forecasting_handler(sample_settings, leads=(3, 24)):
     """Build an OpenMeteo handler with forecasting switched on."""
     settings = _openmeteo_settings(sample_settings)
-    settings["openmeteo"]["forecast_lead_hours"] = list(leads)
+    settings["openmeteo"]["forecast_hours"] = list(leads)
     with patch("toinflux.influx.load_settings", return_value=settings):
         return OpenMeteo(source="openmeteo")
 
@@ -133,7 +133,7 @@ class TestOpenMeteoForecast:
     """The forecast is a request of its own, stamped at the slot each lead time lands on."""
 
     def test_switched_off_it_asks_for_nothing(self, sample_settings):
-        """No forecast_lead_hours, no request: an install that predates forecasts is unchanged."""
+        """No forecast_hours, no request: an install that predates forecasts is unchanged."""
         settings = _openmeteo_settings(sample_settings)
         with patch("toinflux.influx.load_settings", return_value=settings):
             handler = OpenMeteo(source="openmeteo")

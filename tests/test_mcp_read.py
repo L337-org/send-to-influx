@@ -2404,7 +2404,7 @@ class TestAForecastHasNoCurrentState:
     would be a wrong answer given with confidence."""
 
     def test_current_state_is_refused_naming_query_history(self, installation):
-        installation.set_settings("openmeteo", forecast_lead_hours=[3])
+        installation.set_settings("openmeteo", forecast_hours=[3])
         with pytest.raises(ToolParamError) as raised:
             current_state_result("openmeteo_forecast", installation.settings, installation.settings_file)
         assert "holds forecasts" in str(raised.value)

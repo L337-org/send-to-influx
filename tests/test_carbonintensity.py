@@ -156,7 +156,7 @@ def _forward(count=96, forecast=lambda n: 160 + n):
 
 def _forecasting(sample_settings, leads=(1, 47)):
     settings = _ci_settings(sample_settings)
-    settings["carbonintensity"]["forecast_lead_hours"] = list(leads)
+    settings["carbonintensity"]["forecast_hours"] = list(leads)
     with patch("toinflux.influx.load_settings", return_value=settings):
         return CarbonIntensity(source="carbonintensity")
 
@@ -255,3 +255,53 @@ class TestAForecastAnswerThatIsNotAForecast:
         handler = _forecasting(sample_settings)
         with patch.object(handler.session, "get", return_value=_real_response(body)):
             sendtoinflux.collect_forecast(SimpleNamespace(print=False), handler)
+
+
+class TestChoosingTheIntensityFields:
+    """fields chooses which intensity fields are collected, both by default, so an install that
+    records forecasts can drop intensity_forecast, the half-hour's forecast read after the fact."""
+
+    def test_both_by_default(self, sample_settings):
+        with patch("toinflux.influx.load_settings", return_value=_ci_settings(sample_settings)):
+            handler = CarbonIntensity(source="carbonintensity")
+        with patch.object(handler.session, "get", side_effect=_mock_get([_INTENSITY_RESPONSE])):
+            assert handler.get_data() == {"intensity_actual": 143, "intensity_forecast": 150}
+
+    def test_the_actual_alone(self, sample_settings):
+        settings = _ci_settings(sample_settings)
+        settings["carbonintensity"]["fields"] = ["intensity_actual"]
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = CarbonIntensity(source="carbonintensity")
+        with patch.object(handler.session, "get", side_effect=_mock_get([_INTENSITY_RESPONSE])):
+            assert handler.get_data() == {"intensity_actual": 143}
+
+    def test_the_fuel_mix_is_not_affected(self, sample_settings):
+        settings = _ci_settings(sample_settings, include_generation=True)
+        settings["carbonintensity"]["fields"] = ["intensity_forecast"]
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = CarbonIntensity(source="carbonintensity")
+        with patch.object(handler.session, "get", side_effect=_mock_get([_INTENSITY_RESPONSE, _GENERATION_RESPONSE])):
+            data = handler.get_data()
+        assert "intensity_actual" not in data and data["intensity_forecast"] == 150
+        assert data["gen_gas"] == 30.1
+
+    @pytest.mark.parametrize(
+        "fields,expected",
+        [
+            (None, None),
+            (["intensity_actual"], None),
+            ("intensity_actual", "must be a non-empty list"),
+            ([], "must be a non-empty list"),
+            (["intensity_actaul"], "may only name 'intensity_actual', 'intensity_forecast' (got 'intensity_actaul')"),
+            (["gen_gas"], "may only name"),
+            (["intensity_actual", "intensity_actual"], "must not repeat a field"),
+        ],
+    )
+    def test_settings_problems(self, fields, expected):
+        section = {} if fields is None else {"fields": fields}
+        problems = CarbonIntensity.settings_problems("carbonintensity", section)
+        if expected is None:
+            assert problems == []
+        else:
+            (problem,) = problems
+            assert problem.startswith("carbonintensity.fields ") and expected in problem

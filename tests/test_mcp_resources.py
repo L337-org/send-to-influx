@@ -172,7 +172,7 @@ class TestAForecastSourceHasNoStateResource:
         settings = {
             "sources": ["openmeteo"],
             "influx": {"url": "http://x", "user": "u", "password": "p"},
-            "openmeteo": {"db": "w", "interval": 900, "latitude": 1, "longitude": 2, "forecast_lead_hours": [3]},
+            "openmeteo": {"db": "w", "interval": 900, "latitude": 1, "longitude": 2, "forecast_hours": [3]},
         }
         server = _server()
         register_resources(server, settings, None)

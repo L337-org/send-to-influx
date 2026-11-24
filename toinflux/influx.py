@@ -220,7 +220,7 @@ class DataHandler:
         MCP_LIVE_STATE_COVERS_ALL_INSTANCES (bool): False - whether one live read returns every
             instance, rather than needing one read per instance.
         FORECAST_MAX_LEAD_HOURS (int or None): None - how far ahead this source can forecast,
-            in hours, and so the longest lead ``forecast_lead_hours`` accepts. None means no
+            in hours, and so the longest lead ``forecast_hours`` accepts. None means no
             forecast, and the setting is refused.
         FORECAST_HEADER (str or None): None - the line-protocol header forecast points are
             written under, a measurement of their own.
@@ -344,7 +344,7 @@ class DataHandler:
     # from a live read, which is what this distinguishes.
     MCP_LIVE_STATE_COVERS_ALL_INSTANCES = False
     # How many hours ahead this source can forecast, and so the largest lead time its
-    # `forecast_lead_hours` setting accepts. None means the source has no forecast to collect,
+    # `forecast_hours` setting accepts. None means the source has no forecast to collect,
     # and the setting is refused for it. Set on the sources whose far end publishes one.
     FORECAST_MAX_LEAD_HOURS: "int | None" = None
     # The line-protocol header forecast points are written under: a measurement of their own,
@@ -361,6 +361,23 @@ class DataHandler:
     # MCP layer's read-only forecast sources: their newest point is in the future, so the
     # current-state read refuses them rather than reporting a forecast as the present.
     MCP_FORECAST = False
+
+    @classmethod
+    def settings_problems(cls, source, source_settings):
+        """Return problems with settings only this source understands.
+
+        Called by ``validate_settings()`` for each enabled source, after the checks every
+        source shares, so ``--check-config`` reports a key the source would misread rather
+        than the collector meeting it at its first collection. The base has none.
+
+        Args:
+            source (str): the source name, for the message
+            source_settings (dict): the source's settings section
+
+        Returns:
+            list: error strings, empty when the section is usable
+        """
+        return []
 
     @classmethod
     def forecast_fields_for(cls, source_settings):

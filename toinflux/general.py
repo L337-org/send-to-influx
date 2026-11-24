@@ -46,7 +46,7 @@ MAX_AGE_KEY = "max_age"
 # forecast field per configured field and lead time. Absent means off, so an install that
 # predates forecasts writes exactly what it wrote before. Only a source whose class declares
 # FORECAST_MAX_LEAD_HOURS accepts it.
-FORECAST_LEADS_KEY = "forecast_lead_hours"
+FORECAST_LEADS_KEY = "forecast_hours"
 
 
 #: What every continuation line of a multi-line log record is prefixed with. Two spaces is
@@ -1143,11 +1143,16 @@ def _validate_source_block(source, settings, is_v2):
     errors.extend(_validate_duration(source, source_cfg, MINIMUM_INTERVAL_KEY))
     errors.extend(_validate_duration(source, source_cfg, MAX_AGE_KEY))
     errors.extend(_validate_forecast_leads(source, source_cfg))
+    try:
+        errors.extend(source_class(source).settings_problems(source, source_cfg))
+    except ConfigError:
+        # An unknown source is reported by the sources check; nothing more to say here.
+        pass
     return errors
 
 
 def _validate_forecast_leads(source, source_cfg):
-    """Return errors for a source's ``forecast_lead_hours`` list.
+    """Return errors for a source's ``forecast_hours`` list.
 
     Checked here rather than when the forecast is fetched, because a bad list found then
     would only ever be a warning in the log every collection, while the collector carried on

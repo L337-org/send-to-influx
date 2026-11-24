@@ -9,9 +9,14 @@ from datetime import datetime, timezone
 import requests
 from toinflux.influx import DataHandler, forecast_field_name, forecast_slots
 from toinflux.exceptions import SourceConnectionError
-from toinflux.general import render_external
+from toinflux.general import render_external, render_values
 
 CARBON_INTENSITY_BASE_URL = "https://api.carbonintensity.org.uk"
+
+#: The intensity fields ``fields`` may select, and the default: both, as every install collected
+#: before the setting existed. The ``gen_<fuel>`` fields stay with ``include_generation``, because
+#: their names come from the API's fuel list rather than from us.
+INTENSITY_FIELDS = ("intensity_actual", "intensity_forecast")
 ACCEPT_JSON = {"Accept": "application/json"}
 
 
@@ -102,8 +107,8 @@ class CarbonIntensity(DataHandler):
 
         Returns:
             dict: ``intensity_actual`` and ``intensity_forecast`` in gCO2/kWh, each present
-                only when the API reported it, plus a ``gen_<fuel>`` percentage per fuel when
-                ``include_generation`` is set.
+                only when ``fields`` selects it (both by default) and the API reported it,
+                plus a ``gen_<fuel>`` percentage per fuel when ``include_generation`` is set.
 
         Raises:
             SourceConnectionError: propagated from ``_get`` when the API could not be reached,
@@ -111,14 +116,15 @@ class CarbonIntensity(DataHandler):
         """
         self.influx_header = "carbonintensity,source=national_grid "
         self.data = {}
+        wanted = self.source_settings.get("fields", INTENSITY_FIELDS)
 
         # Get current carbon intensity
         result = self._get("intensity")
         if result.get("data"):
             intensity = result["data"][0].get("intensity", {})
-            if intensity.get("actual") is not None:
+            if "intensity_actual" in wanted and intensity.get("actual") is not None:
                 self.data["intensity_actual"] = intensity["actual"]
-            if intensity.get("forecast") is not None:
+            if "intensity_forecast" in wanted and intensity.get("forecast") is not None:
                 self.data["intensity_forecast"] = intensity["forecast"]
 
         # Optionally collect the generation fuel mix
@@ -129,6 +135,33 @@ class CarbonIntensity(DataHandler):
                     self.data[f"gen_{item['fuel']}"] = item["perc"]
 
         return self.data
+
+    @classmethod
+    def settings_problems(cls, source, source_settings):
+        """Return problems with ``fields``, the intensity fields to collect.
+
+        A name outside :data:`INTENSITY_FIELDS` is refused rather than ignored: ignored, a
+        mistyped ``intensity_actaul`` would quietly stop the actual being collected.
+
+        Args:
+            source (str): the source name, for the message
+            source_settings (dict): the ``carbonintensity`` section
+
+        Returns:
+            list: error strings, empty when ``fields`` is absent or usable
+        """
+        if "fields" not in source_settings:
+            return []
+        fields = source_settings["fields"]
+        where = f"{source}.fields"
+        if not isinstance(fields, list) or not fields:
+            return [f"{where} must be a non-empty list chosen from {render_values(INTENSITY_FIELDS)} (got {fields!r})"]
+        unknown = [field for field in fields if field not in INTENSITY_FIELDS]
+        if unknown:
+            return [f"{where} may only name {render_values(INTENSITY_FIELDS)} (got {render_values(unknown)})"]
+        if len(set(fields)) != len(fields):
+            return [f"{where} must not repeat a field (got {fields!r})"]
+        return []
 
     @classmethod
     def forecast_fields_for(cls, source_settings):
@@ -153,7 +186,7 @@ class CarbonIntensity(DataHandler):
 
         Returns:
             list: ``(timestamp, {field: value})`` pairs, one per half-hour a lead time lands
-                on, stamped at the half-hour's start. Empty when ``forecast_lead_hours`` is not
+                on, stamped at the half-hour's start. Empty when ``forecast_hours`` is not
                 set. A half-hour with no forecast value is left out.
 
         Raises:

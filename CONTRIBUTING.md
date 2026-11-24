@@ -159,13 +159,16 @@ Needed for the read tools, the resources and `suggest_dashboard_panels`, which a
 10. **`MCP_LIVE_STATE`** - leave at its `True` default unless `get_data()` is expensive or pointless to
     call live (a full Speedtest run, or Octopus's ~24 h delayed data). Set `False` and current-state
     reads the latest InfluxDB point instead.
-11. **Forecasts**, only if the far end publishes one: set `FORECAST_MAX_LEAD_HOURS` and
+11. **`settings_problems()`** - only if the section has a key only this source understands, such as
+    a choice from a fixed list. `validate_settings()` calls it, so `--check-config` refuses a value
+    the collector would otherwise misread at its first collection.
+12. **Forecasts**, only if the far end publishes one: set `FORECAST_MAX_LEAD_HOURS` and
     `FORECAST_HEADER` (a measurement of its own, never the live one), implement
     `forecast_fields_for()` and `get_forecast()`, and give a forecast base name that is not a live
-    field its unit in `FORECAST_UNITS`. `forecast_lead_hours` validation, collection, writing and the
+    field its unit in `FORECAST_UNITS`. `forecast_hours` validation, collection, writing and the
     read-only `<source>_forecast` MCP source then follow from the class. See
     `architecture/collectors.md`, "Forecasts".
-12. **`GRAFANA_UNITS`** (`toinflux/mcp_dashboards.py`) - map the unit to a real Grafana identifier,
+13. **`GRAFANA_UNITS`** (`toinflux/mcp_dashboards.py`) - map the unit to a real Grafana identifier,
     read out of a running Grafana rather than guessed. Where Grafana has none, use its custom-suffix
     form (`suffix:W/m²`) rather than leaving the panel unitless: an unrecognised id is *not* dropped,
     it renders as a literal suffix, so a typo appears on the axis rather than vanishing. Prefer
@@ -178,60 +181,60 @@ Needed for the read tools, the resources and `suggest_dashboard_panels`, which a
 Only if the source can be *controlled* or *actioned* and its vendor API has a documented write path.
 Most sources are read-only and skip this.
 
-13. Set **`MCP_WRITABLE = True`** and implement the vendor write logic as methods on the class, keeping
+14. Set **`MCP_WRITABLE = True`** and implement the vendor write logic as methods on the class, keeping
     the name-to-id, parameter and capability mapping there (see `Hue.mcp_set_device_state` or
     `Speedtest.mcp_trigger_run`).
-14. Add a per-source registrar to **`_WRITE_TOOL_REGISTRARS`** in `toinflux/mcp_write.py`. A
+15. Add a per-source registrar to **`_WRITE_TOOL_REGISTRARS`** in `toinflux/mcp_write.py`. A
     write-enabled source with no registrar is logged and skipped, not silently controllable.
-15. Every tool needs a **`title=`** distinct from its own name and an **`annotations=ToolAnnotations(...)`**
+16. Every tool needs a **`title=`** distinct from its own name and an **`annotations=ToolAnnotations(...)`**
     with `read_only_hint` set explicitly, plus `destructive_hint` when `read_only_hint=False`. A
     client's auto-permission logic and a registry review read these fields, never the description.
-16. Add **`<source>.mcp_read_write`** (bool, default false) to `example_settings.yaml`. The tools
+17. Add **`<source>.mcp_read_write`** (bool, default false) to `example_settings.yaml`. The tools
     appear once the operator opts in.
 
 ### The debconf install flow
 
 Mechanical, not a judgment call: every rule below is an existing tested convention.
 
-17. Add the source's name to the `sources-to-configure` multiselect `Choices` in
+18. Add the source's name to the `sources-to-configure` multiselect `Choices` in
     `packaging/deb/send-to-influx.templates`, **appending at the end**. The question-visibility
     scenario in `test-packaging.sh` selects sources by position number, so inserting mid-list silently
     retargets those tests.
-18. Credential, identity and connection fields get conditional questions (templates plus a
+19. Credential, identity and connection fields get conditional questions (templates plus a
     `case "$SOURCES"` block in `packaging/deb/config`), all at priority `high`. Debconf's default
     threshold is `high`, so anything lower is silently skipped on a normal install. Tuning fields
     (`interval`, `db`, `timeout`, `fields` lists) are **never** prompted for.
-19. Secrets are `Type: password` templates. `postinst` migrates them via
+20. Secrets are `Type: password` templates. `postinst` migrates them via
     `send-to-influx-set-credential` and clears the stored answer with `db_set ""` immediately after
     `db_get` - never `db_unregister`, which deletes the seen flag and causes blank re-prompts on every
     upgrade. Add every credential-bearing answer to the final unconditional sweep loop too.
-20. A *shared* infrastructure block (like `mqtt:`) is asked once, gated on any source needing it being
+21. A *shared* infrastructure block (like `mqtt:`) is asked once, gated on any source needing it being
     selected - not per source, and not unconditionally, which is InfluxDB's special status only. A
     credential already in systemd-creds satisfies a blank secret prompt on reconfigure, and non-secret
     fields provided alongside a blank secret are still applied.
-21. If the source introduces a **new settings section**, `postinst` must `--ensure-section` it before
+22. If the source introduces a **new settings section**, `postinst` must `--ensure-section` it before
     writing fields or enabling the source. `settings.yaml` is written once at install time and never
     rewritten by an upgrade, so a section added by a later release simply does not exist on existing
     installs: `--set-field` fails, `--enable-source` then writes the source into `sources:` with no
     block behind it, and `load_settings()` raises a fatal `ConfigError` that stops the **whole
     service**.
-22. Auto-enable with `--enable-source` only when every required field actually resolved and
+23. Auto-enable with `--enable-source` only when every required field actually resolved and
     `INFLUX_OK=1`. "Was it ticked" is not enough; otherwise print a specific "not fully configured"
     warning and leave it opt-in.
-23. Extend `packaging/deb/test-packaging.sh`: seed the new source's answers in the seeded-install
+24. Extend `packaging/deb/test-packaging.sh`: seed the new source's answers in the seeded-install
     scenario (asserting fields land in `settings.yaml`, credentials in the credstore, and the
     plaintext secret is absent from both `settings.yaml` and debconf's own database), and extend the
     question-visibility scenario.
 
 ### Documentation
 
-24. Update **README.md** (a short section on the source and any setup steps such as getting an API
+25. Update **README.md** (a short section on the source and any setup steps such as getting an API
     key) and **UNITS.md** (the fields it collects and their units).
-25. Update **AGENTS.md** and the relevant file under
+26. Update **AGENTS.md** and the relevant file under
     **`architecture/`**. `AGENTS.md` is the only instruction file to update: `CLAUDE.md` and
     `.github/copilot-instructions.md` are pointers to it and carry no rules of their own.
 
-If you are only adding a field or fixing a bug in an *existing* source, steps 2, 3 and 17-23 do not
+If you are only adding a field or fixing a bug in an *existing* source, steps 2, 3 and 18-24 do not
 apply, but the rest still do wherever relevant.
 
 ## Checklist when adding a module under `toinflux/`

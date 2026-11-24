@@ -252,13 +252,9 @@ openmeteo:
     - "cloud_cover"
     - "wind_speed_10m"
     - "direct_radiation"
-  # Uncomment the lines below to also record the hourly forecast of the fields above this many
+  # Uncomment the line below to also record the hourly forecast of the fields above this many
   # hours ahead (1-382), in the weather_forecast measurement. See UNITS.md, "Forecasts".
-  # forecast_lead_hours:
-  #   - 3
-  #   - 6
-  #   - 12
-  #   - 24
+  # forecast_hours: [3, 6, 12, 24]
 
 # National Grid Carbon Intensity settings (no API key required)
 carbonintensity:
@@ -275,11 +271,12 @@ carbonintensity:
   # Set to true to also collect the national generation fuel mix percentages
   # (gas, nuclear, wind, solar, coal, hydro, biomass, imports, other)
   include_generation: true
-  # Uncomment the lines below to also record the forward forecast this many hours ahead (1-47),
+  # Which intensity fields to collect (default: both). intensity_forecast is the forecast for the
+  # half-hour intensity_actual describes, read after the fact; drop it if you record forecasts below.
+  # fields: [intensity_actual, intensity_forecast]
+  # Uncomment the line below to also record the forward forecast this many hours ahead (1-47),
   # in the carbonintensity_forecast measurement. See UNITS.md, "Forecasts".
-  # forecast_lead_hours:
-  #   - 3
-  #   - 24
+  # forecast_hours: [3, 24]
 
 # General Myenergi settings
 myenergi:

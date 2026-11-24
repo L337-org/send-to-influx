@@ -171,7 +171,7 @@ would be one worker's identity twice.
 
 ## Forecasts (Open-Meteo and carbon intensity)
 
-Switched on per source by `forecast_lead_hours`, a list of whole hours ahead, validated by
+Switched on per source by `forecast_hours`, a list of whole hours ahead, validated by
 `_validate_forecast_leads()` against the class's `FORECAST_MAX_LEAD_HOURS`; a source whose class
 sets none refuses the key. User-facing description in UNITS.md, "Forecasts".
 
@@ -205,7 +205,8 @@ sets none refuses the key. User-facing description in UNITS.md, "Forecasts".
   by a later fetch holds the later value. The union also means a field the API stops returning
   keeps its last stored value at that slot rather than disappearing.
 - **Open-Meteo is asked with `timeformat=unixtime`**, so slot times are UTC epoch seconds and need
-  no offset applied, and `forecast_hours` of the longest lead plus two, because the series starts at
+  no offset applied, and with the API's own `forecast_hours` parameter (not our setting of the same
+  name) at the longest lead plus two, because the series starts at
   the current hour.
 
 ## Hue
