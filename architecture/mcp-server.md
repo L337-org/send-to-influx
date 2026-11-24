@@ -425,7 +425,8 @@ from the configured fields and lead times, with each base field's unit from the 
 `get_documentation` too, which reads `MCP_FIELD_METADATA` without a round trip.
 
 `MCP_FORECAST` is True on it, and `current_state_result()` refuses it through
-`_refuse_a_forecast()`: the latest point is the furthest ahead the forecast reaches. `query_history`
+`_refuse_a_forecast()`: the latest point is the furthest ahead the forecast reaches. For the same
+reason `register_resources()` gives it a `schema://` resource and no `state://` one. `query_history`
 reads past forecasts beside the actuals unchanged; a future range needs an explicit ISO end, since
 relative ranges only look back. A control cannot use one: the name is not in `configured_sources()`,
 and `validate_control_sources()` refuses a forecast field named on the forecasting source itself.

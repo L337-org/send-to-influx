@@ -162,3 +162,20 @@ class TestResourceFailures:
             "toinflux/mcp_resources.py registers a resource directly with @server.resource - use "
             "@_register_resource(server, ...) so an anticipated failure keeps its message"
         )
+
+
+class TestAForecastSourceHasNoStateResource:
+    """A forecast's current state is always refused, so registering a resource for it would
+    be a capability that exists only to say no."""
+
+    def test_schema_only(self):
+        settings = {
+            "sources": ["openmeteo"],
+            "influx": {"url": "http://x", "user": "u", "password": "p"},
+            "openmeteo": {"db": "w", "interval": 900, "latitude": 1, "longitude": 2, "forecast_lead_hours": [3]},
+        }
+        server = _server()
+        register_resources(server, settings, None)
+        uris = {str(r.uri) for r in anyio.run(server.list_resources)}
+        assert {"schema://openmeteo", "state://openmeteo", "schema://openmeteo_forecast"} <= uris
+        assert "state://openmeteo_forecast" not in uris
