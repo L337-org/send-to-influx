@@ -1465,3 +1465,52 @@ class TestWhichSourcesAreEnabled:
             "source 'hue' is disabled: it is not in the 'sources:' list in the settings file. "
             "Add it there to use it in a control"
         )
+
+
+class TestForecastLeadHours:
+    """forecast_lead_hours switches forecasting on; a bad list is caught by --check-config,
+    not left to warn in the log every collection while current conditions carry on."""
+
+    @staticmethod
+    def _with(sample_settings, value, source="openmeteo"):
+        sample_settings["sources"] = [source]
+        sample_settings["openmeteo"] = {"db": "w", "interval": 900, "latitude": 1, "longitude": 2}
+        sample_settings["carbonintensity"] = {"db": "g", "interval": 1800}
+        sample_settings[source]["forecast_lead_hours"] = value
+        return sample_settings
+
+    def test_absent_is_off_and_valid(self, sample_settings):
+        sample_settings["sources"] = ["openmeteo"]
+        sample_settings["openmeteo"] = {"db": "w", "interval": 900, "latitude": 1, "longitude": 2}
+        validate_settings(sample_settings)
+
+    @pytest.mark.parametrize(
+        "source,value", [("openmeteo", [3, 6, 12, 24]), ("openmeteo", [382]), ("carbonintensity", [1, 47])]
+    )
+    def test_a_usable_list_is_accepted(self, sample_settings, source, value):
+        validate_settings(self._with(sample_settings, value, source))
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (3, "must be a non-empty list"),
+            ([], "must be a non-empty list"),
+            ([True], "entries must be whole hours from 1 to 382"),
+            ([0], "entries must be whole hours from 1 to 382"),
+            ([1.5], "entries must be whole hours from 1 to 382"),
+            ([383], "entries must be whole hours from 1 to 382"),
+            ([3, 3], "must not repeat a lead time"),
+        ],
+    )
+    def test_an_unusable_list_is_refused(self, sample_settings, value, expected):
+        with pytest.raises(ConfigError, match=f"openmeteo.forecast_lead_hours {expected}"):
+            validate_settings(self._with(sample_settings, value))
+
+    def test_carbon_intensity_reaches_47_hours(self, sample_settings):
+        with pytest.raises(ConfigError, match="whole hours from 1 to 47"):
+            validate_settings(self._with(sample_settings, [48], "carbonintensity"))
+
+    def test_a_source_with_no_forecast_refuses_it(self, sample_settings):
+        sample_settings["hue"]["forecast_lead_hours"] = [3]
+        with pytest.raises(ConfigError, match="hue.forecast_lead_hours is not supported: hue has no forecast"):
+            validate_settings(sample_settings)

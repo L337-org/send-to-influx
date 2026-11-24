@@ -4,8 +4,10 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
+import time
+from datetime import datetime, timezone
 import requests
-from toinflux.influx import DataHandler
+from toinflux.influx import DataHandler, forecast_field_name, forecast_slots
 from toinflux.exceptions import SourceConnectionError
 from toinflux.general import render_external
 
@@ -21,6 +23,9 @@ class CarbonIntensity(DataHandler):
             settlement periods, so this is already twice as often as the figure moves.
         DEFAULT_MAX_AGE (int): 3600 - half-hourly settlement periods, and the
             figure caps output rather than holding a setpoint.
+        FORECAST_MAX_LEAD_HOURS (int): 47 - the forward forecast runs 48 hours.
+        FORECAST_HEADER (str): forecasts go to ``carbonintensity_forecast``.
+        FORECAST_UNITS (dict): the unit of the forecast base name ``intensity``.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_FIELD_METADATA (dict): unit and aggregation kind for the two intensity
             fields; the ``gen_<fuel>`` fields carry none, and UNITS.md documents them.
@@ -34,6 +39,13 @@ class CarbonIntensity(DataHandler):
     # rather than holding a setpoint - a control uses it to decide whether to run one heater
     # or two - so a little staleness costs efficiency rather than correctness.
     DEFAULT_MAX_AGE = 3600
+    # The forward forecast runs 48 hours from the half-hour it is asked from. One hour short
+    # of that, so the half-hour at or after the longest lead is always inside it.
+    FORECAST_MAX_LEAD_HOURS = 47
+    # Its own measurement, beside "carbonintensity": see DataHandler.FORECAST_HEADER.
+    FORECAST_HEADER = "carbonintensity_forecast,source=national_grid "
+    # The forecast is of "intensity", which is not a live field of its own.
+    FORECAST_UNITS = {"intensity": "gCO2/kWh"}
 
     MCP_DESCRIPTION = "UK carbon intensity (actual/forecast gCO2/kWh) and the generation fuel mix."
     # Only the two intensity fields carry a unit here. The gen_<fuel>
@@ -117,3 +129,86 @@ class CarbonIntensity(DataHandler):
                     self.data[f"gen_{item['fuel']}"] = item["perc"]
 
         return self.data
+
+    @classmethod
+    def forecast_fields_for(cls, source_settings):
+        """Return the one field forecast: the national intensity.
+
+        Args:
+            source_settings (dict): the ``carbonintensity`` settings section, unused
+
+        Returns:
+            list: ``["intensity"]``
+        """
+        return ["intensity"]
+
+    def get_forecast(self):
+        """Get the national forward forecast of carbon intensity, one value per lead time.
+
+        From the ``/intensity/{from}/fw48h`` endpoint, which returns every half-hour from the
+        one containing ``from`` to 48 hours ahead. The field is ``intensity_forecast_<hours>h``:
+        a forecast of the intensity, made that far ahead. Not to be confused with
+        ``intensity_forecast`` on the live measurement, which is the forecast for the
+        half-hour ``intensity_actual`` describes, read after the fact.
+
+        Returns:
+            list: ``(timestamp, {field: value})`` pairs, one per half-hour a lead time lands
+                on, stamped at the half-hour's start. Empty when ``forecast_lead_hours`` is not
+                set. A half-hour with no forecast value is left out.
+
+        Raises:
+            SourceConnectionError: the API could not be reached or refused the request, or
+                answered with something that is not a forward forecast
+        """
+        leads = self.forecast_lead_hours()
+        if not leads:
+            return []
+        now = time.time()
+        start = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+        try:
+            result = self._get(f"intensity/{start}/fw48h")
+        except SourceConnectionError as e:
+            raise SourceConnectionError(
+                f"Could not fetch the carbon-intensity forecast from {start}: {render_external(e)}"
+            ) from e
+
+        periods = _forecast_periods(result)
+        slots = forecast_slots(sorted(periods), now, leads)
+        points = {}
+        for lead, slot in slots.items():
+            for field in self.forecast_fields():
+                points.setdefault(slot, {})[forecast_field_name(field, lead)] = periods[slot]
+        return sorted(points.items())
+
+
+def _forecast_periods(result):
+    """Read the forward forecast's half-hours into ``{start: forecast}``.
+
+    Args:
+        result (object): the parsed response body
+
+    Returns:
+        dict: each half-hour's start, in epoch seconds, to its forecast intensity, leaving out
+            a half-hour with no forecast value
+
+    Raises:
+        SourceConnectionError: the body is not a list of half-hours, or one cannot be read
+    """
+    entries = result.get("data") if isinstance(result, dict) else None
+    if not isinstance(entries, list):
+        raise SourceConnectionError(
+            f"The carbon-intensity forecast came back without a list of half-hours (got {result!r:.200})"
+        )
+    periods = {}
+    for entry in entries:
+        try:
+            begins = datetime.strptime(entry["from"], "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc)
+            forecast = entry["intensity"]["forecast"]
+        except (KeyError, TypeError, ValueError) as e:
+            raise SourceConnectionError(
+                f"The carbon-intensity forecast held a half-hour it could not be read from "
+                f"(got {entry!r:.200}): {render_external(e)}"
+            ) from e
+        if forecast is not None:
+            periods[int(begins.timestamp())] = forecast
+    return periods

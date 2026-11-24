@@ -125,3 +125,97 @@ class TestCarbonIntensity:
                 handler.get_data()
                 headers_used = mock_get.call_args[1]["headers"]
                 assert headers_used.get("Accept") == "application/json"
+
+
+# Recorded from the live API on 2026-11-24 at 15:49 UTC: GET /intensity/2026-11-24T15:49Z/fw48h
+# answered 96 half-hours starting with the one containing `from`, each shaped
+# {"from": "2026-11-24T15:30Z", "to": "2026-11-24T16:00Z",
+#  "intensity": {"forecast": 164, "actual": null, "index": "moderate"}}.
+
+_NOW = 1795535567  # 2026-11-24T15:52:47Z
+_FIRST = 1795534200  # 2026-11-24T15:30Z
+
+
+def _forward(count=96, forecast=lambda n: 160 + n):
+    """A forward-forecast body of half-hours from 15:30 UTC."""
+    from datetime import datetime, timezone
+
+    entries = []
+    for n in range(count):
+        start = datetime.fromtimestamp(_FIRST + n * 1800, tz=timezone.utc)
+        end = datetime.fromtimestamp(_FIRST + (n + 1) * 1800, tz=timezone.utc)
+        entries.append(
+            {
+                "from": start.strftime("%Y-%m-%dT%H:%MZ"),
+                "to": end.strftime("%Y-%m-%dT%H:%MZ"),
+                "intensity": {"forecast": forecast(n), "actual": None, "index": "moderate"},
+            }
+        )
+    return {"data": entries}
+
+
+def _forecasting(sample_settings, leads=(1, 47)):
+    settings = _ci_settings(sample_settings)
+    settings["carbonintensity"]["forecast_lead_hours"] = list(leads)
+    with patch("toinflux.influx.load_settings", return_value=settings):
+        return CarbonIntensity(source="carbonintensity")
+
+
+class TestCarbonIntensityForecast:
+    """The forward forecast, one field per lead time, stamped at the half-hour it is for."""
+
+    def test_switched_off_it_asks_for_nothing(self, sample_settings):
+        settings = _ci_settings(sample_settings)
+        with patch("toinflux.influx.load_settings", return_value=settings):
+            handler = CarbonIntensity(source="carbonintensity")
+        with patch.object(handler.session, "get") as get:
+            assert handler.get_forecast() == []
+        get.assert_not_called()
+
+    def test_it_asks_for_48_hours_forward_from_now(self, sample_settings):
+        handler = _forecasting(sample_settings)
+        with patch.object(handler.session, "get", side_effect=_mock_get([_forward()])) as get:
+            with patch("toinflux.carbonintensity.time.time", return_value=_NOW):
+                handler.get_forecast()
+        assert get.call_args[0][0] == "https://api.carbonintensity.org.uk/intensity/2026-11-24T15:52Z/fw48h"
+
+    def test_each_lead_is_stamped_at_the_first_half_hour_at_or_after_it(self, sample_settings):
+        """15:52 plus one hour is 16:52, so the one-hour forecast is the 17:00 half-hour's."""
+        handler = _forecasting(sample_settings)
+        with patch.object(handler.session, "get", side_effect=_mock_get([_forward()])):
+            with patch("toinflux.carbonintensity.time.time", return_value=_NOW):
+                points = handler.get_forecast()
+        seventeen = _FIRST + 3 * 1800
+        assert points[0] == (seventeen, {"intensity_forecast_1h": 163})
+        assert list(points[1][1]) == ["intensity_forecast_47h"]
+        assert points[1][0] >= _NOW + 47 * 3600
+
+    def test_a_half_hour_with_no_forecast_is_skipped(self, sample_settings):
+        handler = _forecasting(sample_settings, leads=(1,))
+        body = _forward(forecast=lambda n: None if n == 3 else 160 + n)
+        with patch.object(handler.session, "get", side_effect=_mock_get([body])):
+            with patch("toinflux.carbonintensity.time.time", return_value=_NOW):
+                ((timestamp, fields),) = handler.get_forecast()
+        assert timestamp == _FIRST + 4 * 1800 and fields == {"intensity_forecast_1h": 164}
+
+    def test_an_unreachable_api_says_what_was_being_fetched(self, sample_settings):
+        handler = _forecasting(sample_settings)
+        with patch.object(handler.session, "get", side_effect=requests.exceptions.ConnectionError("no route")):
+            with patch("toinflux.carbonintensity.time.time", return_value=_NOW):
+                with pytest.raises(SourceConnectionError) as raised:
+                    handler.get_forecast()
+        assert "Could not fetch the carbon-intensity forecast from 2026-11-24T15:52Z" in str(raised.value)
+        assert "no route" in str(raised.value)
+
+    def test_an_answer_that_is_not_a_list_of_half_hours_is_refused(self, sample_settings):
+        handler = _forecasting(sample_settings)
+        with patch.object(handler.session, "get", side_effect=_mock_get([{"data": {"oops": 1}}])):
+            with pytest.raises(SourceConnectionError, match="without a list of half-hours"):
+                handler.get_forecast()
+
+    def test_a_half_hour_that_cannot_be_read_is_named(self, sample_settings):
+        handler = _forecasting(sample_settings)
+        with patch.object(handler.session, "get", side_effect=_mock_get([{"data": [{"from": "yesterday"}]}])):
+            with pytest.raises(SourceConnectionError) as raised:
+                handler.get_forecast()
+        assert "could not be read from" in str(raised.value) and "yesterday" in str(raised.value)

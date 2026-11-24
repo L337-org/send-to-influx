@@ -18,7 +18,7 @@ import faulthandler
 from importlib.metadata import version, PackageNotFoundError
 import toinflux
 import toinflux.writer
-from toinflux.general import enabled_sources, listed_sources, render_values
+from toinflux.general import RepeatingProblem, enabled_sources, listed_sources, render_values
 from toinflux.influx import InfluxWriteError, escape_key_or_tag_value, worker_label
 from toinflux.exceptions import ConfigError, SourceConnectionError
 from toinflux.control_record import log_record_destination
@@ -68,7 +68,7 @@ def print_source_data(source, data):
 
     Args:
         source (str): the source name, used as the envelope's key
-        data (dict): the collected point to print
+        data (dict or list): the collected point, or a forecast's list of stamped points, to print
     """
     blob = {
         "source": source,
@@ -121,7 +121,42 @@ def collect_source_data(source, args, data_handler):
         print_source_data(data_handler.worker_label, data)
     else:
         data_handler.send_data()
+    collect_forecast(args, data_handler)
     return data_handler.source_settings["interval"]
+
+
+#: Forecast failures, said once per outage rather than once per collection. Shared by every
+#: worker thread; keyed by worker, so two sources failing are two problems.
+_FORECAST_PROBLEMS = RepeatingProblem()
+
+
+def collect_forecast(args, data_handler) -> None:
+    """Fetch and write a source's forecast, after its reading has been written.
+
+    **A forecast failure never becomes the source's failure.** It is logged here - once while
+    it repeats, at WARNING - and the collector carries on at its interval, with no backoff and
+    no unhealthy heartbeat, because the reading it exists to collect was written. Counting a
+    forecast outage against the source would have stalled current conditions behind a
+    feature most installs do not switch on.
+
+    Args:
+        args (argparse.Namespace): the parsed command line, for the print switch
+        data_handler (DataHandler): the handler whose forecast to collect
+    """
+    label = data_handler.worker_label
+    try:
+        points = data_handler.get_forecast()
+    except SourceConnectionError as exc:
+        # Tolerated by design - see the docstring - so it is logged rather than raised.
+        _FORECAST_PROBLEMS.report(label, logging.WARNING, "Could not collect the forecast for '%s': %s", label, exc)
+        return
+    _FORECAST_PROBLEMS.cleared(label, "Collecting the forecast for '%s' again", label)
+    if not points:
+        return
+    if args.print:
+        print_source_data(f"{label} forecast", [{"time": timestamp, "data": fields} for timestamp, fields in points])
+    else:
+        data_handler.send_forecast(points)
 
 
 def stream_source_data(source, args, data_handler, should_stop, on_activity=None):

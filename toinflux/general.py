@@ -42,6 +42,12 @@ MINIMUM_INTERVAL_KEY = "minimum_interval"
 # faster than the class assumes should not have to edit every control document to say so.
 MAX_AGE_KEY = "max_age"
 
+# The per-source key that switches forecast collection on: a list of whole hours ahead, one
+# forecast field per configured field and lead time. Absent means off, so an install that
+# predates forecasts writes exactly what it wrote before. Only a source whose class declares
+# FORECAST_MAX_LEAD_HOURS accepts it.
+FORECAST_LEADS_KEY = "forecast_lead_hours"
+
 
 #: What every continuation line of a multi-line log record is prefixed with. Two spaces is
 #: enough because the only property that matters is that it is not a digit: a real entry
@@ -1136,7 +1142,48 @@ def _validate_source_block(source, settings, is_v2):
         errors.append(f"{source}.mcp_read_write must be true or false (got {source_cfg['mcp_read_write']!r})")
     errors.extend(_validate_duration(source, source_cfg, MINIMUM_INTERVAL_KEY))
     errors.extend(_validate_duration(source, source_cfg, MAX_AGE_KEY))
+    errors.extend(_validate_forecast_leads(source, source_cfg))
     return errors
+
+
+def _validate_forecast_leads(source, source_cfg):
+    """Return errors for a source's ``forecast_lead_hours`` list.
+
+    Checked here rather than when the forecast is fetched, because a bad list found then
+    would only ever be a warning in the log every collection, while the collector carried on
+    writing current conditions as though nothing were wrong.
+
+    Whole hours only, and each one once. A bool is refused for the reason it is refused in a
+    duration: ``True`` is an ``int`` and would quietly mean one hour. The upper bound is the
+    source's own: how far ahead its far end forecasts, less the slack needed to find the
+    first forecast slot at or after the lead.
+
+    Args:
+        source (str): the source name, for the message
+        source_cfg (dict): that source's settings section
+
+    Returns:
+        list: error strings, empty when the key is absent or usable
+    """
+    if FORECAST_LEADS_KEY not in source_cfg:
+        return []
+    where = f"{source}.{FORECAST_LEADS_KEY}"
+    try:
+        limit = source_class(source).FORECAST_MAX_LEAD_HOURS
+    except ConfigError:
+        # An unknown source is reported by the sources check; nothing more to say here.
+        return []
+    if limit is None:
+        return [f"{where} is not supported: {source} has no forecast to collect"]
+    value = source_cfg[FORECAST_LEADS_KEY]
+    if not isinstance(value, list) or not value:
+        return [f"{where} must be a non-empty list of whole hours ahead, such as [3, 6, 12, 24] (got {value!r})"]
+    bad = [lead for lead in value if isinstance(lead, bool) or not isinstance(lead, int) or not 1 <= lead <= limit]
+    if bad:
+        return [f"{where} entries must be whole hours from 1 to {limit} (got {render_values(bad)})"]
+    if len(set(value)) != len(value):
+        return [f"{where} must not repeat a lead time (got {value!r})"]
+    return []
 
 
 def _validate_interval(source, source_cfg):
