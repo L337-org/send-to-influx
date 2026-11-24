@@ -729,7 +729,7 @@ if [ -d /run/systemd/system ]; then
             if systemctl restart send-to-influx; then
                 RESTARTED=1
             elif [ "$WAS_STOPPED_FOR_UPGRADE" = 1 ]; then
-                echo "send-to-influx: starting the service again after the upgrade failed - it was running before the upgrade and is now stopped. Check 'systemctl status send-to-influx'." >&2
+                echo "send-to-influx: could not start the service again after the upgrade - it was running before and is now stopped. Check 'systemctl status send-to-influx'." >&2
             else
                 echo "send-to-influx: automatic restart after upgrade failed - the service may still be running the previous version. Check 'systemctl status send-to-influx'." >&2
             fi
