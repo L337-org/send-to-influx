@@ -1435,6 +1435,28 @@ def _latest_recorded_per_instance(handler):
     return out
 
 
+def _refuse_a_forecast(source, handler) -> None:
+    """Refuse a current-state read of a forecast source.
+
+    The latest recorded point of a forecast is the furthest ahead it reaches, a day or more
+    away, and reporting it as the present is a wrong answer delivered with confidence. Refused,
+    naming the tool that does answer the question.
+
+    Args:
+        source (str): the source asked for
+        handler (DataHandler): its handler
+
+    Raises:
+        ToolParamError: the source holds forecasts
+    """
+    if handler.MCP_FORECAST is True:
+        raise ToolParamError(
+            f"source {source!r} holds forecasts, stamped at the time they are for, so it has no "
+            f"current state: its newest point is in the future. Read it with query_history over "
+            f"the period wanted, and compare with the live source at the same times"
+        )
+
+
 def current_state_result(source, settings, settings_file):
     """Build the get_current_state payload (runs in a worker thread).
 
@@ -1471,6 +1493,7 @@ def current_state_result(source, settings, settings_file):
     handlers = resolve_handlers(source, settings, settings_file)
     try:
         first = handlers[0][1]
+        _refuse_a_forecast(source, first)
         result = {"source": first.source, "state": "live" if first.MCP_LIVE_STATE else "last_recorded"}
         if first.MCP_DESCRIPTION:
             result["description"] = first.MCP_DESCRIPTION

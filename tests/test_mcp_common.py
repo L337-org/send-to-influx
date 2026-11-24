@@ -359,3 +359,78 @@ class TestTheControlsHistoryIsReadable:
     def test_unconfigured_it_is_an_unknown_source(self, installation):
         with pytest.raises(ToolParamError, match="unknown source 'controls'"):
             resolve_handler("controls", installation.settings, installation.settings_file)
+
+
+class TestForecastsAreReadable:
+    """Forecasts are read through <source>_forecast, like the controls' history: written by a
+    collector under a measurement of their own, so not in sources: and not collectable."""
+
+    V1 = {"url": "http://influx", "user": "u", "password": "p"}
+
+    def _settings(self, leads=(3, 24)):
+        settings = {
+            "sources": ["openmeteo", "carbonintensity", "hue"],
+            "influx": self.V1,
+            "openmeteo": {"db": "w", "interval": 900, "latitude": 1, "longitude": 2},
+            "carbonintensity": {"db": "g", "interval": 1800},
+        }
+        if leads:
+            settings["openmeteo"]["forecast_lead_hours"] = list(leads)
+        return settings
+
+    def test_offered_once_switched_on(self):
+        from toinflux.mcp_common import readable_sources
+
+        settings = self._settings()
+        assert readable_sources(settings) == ["openmeteo", "carbonintensity", "hue", "openmeteo_forecast"]
+        assert configured_sources(settings) == ["openmeteo", "carbonintensity", "hue"]
+
+    def test_and_not_before(self):
+        from toinflux.mcp_common import readable_sources
+
+        assert "openmeteo_forecast" not in readable_sources(self._settings(leads=()))
+
+    def test_not_for_a_source_that_is_switched_off(self):
+        from toinflux.mcp_common import readable_sources
+
+        settings = self._settings()
+        settings["sources"] = ["hue"]
+        assert readable_sources(settings) == ["hue"]
+
+    def test_resolving_it_reads_the_forecast_measurement_in_the_collector_database(self, installation):
+        from toinflux.mcp_common import ForecastRecord, resolve_handlers
+
+        installation.set_settings("openmeteo", forecast_lead_hours=[3, 24])
+        handlers = resolve_handlers("openmeteo_forecast", installation.settings, installation.settings_file)
+        try:
+            ((instance, handler),) = handlers
+            assert instance is None and isinstance(handler, ForecastRecord)
+            assert handler.source == "openmeteo_forecast"
+            assert handler.MCP_MEASUREMENT == "weather_forecast"
+            assert handler.source_settings["db"] == "weather"
+            assert handler.MCP_LIVE_STATE is False and handler.MCP_FORECAST is True
+            assert sorted(handler.MCP_FIELD_METADATA) == [
+                "dew_point_2m_forecast_24h",
+                "dew_point_2m_forecast_3h",
+                "temperature_2m_forecast_24h",
+                "temperature_2m_forecast_3h",
+            ]
+            meaning = handler.MCP_FIELD_METADATA["temperature_2m_forecast_3h"]
+            assert meaning["unit"] == "\u00b0C" and meaning["kind"] == "gauge"
+            assert "at least 3 hours before" in meaning["description"]
+        finally:
+            for _, handler in handlers:
+                close_session(handler.session)
+
+    def test_carbon_intensity_forecasts_carry_their_unit(self, installation):
+        installation.set_settings("carbonintensity", forecast_lead_hours=[1])
+        handler = resolve_handler("carbonintensity_forecast", installation.settings, installation.settings_file)
+        try:
+            assert handler.MCP_MEASUREMENT == "carbonintensity_forecast"
+            assert handler.MCP_FIELD_METADATA["intensity_forecast_1h"]["unit"] == "gCO2/kWh"
+        finally:
+            close_session(handler.session)
+
+    def test_unswitched_it_is_an_unknown_source(self, installation):
+        with pytest.raises(ToolParamError, match="unknown source 'openmeteo_forecast'"):
+            resolve_handler("openmeteo_forecast", installation.settings, installation.settings_file)

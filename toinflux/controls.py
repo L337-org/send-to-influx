@@ -1186,10 +1186,40 @@ def validate_control_sources(document, settings=None):
                 continue
             if must_actuate and _check_actuation(where, entry, source, handler, errors):
                 continue
-            unusable = _installation_problem(source, settings) if settings is not None else None
+            unusable = (None if must_actuate else _forecast_input_problem(entry, handler)) or (
+                _installation_problem(source, settings) if settings is not None else None
+            )
             if unusable:
                 errors.append(f"{where}: {unusable}")
     return errors
+
+
+def _forecast_input_problem(entry, handler):
+    """Return why an input naming a forecast field cannot be read, or None.
+
+    A forecast field is written to the source's forecast measurement, stamped at the time it
+    is for, so its newest point is always in the future. An input reads the newest point and
+    refuses one stamped ahead of now, so such an input would never have a reading: the
+    control would sit in its safe state from its first cycle, with nothing in the document
+    to say why. Said here instead, where ``--check-config`` and a save over MCP both see it.
+
+    Args:
+        entry (dict): the input's entry in the document
+        handler (type): the source's class
+
+    Returns:
+        str or None: the problem, or None where the field is not a forecast
+    """
+    from toinflux.influx import FORECAST_FIELD_RE
+
+    field = entry.get("field")
+    if handler.FORECAST_HEADER is None or not isinstance(field, str) or not FORECAST_FIELD_RE.fullmatch(field):
+        return None
+    return (
+        f"field {field!r} is a forecast, stamped at the time it is for, so its newest point is always "
+        f"in the future and a control input cannot read it. Forecasts are kept to compare with what "
+        f"happened; a control cannot use them yet"
+    )
 
 
 def _installation_problem(source, settings):

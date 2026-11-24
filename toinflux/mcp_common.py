@@ -21,6 +21,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from toinflux.control_record import RECORD_SOURCE, ControlRecord, record_destination
 from toinflux.exceptions import ConfigError, ToInfluxError, ToolParamError
 from toinflux.general import (
+    FORECAST_LEADS_KEY,
     INSTANCED_SOURCES,
     close_session,
     expand_sources,
@@ -28,7 +29,12 @@ from toinflux.general import (
     listed_sources,
     render_external,
     render_values,
+    source_class,
 )
+from toinflux.influx import DataHandler, forecast_field_name
+
+#: Appended to a source's name to name the read-only source its forecasts are read through.
+FORECAST_SOURCE_SUFFIX = "_forecast"
 
 # Every failure this project raises deliberately inherits ToInfluxError, and that base is what the
 # translation catches. It was a tuple of two types, and a tuple is a list that goes stale: ConfigError
@@ -175,7 +181,91 @@ def readable_sources(settings):
     sources = configured_sources(settings)
     if record_destination(settings) and RECORD_SOURCE not in sources:
         sources.append(RECORD_SOURCE)
+    for name in forecast_sources(settings):
+        if name not in sources:
+            sources.append(name)
     return sources
+
+
+def forecast_sources(settings):
+    """Return the read-only source names forecasts are read through, one per forecasting source.
+
+    ``<source>_forecast`` for each configured source whose class has a forecast and whose
+    section switches it on with ``forecast_lead_hours``. Read like the controls' history and
+    for the same reason: the points are written by a collector under a measurement of their
+    own, so there is nothing to collect under this name and it must not be in ``sources:``.
+    Not offered where forecasting is off, so a name that would answer with nothing is never
+    listed.
+
+    Args:
+        settings (dict): parsed settings dict
+
+    Returns:
+        list: lowercased source names
+    """
+    names = []
+    for source in configured_sources(settings):
+        try:
+            cls = source_class(source)
+        except ConfigError:
+            continue
+        section = settings.get(source)
+        if cls.FORECAST_HEADER and isinstance(section, dict) and section.get(FORECAST_LEADS_KEY):
+            names.append(source + FORECAST_SOURCE_SUFFIX)
+    return names
+
+
+class ForecastRecord(DataHandler):
+    """Reads one source's forecasts, as a source of their own.
+
+    Built on the forecasting source's own settings section, so it reads the same database
+    the collector wrote to. Its measurement, description and field meanings come from that
+    source's class and settings, which is why they are set per handler rather than as class
+    attributes: one class serves every forecasting source.
+
+    Attributes:
+        MCP_LIVE_STATE (bool): False - a forecast has no live read; it is what was stored.
+        MCP_FORECAST (bool): True - the newest point is in the future, so the current-state
+            read refuses this source rather than reporting a forecast as the present.
+    """
+
+    MCP_LIVE_STATE = False
+    MCP_FORECAST = True
+
+    def __init__(self, parent, settings_file=None):
+        """Build the reader for one forecasting source.
+
+        Args:
+            parent (str): the forecasting source, such as ``openmeteo``
+            settings_file (str or None): settings path, threaded to the handler's own load
+
+        Raises:
+            ConfigError: the source is unknown, has no section, or does not forecast
+        """
+        super().__init__(parent, settings_file=settings_file)
+        parent_class = source_class(parent)
+        if parent_class.FORECAST_HEADER is None:
+            raise ConfigError(f"Source {parent!r} has no forecast to read")
+        self.source = parent + FORECAST_SOURCE_SUFFIX
+        live = parent_class.MCP_MEASUREMENT or parent
+        self.MCP_MEASUREMENT = parent_class.FORECAST_HEADER.split(",", 1)[0]
+        self.MCP_DESCRIPTION = (
+            f"Forecasts collected by {parent}, one field per forecast field and lead time: "
+            f"<field>_forecast_<N>h is the last forecast made at least N hours before the time it is "
+            f"stamped at. Stamped at the time it is for, so it lines up with the actual in "
+            f"{live!r} at the same time, and the newest points are in the future."
+        )
+        self.MCP_FIELD_METADATA = {}
+        for field in parent_class.forecast_fields_for(self.source_settings):
+            unit = parent_class.MCP_FIELD_METADATA.get(field, {}).get("unit") or parent_class.FORECAST_UNITS.get(field)
+            for lead in parent_class.forecast_lead_hours_for(self.source_settings):
+                meaning = {
+                    "kind": "gauge",
+                    "description": f"Forecast of {field}, made at least {lead} hours before the time it is stamped at.",
+                }
+                if unit:
+                    meaning["unit"] = unit
+                self.MCP_FIELD_METADATA[forecast_field_name(field, lead)] = meaning
 
 
 def _construct(source, settings_file, instance=None):
@@ -195,6 +285,9 @@ def _construct(source, settings_file, instance=None):
     if source.lower() == RECORD_SOURCE:
         # Not through get_class, which knows only what can be collected - see readable_sources.
         return ControlRecord(settings_file)
+    if source.lower().endswith(FORECAST_SOURCE_SUFFIX):
+        # Likewise: a forecast is read under its own name, from its collector's section.
+        return ForecastRecord(source.lower()[: -len(FORECAST_SOURCE_SUFFIX)], settings_file)
     return get_class(source, settings_file, instance=instance)
 
 
@@ -247,7 +340,10 @@ def resolve_handlers(source, settings, settings_file):
     """
     _require_available(source, settings)
     # The record is one handler reading every control, and expand_sources knows only collectors.
-    units = [(RECORD_SOURCE, None)] if source.lower() == RECORD_SOURCE else expand_sources([source.lower()], settings)
+    if source.lower() == RECORD_SOURCE or source.lower() in forecast_sources(settings):
+        units = [(source.lower(), None)]
+    else:
+        units = expand_sources([source.lower()], settings)
     if not units:
         raise ToolParamError(
             f"source {source!r} has no usable target configured - nothing to report on. "

@@ -121,6 +121,13 @@ Break one of these and the failure is silent or data-destroying.
   `general.render_values()` rather than a bare join - same reason, plus a value that is not a
   string would otherwise raise while reporting the bad input. Joining prose fragments we wrote
   is a different thing and stays a bare join. Guarded, so not a review item.
+- **A forecast never goes in a live measurement.** It is stamped at the time it is for, so in the
+  live measurement it would be the newest point, and the current-state and data-range reads would
+  report it as the present. `FORECAST_HEADER` names a measurement of its own, and
+  `tests/integration/test_forecasts_influxdb.py` fails if a forecast reaches the live one.
+- **A forecast failure is never the source's failure.** `get_forecast()` is separate from
+  `get_data()`, which is also the live read for controls and MCP, and `collect_forecast()` logs a
+  failure once per outage without backing off or marking the source unhealthy.
 - **Changing a measurement, tag set or field key means sweeping `tests/integration/` too.** Those
   tests are deselected by default and `pytest -m integration` without a broker skips cleanly, so a
   green local run proves nothing about them. Grep for the old names, run the suite against a real
@@ -200,7 +207,9 @@ disabled capability is not registered at all rather than registered-and-refusing
 - **The controls' PID history is readable and is not a source.** `readable_sources()` adds
   `controls` to `configured_sources()` for the read tools only, and `_construct()` builds its
   `ControlRecord`; it is not in `_source_classes()`, so nothing can collect it. Its `control`
-  measurement and field keys are emitted data like any other.
+  measurement and field keys are emitted data like any other. **Forecasts are read the same way**,
+  through `<source>_forecast` and a `ForecastRecord`, offered only where `forecast_lead_hours` is set,
+  and refused by the current-state read (`MCP_FORECAST`), whose newest point would be in the future.
 - **Grafana vocabulary stays in `toinflux/mcp_dashboards.py`.** `mcp_read` does not import it, so the
   leak is structurally impossible rather than merely avoided.
 - **The injection defence is split, and the split is the thing to get right.** Query construction

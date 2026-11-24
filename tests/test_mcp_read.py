@@ -2397,3 +2397,15 @@ def test_resolve_schema_closes_the_session_when_schema_building_fails():
         with pytest.raises(ConfigError):
             resolve_schema("zappi", settings, None)
     handler.session.close.assert_called_once()
+
+
+class TestAForecastHasNoCurrentState:
+    """The newest point of a forecast is a day or more ahead; reporting it as the present
+    would be a wrong answer given with confidence."""
+
+    def test_current_state_is_refused_naming_query_history(self, installation):
+        installation.set_settings("openmeteo", forecast_lead_hours=[3])
+        with pytest.raises(ToolParamError) as raised:
+            current_state_result("openmeteo_forecast", installation.settings, installation.settings_file)
+        assert "holds forecasts" in str(raised.value)
+        assert "query_history" in str(raised.value)
