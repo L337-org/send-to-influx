@@ -191,9 +191,12 @@ sets none refuses the key. User-facing description in UNITS.md, "Forecasts".
   around it still finds it, and a refused `precipitation_probability` does not take
   `precipitation` with it. Each is logged at WARNING with the reason, then left out of
   the request for `FORECAST_REFUSAL_RETRY` (a day) rather than for good, because nothing says why it
-  was refused. A reason naming none of the fields asked for stops the loop and raises as any other
-  refusal, and every field refused raises rather than returning an empty forecast, which
-  `collect_forecast()` would count as collected. The field list is sent with literal commas,
+  was refused. Only a 400 drops a field: a 429 or a 5xx is about when, not what. A reason naming
+  none of the fields asked for, or every one of several, stops the loop and raises as any other
+  refusal, to be asked again at the next interval - the second is what the list echoed back looks
+  like, which Open-Meteo did when the commas were sent encoded, and holding every field back a day
+  for it would turn one odd answer into a day's outage. Every field refused raises rather than
+  returning an empty forecast, which `collect_forecast()` would count as collected. The field list is sent with literal commas,
   encoded by the collector: requests would send them as `%2C`, which Open-Meteo answers correctly
   when every field is valid but refuses naming the whole list, so no field could be dropped.
 - **Stamped at the time the forecast is for, at the first slot at or after `now + lead`**

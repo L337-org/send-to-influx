@@ -225,7 +225,16 @@ class OpenMeteo(DataHandler):
                 # String value bogus_x" for a field it has no hourly forecast of - which the status
                 # line alone does not. That is the one thing an operator needs to fix it.
                 reason = _refusal_reason(e.response)
-                named = _refused_fields(reason, asked)
+                # Only a 400 is a refusal of what was asked for: a 429 or a 5xx is about the
+                # request's timing, not its fields. And a reason naming every one of several
+                # fields is more likely the list echoed back - what Open-Meteo did when the
+                # commas were sent encoded - than each refused in turn; both raise as any other
+                # refusal and are asked again at the next interval, rather than held back a day.
+                named = (
+                    _refused_fields(reason, asked) if e.response is not None and e.response.status_code == 400 else []
+                )
+                if len(asked) > 1 and len(named) == len(asked):
+                    named = []
                 if not named:
                     raise SourceConnectionError(
                         f"Open-Meteo refused the forecast request for fields {asked!r}: "
@@ -253,7 +262,8 @@ class OpenMeteo(DataHandler):
             + (
                 f"reasons: {render_values(refusals.values())}"
                 if refusals
-                else "each refusal was logged when it happened, and is asked again a day after it"
+                else f"each refusal was logged when it happened, and is asked again "
+                f"{self.FORECAST_REFUSAL_RETRY // 3600} hours after it"
             )
         )
 
@@ -306,7 +316,7 @@ def _refused_fields(reason, fields):
     """Return the fields a refusal names, in the order they were asked for.
 
     Open-Meteo names the first field it could not parse - "... from invalid String value
-    bogus_x", recorded from the live API on 2026-11-26 - and only that one, so a request with
+    bogus_x" - and only that one, so a request with
     several bad fields is refused once for each. A field counts as named wherever it appears as
     a whole name, with no letter, digit or underscore either side, rather than at a set place in
     the wording, which reads as the API's internals and may change: quoting the name or moving it

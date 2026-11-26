@@ -127,6 +127,7 @@ def _forecasting_handler(sample_settings, leads=(3, 24)):
 def _response(body, status=200):
     """A mock response with a JSON body, raising for status like requests does."""
     resp = MagicMock()
+    resp.status_code = status
     resp.json.return_value = body
     if status >= 400:
         error = requests.exceptions.HTTPError(f"{status} Client Error: Bad Request for url: https://api.open-meteo.com")
@@ -340,7 +341,10 @@ class TestARefusedFieldCostsOnlyItself:
             with pytest.raises(SourceConnectionError):
                 handler.get_forecast()
         with patch.object(handler.session, "get") as get:
-            with pytest.raises(SourceConnectionError, match="each refusal was logged when it happened"):
+            with pytest.raises(
+                SourceConnectionError,
+                match="each refusal was logged when it happened, and is asked again 24 hours after it",
+            ):
                 handler.get_forecast()
         get.assert_not_called()
 
@@ -406,6 +410,27 @@ class TestARefusedFieldCostsOnlyItself:
                 handler.get_forecast()
         assert get.call_count == 2
         assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
+
+    def test_a_reason_naming_every_field_is_not_taken_as_every_field_refused(self, sample_settings):
+        """The list echoed back, as Open-Meteo does when the commas arrive encoded, would otherwise
+        hold every field back for a day; it is raised and asked again at the next interval."""
+        handler = _refusing_handler(sample_settings, ["temperature_2m", "relative_humidity_2m"])
+        echoed = _REFUSAL.format("temperature_2m,relative_humidity_2m")
+        with patch.object(handler.session, "get", return_value=_response({"reason": echoed, "error": True}, 400)):
+            with pytest.raises(SourceConnectionError, match="refused the forecast request for fields"):
+                handler.get_forecast()
+        assert handler._refused_forecast_fields == {}
+
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    def test_only_a_400_drops_a_field(self, sample_settings, status):
+        """A rate limit or an outage is about when, not what; a field in its body is not refused."""
+        handler = _refusing_handler(sample_settings, ["temperature_2m", "bogus_x"])
+        body = {"reason": _REFUSAL.format("bogus_x"), "error": True}
+        with patch.object(handler.session, "get", return_value=_response(body, status)) as get:
+            with pytest.raises(SourceConnectionError, match="refused the forecast request"):
+                handler.get_forecast()
+        assert get.call_count == 1
+        assert handler._refused_forecast_fields == {}
 
     def test_current_conditions_are_not_affected(self, sample_settings):
         handler = _refusing_handler(sample_settings, ["temperature_2m", "bogus_x"])
