@@ -151,6 +151,10 @@ With `forecast_hours` set, the hourly forecast of the same `fields` is also writ
 |---|---|---|
 | `<field>_forecast_<N>h` (e.g. `temperature_2m_forecast_3h`) | The field's own unit | The last forecast made at least N hours before the hour it is stamped at |
 
+A field Open-Meteo has no hourly forecast of is left out of the forecast, with a warning in the log
+giving Open-Meteo's reason, and the other fields are forecast as usual. It is asked for again a day
+later. Its current reading is collected either way.
+
 ## Forecasts
 
 Open-Meteo and carbon intensity can also record forecasts, switched on per source with

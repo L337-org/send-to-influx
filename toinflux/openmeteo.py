@@ -4,11 +4,14 @@ __author__ = "Gavin Lucas"
 __copyright__ = "Copyright (C) 2025 Gavin Lucas"
 __license__ = "MIT"
 
+import logging
+import re
 import time
+import urllib.parse
 import requests
 from toinflux.influx import DataHandler, forecast_field_name, forecast_slots
 from toinflux.exceptions import SourceConnectionError
-from toinflux.general import render_external
+from toinflux.general import render_external, render_values
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -25,6 +28,8 @@ class OpenMeteo(DataHandler):
             outdoor dew point moves slowly, so an hour-old figure is still sound.
         FORECAST_MAX_LEAD_HOURS (int): 382 - sixteen days, less the slack the slot search needs.
         FORECAST_HEADER (str): forecasts go to ``weather_forecast``, beside ``weather``.
+        FORECAST_REFUSAL_RETRY (int): 86400 - how long a field Open-Meteo refused to forecast
+            is left out of the forecast request before it is asked for again.
         MCP_DESCRIPTION (str): what this source advertises to an MCP client.
         MCP_MEASUREMENT (str): "weather" - this source's measurement is not its own name.
         MCP_FIELD_METADATA (dict): units and aggregation kinds for the example-settings
@@ -46,6 +51,11 @@ class OpenMeteo(DataHandler):
     FORECAST_MAX_LEAD_HOURS = 16 * 24 - 2
     # Its own measurement, beside "weather" rather than in it: see DataHandler.FORECAST_HEADER.
     FORECAST_HEADER = "weather_forecast,source=open-meteo "
+    # A refused field is left out for a day and then asked for again, rather than for good,
+    # because nothing says why Open-Meteo refused it: a variable it adds hourly support for, or
+    # a refusal that was its own fault, comes back without a restart. While it is still refused
+    # that costs one extra request a day.
+    FORECAST_REFUSAL_RETRY = 24 * 3600
 
     MCP_DESCRIPTION = "Open-Meteo weather: temperature, dew point, humidity, precipitation, cloud, wind and radiation."
     # Writes to the "weather" measurement, not "openmeteo".
@@ -83,6 +93,19 @@ class OpenMeteo(DataHandler):
             "description": "Direct beam solar radiation on the horizontal plane, excluding diffuse light.",
         },
     }
+
+    def __init__(self, source=None, settings_file=None, instance=None):
+        """Build an Open-Meteo handler, with no field yet refused a forecast.
+
+        Args:
+            source (str or None): The source name.
+            settings_file (str or None): Path to settings.yaml, or None for the default location.
+            instance (str or None): Which instance of the source this serves.
+        """
+        super().__init__(source=source, settings_file=settings_file, instance=instance)
+        # Fields Open-Meteo refused to forecast: name -> monotonic time of the refusal. Per
+        # handler, so a handler rebuilt after a failed reading asks for them all again once.
+        self._refused_forecast_fields = {}
 
     def get_data(self):
         """Get current weather observations from Open-Meteo.
@@ -137,20 +160,118 @@ class OpenMeteo(DataHandler):
         that a field Open-Meteo forecasts no hourly value for, which it answers with a 400 for
         the whole request, cannot cost the collector its current reading.
 
+        A field Open-Meteo refuses is dropped and the request repeated without it, so one field
+        it will not forecast does not cost the others theirs. Each refusal is logged at WARNING
+        with Open-Meteo's reason, and the field is left out of the request for
+        ``FORECAST_REFUSAL_RETRY`` seconds before it is asked for again.
+
         Returns:
             list: ``(timestamp, {field: value})`` pairs, one per hourly slot a lead time lands
                 on, each field named ``<field>_forecast_<hours>h`` and stamped at the slot's
                 start. Empty when ``forecast_hours`` is not set. A value the API left null
-                is absent rather than None.
+                is absent rather than None, and so is every value of a refused field.
 
         Raises:
-            SourceConnectionError: the API could not be reached, refused the request, or
+            SourceConnectionError: the API could not be reached, refused a request for a reason
+                that names none of the fields asked for, refused every configured field, or
                 answered with something that is not an hourly forecast
         """
         leads = self.forecast_lead_hours()
         if not leads:
             return []
+        response, asked = self._request_forecast_of_what_is_accepted(leads)
+        hourly, times = _hourly_series(response)
+        slots = forecast_slots(times, time.time(), leads)
+        points = {}
+        for lead, slot in slots.items():
+            index = times.index(slot)
+            for field in asked:
+                series = hourly.get(field)
+                if isinstance(series, list) and index < len(series) and series[index] is not None:
+                    points.setdefault(int(slot), {})[forecast_field_name(field, lead)] = series[index]
+        return sorted(points.items())
+
+    def _request_forecast_of_what_is_accepted(self, leads):
+        """Request the forecast, dropping each field Open-Meteo refuses until it answers.
+
+        Open-Meteo refuses the whole request for one field it will not forecast and names only
+        the first, so with k refused fields this makes k + 1 requests. A field refused within
+        ``FORECAST_REFUSAL_RETRY`` seconds is not asked for at all.
+
+        Args:
+            leads (list): the lead times in hours, ascending
+
+        Returns:
+            tuple: (the answer, its status already checked; the fields it was asked for)
+
+        Raises:
+            SourceConnectionError: the API could not be reached, refused a request for a reason
+                that names none of the fields asked for, or refused every configured field
+        """
         fields = self.forecast_fields()
+        now = time.monotonic()
+        self._refused_forecast_fields = {
+            field: refused_at
+            for field, refused_at in self._refused_forecast_fields.items()
+            if now - refused_at < self.FORECAST_REFUSAL_RETRY
+        }
+        asked = [field for field in fields if field not in self._refused_forecast_fields]
+        refusals = {}
+        while asked:
+            try:
+                response = self._request_forecast(asked, leads)
+            except requests.exceptions.HTTPError as e:
+                # Open-Meteo says why it refused in the body - "Cannot initialize ... from invalid
+                # String value bogus_x" for a field it has no hourly forecast of - which the status
+                # line alone does not. That is the one thing an operator needs to fix it.
+                reason = _refusal_reason(e.response)
+                named = _refused_fields(reason, asked)
+                if not named:
+                    raise SourceConnectionError(
+                        f"Open-Meteo refused the forecast request for fields {asked!r}: "
+                        f"{render_external(e)}; reason: {render_external(reason)}"
+                        + (f"; already left out: {render_values(refusals)}" if refusals else "")
+                    ) from e
+                for field in named:
+                    refusals[field] = reason
+                    self._refused_forecast_fields[field] = now
+                    asked.remove(field)
+                continue
+            for field, reason in refusals.items():
+                # Tolerated: the other fields' forecasts are collected without it.
+                logging.warning(
+                    "Open-Meteo refused to forecast %r, so it is left out of the forecast for %d hours: %s",
+                    field,
+                    self.FORECAST_REFUSAL_RETRY // 3600,
+                    render_external(reason),
+                )
+            return response, asked
+        # Raised rather than an empty forecast, which collect_forecast() would take as collected.
+        # A field refused on an earlier call has no reason here: it was logged then.
+        raise SourceConnectionError(
+            f"Open-Meteo refused to forecast every configured field {render_values(fields)}; "
+            + (
+                f"reasons: {render_values(refusals.values())}"
+                if refusals
+                else "each refusal was logged when it happened, and is asked again a day after it"
+            )
+        )
+
+    def _request_forecast(self, fields, leads):
+        """Ask Open-Meteo for the hourly forecast of these fields.
+
+        Args:
+            fields (list): the field names to ask for
+            leads (list): the lead times in hours, ascending
+
+        Returns:
+            requests.Response: the answer, its status already checked
+
+        Raises:
+            requests.exceptions.HTTPError: Open-Meteo answered with an error status, left for the
+                caller, which reads the reason from its response
+            SourceConnectionError: the API could not be reached
+        """
         params = {
             "latitude": self.source_settings["latitude"],
             "longitude": self.source_settings["longitude"],
@@ -166,31 +287,40 @@ class OpenMeteo(DataHandler):
         try:
             response = self.session.get(
                 OPEN_METEO_URL,
-                params=params,
+                # Encoded here with the commas left literal, because requests would send them as
+                # %2C. Open-Meteo answers a valid list either way, but refuses an encoded one
+                # naming the whole list as the bad value rather than the field at fault - so the
+                # refused field could not be found and dropped.
+                params=urllib.parse.urlencode(params, safe=","),
                 timeout=self.source_settings.get("timeout", 10),
             )
             response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            # Open-Meteo says why it refused in the body - "Cannot initialize ... from invalid
-            # String value bogus_x" for a field it has no hourly forecast of - which the status
-            # line alone does not. That is the one thing an operator needs to fix it.
-            raise SourceConnectionError(
-                f"Open-Meteo refused the forecast request for fields {fields!r}: "
-                f"{render_external(e)}; reason: {render_external(_refusal_reason(e.response))}"
-            ) from e
+        except requests.exceptions.HTTPError:
+            raise
         except requests.exceptions.RequestException as e:
             raise SourceConnectionError(f"Could not fetch the Open-Meteo forecast: {render_external(e)}") from e
+        return response
 
-        hourly, times = _hourly_series(response)
-        slots = forecast_slots(times, time.time(), leads)
-        points = {}
-        for lead, slot in slots.items():
-            index = times.index(slot)
-            for field in fields:
-                series = hourly.get(field)
-                if isinstance(series, list) and index < len(series) and series[index] is not None:
-                    points.setdefault(int(slot), {})[forecast_field_name(field, lead)] = series[index]
-        return sorted(points.items())
+
+def _refused_fields(reason, fields):
+    """Return the fields a refusal names, in the order they were asked for.
+
+    Open-Meteo names the first field it could not parse - "... from invalid String value
+    bogus_x", recorded from the live API on 2026-11-26 - and only that one, so a request with
+    several bad fields is refused once for each. A field counts as named wherever it appears as
+    a whole name, with no letter, digit or underscore either side, rather than at a set place in
+    the wording, which reads as the API's internals and may change: quoting the name or moving it
+    still finds it. Whole names because Open-Meteo's own variables nest - a refused
+    ``precipitation_probability`` must not take ``precipitation`` with it.
+
+    Args:
+        reason (str): the reason Open-Meteo gave
+        fields (list): the fields the refused request asked for
+
+    Returns:
+        list: the fields named; empty when it names none of them
+    """
+    return [field for field in fields if re.search(rf"(?<!\w){re.escape(field)}(?!\w)", reason)]
 
 
 def _hourly_series(response):
