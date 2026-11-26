@@ -183,8 +183,23 @@ sets none refuses the key. User-facing description in UNITS.md, "Forecasts".
   no backoff, no `ok=0` heartbeat, because the reading the collector exists for was written.
   Open-Meteo's forecast is a request of its own for the same reason: a configured field it has no
   hourly forecast of fails the whole request with a 400, and in the current-conditions request that
-  would have cost the reading. The 400's body carries the reason naming the field, and the error
-  message includes it.
+  would have cost the reading.
+- **A field Open-Meteo refuses costs only itself.** The 400's reason names the first field it could
+  not parse, so `get_forecast()` drops every field the reason names and asks again until it is
+  answered: k refused fields cost at most k + 1 requests. A field counts as named wherever it
+  appears as a whole name, with no letter, digit or underscore either side, so a change of wording
+  around it still finds it, and a refused `precipitation_probability` does not take `precipitation`
+  with it. Each is logged at WARNING with the reason, then left out of the request for
+  `FORECAST_REFUSAL_RETRY` (a day) rather than for good, because nothing says why it was refused.
+  Only a 400 drops a field: a 429 or a 5xx is about when, not what. A reason naming none of the
+  fields asked for, or every one of several, stops the loop and raises as any other refusal, to be
+  asked again at the next interval - the second is what the list echoed back looks like, which
+  Open-Meteo did when the commas were sent encoded, and holding every field back a day for it would
+  turn one odd answer into a day's outage. Every field refused raises rather than returning an empty
+  forecast, which `collect_forecast()` would count as collected. The field list is sent with literal
+  commas, encoded by the collector: requests would send them as `%2C`, which Open-Meteo answers
+  correctly when every field is valid but refuses naming the whole list, so no field could be
+  dropped.
 - **Stamped at the time the forecast is for, at the first slot at or after `now + lead`**
   (`forecast_slots()` in `influx.py`). A slot is rewritten on every collection while it is at least
   the lead away and left alone after, so a past slot holds the last forecast made at least that far

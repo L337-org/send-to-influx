@@ -206,8 +206,9 @@ Recommended interval is 15 minutes (900 seconds) or longer.
 
 Set `forecast_hours` to a list of whole hours ahead, from 1 to 382, to also record the hourly
 forecast of the same fields at those lead times, in its own `weather_forecast` measurement - for
-example `[3, 6, 12, 24]`. The forecast is a separate request, so a field Open-Meteo has no hourly
-forecast of is reported in the log once and costs you only the forecast, never current conditions.
+example `[3, 6, 12, 24]`. A field Open-Meteo has no hourly forecast of is left out of the forecast,
+with a warning in the log giving Open-Meteo's reason, and the other fields are forecast as usual. It
+is asked for again a day later, and its current reading is collected either way.
 See [UNITS.md](UNITS.md#forecasts) for how forecasts are stamped and compared with what happened.
 
 Octopus Energy
